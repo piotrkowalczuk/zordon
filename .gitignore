@@ -1,8 +1,9 @@
 .idea
 .DS_Store
 data
-Alphasfile
 prometheus.yml
 zordon
 _*.md
 .claude
+tmp
+example/.zordon

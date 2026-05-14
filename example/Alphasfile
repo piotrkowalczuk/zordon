@@ -1,0 +1,54 @@
+service.go "nats-server" {
+  import = "github.com/nats-io/nats-server/v2"
+  branch = "v2.14.0"
+
+  arguments {
+    D = false
+    V = false
+    p = 9010
+    m = 9011
+  }
+}
+
+service.rust "tansu" {
+  crate        = "tansu"
+  all_features = true
+}
+
+service.go "prometheus" {
+  import = "github.com/prometheus/prometheus/cmd/prometheus"
+  branch = "v3.11.3"
+  doubleDash = true
+
+  arguments {
+    config.file = "prometheus.yml"
+    log.format = "json"
+    web.listen-address = ":9020"
+  }
+
+  readiness {
+    http {
+      path = "/-/ready"
+      port = 9020
+    }
+    period            = "200ms"
+    timeout           = "1s"
+    failure_threshold = 30
+  }
+}
+
+
+service.ruby "ruby-service" {
+  git = "github.com/niwasawa/ruby-sinatra-hello-world"
+  install = "bundle install --path vendor/bundle"
+  run = "bundle exec ruby myapp.rb"
+  
+  log {
+    format = "plain"
+    filter = "^\\tfrom |^/Users/.*|:in `.*'|:in `<.*>'"
+  }
+  
+  arguments {
+    p = 8888
+  }
+}
