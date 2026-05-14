@@ -1,0 +1,338 @@
+package alphasfile
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"sort"
+
+	"github.com/hashicorp/hcl/v2"
+	"github.com/zclconf/go-cty/cty"
+	"github.com/zclconf/go-cty/cty/function"
+
+	"github.com/piotrkowalczuk/zordon/internal/source"
+)
+
+// resolver walks the service DAG and produces the wire-stable *Alphasfile.
+//
+// Within each service, evaluation goes through a fixed sequence so that
+// `self` can grow incrementally:
+//
+//	1. self_base   = { name, toolchain, dir }
+//	2. eval Vars   → self.vars  = {...}
+//	3. eval Files  → self.file.<name> = { path, body }
+//	4. eval Args   → self.arguments = {...}
+//	5. eval Probe  → readiness port
+//
+// Files come before arguments because the common pattern is to generate a
+// config file and pass its path as a flag. Going the other way (file body
+// referencing argument values) is uncommon and can be expressed via vars.
+type resolver struct {
+	root     *rootBlock
+	stateDir string
+
+	// Already-evaluated services, keyed by toolchain then name. Re-projected
+	// into the EvalContext under "service" before each new eval step.
+	serviceByTC map[string]map[string]cty.Value
+
+	resolvedServices []*Service
+	resolvedFiles    []*File
+}
+
+func resolve(root *rootBlock, stateDir string) (*Alphasfile, error) {
+	r := &resolver{
+		root:        root,
+		stateDir:    stateDir,
+		serviceByTC: map[string]map[string]cty.Value{},
+	}
+	g, err := newGraph(root.Services)
+	if err != nil {
+		return nil, err
+	}
+	order, err := g.topoSort()
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range order {
+		if err := r.evalService(n.service); err != nil {
+			return nil, fmt.Errorf("%s: %w", n.id, err)
+		}
+	}
+	return &Alphasfile{Services: r.resolvedServices, Files: r.resolvedFiles}, nil
+}
+
+func (r *resolver) evalService(sb *serviceBlock) error {
+	dir := serviceDir(sb)
+
+	// Stage 1: self_base — what we know just from labels + import/git URL.
+	self := map[string]cty.Value{
+		"name":      cty.StringVal(sb.Name),
+		"toolchain": cty.StringVal(sb.Toolchain),
+		"dir":       cty.StringVal(dir),
+	}
+
+	// Stage 2: vars (may reference self.{name,toolchain,dir} and any
+	// already-evaluated cross-service value).
+	varsVal, err := r.evalMap(sb.Vars, self, "vars")
+	if err != nil {
+		return err
+	}
+	self["vars"] = mapValToCty(varsVal)
+
+	// Stage 3: nested file blocks (may reference self.vars and previously-
+	// declared sibling files via self.file.<earlier_name>).
+	fileVals := map[string]cty.Value{}
+	for _, fb := range sb.Files {
+		ctx := r.ctxWith(self)
+		path, body, err := evalFileExpr(fb, ctx)
+		if err != nil {
+			return err
+		}
+		f := &File{Name: fb.Name, Path: path, Body: body}
+		r.resolvedFiles = append(r.resolvedFiles, f)
+		fileVals[fb.Name] = cty.ObjectVal(map[string]cty.Value{
+			"name": cty.StringVal(fb.Name),
+			"path": cty.StringVal(path),
+			"body": cty.StringVal(body),
+		})
+		// Make this file visible to siblings declared after it and to the
+		// remaining eval stages.
+		self["file"] = cty.ObjectVal(fileVals)
+	}
+	if _, ok := self["file"]; !ok {
+		self["file"] = cty.EmptyObjectVal
+	}
+
+	// Stage 4: arguments (may reference self.vars and self.file).
+	args, err := r.evalMap(sb.Arguments, self, "arguments")
+	if err != nil {
+		return err
+	}
+	self["arguments"] = mapValToCty(args)
+
+	// Stage 5: readiness port (may reference everything in self).
+	var probePort int
+	if sb.Readiness != nil && sb.Readiness.HTTP != nil {
+		ctx := r.ctxWith(self)
+		probePort, err = evalIntExpr(sb.Readiness.HTTP.Port, ctx, "readiness.http.port")
+		if err != nil {
+			return err
+		}
+	}
+
+	// Build the wire-stable Service and runtime config.
+	rt := &RuntimeConfig{
+		Name:           sb.Name,
+		Color:          sb.Color,
+		DoubleDash:     sb.DoubleDash,
+		SpaceSeparated: sb.SpaceSeparated,
+		Dir:            sb.Dir,
+		Arguments:      args,
+	}
+	if sb.Log != nil {
+		rt.Log = &LogConfig{Format: sb.Log.Format, Filter: sb.Log.Filter}
+	}
+	if sb.Readiness != nil {
+		p, err := compileProbe(sb.Readiness, probePort)
+		if err != nil {
+			return fmt.Errorf("readiness: %w", err)
+		}
+		rt.Readiness = p
+	}
+
+	svc := &Service{Toolchain: sb.Toolchain, Runtime: rt}
+	switch sb.Toolchain {
+	case ToolchainGo:
+		svc.Go = &ServiceGo{Name: sb.Name, Import: sb.Import, Branch: sb.Branch, Install: sb.Install}
+	case ToolchainRust:
+		svc.Rust = &ServiceRust{
+			Name: sb.Name, Crate: sb.Crate, Version: sb.Version, Git: sb.Git,
+			Branch: sb.Branch, Tag: sb.Tag, Rev: sb.Rev, Bin: sb.Bin,
+			Features: sb.Features, AllFeatures: sb.AllFeatures, Locked: sb.Locked,
+			Install: sb.Install,
+		}
+	case ToolchainRuby:
+		svc.Ruby = &ServiceRuby{
+			Name: sb.Name, Git: sb.Git, Branch: sb.Branch, Tag: sb.Tag,
+			Rev: sb.Rev, Install: sb.Install, Run: sb.Run,
+		}
+	default:
+		return fmt.Errorf("unknown toolchain %q (want go|rust|ruby)", sb.Toolchain)
+	}
+	r.resolvedServices = append(r.resolvedServices, svc)
+
+	// Expose the fully-evaluated service to downstream blocks.
+	if r.serviceByTC[sb.Toolchain] == nil {
+		r.serviceByTC[sb.Toolchain] = map[string]cty.Value{}
+	}
+	r.serviceByTC[sb.Toolchain][sb.Name] = cty.ObjectVal(self)
+	return nil
+}
+
+// evalMap evaluates an HCL expression that should yield a map/object and
+// returns its members as a Go map (for embedding in RuntimeConfig) plus
+// nil-safety. Used for both `vars` and `arguments`.
+func (r *resolver) evalMap(expr hcl.Expression, self map[string]cty.Value, field string) (map[string]any, error) {
+	if expr == nil {
+		return nil, nil
+	}
+	ctx := r.ctxWith(self)
+	val, diags := expr.Value(ctx)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("%s: %s", field, diags.Error())
+	}
+	if val.IsNull() {
+		return nil, nil
+	}
+	t := val.Type()
+	if !t.IsObjectType() && !t.IsMapType() {
+		return nil, fmt.Errorf("%s must be a map/object, got %s", field, t.FriendlyName())
+	}
+	out := map[string]any{}
+	for k, v := range val.AsValueMap() {
+		out[k] = ctyToAny(v)
+	}
+	return out, nil
+}
+
+func evalFileExpr(fb *fileBlock, ctx *hcl.EvalContext) (string, string, error) {
+	pathVal, diags := fb.Path.Value(ctx)
+	if diags.HasErrors() {
+		return "", "", fmt.Errorf("file.%s.path: %s", fb.Name, diags.Error())
+	}
+	if pathVal.Type() != cty.String {
+		return "", "", fmt.Errorf("file.%s.path must be a string, got %s", fb.Name, pathVal.Type().FriendlyName())
+	}
+	bodyVal, diags := fb.Body.Value(ctx)
+	if diags.HasErrors() {
+		return "", "", fmt.Errorf("file.%s.body: %s", fb.Name, diags.Error())
+	}
+	if bodyVal.Type() != cty.String {
+		return "", "", fmt.Errorf("file.%s.body must be a string, got %s", fb.Name, bodyVal.Type().FriendlyName())
+	}
+	return pathVal.AsString(), bodyVal.AsString(), nil
+}
+
+func evalIntExpr(expr hcl.Expression, ctx *hcl.EvalContext, field string) (int, error) {
+	val, diags := expr.Value(ctx)
+	if diags.HasErrors() {
+		return 0, fmt.Errorf("%s: %s", field, diags.Error())
+	}
+	if val.IsNull() {
+		return 0, nil
+	}
+	if val.Type() != cty.Number {
+		return 0, fmt.Errorf("%s must be a number, got %s", field, val.Type().FriendlyName())
+	}
+	i64, _ := val.AsBigFloat().Int64()
+	return int(i64), nil
+}
+
+// ctxWith assembles the EvalContext from the resolver's running state plus
+// the per-service `self` (omitted for non-service evaluation paths, if any
+// are added in the future).
+func (r *resolver) ctxWith(self map[string]cty.Value) *hcl.EvalContext {
+	vars := map[string]cty.Value{}
+	if len(r.serviceByTC) > 0 {
+		toolchains := map[string]cty.Value{}
+		for tc, services := range r.serviceByTC {
+			toolchains[tc] = cty.ObjectVal(copyCtyMap(services))
+		}
+		vars["service"] = cty.ObjectVal(toolchains)
+	}
+	if self != nil {
+		vars["self"] = cty.ObjectVal(copyCtyMap(self))
+	}
+	return &hcl.EvalContext{
+		Variables: vars,
+		Functions: r.functions(),
+	}
+}
+
+func copyCtyMap(in map[string]cty.Value) map[string]cty.Value {
+	out := make(map[string]cty.Value, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// mapValToCty projects a Go map[string]any (the evaluated form of vars or
+// arguments) back into a cty.Value so subsequent stages can read it via
+// self.vars.<key> / self.arguments[<key>].
+func mapValToCty(args map[string]any) cty.Value {
+	if len(args) == 0 {
+		return cty.EmptyObjectVal
+	}
+	out := make(map[string]cty.Value, len(args))
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out[k] = anyToCty(args[k])
+	}
+	return cty.ObjectVal(out)
+}
+
+// serviceDir returns the on-disk directory where this service's source tree
+// lives (or would live after a clone). Empty for services that don't need a
+// checkout (e.g. rust crates installed from crates.io).
+func serviceDir(sb *serviceBlock) string {
+	src := serviceSource(sb)
+	if src == "" {
+		return ""
+	}
+	info, err := source.Resolve(src)
+	if err != nil {
+		return ""
+	}
+	return info.RepoDir
+}
+
+func serviceSource(sb *serviceBlock) string {
+	switch sb.Toolchain {
+	case ToolchainGo:
+		return sb.Import
+	case ToolchainRust, ToolchainRuby:
+		return sb.Git
+	}
+	return ""
+}
+
+// --- functions exposed in HCL expressions ---------------------------------
+
+func (r *resolver) functions() map[string]function.Function {
+	return map[string]function.Function{
+		"tmpdir":        r.tmpdirFunc(),
+		"net::pickport": pickPortFunc(),
+	}
+}
+
+func (r *resolver) tmpdirFunc() function.Function {
+	return function.New(&function.Spec{
+		Type: function.StaticReturnType(cty.String),
+		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
+			if r.stateDir == "" {
+				return cty.NilVal, errors.New("tmpdir() called but no state dir configured")
+			}
+			return cty.StringVal(r.stateDir), nil
+		},
+	})
+}
+
+func pickPortFunc() function.Function {
+	return function.New(&function.Spec{
+		Type: function.StaticReturnType(cty.Number),
+		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				return cty.NilVal, fmt.Errorf("net::pickport: %w", err)
+			}
+			addr := l.Addr().(*net.TCPAddr)
+			_ = l.Close()
+			return cty.NumberIntVal(int64(addr.Port)), nil
+		},
+	})
+}

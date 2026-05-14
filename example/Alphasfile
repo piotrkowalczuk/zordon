@@ -2,11 +2,16 @@ service "go" "nats-server" {
   import = "github.com/nats-io/nats-server/v2"
   branch = "v2.14.0"
 
+  vars = {
+    client = net::pickport()
+    http   = net::pickport()
+  }
+
   arguments = {
     D = false
     V = false
-    p = 9010
-    m = 9011
+    p = self.vars.client
+    m = self.vars.http
   }
 }
 
@@ -20,16 +25,30 @@ service "go" "prometheus" {
   branch     = "v3.11.3"
   doubleDash = true
 
+  vars = {
+    port = net::pickport()
+  }
+
   arguments = {
-    "config.file"        = "prometheus.yml"
+    "config.file"        = self.file.config.path
     "log.format"         = "json"
-    "web.listen-address" = ":9020"
+    "web.listen-address" = ":${self.vars.port}"
+  }
+
+  file "config" {
+    path = "${tmpdir()}/prometheus.yml"
+    body = <<-EOT
+      global:
+        scrape_interval: 15s
+
+      scrape_configs: []
+    EOT
   }
 
   readiness {
     http {
       path = "/-/ready"
-      port = 9020
+      port = self.vars.port
     }
     period            = "200ms"
     timeout           = "1s"
@@ -47,7 +66,11 @@ service "ruby" "ruby-service" {
     filter = "^\\tfrom |^/Users/.*|:in `.*'|:in `<.*>'"
   }
 
+  vars = {
+    port = net::pickport()
+  }
+
   arguments = {
-    p = 8888
+    p = self.vars.port
   }
 }

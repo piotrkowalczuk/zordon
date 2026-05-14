@@ -36,6 +36,19 @@ func SocketPath(alphasfilePath string) (string, error) {
 	return filepath.Join(socketDir(), name), nil
 }
 
+// StateDir returns a deterministic per-Alphasfile directory under the system
+// temp dir, used for generated files (file{} blocks, alpha logs, etc.).
+// Mkdir is on-demand; this function only returns the path.
+func StateDir(alphasfilePath string) (string, error) {
+	abs, err := filepath.Abs(alphasfilePath)
+	if err != nil {
+		return "", fmt.Errorf("abs: %w", err)
+	}
+	sum := sha256.Sum256([]byte(abs))
+	name := fmt.Sprintf("zordon-%s", hex.EncodeToString(sum[:8]))
+	return filepath.Join(os.TempDir(), name), nil
+}
+
 func socketDir() string {
 	if runtime.GOOS == "linux" {
 		if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {

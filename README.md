@@ -46,32 +46,32 @@ zordon start --timeout 60s  max wait for alpha to come up & finish bringup
 
 ## Alphasfile
 
-The `Alphasfile` is a single HCL document that declares one block per
-service. Each block is namespaced by toolchain — `service.go`,
-`service.rust`, `service.ruby` — because the install/build path differs.
+The `Alphasfile` is a single HCL2 document. Each service is a two-label
+block: `service "<toolchain>" "<name>" { ... }`. Toolchain is `go`,
+`rust`, or `ruby` — they differ in how the binary is built and run.
 
 ```hcl
-service.go "nats-server" {
+service "go" "nats-server" {
   import = "github.com/nats-io/nats-server/v2"
   branch = "v2.14.0"
 
-  arguments {
+  arguments = {
     p = 9010
     m = 9011
   }
 }
 
-service.rust "tansu" {
+service "rust" "tansu" {
   crate        = "tansu"
   all_features = true
 }
 
-service.go "prometheus" {
+service "go" "prometheus" {
   import     = "github.com/prometheus/prometheus/cmd/prometheus"
   branch     = "v3.11.3"
   doubleDash = true
 
-  arguments {
+  arguments = {
     "config.file"        = "prometheus.yml"
     "log.format"         = "json"
     "web.listen-address" = ":9020"
@@ -88,12 +88,12 @@ service.go "prometheus" {
   }
 }
 
-service.ruby "ruby-service" {
+service "ruby" "ruby-service" {
   git     = "github.com/niwasawa/ruby-sinatra-hello-world"
   install = "bundle install --path vendor/bundle"
   run     = "bundle exec ruby myapp.rb"
 
-  arguments {
+  arguments = {
     p = 8888
   }
 }
@@ -101,24 +101,24 @@ service.ruby "ruby-service" {
 
 ### Toolchain blocks
 
-- **`service.go`** — `import` is a Go-style import path; the binary is
+- **`service "go" "<name>"`** — `import` is a Go import path; the binary is
   expected on `$PATH` after `go install <import>`. `branch` pins a tag.
-- **`service.rust`** — installed via `cargo install`. With `git = "..."`,
-  zordon will clone and build from a local checkout (`cargo install --path`).
-- **`service.ruby`** — `git` points at a repo, `install` runs after clone,
-  and `run` is the command line to start the service. The whole flow is
-  driven from the cloned checkout: zordon clones into `~/.zordon/src/<host>/<owner>/<repo>`,
-  runs `install` there, then runs `run` with `cwd` set to that directory.
+- **`service "rust" "<name>"`** — installed via `cargo install`. With
+  `git = "..."`, zordon clones and builds from a local checkout
+  (`cargo install --path`).
+- **`service "ruby" "<name>"`** — `git` points at a repo, `install` runs
+  after clone, and `run` is the command line to start the service. The
+  whole flow is driven from the cloned checkout: zordon clones into
+  `~/.zordon/src/<host>/<owner>/<repo>`, runs `install` there, then runs
+  `run` with `cwd` set to that directory.
 
 ### Flags / arguments
 
-Each service can declare an `arguments` block. Keys are flag names, values
-are passed verbatim. By default flags are rendered `-key=value` (Go-style);
-set `doubleDash = true` for `--key=value`, and `space_separated = true` for
-`-key value` (Ruby is always space-separated).
-
-If a flag name contains a dot (`web.listen-address`), quote the key so HCL
-treats it as one string and not a nested block.
+`arguments` is a map of flag name → value. By default flags are rendered
+`-key=value` (Go-style); set `doubleDash = true` for `--key=value`, and
+`space_separated = true` for `-key value` (Ruby is always space-separated).
+Quote keys that contain dots: `"config.file" = "..."` — bare dotted keys
+parse as nested objects in HCL2.
 
 ### Readiness probes
 
@@ -147,7 +147,7 @@ stayed alive for `--stabilization` (default `1s`).
 ### Log control
 
 ```hcl
-service.ruby "ruby-service" {
+service "ruby" "ruby-service" {
   ...
   log {
     format = "plain"        # or "json"; structured logs get parsed
@@ -155,6 +155,95 @@ service.ruby "ruby-service" {
   }
 }
 ```
+
+## Dynamic configuration
+
+The `Alphasfile` is evaluated as a DAG before bringup: expressions in one
+service can reference values computed in another, and zordon orders the
+evaluation so dependencies resolve first. This is what makes the local
+stack reproducible — no shell glue to wire ports together, no `.env`
+files committed by hand.
+
+Everything that belongs to a service lives inside its block: locally-cached
+values (`vars`), generated files (`file "<name>" { ... }`), and the
+arguments / readiness probe that consume them.
+
+### Helpers
+
+- `net::pickport()` — returns a free TCP port (binds to `:0`, closes,
+  reports the port). Each call returns a new port — store it in `vars`
+  if you need to reuse it.
+- `tmpdir()` — returns a deterministic per-Alphasfile directory under
+  `$TMPDIR/zordon-<sha8>/`. Same value every time you call it during a
+  single evaluation. Created on demand.
+
+### `self` inside a service
+
+Inside a service, `self` exposes the service's own resolved values. It
+fills in incrementally as evaluation progresses through these stages:
+
+1. `self.{name, toolchain, dir}` — known immediately from the block labels
+   and `import`/`git`.
+2. `self.vars` — populated after `vars = { ... }` is evaluated.
+3. `self.file.<name>` — `{ path, body }` of each nested `file` block,
+   added as they're evaluated.
+4. `self.arguments` — populated after `arguments = { ... }`.
+
+The `readiness.http.port` expression runs last, so it sees all of the above.
+
+### Cross-service references
+
+After a service is fully evaluated, the same data is exposed under
+`service.<toolchain>.<name>` for downstream services:
+
+- `service.go.foo.vars.<key>`
+- `service.go.foo.arguments["<key>"]`
+- `service.go.foo.file.<name>.path`
+- `service.go.foo.dir`
+
+The DAG ensures the referenced service is evaluated first.
+
+### Example
+
+```hcl
+service "go" "prometheus" {
+  import     = "github.com/prometheus/prometheus/cmd/prometheus"
+  doubleDash = true
+
+  vars = {
+    port = net::pickport()
+  }
+
+  file "config" {
+    path = "${tmpdir()}/prometheus.yml"
+    body = <<-EOT
+      global:
+        scrape_interval: 15s
+      scrape_configs: []
+    EOT
+  }
+
+  arguments = {
+    "config.file"        = self.file.config.path
+    "web.listen-address" = ":${self.vars.port}"
+  }
+
+  readiness {
+    http {
+      path = "/-/ready"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 30
+  }
+}
+```
+
+One `pickport()` call lands in `vars`; the same port flows into the
+listen address, the readiness probe, and (if needed) any other service
+referencing `service.go.prometheus.vars.port`. The config file is
+materialized into `tmpdir()` at configure time and unlinked when
+`zordon stop` shuts alpha down.
 
 
 ## License

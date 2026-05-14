@@ -1,7 +1,6 @@
 .idea
 .DS_Store
 data
-prometheus.yml
 zordon
 _*.md
 .claude

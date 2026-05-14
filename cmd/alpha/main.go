@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,6 +69,7 @@ type alphaState struct {
 	alphasfilePath string
 	config         *alphasfile.Alphasfile
 	running        map[string]*exec.Cmd
+	files          []string // absolute paths of file{} outputs to unlink on shutdown
 }
 
 func (s *alphaState) configure(path string, af *alphasfile.Alphasfile) {
@@ -75,6 +77,12 @@ func (s *alphaState) configure(path string, af *alphasfile.Alphasfile) {
 	defer s.mu.Unlock()
 	s.alphasfilePath = path
 	s.config = af
+}
+
+func (s *alphaState) addFile(p string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.files = append(s.files, p)
 }
 
 func (s *alphaState) addProcess(name string, cmd *exec.Cmd) {
@@ -117,6 +125,8 @@ func (s *alphaState) shutdownAll(grace time.Duration, log *zlog.Logger) {
 	s.mu.Lock()
 	procs := s.running
 	s.running = nil
+	files := s.files
+	s.files = nil
 	s.mu.Unlock()
 
 	for name, cmd := range procs {
@@ -137,6 +147,49 @@ func (s *alphaState) shutdownAll(grace time.Duration, log *zlog.Logger) {
 		log.Info("alpha", "SIGKILL %s pid=%d", name, cmd.Process.Pid)
 		_ = cmd.Process.Kill()
 	}
+
+	for _, p := range files {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			log.Error("alpha", "unlink %s: %v", p, err)
+		} else {
+			log.Info("alpha", "removed file %s", p)
+		}
+	}
+}
+
+// materializeFiles writes generated file{} blocks to disk atomically (write
+// to a temp file in the destination directory, then rename). Returns on the
+// first error so failing config doesn't leave half a tree behind.
+func materializeFiles(files []*alphasfile.File, state *alphaState, log *zlog.Logger) error {
+	for _, f := range files {
+		if f.Path == "" {
+			return fmt.Errorf("file %q has empty path", f.Name)
+		}
+		dir := filepath.Dir(f.Path)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+		tmp, err := os.CreateTemp(dir, ".zordon-"+filepath.Base(f.Path)+".*")
+		if err != nil {
+			return fmt.Errorf("temp file in %s: %w", dir, err)
+		}
+		if _, err := tmp.WriteString(f.Body); err != nil {
+			tmp.Close()
+			os.Remove(tmp.Name())
+			return fmt.Errorf("write %s: %w", f.Path, err)
+		}
+		if err := tmp.Close(); err != nil {
+			os.Remove(tmp.Name())
+			return fmt.Errorf("close %s: %w", tmp.Name(), err)
+		}
+		if err := os.Rename(tmp.Name(), f.Path); err != nil {
+			os.Remove(tmp.Name())
+			return fmt.Errorf("rename %s -> %s: %w", tmp.Name(), f.Path, err)
+		}
+		state.addFile(f.Path)
+		log.Info("alpha", "wrote file %s (%d bytes)", f.Path, len(f.Body))
+	}
+	return nil
 }
 
 // safeEncoder serializes writes from multiple goroutines and silently drops
@@ -292,10 +345,18 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	failfast := req.Configure.Failfast
 	state.configure(req.Configure.AlphasfilePath, req.Configure.Alphasfile)
 	services := req.Configure.Alphasfile.All()
-	log.Info("alpha", "configured from %s (%d services, failfast=%v), starting bringup", req.Configure.AlphasfilePath, len(services), failfast)
+	files := req.Configure.Alphasfile.Files
+	log.Info("alpha", "configured from %s (%d services, %d files, failfast=%v), starting bringup",
+		req.Configure.AlphasfilePath, len(services), len(files), failfast)
 
 	stream := newSafeEncoder(enc)
 	defer stream.Close()
+
+	if err := materializeFiles(files, state, log); err != nil {
+		log.Error("alpha", "materialize files: %v", err)
+		stream.Send(&protocol.Event{Kind: protocol.EventError, Error: "file: " + err.Error()})
+		return
+	}
 
 	for _, svc := range services {
 		ok := bringupService(svc, state, cfg, stream, log, failfast, requestShutdown)

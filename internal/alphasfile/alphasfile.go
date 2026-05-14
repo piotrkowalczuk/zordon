@@ -2,35 +2,9 @@
 // service definitions consumed by zordon and alpha.
 //
 // The runtime side (process spawn, install, etc.) lives elsewhere; here we
-// only own the wire-stable data model.
-//
-// Schema (HCL2):
-//
-//	service "<toolchain>" "<name>" {
-//	  // common runtime fields
-//	  color           = "..."
-//	  doubleDash      = true
-//	  space_separated = true
-//	  dir             = "..."
-//	  arguments = {
-//	    "key" = "value"
-//	    ...
-//	  }
-//	  log {
-//	    format = "json" | "plain"
-//	    filter = "<regex>"
-//	  }
-//	  readiness {
-//	    http { path = ..., port = ..., host = ..., scheme = ... }
-//	    initial_delay     = "0s"
-//	    period            = "200ms"
-//	    timeout           = "1s"
-//	    failure_threshold = 30
-//	    success_threshold = 1
-//	  }
-//
-//	  // toolchain-specific (see Service{Go,Rust,Ruby} below)
-//	}
+// only own the wire-stable data model plus the eval pipeline that resolves
+// dynamic expressions (cross-service references, helpers like net.pickport)
+// into concrete values before the data is shipped to alpha.
 package alphasfile
 
 import (
@@ -53,8 +27,8 @@ const (
 	ToolchainRuby = "ruby"
 )
 
-// LogConfig and below are the wire-stable JSON shape. They carry no hcl
-// struct tags because parsing goes through a separate intermediate.
+// --- wire-stable types (JSON over the control socket) ---------------------
+
 type LogConfig struct {
 	Format string `json:"format,omitempty"`
 	Filter string `json:"filter,omitempty"`
@@ -103,7 +77,6 @@ type ServiceRuby struct {
 	Run     string `json:"run,omitempty"`
 }
 
-// Service is the flat, serializable view: package manifest + runtime config.
 type Service struct {
 	Toolchain string         `json:"toolchain"`
 	Runtime   *RuntimeConfig `json:"runtime"`
@@ -124,9 +97,6 @@ func (s *Service) Name() string {
 	return ""
 }
 
-// NeedsSource reports whether the service has a source tree we should
-// materialize (clone). Go always needs source (the import path is a repo).
-// Rust/Ruby only when an explicit Git is provided.
 func (s *Service) NeedsSource() bool {
 	switch {
 	case s.Go != nil:
@@ -139,7 +109,6 @@ func (s *Service) NeedsSource() bool {
 	return false
 }
 
-// Source returns the canonical source string (Go import path or git URL).
 func (s *Service) Source() string {
 	switch {
 	case s.Go != nil:
@@ -152,8 +121,6 @@ func (s *Service) Source() string {
 	return ""
 }
 
-// Branch returns the ref to check out: explicit Branch wins, Tag/Rev fall
-// back when set (in that order). Empty string = default branch.
 func (s *Service) Branch() string {
 	switch {
 	case s.Go != nil:
@@ -178,7 +145,6 @@ func (s *Service) Branch() string {
 	return ""
 }
 
-// Install returns the user-provided install command string.
 func (s *Service) Install() string {
 	switch {
 	case s.Go != nil:
@@ -214,13 +180,22 @@ func (s *Service) Flags() []string {
 	return out
 }
 
+// File is a generated file written by alpha at Configure time and unlinked
+// on shutdown. Path and Body are already-resolved concrete strings.
+type File struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Body string `json:"body"`
+}
+
 type Alphasfile struct {
 	Services []*Service `json:"services,omitempty"`
+	Files    []*File    `json:"files,omitempty"`
 }
 
 func (af *Alphasfile) All() []*Service { return af.Services }
 
-// --- HCL2 intermediate (parser-internal) -----------------------------------
+// --- HCL2 intermediate (parser-internal) ----------------------------------
 
 type rootBlock struct {
 	Services []*serviceBlock `hcl:"service,block"`
@@ -230,34 +205,32 @@ type serviceBlock struct {
 	Toolchain string `hcl:"toolchain,label"`
 	Name      string `hcl:"name,label"`
 
-	Color          string         `hcl:"color,optional"`
-	Log            *logBlock      `hcl:"log,block"`
-	DoubleDash     bool           `hcl:"doubleDash,optional"`
-	SpaceSeparated bool           `hcl:"space_separated,optional"`
-	Dir            string         `hcl:"dir,optional"`
-	Arguments      hcl.Expression `hcl:"arguments,optional"`
-	Readiness      *probeSpec     `hcl:"readiness,block"`
+	// static fields
+	Color          string    `hcl:"color,optional"`
+	Log            *logBlock `hcl:"log,block"`
+	DoubleDash     bool      `hcl:"doubleDash,optional"`
+	SpaceSeparated bool      `hcl:"space_separated,optional"`
+	Dir            string    `hcl:"dir,optional"`
+	Import         string    `hcl:"import,optional"`
+	Branch         string    `hcl:"branch,optional"`
+	Install        string    `hcl:"install,optional"`
+	Crate          string    `hcl:"crate,optional"`
+	Version        string    `hcl:"version,optional"`
+	Git            string    `hcl:"git,optional"`
+	Tag            string    `hcl:"tag,optional"`
+	Rev            string    `hcl:"rev,optional"`
+	Bin            string    `hcl:"bin,optional"`
+	Features       []string  `hcl:"features,optional"`
+	AllFeatures    bool      `hcl:"all_features,optional"`
+	Locked         bool      `hcl:"locked,optional"`
+	Run            string    `hcl:"run,optional"`
 
-	// go
-	Import string `hcl:"import,optional"`
-
-	// shared go/rust/ruby
-	Branch  string `hcl:"branch,optional"`
-	Install string `hcl:"install,optional"`
-
-	// rust
-	Crate       string   `hcl:"crate,optional"`
-	Version     string   `hcl:"version,optional"`
-	Git         string   `hcl:"git,optional"`
-	Tag         string   `hcl:"tag,optional"`
-	Rev         string   `hcl:"rev,optional"`
-	Bin         string   `hcl:"bin,optional"`
-	Features    []string `hcl:"features,optional"`
-	AllFeatures bool     `hcl:"all_features,optional"`
-	Locked      bool     `hcl:"locked,optional"`
-
-	// ruby
-	Run string `hcl:"run,optional"`
+	// dynamic (DAG-evaluated, in this order:
+	//   vars → arguments → files → readiness.port)
+	Vars      hcl.Expression `hcl:"vars,optional"`
+	Arguments hcl.Expression `hcl:"arguments,optional"`
+	Files     []*fileBlock   `hcl:"file,block"`
+	Readiness *probeSpec     `hcl:"readiness,block"`
 }
 
 type logBlock struct {
@@ -275,14 +248,25 @@ type probeSpec struct {
 }
 
 type httpActionSpec struct {
-	Path   string `hcl:"path,optional"`
-	Port   int    `hcl:"port"`
-	Host   string `hcl:"host,optional"`
-	Scheme string `hcl:"scheme,optional"`
+	Path   string         `hcl:"path,optional"`
+	Port   hcl.Expression `hcl:"port"`
+	Host   string         `hcl:"host,optional"`
+	Scheme string         `hcl:"scheme,optional"`
 }
 
-// Open parses an Alphasfile at path.
-func Open(path string) (*Alphasfile, error) {
+type fileBlock struct {
+	Name string         `hcl:"name,label"`
+	Path hcl.Expression `hcl:"path"`
+	Body hcl.Expression `hcl:"body"`
+}
+
+// --- public entry point ---------------------------------------------------
+
+// Open parses and resolves an Alphasfile. stateDir is what tmpdir() returns
+// inside expressions (typically a deterministic per-Alphasfile directory
+// computed by the caller via control.StateDir). Pass an empty stateDir to
+// disable tmpdir() (it will error if used).
+func Open(path, stateDir string) (*Alphasfile, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("alphasfile read: %w", err)
@@ -296,89 +280,10 @@ func Open(path string) (*Alphasfile, error) {
 	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
 		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
 	}
-
-	af := &Alphasfile{}
-	for _, sb := range root.Services {
-		svc, err := convertService(sb)
-		if err != nil {
-			return nil, fmt.Errorf("alphasfile: service %q %q: %w", sb.Toolchain, sb.Name, err)
-		}
-		af.Services = append(af.Services, svc)
-	}
-	return af, nil
+	return resolve(&root, stateDir)
 }
 
-func convertService(sb *serviceBlock) (*Service, error) {
-	args, err := evalArguments(sb.Arguments)
-	if err != nil {
-		return nil, err
-	}
-
-	rt := &RuntimeConfig{
-		Name:           sb.Name,
-		Color:          sb.Color,
-		DoubleDash:     sb.DoubleDash,
-		SpaceSeparated: sb.SpaceSeparated,
-		Dir:            sb.Dir,
-		Arguments:      args,
-	}
-	if sb.Log != nil {
-		rt.Log = &LogConfig{Format: sb.Log.Format, Filter: sb.Log.Filter}
-	}
-	if sb.Readiness != nil {
-		p, err := compileProbe(sb.Readiness)
-		if err != nil {
-			return nil, fmt.Errorf("readiness: %w", err)
-		}
-		rt.Readiness = p
-	}
-
-	svc := &Service{Toolchain: sb.Toolchain, Runtime: rt}
-	switch sb.Toolchain {
-	case ToolchainGo:
-		svc.Go = &ServiceGo{Name: sb.Name, Import: sb.Import, Branch: sb.Branch, Install: sb.Install}
-	case ToolchainRust:
-		svc.Rust = &ServiceRust{
-			Name: sb.Name, Crate: sb.Crate, Version: sb.Version, Git: sb.Git,
-			Branch: sb.Branch, Tag: sb.Tag, Rev: sb.Rev, Bin: sb.Bin,
-			Features: sb.Features, AllFeatures: sb.AllFeatures, Locked: sb.Locked,
-			Install: sb.Install,
-		}
-	case ToolchainRuby:
-		svc.Ruby = &ServiceRuby{
-			Name: sb.Name, Git: sb.Git, Branch: sb.Branch, Tag: sb.Tag,
-			Rev: sb.Rev, Install: sb.Install, Run: sb.Run,
-		}
-	default:
-		return nil, fmt.Errorf("unknown toolchain %q (want go|rust|ruby)", sb.Toolchain)
-	}
-	return svc, nil
-}
-
-// evalArguments evaluates the `arguments` expression into a flat map. With a
-// nil EvalContext only literal values resolve; dynamic helpers and cross-
-// service references are introduced in a later phase.
-func evalArguments(expr hcl.Expression) (map[string]any, error) {
-	if expr == nil {
-		return nil, nil
-	}
-	val, diags := expr.Value(nil)
-	if diags.HasErrors() {
-		return nil, fmt.Errorf("arguments: %s", diags.Error())
-	}
-	if val.IsNull() {
-		return nil, nil
-	}
-	t := val.Type()
-	if !t.IsObjectType() && !t.IsMapType() {
-		return nil, fmt.Errorf("arguments must be a map/object, got %s", t.FriendlyName())
-	}
-	out := map[string]any{}
-	for k, v := range val.AsValueMap() {
-		out[k] = ctyToAny(v)
-	}
-	return out, nil
-}
+// --- value coercion -------------------------------------------------------
 
 func ctyToAny(v cty.Value) any {
 	if v.IsNull() {
@@ -401,7 +306,28 @@ func ctyToAny(v cty.Value) any {
 	return v.GoString()
 }
 
-func compileProbe(ps *probeSpec) (*probe.Probe, error) {
+// anyToCty converts a Go scalar to a cty.Value for the EvalContext. Used to
+// expose already-evaluated arguments back into HCL space so later blocks can
+// reference them via service.<tc>.<name>.arguments["..."].
+func anyToCty(v any) cty.Value {
+	switch x := v.(type) {
+	case nil:
+		return cty.NullVal(cty.DynamicPseudoType)
+	case string:
+		return cty.StringVal(x)
+	case bool:
+		return cty.BoolVal(x)
+	case int:
+		return cty.NumberIntVal(int64(x))
+	case int64:
+		return cty.NumberIntVal(x)
+	case float64:
+		return cty.NumberFloatVal(x)
+	}
+	return cty.StringVal(fmt.Sprintf("%v", v))
+}
+
+func compileProbe(ps *probeSpec, port int) (*probe.Probe, error) {
 	p := &probe.Probe{
 		FailureThreshold: ps.FailureThreshold,
 		SuccessThreshold: ps.SuccessThreshold,
@@ -409,7 +335,7 @@ func compileProbe(ps *probeSpec) (*probe.Probe, error) {
 	if ps.HTTP != nil {
 		p.HTTP = &probe.HTTPAction{
 			Path:   ps.HTTP.Path,
-			Port:   ps.HTTP.Port,
+			Port:   port,
 			Host:   ps.HTTP.Host,
 			Scheme: ps.HTTP.Scheme,
 		}
