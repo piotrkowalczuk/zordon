@@ -1,14 +1,17 @@
 module github.com/piotrkowalczuk/zordon
 
+go 1.25.6
+
 require (
 	github.com/codegangsta/cli v1.20.0
-	github.com/go-kit/kit v0.3.0
-	github.com/go-logfmt/logfmt v0.4.0 // indirect
-	github.com/go-stack/stack v1.8.0 // indirect
 	github.com/hashicorp/hcl v1.0.0
-	github.com/mattn/go-colorable v0.1.1 // indirect
-	github.com/mgutz/ansi v0.0.0-20170206155736-9520e82c474b
-	github.com/piotrkowalczuk/sklog v0.0.0-20160522131640-ec5c8660c571
-	github.com/stretchr/testify v1.3.0 // indirect
-	golang.org/x/sys v0.0.0-20190403152447-81d4e9dc473e // indirect
+	go.uber.org/zap v1.28.0
+	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
+)
+
+require (
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
+	github.com/stretchr/testify v1.11.1 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
 )

@@ -4,3 +4,5 @@ data
 Alphasfile
 prometheus.yml
 zordon
+_*.md
+.claude

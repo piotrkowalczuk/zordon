@@ -3,20 +3,36 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 
-	"github.com/go-kit/kit/log"
-	"github.com/piotrkowalczuk/sklog"
+	"go.uber.org/zap"
 )
 
 const (
 	zordonDir = ".zordon"
 )
+
+func savePID(name string, pid int) error {
+	f, err := openPIDFile(name)
+	if err != nil {
+		// If it already exists, we want to overwrite it.
+		// openPIDFile uses O_EXCL, so we need to handle that.
+		fpath := filepath.Join(zordonDir, name+".pid")
+		f, err = os.OpenFile(fpath, os.O_WRONLY|os.O_TRUNC, 0666)
+		if err != nil {
+			return err
+		}
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(strconv.Itoa(pid)); err != nil {
+		return err
+	}
+	return nil
+}
 
 func openPIDFile(name string) (*os.File, error) {
 	fpath := filepath.Join(zordonDir, name+".pid")
@@ -31,45 +47,57 @@ func openPIDFile(name string) (*os.File, error) {
 	}
 	return f, nil
 }
-func killAll(l log.Logger) error {
-	fi, err := ioutil.ReadDir(zordonDir)
+
+func isProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = p.Signal(syscall.Signal(0))
+	return err == nil
+}
+
+func killAll(l *zap.Logger) error {
+	entries, err := scanZordonProcs()
 	if err != nil {
 		return err
 	}
 
-	for _, f := range fi {
-		if f.IsDir() {
+	myPID := os.Getpid()
+	for _, e := range entries {
+		// Kill if:
+		// 1. It belongs to this instance (standard shutdown)
+		// 2. Its parent (ZORDON_PPID) is no longer alive (orphan from previous crash)
+		isOrphan := !isProcessAlive(e.ppid)
+		if e.ppid != myPID && !isOrphan {
 			continue
 		}
-		if !strings.HasSuffix(f.Name(), ".pid") {
+
+		p, err := os.FindProcess(e.pid)
+		if err != nil {
 			continue
-		}
-
-		fp := filepath.Join(zordonDir, f.Name())
-		b, err := ioutil.ReadFile(fp)
-		if err != nil {
-			return err
-		}
-
-		pid, err := strconv.ParseInt(string(b), 10, 64)
-		if err != nil {
-			return err
-		}
-
-		p, err := os.FindProcess(int(pid))
-		if err != nil {
-			return err
 		}
 
 		if err := p.Kill(); err != nil {
-			return err
+			// Ignore error if process already exited
+			continue
 		}
 
-		sklog.Info(l, fmt.Sprintf("process %s (%d) has been killed", f.Name(), pid))
-
-		if err := os.Remove(fp); err != nil {
-			return err
+		msg := "process %s (%d) has been killed"
+		if isOrphan {
+			msg = "orphaned process %s (%d) from zordon pid %d has been cleaned up"
+			l.Info(fmt.Sprintf(msg, e.service, e.pid, e.ppid))
+		} else {
+			l.Info(fmt.Sprintf(msg, e.service, e.pid))
 		}
+	}
+
+	// Also clean up any stale PID files if the directory exists.
+	if _, err := os.Stat(zordonDir); err == nil {
+		os.RemoveAll(zordonDir)
 	}
 
 	return nil

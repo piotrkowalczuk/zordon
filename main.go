@@ -5,30 +5,22 @@ import (
 	"os/exec"
 
 	"github.com/codegangsta/cli"
-	"github.com/go-kit/kit/log"
-	"github.com/mgutz/ansi"
-	"github.com/piotrkowalczuk/sklog"
+	"go.uber.org/zap"
 )
 
 var (
 	gopath     string
 	alphasFile string
-	colors     = []string{
-		ansi.LightGreen,
-		ansi.LightYellow,
-		ansi.LightBlue,
-		ansi.LightMagenta,
-		ansi.LightCyan,
-	}
-	logger     log.Logger
-	colorReset = ansi.ColorCode("reset")
+	logger     *zap.Logger
 )
 
 func init() {
-	logger = sklog.NewHumaneLogger(os.Stdout, formatter)
+	logger = newLogger()
 }
 
 func main() {
+	defer logger.Sync()
+
 	app := cli.NewApp()
 	app.Name = "zordon"
 	app.Usage = "Defends development environment from Rita, and her endless waves of containers!"
@@ -79,29 +71,32 @@ func main() {
 			Action:      powerup,
 			Before:      summon,
 		},
+		{
+			Name:        "list",
+			Aliases:     []string{"ls"},
+			Description: "List services managed by any running zordon instance.",
+			Action:      list,
+		},
 	}
 
 	app.Run(os.Args)
 }
 
 func summon(ctx *cli.Context) error {
-	// TODO: implement, something goes wrong
-	// fmt.Println(ctx.Command)
-	// sklog.Log(logger, sklog.KeyMessage, ctx.Command.Description, sklog.KeyLevel, sklog.LevelFatal, sklog.KeySubsystem, "zordon")
 	return nil
 }
 
-func src(gopath, pkg string) string {
-	return gopath + "/src/" + pkg
-}
-
-func serviceLogger(l log.Logger, s *Service) log.Logger {
-	return log.NewContext(l).With(sklog.KeySubsystem, s.Name, keyColor, s.Color, keyColorReset, colorReset)
+func serviceLogger(l *zap.Logger, s *Service) *zap.Logger {
+	return l.With(zap.String(keySubsystem, s.Name), zap.String(keyColor, s.Color))
 }
 
 func isGitModifiedLocaly(s *Service) (bool, error) {
-	check := exec.Command("git", "-C", src(gopath, s.Import), "diff", "--exit-code")
-	if err := run(check, s, log.NewNopLogger()); err != nil {
+	src, err := resolveSource(s)
+	if err != nil {
+		return false, err
+	}
+	check := exec.Command("git", "-C", src.repoDir, "diff", "--exit-code")
+	if err := run(check, s, zap.NewNop()); err != nil {
 		if check.ProcessState.Exited() {
 			return true, nil
 		}
@@ -112,15 +107,20 @@ func isGitModifiedLocaly(s *Service) (bool, error) {
 }
 
 func updateRepository(s *Service) (err error) {
-	fetch := exec.Command("git", "-C", src(gopath, s.Import), "fetch", "-q", "origin", s.Branch)
+	src, err := resolveSource(s)
+	if err != nil {
+		return err
+	}
+	branch := s.Branch()
+	fetch := exec.Command("git", "-C", src.repoDir, "fetch", "-q", "origin", branch)
 	if err = run(fetch, s, logger); err != nil {
 		return
 	}
-	checkout := exec.Command("git", "-C", src(gopath, s.Import), "checkout", "-q", s.Branch)
+	checkout := exec.Command("git", "-C", src.repoDir, "checkout", "-q", branch)
 	if err = run(checkout, s, logger); err != nil {
 		return
 	}
-	pull := exec.Command("git", "-C", src(gopath, s.Import), "pull", "-q", "origin", s.Branch)
+	pull := exec.Command("git", "-C", src.repoDir, "pull", "-q", "origin", branch)
 	if err = run(pull, s, logger); err != nil {
 		return
 	}

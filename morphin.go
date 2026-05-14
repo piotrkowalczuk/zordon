@@ -6,57 +6,66 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
-	"path/filepath"
-
 	"github.com/codegangsta/cli"
-	klog "github.com/go-kit/kit/log"
-	"github.com/piotrkowalczuk/sklog"
+	"go.uber.org/zap"
 )
 
 func morphin(ctx *cli.Context) error {
 	af, err := openAlphasfile(alphasFile)
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal(err.Error())
 	}
 
-	sklog.Log(logger, sklog.KeyMessage, "Rangers, you must act swiftly, the development environment is in grave danger!", sklog.KeyLevel, sklog.LevelWarning, sklog.KeySubsystem, "zordon")
-
-	var (
-		gopath string
-		ok     bool
-	)
-	if gopath, ok = os.LookupEnv("GOPATH"); !ok {
-		log.Fatalf("missing $GOPATH envrionmental variable")
-	}
+	logger.Warn("Rangers, you must act swiftly, the development environment is in grave danger!", zap.String(keySubsystem, "zordon"))
 
 	if ctx.Bool("install") {
-		for _, s := range af.Service {
-			l := klog.NewContext(logger).With(keyColor, s.Color, keyColorReset, colorReset)
+		toolchains := map[string]bool{}
+		for _, s := range af.All() {
+			l := serviceLogger(logger, s)
+			toolchains[s.Toolchain] = true
+			var src sourceInfo
+			if s.NeedsSource() {
+				var err error
+				src, err = ensureSource(s, l)
+				if err != nil {
+					l.Fatal(fmt.Sprintf("%s source error", s.Name), zap.Error(err))
+				}
+			}
 			var install *exec.Cmd
-			if s.Install == "" {
-				install = exec.Command("go", "install", s.Import)
-
+			if custom := s.CustomInstall(); custom == "" {
+				install = s.InstallCmd(src)
 			} else {
-				install = exec.Command(s.Install)
+				fields := strings.Fields(custom)
+				install = exec.Command(fields[0], fields[1:]...)
 				install.Env = os.Environ()
-				install.Dir = filepath.Join(gopath, "src", s.Import)
+				install.Dir = src.repoDir
 			}
 			if err := run(install, s, l); err != nil {
-				sklog.Fatal(l, fmt.Errorf("%s installation error: %s", s.Name, err.Error()))
+				l.Fatal(fmt.Sprintf("%s installation error: %s", s.Name, err.Error()))
 			}
 
-			sklog.Info(l, fmt.Sprintf("%s!!!", strings.ToUpper(s.Name)), sklog.KeySubsystem, s.Name)
+			l.Info(fmt.Sprintf("%s!!!", strings.ToUpper(s.Name)))
 		}
+		warnIfBinNotInPath(toolchains)
 	}
 
-	al := klog.NewContext(logger).With(sklog.KeySubsystem, "alpha", keyColorReset, colorReset)
+	al := logger.With(zap.String(keySubsystem, "alpha"))
+
+	// Pre-flight cleanup: find and kill any orphaned processes from previous runs.
+	if err := killAll(al); err != nil {
+		al.Error("pre-flight cleanup failed", zap.Error(err))
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
 			killAll(al)
@@ -65,110 +74,121 @@ func morphin(ctx *cli.Context) error {
 	}()
 
 	c := make(chan os.Signal, 1)
-	end := make(chan struct{}, 1)
-
 	signal.Notify(c, os.Interrupt)
+
+	var wg sync.WaitGroup
+	for _, r := range af.All() {
+		<-time.After(1 * time.Second)
+		wg.Add(1)
+		go func(s *Service) {
+			defer wg.Done()
+			morphRanger(s, logger)
+		}(r)
+	}
+
+	done := make(chan struct{})
 	go func() {
-		for _ = range c {
-			killAll(al)
-			end <- struct{}{}
-		}
+		wg.Wait()
+		close(done)
 	}()
 
-	for _, r := range af.Service {
-		<-time.After(1 * time.Second)
-		go morphRanger(r, logger)
+	select {
+	case <-c:
+		al.Info("interrupt received, killing services")
+		killAll(al)
+		<-done
+	case <-done:
+		al.Info("all services have stopped, shutting down")
 	}
-	<-end
 	return nil
 }
 
-func morphRanger(s *Service, l klog.Logger) {
+func morphRanger(s *Service, l *zap.Logger) {
 	rl := serviceLogger(l, s)
+	afAbs, _ := filepath.Abs(alphasFile)
 	for {
 		cmd := exec.Command(s.Name, s.Flags()...)
 		cmd.Dir = s.Dir
+		cmd.Env = append(os.Environ(),
+			"ZORDON=1",
+			"ZORDON_SERVICE="+s.Name,
+			"ZORDON_ALPHASFILE="+afAbs,
+			"ZORDON_PPID="+strconv.Itoa(os.Getpid()),
+		)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 		if err := run(cmd, s, rl); err != nil {
 			if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
-				sklog.Error(rl, fmt.Errorf("service will be restarted because of error: %s", err.Error()))
+				rl.Error("service will be restarted because of error", zap.Error(err))
+				time.Sleep(1 * time.Second)
 				continue
 			}
 
-			sklog.Error(rl, fmt.Errorf("service has stoped with error: %s", err.Error()))
+			rl.Error("service has stoped with error", zap.Error(err))
 			return
 		}
 	}
 }
 
-func run(c *exec.Cmd, s *Service, l klog.Logger) error {
-	var (
-		err            error
-		stderr, stdout io.ReadCloser
-		multi          io.Reader
-	)
-	stderr, err = c.StderrPipe()
+func run(c *exec.Cmd, s *Service, l *zap.Logger) error {
+	stderr, err := c.StderrPipe()
 	if err != nil {
 		return err
 	}
-	stdout, err = c.StdoutPipe()
+	stdout, err := c.StdoutPipe()
 	if err != nil {
 		return err
 	}
-	multi = io.MultiReader(stdout, stderr)
-
-	//// Open the pid file before starting the process so that if we get two
-	//// programs trying to concurrently start a server on the same directory
-	//// at the same time, only one should succeed.
-	//pidf, err := openPIDFile(s.Name)
-	//if err != nil {
-	//	return fmt.Errorf("cannot create %s.pid: %v", s.Name, err)
-	//}
-	//defer pidf.Close()
 
 	if err = c.Start(); err != nil {
 		return err
 	}
 
-	//if _, err := fmt.Fprint(pidf, c.Process.Pid); err != nil {
-	//	return fmt.Errorf("cannot write %s.pid file: %v", s.Name, err)
-	//}
-
-	sc(multi, s, l)
-
-	if err = c.Wait(); err != nil {
-		return err
+	if err := savePID(s.Name, c.Process.Pid); err != nil {
+		l.Error("failed to save PID", zap.Error(err))
 	}
 
-	return nil
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); sc(stdout, s, l) }()
+	go func() { defer wg.Done(); sc(stderr, s, l) }()
+	wg.Wait()
+
+	return c.Wait()
 }
 
-func sc(rc io.Reader, s *Service, l klog.Logger) {
+func sc(rc io.Reader, s *Service, l *zap.Logger) {
 	in := bufio.NewScanner(rc)
-	tmp := map[string]interface{}{}
 ScanLoop:
 	for in.Scan() {
 		switch s.Log {
 		case "json":
 			if !bytes.HasPrefix(in.Bytes(), []byte("{")) {
-				sklog.Log(l, sklog.KeyMessage, in.Text())
+				l.Info(in.Text())
 				continue ScanLoop
-
 			}
+			tmp := map[string]any{}
 			if err := json.Unmarshal(in.Bytes(), &tmp); err != nil {
-				sklog.Log(l, sklog.KeyMessage, in.Text(), "error", err.Error())
+				l.Info(in.Text(), zap.String(keyError, err.Error()))
 				continue ScanLoop
 			}
-			arr := make([]interface{}, 0, len(tmp)*2)
+			fields := make([]zap.Field, 0, len(tmp))
+			msg := ""
 			for k, v := range tmp {
-				arr = append(arr, k, v)
+				if (k == "msg" || k == "message") && msg == "" {
+					if s, ok := v.(string); ok {
+						msg = s
+						continue
+					}
+				}
+				fields = append(fields, zap.Any(k, v))
 			}
-			sklog.Log(l, append(arr)...)
+			l.Info(msg, fields...)
 		default:
-			sklog.Log(l, sklog.KeyMessage, in.Text())
+			l.Info(in.Text())
 		}
 	}
 	if err := in.Err(); err != nil {
-		sklog.Error(l, err, sklog.KeySubsystem, "alpha")
+		l.Error("scan error", zap.String(keySubsystem, "alpha"), zap.Error(err))
 	}
 }
