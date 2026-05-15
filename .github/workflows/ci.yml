@@ -8,15 +8,23 @@ on:
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        distro:
+          - ubuntu:24.04
+          - debian:12
+          - fedora:latest
+          - archlinux:latest
+    container:
+      image: ${{ matrix.distro }}
     steps:
+      - name: Install dependencies
+        run: |
+          if [ -x "$(command -v apt-get)" ]; then apt-get update && apt-get install -y git golang-go; fi
+          if [ -x "$(command -v dnf)" ]; then dnf install -y git golang; fi
+          if [ -x "$(command -v pacman)" ]; then pacman -Syu --noconfirm git go; fi
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
       - name: Build Zordon
         run: go build -o zordon ./cmd/zordon/
       - name: Run Tests
