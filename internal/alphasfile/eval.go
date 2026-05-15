@@ -31,6 +31,7 @@ import (
 // config file and pass its path as a flag. Going the other way (file body
 // referencing argument values) is uncommon and can be expressed via vars.
 type resolver struct {
+	path string
 	root *rootBlock
 	inv  *invocation.Invocation
 
@@ -48,18 +49,23 @@ type resolver struct {
 	resolvedServices []*Service
 }
 
-func resolve(root *rootBlock, inv *invocation.Invocation, parent map[string]map[string]cty.Value) (*Alphasfile, error) {
+func resolve(name string, root *rootBlock, inv *invocation.Invocation, seed map[string]map[string]cty.Value) (*Alphasfile, error) {
+	if seed == nil {
+		seed = map[string]map[string]cty.Value{}
+	}
 	r := &resolver{
+		path:        name,
 		root:        root,
 		inv:         inv,
-		serviceByTC: map[string]map[string]cty.Value{},
+		serviceByTC: seed,
 		taken:       map[string]string{},
 	}
+	// ... rest of resolve function
+
+
 	parentKnown := map[string]struct{}{}
-	for tc, byName := range parent {
-		r.serviceByTC[tc] = map[string]cty.Value{}
-		for name, v := range byName {
-			r.serviceByTC[tc][name] = v
+	for tc, byName := range seed {
+		for name := range byName {
 			r.taken[tc+"/"+name] = "parent"
 			parentKnown[serviceID(tc, name)] = struct{}{}
 		}
@@ -215,8 +221,13 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	
 	var worktree *Worktree
 	if sb.Worktree != nil && len(sb.Worktree.Sparse) > 0 {
+		var resolvedSparse []string
+		for _, s := range sb.Worktree.Sparse {
+				// Resolve sparse paths relative to Alphasfile directory
+			resolvedSparse = append(resolvedSparse, filepath.Join(filepath.Dir(r.path), s))
+		}
 		worktree = &Worktree{
-			Sparse: append([]string{}, sb.Worktree.Sparse...),
+			Sparse: resolvedSparse,
 		}
 	}
 

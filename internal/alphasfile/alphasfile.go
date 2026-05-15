@@ -354,7 +354,7 @@ func Compile(name string, src []byte, inv *invocation.Invocation, parent *Parent
 	if parent != nil {
 		seed = parent.byTC
 	}
-	return resolve(&root, inv, seed)
+	return resolve(name, &root, inv, seed)
 }
 
 // ParentContext carries the resolved services of every Alphasfile above the

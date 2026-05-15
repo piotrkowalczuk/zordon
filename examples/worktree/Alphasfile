@@ -8,7 +8,7 @@
 
 service "go" "example" {
   src = "../.."
-  exe = "./examples/worktree/src/example"
+  exe = "./src/example"
 
   vars = {
     port = net::pickport()
@@ -21,7 +21,7 @@ service "go" "example" {
   ]
 
   worktree = {
-    sparse = ["examples/worktree/src/example"]
+    sparse = ["./src/example"]
   }
 
   readiness {
