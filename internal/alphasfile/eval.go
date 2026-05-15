@@ -213,6 +213,25 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		src = sb.Dir
 	}
 	
+	var sparse []string
+	if sb.Worktree != nil && len(sb.Worktree.Sparse) > 0 {
+		sparse = append(sparse, sb.Worktree.Sparse...)
+	}
+	// Add exe to sparse checkout paths if explicitly set and not already included
+	if sb.Exe != "" && sb.Exe != "." {
+		exePath := filepath.Clean(sb.Exe)
+		found := false
+		for _, s := range sparse {
+			if filepath.Clean(s) == exePath {
+				found = true
+				break
+			}
+		}
+		if !found {
+			sparse = append(sparse, exePath)
+		}
+	}
+
 	svc := &Service{
 		Toolchain: sb.Toolchain,
 		Runtime:   rt,
@@ -225,6 +244,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 			Rev:       sb.Rev,
 			Exe:       sb.Exe,
 			Cmd:       strings.Join(command, " "),
+			Sparse:    sparse,
 		},
 	}
 	r.resolvedServices = append(r.resolvedServices, svc)

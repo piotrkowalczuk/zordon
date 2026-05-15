@@ -56,14 +56,15 @@ type RuntimeConfig struct {
 // Dir (user-owned repo), or neither (Crate / a prebuilt binary on $PATH —
 // not worktree-able). Build overrides the per-toolchain default.
 type Package struct {
-	Toolchain string `json:"toolchain"` // go|rust|ruby
-	Git       string `json:"git,omitempty"`
-	Src       string `json:"src,omitempty"` // Relates to the local checkout path
-	Branch    string `json:"branch,omitempty"`
-	Tag       string `json:"tag,omitempty"`
-	Rev       string `json:"rev,omitempty"`
-	Exe       string `json:"exe,omitempty"` // Where the binary is built
-	Cmd       string `json:"cmd,omitempty"` // Explicit execution argv if needed
+	Toolchain string   `json:"toolchain"` // go|rust|ruby
+	Git       string   `json:"git,omitempty"`
+	Src       string   `json:"src,omitempty"` // Relates to the local checkout path
+	Branch    string   `json:"branch,omitempty"`
+	Tag       string   `json:"tag,omitempty"`
+	Rev       string   `json:"rev,omitempty"`
+	Exe       string   `json:"exe,omitempty"` // Where the binary is built
+	Cmd       string   `json:"cmd,omitempty"` // Explicit execution argv if needed
+	Sparse    []string `json:"sparse,omitempty"`
 }
 
 type Service struct {
@@ -274,9 +275,14 @@ type serviceBlock struct {
 	Arguments hcl.Expression `hcl:"arguments,optional"`
 	Cmd       hcl.Expression `hcl:"cmd,optional"`
 
-	Sudo      []*sudoBlock `hcl:"sudo,block"`
-	Files     []*fileBlock `hcl:"file,block"`
-	Readiness *probeSpec   `hcl:"readiness,block"`
+	Worktree  *worktreeBlock `hcl:"worktree,block"`
+	Sudo      []*sudoBlock   `hcl:"sudo,block"`
+	Files     []*fileBlock   `hcl:"file,block"`
+	Readiness *probeSpec     `hcl:"readiness,block"`
+}
+
+type worktreeBlock struct {
+	Sparse []string `hcl:"sparse,optional"`
 }
 
 type sudoBlock struct {
