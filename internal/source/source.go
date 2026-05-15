@@ -141,14 +141,14 @@ func (p Primary) Ensure(ctx context.Context, run Runner) error {
 			if err := os.MkdirAll(filepath.Dir(bare), 0o755); err != nil {
 				return fmt.Errorf("mkdir bare parent: %w", err)
 			}
-			if err := run(ctx, exec.CommandContext(ctx, "git", "clone", "--bare", p.cloneURL(), bare)); err != nil {
+			if err := run(ctx, exec.CommandContext(ctx, "git", "clone", "--bare", "--depth=1", p.cloneURL(), bare)); err != nil {
 				return fmt.Errorf("git clone --bare: %w", err)
 			}
 			return nil
 		} else if err != nil {
 			return err
 		}
-		if err := run(ctx, exec.CommandContext(ctx, "git", "-C", bare, "fetch", "--tags", "--force", "origin", "+refs/heads/*:refs/heads/*")); err != nil {
+		if err := run(ctx, exec.CommandContext(ctx, "git", "-C", bare, "fetch", "--depth=1", "--tags", "--force", "origin", "+refs/heads/*:refs/heads/*")); err != nil {
 			return fmt.Errorf("git fetch bare: %w", err)
 		}
 		return nil
@@ -177,10 +177,28 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 	if start == "" {
 		start = "HEAD"
 	}
-	args := []string{"-C", gitDir, "worktree", "add", "--force", "-B", branch, dest, start}
+	
+	// If the directory was manually deleted but Git still tracks it, add will fail.
+	// We attempt to remove the specific dangling reference first. It's safe to
+	// ignore the error since it will fail if the reference doesn't exist.
+	_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "remove", "--force", dest))
+
+	// Use --no-checkout as requested, and perform sparse checkout setup manually.
+	args := []string{"-C", gitDir, "worktree", "add", "--no-checkout", "--force", "-B", branch, dest, start}
 	if err := run(ctx, exec.CommandContext(ctx, "git", args...)); err != nil {
 		return fmt.Errorf("git worktree add: %w", err)
 	}
+
+	// Initialize sparse checkout
+	if err := run(ctx, exec.CommandContext(ctx, "git", "-C", dest, "sparse-checkout", "init")); err != nil {
+		return fmt.Errorf("git sparse-checkout init: %w", err)
+	}
+	
+	// Perform the checkout manually
+	if err := run(ctx, exec.CommandContext(ctx, "git", "-C", dest, "checkout", branch)); err != nil {
+		return fmt.Errorf("git checkout: %w", err)
+	}
+
 	return nil
 }
 
