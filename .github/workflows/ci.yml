@@ -31,8 +31,11 @@ jobs:
           if [ -x "$(command -v dnf)" ]; then dnf install -y git golang; fi
           if [ -x "$(command -v pacman)" ]; then pacman -Syu --noconfirm git go; fi
       - uses: actions/checkout@v4
-      - name: Build Zordon
-        run: go build -o zordon ./cmd/zordon/
+      - name: Build Zordon and Alpha
+        run: |
+          go build -o zordon ./cmd/zordon/
+          go build -o alpha ./cmd/alpha/
+          chmod +x zordon alpha
       - name: Run Privileged Hooks
         run: sudo ./zordon sudo
       - name: Run E2E Test
