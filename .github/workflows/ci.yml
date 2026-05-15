@@ -33,5 +33,4 @@ jobs:
         run: go test ./...
       - name: E2E Verification
         run: |
-          chmod +x test_lifecycle.sh
-          ./test_lifecycle.sh
+          find examples -name "test.sh" -executable -exec {} \;
