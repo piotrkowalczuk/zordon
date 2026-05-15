@@ -4,15 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
 
-	"github.com/piotrkowalczuk/zordon/internal/source"
+	"github.com/piotrkowalczuk/zordon/internal/invocation"
 )
 
 // resolver walks the service DAG and produces the wire-stable *Alphasfile.
@@ -30,8 +28,8 @@ import (
 // config file and pass its path as a flag. Going the other way (file body
 // referencing argument values) is uncommon and can be expressed via vars.
 type resolver struct {
-	root     *rootBlock
-	stateDir string
+	root *rootBlock
+	inv  *invocation.Invocation
 
 	// Already-evaluated services, keyed by toolchain then name. Re-projected
 	// into the EvalContext under "service" before each new eval step. May be
@@ -44,10 +42,10 @@ type resolver struct {
 	resolvedServices []*Service
 }
 
-func resolve(root *rootBlock, stateDir string, parent map[string]map[string]cty.Value) (*Alphasfile, error) {
+func resolve(root *rootBlock, inv *invocation.Invocation, parent map[string]map[string]cty.Value) (*Alphasfile, error) {
 	r := &resolver{
 		root:        root,
-		stateDir:    stateDir,
+		inv:         inv,
 		serviceByTC: map[string]map[string]cty.Value{},
 		taken:       map[string]string{},
 	}
@@ -83,9 +81,15 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	}
 	r.taken[sb.Toolchain+"/"+sb.Name] = "local"
 
-	dir := serviceDir(sb)
+	// dir = this service's per-invocation checkout (empty if not
+	// worktree-able: crate / prebuilt). Pure — no filesystem touch here;
+	// alpha materializes the worktree at this path later.
+	dir := ""
+	if sb.Git != "" || sb.Dir != "" {
+		dir = r.inv.CheckoutPath(sb.Name)
+	}
 
-	// Stage 1: self_base — what we know just from labels + import/git URL.
+	// Stage 1: self_base — known from labels + primary, before any eval.
 	self := map[string]cty.Value{
 		"name":      cty.StringVal(sb.Name),
 		"toolchain": cty.StringVal(sb.Toolchain),
@@ -176,7 +180,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		Command:        command,
 		Sudo:           sudo,
 		Files:          files,
-		Dir:            sb.Dir,
+		Dir:            dir,
 	}
 	if sb.Log != nil {
 		rt.Log = &LogConfig{Format: sb.Log.Format, Filter: sb.Log.Filter}
@@ -189,24 +193,27 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		rt.Readiness = p
 	}
 
-	svc := &Service{Toolchain: sb.Toolchain, Runtime: rt}
 	switch sb.Toolchain {
-	case ToolchainGo:
-		svc.Go = &ServiceGo{Name: sb.Name, Import: sb.Import, Branch: sb.Branch, Install: sb.Install}
-	case ToolchainRust:
-		svc.Rust = &ServiceRust{
-			Name: sb.Name, Crate: sb.Crate, Version: sb.Version, Git: sb.Git,
-			Branch: sb.Branch, Tag: sb.Tag, Rev: sb.Rev, Bin: sb.Bin,
-			Features: sb.Features, AllFeatures: sb.AllFeatures, Locked: sb.Locked,
-			Install: sb.Install,
-		}
-	case ToolchainRuby:
-		svc.Ruby = &ServiceRuby{
-			Name: sb.Name, Git: sb.Git, Branch: sb.Branch, Tag: sb.Tag,
-			Rev: sb.Rev, Install: sb.Install, Run: sb.Run,
-		}
+	case ToolchainGo, ToolchainRust, ToolchainRuby:
 	default:
 		return fmt.Errorf("unknown toolchain %q (want go|rust|ruby)", sb.Toolchain)
+	}
+	if sb.Git != "" && sb.Dir != "" {
+		return fmt.Errorf("service %q declares both git and dir; pick one primary", sb.Name)
+	}
+	svc := &Service{
+		Toolchain: sb.Toolchain,
+		Runtime:   rt,
+		Package: &Package{
+			Toolchain: sb.Toolchain,
+			Git:       sb.Git,
+			Dir:       sb.Dir,
+			Branch:    sb.Branch,
+			Tag:       sb.Tag,
+			Rev:       sb.Rev,
+			Crate:     sb.Crate,
+			Build:     sb.Build,
+		},
 	}
 	r.resolvedServices = append(r.resolvedServices, svc)
 
@@ -298,10 +305,17 @@ func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, f
 	var out []string
 	for it := val.ElementIterator(); it.Next(); {
 		_, ev := it.Element()
-		if ev.Type() != cty.String {
-			return nil, fmt.Errorf("%s elements must be strings, got %s", field, ev.Type().FriendlyName())
+		// argv elements are strings; coerce scalars (a sole-interpolation
+		// like "${self.vars.port}" yields a number under HCL's template
+		// unwrapping — stringify it rather than reject).
+		switch ev.Type() {
+		case cty.String:
+			out = append(out, ev.AsString())
+		case cty.Number, cty.Bool:
+			out = append(out, fmt.Sprintf("%v", ctyToAny(ev)))
+		default:
+			return nil, fmt.Errorf("%s elements must be scalars, got %s", field, ev.Type().FriendlyName())
 		}
-		out = append(out, ev.AsString())
 	}
 	return out, nil
 }
@@ -374,44 +388,15 @@ func mapValToCty(args map[string]any) cty.Value {
 	return cty.ObjectVal(out)
 }
 
-// serviceDir returns the on-disk directory where this service's source tree
-// lives (or would live after a clone). Empty for services that don't need a
-// checkout (e.g. rust crates installed from crates.io).
-func serviceDir(sb *serviceBlock) string {
-	src := serviceSource(sb)
-	if src == "" {
-		return ""
-	}
-	info, err := source.Resolve(src)
-	if err != nil {
-		return ""
-	}
-	return info.RepoDir
-}
-
-func serviceSource(sb *serviceBlock) string {
-	switch sb.Toolchain {
-	case ToolchainGo:
-		return sb.Import
-	case ToolchainRust, ToolchainRuby:
-		return sb.Git
-	}
-	return ""
-}
-
-// serviceDirOf is the wire-Service analogue of serviceDir: resolves the
-// on-disk checkout dir from an already-built *Service (used when rebuilding
-// parent context from a running alpha's state).
+// serviceDirOf returns the resolved per-invocation checkout dir of an
+// already-built *Service (used when rebuilding the federation parent
+// context from a running alpha's state). It's just the value the resolver
+// already computed — no recomputation, no filesystem.
 func serviceDirOf(s *Service) string {
-	src := s.Source()
-	if src == "" {
+	if s.Runtime == nil {
 		return ""
 	}
-	info, err := source.Resolve(src)
-	if err != nil {
-		return ""
-	}
-	return info.RepoDir
+	return s.Runtime.Dir
 }
 
 // --- functions exposed in HCL expressions ---------------------------------
@@ -433,12 +418,10 @@ func (r *resolver) pathhashFunc() function.Function {
 	return function.New(&function.Spec{
 		Type: function.StaticReturnType(cty.String),
 		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
-			if r.stateDir == "" {
-				return cty.NilVal, errors.New("pathhash() called but no state dir configured")
+			if r.inv == nil || r.inv.Hash == "" {
+				return cty.NilVal, errors.New("pathhash() called but no invocation configured")
 			}
-			// stateDir basename is "zordon-<hash>" (see control.StateDir).
-			base := filepath.Base(r.stateDir)
-			return cty.StringVal(strings.TrimPrefix(base, "zordon-")), nil
+			return cty.StringVal(r.inv.Hash), nil
 		},
 	})
 }
@@ -447,10 +430,10 @@ func (r *resolver) tmpdirFunc() function.Function {
 	return function.New(&function.Spec{
 		Type: function.StaticReturnType(cty.String),
 		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
-			if r.stateDir == "" {
-				return cty.NilVal, errors.New("tmpdir() called but no state dir configured")
+			if r.inv == nil || r.inv.TmpDir == "" {
+				return cty.NilVal, errors.New("tmpdir() called but no invocation configured")
 			}
-			return cty.StringVal(r.stateDir), nil
+			return cty.StringVal(r.inv.TmpDir), nil
 		},
 	})
 }

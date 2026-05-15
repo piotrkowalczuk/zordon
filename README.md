@@ -30,6 +30,7 @@ zordon start              # spawn alpha, push config, stream bringup logs
 zordon status             # what's running across the whole chain right now?
 zordon stop               # ask alpha to shut its children down and exit
 zordon sudo               # apply the idempotent privileged hooks (see Federation)
+zordon worktree create x  # a parallel, isolated copy of the stack (see Worktrees)
 ```
 
 `zordon start` exits as soon as every service reaches READY (so you can
@@ -53,8 +54,9 @@ block: `service "<toolchain>" "<name>" { ... }`. Toolchain is `go`,
 
 ```hcl
 service "go" "nats-server" {
-  import = "github.com/nats-io/nats-server/v2"
-  branch = "v2.14.0"
+  git = "github.com/nats-io/nats-server"   # zordon-owned bare clone
+  tag = "v2.14.0"
+  # default build: go build -o ./nats-server .
 
   arguments = {
     p = 9010
@@ -63,13 +65,13 @@ service "go" "nats-server" {
 }
 
 service "rust" "tansu" {
-  crate        = "tansu"
-  all_features = true
+  crate = "tansu"   # no git/dir ⇒ not worktree-able; expected on $PATH
 }
 
 service "go" "prometheus" {
-  import     = "github.com/prometheus/prometheus/cmd/prometheus"
-  branch     = "v3.11.3"
+  git        = "github.com/prometheus/prometheus"
+  tag        = "v3.11.3"
+  build      = "go build -o ./prometheus ./cmd/prometheus"
   doubleDash = true
 
   arguments = {
@@ -83,35 +85,35 @@ service "go" "prometheus" {
       path = "/-/ready"
       port = 9020
     }
-    period            = "200ms"
-    timeout           = "1s"
-    failure_threshold = 30
   }
 }
 
-service "ruby" "ruby-service" {
-  git     = "github.com/niwasawa/ruby-sinatra-hello-world"
-  install = "bundle install --path vendor/bundle"
-  run     = "bundle exec ruby myapp.rb"
-
-  arguments = {
-    p = 8888
-  }
+service "go" "my-app" {
+  dir = "~/code/my-app"   # your own checkout; zordon never writes to it
+  command = ["./my-app", "-addr", ":8080"]
 }
 ```
 
-### Toolchain blocks
+### Source: the primary repo
 
-- **`service "go" "<name>"`** — `import` is a Go import path; the binary is
-  expected on `$PATH` after `go install <import>`. `branch` pins a tag.
-- **`service "rust" "<name>"`** — installed via `cargo install`. With
-  `git = "..."`, zordon clones and builds from a local checkout
-  (`cargo install --path`).
-- **`service "ruby" "<name>"`** — `git` points at a repo, `install` runs
-  after clone, and `run` is the command line to start the service. The
-  whole flow is driven from the cloned checkout: zordon clones into
-  `~/.zordon/src/<host>/<owner>/<repo>`, runs `install` there, then runs
-  `run` with `cwd` set to that directory.
+Every service has a **primary** — exactly one of:
+
+- **`git = "host/owner/repo"`** — zordon bare-clones it once into
+  `~/.zordon/src/...` and `git worktree add`s a fresh tree per invocation.
+- **`dir = "/path/to/repo"`** — your own git checkout; zordon only
+  `git worktree add`s from it, never writes to the primary.
+- **neither** (e.g. `crate = "..."`, or a prebuilt binary) — not
+  worktree-able; resolved from `$PATH`.
+
+`branch` / `tag` / `rev` pin the revision checked out into the worktree.
+The service is built **in that checkout** with a per-toolchain default
+(`go build -o ./<name> .`, `cargo build --release`, `bundle install`)
+unless you override it with `build = "..."`. It then runs from the
+checkout — `command = [...]` is the full argv (cwd = checkout); with no
+`command`, zordon runs `./<name> <flags>`.
+
+This is what makes parallel **worktrees** possible — see
+[Worktrees](#worktrees).
 
 ### Flags / arguments
 
@@ -208,7 +210,9 @@ The DAG ensures the referenced service is evaluated first.
 
 ```hcl
 service "go" "prometheus" {
-  import     = "github.com/prometheus/prometheus/cmd/prometheus"
+  git        = "github.com/prometheus/prometheus"
+  tag        = "v3.11.3"
+  build      = "go build -o ./prometheus ./cmd/prometheus"
   doubleDash = true
 
   vars = {
@@ -245,6 +249,43 @@ listen address, the readiness probe, and (if needed) any other service
 referencing `service.go.prometheus.vars.port`. The config file is
 materialized into `tmpdir()` at configure time and unlinked when
 `zordon stop` shuts alpha down.
+
+## Worktrees
+
+Every run of zordon happens in a *worktree*. The project root is the
+implicit worktree `main`; you can spin up more, each a fully isolated
+copy of the whole stack over the **same `Alphasfile`** — its own state
+dir, its own `pickport()` draws, its own per-service `git worktree`
+checkouts, its own `alpha`.
+
+```sh
+zordon worktree create feature        # mkdir .zordon/worktrees/feature
+cd .zordon/worktrees/feature
+zordon start                          # walks up, adopts ../../../Alphasfile
+                                      # as the leaf — but as worktree "feature"
+zordon worktree list
+zordon worktree rm feature
+```
+
+`zordon start` from `.zordon/worktrees/<name>/` walks up, finds the
+project's `Alphasfile`, and adopts it as the leaf — same file on disk,
+different invocation. The invocation hash is
+`sha(invocation_dir + alphasfile_bytes + parent_context)`, so `main` and
+`feature` get **distinct hashes ⇒ distinct sockets, state dirs, and
+fresh `pickport()` values** — they run side by side without colliding.
+`zordon status` shows which worktree each level is and its hash; that
+hash is also what `pathhash()` returns (handy for collision-free vhost
+names: `app.${pathhash()}.test`).
+
+Each worktree-able service is materialized via `git worktree add` from
+its primary into `<state>/src/<svc>` and built there, so editing code in
+one worktree's checkout doesn't touch another's. Federation parents
+(below) are *reused* across worktrees as-is — only the leaf forks.
+
+Main use case: an AI agent gets a sandbox next to the developer's stack;
+derivatives: parallel experiments, A/B-testing two revisions. For async
+isolation, keep the broker (NATS/Kafka/…) in the **project** Alphasfile,
+not the global parent — then each worktree gets its own bus.
 
 ## Federation
 
@@ -354,7 +395,9 @@ anything, and without any per-app glue code. From
 ```hcl
 # examples/federation/Alphasfile  (the root: caddy + coredns)
 service "go" "caddy" {
-  import = "github.com/caddyserver/caddy/v2/cmd/caddy"
+  git   = "github.com/caddyserver/caddy"
+  tag   = "v2.10.0"
+  build = "go build -o ./caddy ./cmd/caddy"
   vars = {
     http       = net::pickport()
     config_dir = "${tmpdir()}/conf.d"
@@ -363,13 +406,15 @@ service "go" "caddy" {
     path = "${tmpdir()}/Caddyfile"
     body = "…  import ${self.vars.config_dir}/*.caddy"
   }
-  command = ["caddy", "run", "--config", self.file.caddyfile.path,
+  command = ["./caddy", "run", "--config", self.file.caddyfile.path,
              "--adapter", "caddyfile", "--watch"]
 }
 
 # examples/federation/project/Alphasfile  (the project)
 service "go" "prometheus" {
-  import = "github.com/prometheus/prometheus/cmd/prometheus"
+  git    = "github.com/prometheus/prometheus"
+  tag    = "v3.11.3"
+  build  = "go build -o ./prometheus ./cmd/prometheus"
   vars   = { port = net::pickport() }
 
   # The entire integration: one dropped vhost fragment.

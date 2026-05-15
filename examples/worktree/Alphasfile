@@ -1,0 +1,47 @@
+# examples/worktree — demonstrates parallel, isolated worktrees.
+#
+# The `example` service's primary is the zordon repo itself; zordon
+# bare-clones it once into ~/.zordon/src, then `git worktree add`s a fresh
+# tree per invocation and builds the server in it. Every worktree gets its
+# own pathhash() (passed as -tag), its own pickport(), and its own checkout
+# — so two runs over THIS SAME file never collide.
+#
+# Try it:
+#
+#   cd examples/worktree
+#   zordon start                       # the implicit "main" worktree
+#   curl http://127.0.0.1:<port>/      # port shown in `zordon status`
+#
+#   zordon worktree create feature
+#   cd .zordon/worktrees/feature
+#   zordon start                       # a second, fully isolated copy
+#
+#   zordon status                      # both levels, distinct hashes/ports
+#
+# Tip: to iterate on local code instead of the pinned upstream, point the
+# primary at your own checkout:  dir = "/abs/path/to/your/zordon"
+
+service "go" "example" {
+  git    = "github.com/piotrkowalczuk/zordon"
+  branch = "master"
+  build  = "go build -o ./example ./examples/worktree/src/example"
+
+  vars = {
+    port = net::pickport()
+  }
+
+  command = [
+    "./example",
+    "-addr", "127.0.0.1:${self.vars.port}",
+    "-tag", "${pathhash()}",
+  ]
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

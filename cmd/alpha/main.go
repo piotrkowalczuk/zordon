@@ -513,7 +513,7 @@ func streamLines(name, kind string, r io.Reader, stream *safeEncoder, log *zlog.
 	}
 }
 
-func buildCmd(svc *alphasfile.Service, repoDir string) (*exec.Cmd, error) {
+func buildCmd(svc *alphasfile.Service, checkout string) (*exec.Cmd, error) {
 	name := svc.Name()
 	if name == "" {
 		return nil, errors.New("service has no name")
@@ -521,53 +521,90 @@ func buildCmd(svc *alphasfile.Service, repoDir string) (*exec.Cmd, error) {
 	var cmd *exec.Cmd
 	switch {
 	case svc.Runtime != nil && len(svc.Runtime.Command) > 0:
-		// Explicit argv (subcommand-driven binaries like `caddy run ...`).
+		// Explicit argv (subcommand-driven binaries / built artifacts).
 		argv := svc.Runtime.Command
 		cmd = exec.Command(argv[0], argv[1:]...)
-	case svc.Ruby != nil && strings.TrimSpace(svc.Ruby.Run) != "":
-		fields := strings.Fields(svc.Ruby.Run)
-		cmd = exec.Command(fields[0], append(fields[1:], svc.Flags()...)...)
+	case checkout != "":
+		// Worktree service with no explicit command: run the binary built
+		// by the default build step, from the checkout.
+		cmd = exec.Command("./"+name, svc.Flags()...)
 	default:
+		// Crate / prebuilt: resolve from $PATH.
 		cmd = exec.Command(name, svc.Flags()...)
 	}
-	switch {
-	case svc.Runtime != nil && svc.Runtime.Dir != "":
-		cmd.Dir = svc.Runtime.Dir
-	case repoDir != "":
-		cmd.Dir = repoDir
+	if checkout != "" {
+		cmd.Dir = checkout
 	}
 	return cmd, nil
 }
 
-// prepare materializes the source checkout and runs the per-service install
-// command for services that ship as a git tree to be invoked from a checkout
-// (currently: Ruby with Git). Output is streamed back to zordon as log events
-// under stream="prepare" so the user sees clone/install progress live.
+// defaultBuild is the per-toolchain build run inside a fresh checkout when
+// the service doesn't override it with `build = "..."`.
+func defaultBuild(toolchain, name string) string {
+	switch toolchain {
+	case alphasfile.ToolchainGo:
+		return "go build -o ./" + name + " ."
+	case alphasfile.ToolchainRust:
+		return "cargo build --release"
+	case alphasfile.ToolchainRuby:
+		return "bundle install"
+	}
+	return ""
+}
+
+// prepare materializes a per-invocation git worktree for the service and
+// runs its build step in that checkout. Worktree-able = has a git or dir
+// primary; crate/prebuilt services skip this and run from $PATH. Output is
+// streamed back to zordon under stream="prepare".
 //
-// Returns the resolved repo dir (empty when no preparation was needed) so the
-// caller can set exec.Cmd.Dir on the run command.
+// Returns the checkout dir (empty for non-worktree services) so the caller
+// can set exec.Cmd.Dir.
 func prepare(svc *alphasfile.Service, name string, stream *safeEncoder, log *zlog.Logger) (string, error) {
-	if svc.Ruby == nil || svc.Ruby.Git == "" {
+	if !svc.Worktreeable() || svc.Package == nil {
 		return "", nil
 	}
-	runner := newPrepareRunner(name, stream, log)
-
-	log.Info("alpha", "prepare %s: ensuring source %s", name, svc.Ruby.Git)
-	info, err := source.Ensure(context.Background(), svc.Ruby.Git, svc.Branch(), runner)
-	if err != nil {
-		return "", fmt.Errorf("ensure source: %w", err)
+	dest := ""
+	if svc.Runtime != nil {
+		dest = svc.Runtime.Dir
+	}
+	if dest == "" {
+		return "", fmt.Errorf("worktree-able service %q has no resolved checkout dir", name)
 	}
 
-	if install := strings.TrimSpace(svc.Install()); install != "" {
-		fields := strings.Fields(install)
-		log.Info("alpha", "prepare %s: install %s", name, install)
-		c := exec.Command(fields[0], fields[1:]...)
-		c.Dir = info.RepoDir
-		if err := runner(context.Background(), c); err != nil {
-			return "", fmt.Errorf("install: %w", err)
+	p, err := source.NewPrimary(svc.Package.Git, svc.Package.Dir, svc.Ref())
+	if err != nil {
+		return "", err
+	}
+	runner := newPrepareRunner(name, stream, log)
+	ctx := context.Background()
+
+	log.Info("alpha", "prepare %s: ensuring primary (%s)", name, p.Kind)
+	if err := p.Ensure(ctx, runner); err != nil {
+		return "", fmt.Errorf("ensure primary: %w", err)
+	}
+
+	wt := os.Getenv("ZORDON_WORKTREE")
+	if wt == "" {
+		wt = "main"
+	}
+	log.Info("alpha", "prepare %s: worktree -> %s (branch zordon/%s)", name, dest, wt)
+	if err := p.AddWorktree(ctx, dest, "zordon/"+wt, runner); err != nil {
+		return "", fmt.Errorf("git worktree: %w", err)
+	}
+
+	build := strings.TrimSpace(svc.Build())
+	if build == "" {
+		build = defaultBuild(svc.Toolchain, name)
+	}
+	if build != "" {
+		log.Info("alpha", "prepare %s: build (%s)", name, build)
+		c := exec.Command("/bin/sh", "-c", build)
+		c.Dir = dest
+		if err := runner(ctx, c); err != nil {
+			return "", fmt.Errorf("build: %w", err)
 		}
 	}
-	return info.RepoDir, nil
+	return dest, nil
 }
 
 // newPrepareRunner builds a source.Runner that pipes exec.Cmd output through

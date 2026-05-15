@@ -1,6 +1,16 @@
+# Every service has a primary repo (`git` = zordon-owned bare clone, or
+# `dir` = your own checkout) and is materialized into a per-invocation git
+# worktree, built there, and run from there. `build` overrides the
+# per-toolchain default (go: `go build -o ./<name> .`, rust:
+# `cargo build --release`, ruby: `bundle install`).
+#
+# A service with neither git nor dir (here: the tansu crate) isn't
+# worktree-able — it's expected on $PATH (e.g. `cargo install tansu`).
+
 service "go" "nats-server" {
-  import = "github.com/nats-io/nats-server/v2"
-  branch = "v2.14.0"
+  git = "github.com/nats-io/nats-server"
+  tag = "v2.14.0"
+  # default build: go build -o ./nats-server .
 
   vars = {
     client = net::pickport()
@@ -16,13 +26,13 @@ service "go" "nats-server" {
 }
 
 service "rust" "tansu" {
-  crate        = "tansu"
-  all_features = true
+  crate = "tansu" # not worktree-able; expected on $PATH
 }
 
 service "go" "prometheus" {
-  import     = "github.com/prometheus/prometheus/cmd/prometheus"
-  branch     = "v3.11.3"
+  git        = "github.com/prometheus/prometheus"
+  tag        = "v3.11.3"
+  build      = "go build -o ./prometheus ./cmd/prometheus"
   doubleDash = true
 
   vars = {
@@ -57,9 +67,8 @@ service "go" "prometheus" {
 }
 
 service "ruby" "ruby-service" {
-  git     = "github.com/niwasawa/ruby-sinatra-hello-world"
-  install = "bundle install --path vendor/bundle"
-  run     = "bundle exec ruby myapp.rb"
+  git   = "github.com/niwasawa/ruby-sinatra-hello-world"
+  build = "bundle install --path vendor/bundle"
 
   log {
     format = "plain"
@@ -70,7 +79,5 @@ service "ruby" "ruby-service" {
     port = net::pickport()
   }
 
-  arguments = {
-    p = self.vars.port
-  }
+  command = ["bundle", "exec", "ruby", "myapp.rb", "-p", "${self.vars.port}"]
 }

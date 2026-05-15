@@ -18,6 +18,7 @@ import (
 	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/zclconf/go-cty/cty"
 
+	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 )
 
@@ -49,116 +50,135 @@ type RuntimeConfig struct {
 	Readiness      *probe.Probe   `json:"readiness,omitempty"`
 }
 
-type ServiceGo struct {
-	Name    string `json:"name"`
-	Import  string `json:"import"`
-	Branch  string `json:"branch,omitempty"`
-	Install string `json:"install,omitempty"`
-}
-
-type ServiceRust struct {
-	Name        string   `json:"name"`
-	Crate       string   `json:"crate,omitempty"`
-	Version     string   `json:"version,omitempty"`
-	Git         string   `json:"git,omitempty"`
-	Branch      string   `json:"branch,omitempty"`
-	Tag         string   `json:"tag,omitempty"`
-	Rev         string   `json:"rev,omitempty"`
-	Bin         string   `json:"bin,omitempty"`
-	Features    []string `json:"features,omitempty"`
-	AllFeatures bool     `json:"all_features,omitempty"`
-	Locked      bool     `json:"locked,omitempty"`
-	Install     string   `json:"install,omitempty"`
-}
-
-type ServiceRuby struct {
-	Name    string `json:"name"`
-	Git     string `json:"git,omitempty"`
-	Branch  string `json:"branch,omitempty"`
-	Tag     string `json:"tag,omitempty"`
-	Rev     string `json:"rev,omitempty"`
-	Install string `json:"install,omitempty"`
-	Run     string `json:"run,omitempty"`
+// Package is the unified, toolchain-tagged source/build manifest. A
+// service's primary is exactly one of: Git (zordon-owned bare clone),
+// Dir (user-owned repo), or neither (Crate / a prebuilt binary on $PATH —
+// not worktree-able). Build overrides the per-toolchain default.
+type Package struct {
+	Toolchain string `json:"toolchain"` // go|rust|ruby
+	Git       string `json:"git,omitempty"`
+	Dir       string `json:"dir,omitempty"`
+	Branch    string `json:"branch,omitempty"`
+	Tag       string `json:"tag,omitempty"`
+	Rev       string `json:"rev,omitempty"`
+	Crate     string `json:"crate,omitempty"` // rust crates.io (KindNone)
+	Build     string `json:"build,omitempty"` // override; default per toolchain
 }
 
 type Service struct {
 	Toolchain string         `json:"toolchain"`
 	Runtime   *RuntimeConfig `json:"runtime"`
-	Go        *ServiceGo     `json:"go,omitempty"`
-	Rust      *ServiceRust   `json:"rust,omitempty"`
-	Ruby      *ServiceRuby   `json:"ruby,omitempty"`
+	Package   *Package       `json:"package,omitempty"`
+}
+
+// ServiceMeta is the static, eval-free view of a service: identity plus its
+// source primary. `zordon worktree` uses it to materialize checkouts
+// without resolving the dynamic graph (no Invocation / parent context /
+// pickport needed just to `git worktree add`).
+type ServiceMeta struct {
+	Name      string
+	Toolchain string
+	Package   *Package
+}
+
+// Ref is the default revision for this service's worktree (Branch, then
+// Tag, then Rev; empty = primary HEAD).
+func (m *ServiceMeta) Ref() string {
+	switch {
+	case m.Package == nil:
+		return ""
+	case m.Package.Branch != "":
+		return m.Package.Branch
+	case m.Package.Tag != "":
+		return m.Package.Tag
+	case m.Package.Rev != "":
+		return m.Package.Rev
+	}
+	return ""
+}
+
+// Worktreeable reports whether this service has a git/dir primary.
+func (m *ServiceMeta) Worktreeable() bool {
+	return m.Package != nil && (m.Package.Git != "" || m.Package.Dir != "")
+}
+
+// ParseServices does a parse-only decode of an Alphasfile: it returns each
+// service's identity and source primary without evaluating any expression
+// (vars / arguments / files / readiness / sudo are ignored). Pure, needs no
+// Invocation — the entry point for `zordon worktree`.
+func ParseServices(path string) ([]*ServiceMeta, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("alphasfile read: %w", err)
+	}
+	parser := hclparse.NewParser()
+	file, diags := parser.ParseHCL(b, path)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("alphasfile parse: %s", diags.Error())
+	}
+	var root rootBlock
+	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
+		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
+	}
+	out := make([]*ServiceMeta, 0, len(root.Services))
+	for _, sb := range root.Services {
+		if sb.Git != "" && sb.Dir != "" {
+			return nil, fmt.Errorf("service %q declares both git and dir; pick one primary", sb.Name)
+		}
+		out = append(out, &ServiceMeta{
+			Name:      sb.Name,
+			Toolchain: sb.Toolchain,
+			Package: &Package{
+				Toolchain: sb.Toolchain,
+				Git:       sb.Git,
+				Dir:       sb.Dir,
+				Branch:    sb.Branch,
+				Tag:       sb.Tag,
+				Rev:       sb.Rev,
+				Crate:     sb.Crate,
+				Build:     sb.Build,
+			},
+		})
+	}
+	return out, nil
 }
 
 func (s *Service) Name() string {
-	switch {
-	case s.Go != nil:
-		return s.Go.Name
-	case s.Rust != nil:
-		return s.Rust.Name
-	case s.Ruby != nil:
-		return s.Ruby.Name
+	if s.Runtime != nil {
+		return s.Runtime.Name
 	}
 	return ""
 }
 
-func (s *Service) NeedsSource() bool {
-	switch {
-	case s.Go != nil:
-		return s.Go.Import != ""
-	case s.Rust != nil:
-		return s.Rust.Git != ""
-	case s.Ruby != nil:
-		return s.Ruby.Git != ""
+// Ref returns the default revision for git worktree add: Branch wins, then
+// Tag, then Rev. Empty = primary HEAD.
+func (s *Service) Ref() string {
+	if s.Package == nil {
+		return ""
 	}
-	return false
-}
-
-func (s *Service) Source() string {
 	switch {
-	case s.Go != nil:
-		return s.Go.Import
-	case s.Rust != nil:
-		return s.Rust.Git
-	case s.Ruby != nil:
-		return s.Ruby.Git
+	case s.Package.Branch != "":
+		return s.Package.Branch
+	case s.Package.Tag != "":
+		return s.Package.Tag
+	case s.Package.Rev != "":
+		return s.Package.Rev
 	}
 	return ""
 }
 
-func (s *Service) Branch() string {
-	switch {
-	case s.Go != nil:
-		return s.Go.Branch
-	case s.Rust != nil:
-		switch {
-		case s.Rust.Tag != "":
-			return s.Rust.Tag
-		case s.Rust.Rev != "":
-			return s.Rust.Rev
-		}
-		return s.Rust.Branch
-	case s.Ruby != nil:
-		switch {
-		case s.Ruby.Tag != "":
-			return s.Ruby.Tag
-		case s.Ruby.Rev != "":
-			return s.Ruby.Rev
-		}
-		return s.Ruby.Branch
-	}
-	return ""
+// Worktreeable reports whether the service has a git/dir primary (so it can
+// get a per-invocation checkout). Crate / bare-binary services don't.
+func (s *Service) Worktreeable() bool {
+	return s.Package != nil && (s.Package.Git != "" || s.Package.Dir != "")
 }
 
-func (s *Service) Install() string {
-	switch {
-	case s.Go != nil:
-		return s.Go.Install
-	case s.Rust != nil:
-		return s.Rust.Install
-	case s.Ruby != nil:
-		return s.Ruby.Install
+// Build returns the build command override, or "" for the toolchain default.
+func (s *Service) Build() string {
+	if s.Package == nil {
+		return ""
 	}
-	return ""
+	return s.Package.Build
 }
 
 // Flags renders RuntimeConfig.Arguments into argv flags. Format follows
@@ -236,20 +256,16 @@ type serviceBlock struct {
 	Log            *logBlock `hcl:"log,block"`
 	DoubleDash     bool      `hcl:"doubleDash,optional"`
 	SpaceSeparated bool      `hcl:"space_separated,optional"`
-	Dir            string    `hcl:"dir,optional"`
-	Import         string    `hcl:"import,optional"`
-	Branch         string    `hcl:"branch,optional"`
-	Install        string    `hcl:"install,optional"`
-	Crate          string    `hcl:"crate,optional"`
-	Version        string    `hcl:"version,optional"`
-	Git            string    `hcl:"git,optional"`
-	Tag            string    `hcl:"tag,optional"`
-	Rev            string    `hcl:"rev,optional"`
-	Bin            string    `hcl:"bin,optional"`
-	Features       []string  `hcl:"features,optional"`
-	AllFeatures    bool      `hcl:"all_features,optional"`
-	Locked         bool      `hcl:"locked,optional"`
-	Run            string    `hcl:"run,optional"`
+
+	// source primary: git (zordon-owned bare) XOR dir (user-owned repo);
+	// neither ⇒ crate / prebuilt (not worktree-able).
+	Git    string `hcl:"git,optional"`
+	Dir    string `hcl:"dir,optional"`
+	Branch string `hcl:"branch,optional"`
+	Tag    string `hcl:"tag,optional"`
+	Rev    string `hcl:"rev,optional"`
+	Crate  string `hcl:"crate,optional"`
+	Build  string `hcl:"build,optional"` // override; default per toolchain
 
 	// dynamic (DAG-evaluated, in this order:
 	//   vars → files → arguments → command → readiness.port)
@@ -308,19 +324,24 @@ type fileBlock struct {
 
 // --- public entry point ---------------------------------------------------
 
-// Open parses and resolves an Alphasfile. stateDir is what tmpdir() returns
-// inside expressions (typically a deterministic per-Alphasfile directory
-// computed by the caller via control.StateDir). Pass an empty stateDir to
-// disable tmpdir() (it will error if used). parent pre-seeds the service
-// namespace with values resolved by Alphasfiles higher in a federation
-// chain; pass nil for a standalone Alphasfile.
-func Open(path, stateDir string, parent *ParentContext) (*Alphasfile, error) {
+// Open reads, parses and resolves an Alphasfile at path. inv carries the
+// invocation identity (hash, tmp dir, per-service checkout paths); parent
+// pre-seeds the flat service namespace with values resolved by Alphasfiles
+// higher in a federation chain (nil for a standalone file).
+func Open(path string, inv *invocation.Invocation, parent *ParentContext) (*Alphasfile, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("alphasfile read: %w", err)
 	}
+	return Compile(path, b, inv, parent)
+}
+
+// Compile is Open without filesystem I/O: it resolves the given Alphasfile
+// source bytes. Pure (no process spawn, no clone) — the unit-test entry
+// point for the whole resolution pipeline. name is only used in diagnostics.
+func Compile(name string, src []byte, inv *invocation.Invocation, parent *ParentContext) (*Alphasfile, error) {
 	parser := hclparse.NewParser()
-	file, diags := parser.ParseHCL(b, path)
+	file, diags := parser.ParseHCL(src, name)
 	if diags.HasErrors() {
 		return nil, fmt.Errorf("alphasfile parse: %s", diags.Error())
 	}
@@ -332,7 +353,7 @@ func Open(path, stateDir string, parent *ParentContext) (*Alphasfile, error) {
 	if parent != nil {
 		seed = parent.byTC
 	}
-	return resolve(&root, stateDir, seed)
+	return resolve(&root, inv, seed)
 }
 
 // ParentContext carries the resolved services of every Alphasfile above the

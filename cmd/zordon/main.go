@@ -84,7 +84,19 @@ func main() {
 		},
 	}
 
-	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd)
+	// worktree
+	wtFlags := ff.NewFlagSet("worktree").SetParent(rootFlags)
+	wtCmd := &ff.Command{
+		Name:      "worktree",
+		Usage:     "zordon worktree <create|list|rm> [name]",
+		ShortHelp: "manage parallel worktrees (isolated state/ports over the same Alphasfile)",
+		Flags:     wtFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runWorktree(ctx, zlog.New(os.Stderr, *agent), args)
+		},
+	}
+
+	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wtCmd)
 
 	err := rootCmd.ParseAndRun(context.Background(), os.Args[1:])
 	switch {
@@ -174,7 +186,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, hash str
 	}
 }
 
-func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose bool, log *zlog.Logger) error {
+func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose bool, log *zlog.Logger, extraEnv map[string]string) error {
 	logf := func(format string, a ...any) { log.Info("zordon", format, a...) }
 	readyR, readyW, err := os.Pipe()
 	if err != nil {
@@ -184,6 +196,9 @@ func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose 
 	cmd := exec.Command(alphaBin, "run", "--socket", sock, "--log-file", alphaLog)
 	cmd.ExtraFiles = []*os.File{readyW}
 	cmd.Env = append(os.Environ(), "ZORDON_READY_FD="+strconv.Itoa(2+len(cmd.ExtraFiles)))
+	for k, v := range extraEnv {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
@@ -262,49 +277,28 @@ func runStatus(ctx context.Context, log *zlog.Logger) error {
 	_ = log // status output is structured stdout, not log-style
 
 	// Status reports the whole federation chain, not just the invocation.
-	chain, invocation, err := discoverChain()
+	levels, err := resolveChain(ctx)
 	if err != nil {
 		return err
 	}
 
 	anyRunning := false
-	for i, afPath := range chain {
+	for i, lv := range levels {
 		if i > 0 {
 			fmt.Println()
 		}
 		marker := ""
-		if afPath == invocation {
-			marker = " (invocation)"
+		if lv.isInvocation {
+			marker = fmt.Sprintf(" (invocation, worktree=%s)", lv.inv.Worktree)
 		}
-		hash := ""
-		if sd, e := control.StateDir(afPath); e == nil {
-			hash = strings.TrimPrefix(filepath.Base(sd), "zordon-")
-		}
-		fmt.Printf("# [%s] %s%s\n", hash, afPath, marker)
+		fmt.Printf("# [%s] %s%s\n", lv.inv.Hash, lv.afPath, marker)
 
-		sock, err := control.SocketPath(afPath)
-		if err != nil {
-			return err
-		}
-		resp, err := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpState})
-		if err != nil {
-			if control.IsNotRunning(err) {
-				fmt.Println("  alpha: not running")
-				continue
-			}
-			fmt.Printf("  alpha: error: %v\n", err)
-			continue
-		}
-		if resp.Error != "" {
-			fmt.Printf("  alpha: error: %s\n", resp.Error)
-			continue
-		}
-		if resp.State == nil {
-			fmt.Println("  alpha: running (empty state)")
+		if lv.state == nil {
+			fmt.Println("  alpha: not running")
 			continue
 		}
 		anyRunning = true
-		st := resp.State
+		st := lv.state
 		fmt.Printf("  alpha pid=%d started=%s\n", st.PID, st.StartedAt)
 		if len(st.Services) == 0 {
 			fmt.Println("  services: (none configured yet)")
@@ -330,15 +324,23 @@ func runStatus(ctx context.Context, log *zlog.Logger) error {
 }
 
 func runStop(ctx context.Context, log *zlog.Logger) error {
-	afPath, err := walkUp() // no eval: stop only needs the socket path
+	// Stop only the invocation (leaf); parents are shared infra. We still
+	// need the chain walk to derive the leaf's socket (its hash depends on
+	// the resolved parent context).
+	levels, err := resolveChain(ctx)
 	if err != nil {
 		return err
 	}
-	sock, err := control.SocketPath(afPath)
-	if err != nil {
-		return err
+	var leaf *level
+	for _, lv := range levels {
+		if lv.isInvocation {
+			leaf = lv
+		}
 	}
-	resp, err := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown})
+	if leaf == nil {
+		return errors.New("no invocation level in chain")
+	}
+	resp, err := control.Roundtrip(ctx, leaf.inv.SocketPath(), &protocol.Request{Op: protocol.OpShutdown})
 	if err != nil {
 		if control.IsNotRunning(err) {
 			log.Info("zordon", "alpha is not running")
@@ -349,6 +351,6 @@ func runStop(ctx context.Context, log *zlog.Logger) error {
 	if resp.Error != "" {
 		return fmt.Errorf("alpha: %s", resp.Error)
 	}
-	log.Info("alpha", "shutdown requested")
+	log.Info("alpha", "shutdown requested (worktree=%s)", leaf.inv.Worktree)
 	return nil
 }

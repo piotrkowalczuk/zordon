@@ -14,8 +14,9 @@
 # project-specific.
 
 service "go" "prometheus" {
-  import     = "github.com/prometheus/prometheus/cmd/prometheus"
-  branch     = "v3.11.3"
+  git        = "github.com/prometheus/prometheus"
+  tag        = "v3.11.3"
+  build      = "go build -o ./prometheus ./cmd/prometheus"
   doubleDash = true
 
   vars = {

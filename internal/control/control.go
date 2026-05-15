@@ -5,58 +5,20 @@ package control
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"syscall"
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 )
 
-const socketPrefix = "zordon-alpha"
-
-// SocketPath derives a deterministic socket path from the absolute Alphasfile
-// path. Both zordon and alpha compute it the same way, so no shared state
-// file is needed.
-//
-// Lives under $XDG_RUNTIME_DIR if available (Linux), else os.TempDir().
-func SocketPath(alphasfilePath string) (string, error) {
-	abs, err := filepath.Abs(alphasfilePath)
-	if err != nil {
-		return "", fmt.Errorf("abs: %w", err)
-	}
-	sum := sha256.Sum256([]byte(abs))
-	name := fmt.Sprintf("%s-%s.sock", socketPrefix, hex.EncodeToString(sum[:8]))
-	return filepath.Join(socketDir(), name), nil
-}
-
-// StateDir returns a deterministic per-Alphasfile directory under the system
-// temp dir, used for generated files (file{} blocks, alpha logs, etc.).
-// Mkdir is on-demand; this function only returns the path.
-func StateDir(alphasfilePath string) (string, error) {
-	abs, err := filepath.Abs(alphasfilePath)
-	if err != nil {
-		return "", fmt.Errorf("abs: %w", err)
-	}
-	sum := sha256.Sum256([]byte(abs))
-	name := fmt.Sprintf("zordon-%s", hex.EncodeToString(sum[:8]))
-	return filepath.Join(os.TempDir(), name), nil
-}
-
-func socketDir() string {
-	if runtime.GOOS == "linux" {
-		if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
-			return d
-		}
-	}
-	return os.TempDir()
-}
+// Socket/state paths are now derived per-invocation by internal/invocation
+// (Invocation.SocketPath / .StateDir), so this package only owns the lock,
+// the listener, and the request/response helpers.
 
 // Lock takes an exclusive, blocking flock on <stateDir>/start.lock so that
 // only one `zordon start` operates on a given Alphasfile at a time. The

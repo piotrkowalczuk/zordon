@@ -1,7 +1,12 @@
-// Package source resolves and materializes service source trees under
-// $HOME/.zordon/src. It owns the "where does the code live on disk"
-// question for any service that needs to be built or run from a checkout
-// (Go import paths, Rust git deps, Ruby git sources).
+// Package source owns the "where does a service's code live" question.
+//
+// A service has a *primary* repository — either zordon-owned (`git`,
+// bare-cloned under ~/.zordon/src) or user-owned (`dir`, an existing git
+// checkout zordon never writes to). Every invocation gets its own working
+// tree via `git worktree add` from that primary, so parallel invocations
+// (worktrees) are isolated. Services with neither git nor dir (a crates.io
+// crate, a prebuilt binary on $PATH) have no primary and are not
+// worktree-able.
 package source
 
 import (
@@ -14,17 +19,26 @@ import (
 	"strings"
 )
 
-// Info points at a resolved checkout: the URL we clone from, the directory
-// it lives in on disk, and the subpath inside the repo (for Go import paths
-// that include a directory below the repo root, e.g. .../cmd/foo).
-type Info struct {
-	RepoURL string
-	RepoDir string
-	Subpath string
+type Kind string
+
+const (
+	KindNone Kind = ""    // crate / prebuilt — not worktree-able
+	KindGit  Kind = "git" // zordon-owned bare primary
+	KindDir  Kind = "dir" // user-owned repo primary
+)
+
+// Primary identifies a service's source of truth.
+type Primary struct {
+	Kind Kind
+	// Repo is host/owner/repo (normalized) for KindGit, or an absolute
+	// filesystem path for KindDir.
+	Repo string
+	// Ref is the default revision (branch/tag/rev) checked out into new
+	// worktrees. Empty means the primary's current HEAD.
+	Ref string
 }
 
-// Home returns the on-disk root for zordon-managed source checkouts.
-// Falls back to "./.zordon" if $HOME cannot be resolved.
+// Home returns the on-disk root for zordon-managed source.
 func Home() string {
 	if home, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(home, ".zordon")
@@ -32,96 +46,151 @@ func Home() string {
 	return ".zordon"
 }
 
-// Resolve splits a source string (Go-style import path OR a host/owner/repo
-// triple from a git URL we already trimmed) into RepoURL/RepoDir/Subpath.
-//
-// Only github.com, gitlab.com, and bitbucket.org are supported — anything
-// else would need vanity-import resolution, which we don't do.
-func Resolve(src string) (Info, error) {
-	src = strings.TrimPrefix(src, "https://")
-	src = strings.TrimPrefix(src, "http://")
-	src = strings.TrimSuffix(src, ".git")
-	parts := strings.Split(src, "/")
-	if len(parts) < 3 {
-		return Info{}, fmt.Errorf("import path too short: %q", src)
+// NewPrimary builds a Primary from a service's git/dir/ref fields. git and
+// dir are mutually exclusive; both empty ⇒ KindNone (not worktree-able).
+func NewPrimary(git, dir, ref string) (Primary, error) {
+	switch {
+	case git != "" && dir != "":
+		return Primary{}, errors.New("service declares both git and dir; pick one primary")
+	case git != "":
+		repo, err := normalizeGit(git)
+		if err != nil {
+			return Primary{}, err
+		}
+		return Primary{Kind: KindGit, Repo: repo, Ref: ref}, nil
+	case dir != "":
+		abs, err := expandAbs(dir)
+		if err != nil {
+			return Primary{}, err
+		}
+		return Primary{Kind: KindDir, Repo: abs, Ref: ref}, nil
+	default:
+		return Primary{Kind: KindNone, Ref: ref}, nil
 	}
-	host := parts[0]
-	switch host {
+}
+
+// Worktreeable reports whether this service can get a git worktree.
+func (p Primary) Worktreeable() bool { return p.Kind == KindGit || p.Kind == KindDir }
+
+func normalizeGit(git string) (string, error) {
+	g := strings.TrimPrefix(git, "https://")
+	g = strings.TrimPrefix(g, "http://")
+	g = strings.TrimSuffix(g, ".git")
+	parts := strings.Split(g, "/")
+	if len(parts) < 3 {
+		return "", fmt.Errorf("git path too short: %q", git)
+	}
+	switch parts[0] {
 	case "github.com", "gitlab.com", "bitbucket.org":
 	default:
-		return Info{}, fmt.Errorf("unsupported host %q (only github.com, gitlab.com, bitbucket.org)", host)
+		return "", fmt.Errorf("unsupported git host %q (github.com, gitlab.com, bitbucket.org)", parts[0])
 	}
-	repoImport := strings.Join(parts[:3], "/")
-	remaining := parts[3:]
-	if len(remaining) > 0 && isMajorVersionMarker(remaining[0]) {
-		remaining = remaining[1:]
-	}
-	sub := "."
-	if len(remaining) > 0 {
-		sub = "./" + strings.Join(remaining, "/")
-	}
-	return Info{
-		RepoURL: "https://" + repoImport + ".git",
-		RepoDir: filepath.Join(Home(), "src", repoImport),
-		Subpath: sub,
-	}, nil
+	return strings.Join(parts[:3], "/"), nil
 }
 
-func isMajorVersionMarker(seg string) bool {
-	if len(seg) < 2 || seg[0] != 'v' {
-		return false
-	}
-	for _, r := range seg[1:] {
-		if r < '0' || r > '9' {
-			return false
+func expandAbs(dir string) (string, error) {
+	if strings.HasPrefix(dir, "~") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
 		}
+		dir = filepath.Join(home, strings.TrimPrefix(dir, "~"))
 	}
-	return true
+	return filepath.Abs(dir)
 }
 
-// Runner abstracts how a caller wants exec.Cmd output captured (e.g. piped
-// into a per-service log stream). Caller must Start and Wait the command.
+func (p Primary) cloneURL() string { return "https://" + p.Repo + ".git" }
+
+// BarePath is where the zordon-owned bare primary lives (KindGit only).
+func (p Primary) BarePath() string {
+	return filepath.Join(Home(), "src", p.Repo) + ".git"
+}
+
+// primaryPath is the git dir we run `git worktree` against.
+func (p Primary) primaryPath() string {
+	switch p.Kind {
+	case KindGit:
+		return p.BarePath()
+	case KindDir:
+		return p.Repo
+	}
+	return ""
+}
+
+// Runner abstracts how a caller captures exec.Cmd output (e.g. piping into
+// a per-service log stream). It must Start and Wait the command.
 type Runner func(ctx context.Context, cmd *exec.Cmd) error
 
-// Ensure makes sure src is checked out at branch under Home()/src. If the
-// directory exists already, it fetches+resets to FETCH_HEAD on the requested
-// branch (when given). Returns the resolved Info regardless of clone outcome
-// so callers can build sub-commands against it.
-func Ensure(ctx context.Context, src, branch string, run Runner) (Info, error) {
-	info, err := Resolve(src)
-	if err != nil {
-		return info, err
+// Ensure makes the primary available. KindGit: bare-clone on first use,
+// otherwise fetch all refs. KindDir: assert it's a git repo. KindNone: noop.
+func (p Primary) Ensure(ctx context.Context, run Runner) error {
+	if run == nil {
+		return errors.New("source.Ensure: nil runner")
+	}
+	switch p.Kind {
+	case KindNone:
+		return nil
+	case KindDir:
+		if err := run(ctx, exec.CommandContext(ctx, "git", "-C", p.Repo, "rev-parse", "--git-dir")); err != nil {
+			return fmt.Errorf("dir primary %s is not a git repo: %w", p.Repo, err)
+		}
+		return nil
+	case KindGit:
+		bare := p.BarePath()
+		if _, err := os.Stat(bare); os.IsNotExist(err) {
+			if err := os.MkdirAll(filepath.Dir(bare), 0o755); err != nil {
+				return fmt.Errorf("mkdir bare parent: %w", err)
+			}
+			if err := run(ctx, exec.CommandContext(ctx, "git", "clone", "--bare", p.cloneURL(), bare)); err != nil {
+				return fmt.Errorf("git clone --bare: %w", err)
+			}
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if err := run(ctx, exec.CommandContext(ctx, "git", "-C", bare, "fetch", "--tags", "--force", "origin", "+refs/heads/*:refs/heads/*")); err != nil {
+			return fmt.Errorf("git fetch bare: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("unknown primary kind %q", p.Kind)
+}
+
+// AddWorktree creates (or reuses) a working tree at dest, on branch
+// `branch`, starting from p.Ref (or the primary's HEAD). Reuses an existing
+// valid worktree as-is so parallel invocations stay stable across restarts.
+func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runner) error {
+	if !p.Worktreeable() {
+		return fmt.Errorf("service has no git/dir primary; not worktree-able")
 	}
 	if run == nil {
-		return info, errors.New("source.Ensure: nil runner")
+		return errors.New("source.AddWorktree: nil runner")
 	}
+	if _, err := os.Stat(filepath.Join(dest, ".git")); err == nil {
+		return nil // existing worktree — reuse
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return fmt.Errorf("mkdir worktree parent: %w", err)
+	}
+	gitDir := p.primaryPath()
+	start := p.Ref
+	if start == "" {
+		start = "HEAD"
+	}
+	args := []string{"-C", gitDir, "worktree", "add", "--force", "-B", branch, dest, start}
+	if err := run(ctx, exec.CommandContext(ctx, "git", args...)); err != nil {
+		return fmt.Errorf("git worktree add: %w", err)
+	}
+	return nil
+}
 
-	if _, err := os.Stat(info.RepoDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(filepath.Dir(info.RepoDir), 0o755); err != nil {
-			return info, fmt.Errorf("mkdir repo parent: %w", err)
-		}
-		args := []string{"clone", "--depth", "1", "--recurse-submodules"}
-		if branch != "" {
-			args = append(args, "--branch", branch)
-		}
-		args = append(args, info.RepoURL, info.RepoDir)
-		if err := run(ctx, exec.CommandContext(ctx, "git", args...)); err != nil {
-			return info, fmt.Errorf("git clone: %w", err)
-		}
-		return info, nil
-	} else if err != nil {
-		return info, err
+// RemoveWorktree detaches a worktree from its primary and deletes the tree.
+func (p Primary) RemoveWorktree(ctx context.Context, dest string, run Runner) error {
+	if run == nil {
+		return errors.New("source.RemoveWorktree: nil runner")
 	}
-
-	fetchArgs := []string{"-C", info.RepoDir, "fetch", "--depth", "1", "origin"}
-	if branch != "" {
-		fetchArgs = append(fetchArgs, branch)
+	if gd := p.primaryPath(); gd != "" {
+		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gd, "worktree", "remove", "--force", dest))
 	}
-	if err := run(ctx, exec.CommandContext(ctx, "git", fetchArgs...)); err != nil {
-		return info, fmt.Errorf("git fetch: %w", err)
-	}
-	if err := run(ctx, exec.CommandContext(ctx, "git", "-C", info.RepoDir, "reset", "--hard", "FETCH_HEAD")); err != nil {
-		return info, fmt.Errorf("git reset: %w", err)
-	}
-	return info, nil
+	return os.RemoveAll(dest)
 }
