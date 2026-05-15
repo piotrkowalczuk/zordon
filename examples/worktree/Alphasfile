@@ -3,12 +3,12 @@
 # `src = "../.."` points the primary at the zordon repo this Alphasfile
 # lives in.
 #
-# `exe = "./examples/worktree/src/example"` names the main package path;
+# `exe = "./src/example"` names the main package path;
 # the Go toolchain builds it into fs::bin().
 
 service "go" "example" {
   src = "../.."
-  exe = "./examples/worktree/src/example"
+  exe = "./src/example"
 
   vars = {
     port = net::pickport()
@@ -19,6 +19,10 @@ service "go" "example" {
     "-addr", "127.0.0.1:${self.vars.port}",
     "-tag", "${pathhash()}",
   ]
+
+  worktree = {
+    sparse = ["examples/worktree/src/example"]
+  }
 
   readiness {
     http {
