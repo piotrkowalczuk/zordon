@@ -11,12 +11,12 @@ test:
 	go test ./...
 
 e2e: build
-	@sudo -v
 	@ZORDON_BIN="$$(pwd)/bin/zordon"; \
 	for dir in $(EXAMPLES); do \
 		echo "Running E2E for $$dir..."; \
 		(cd $$dir && \
-		sudo $$ZORDON_BIN sudo && \
+		if [ "$$(basename $$dir)" = "federation" ]; then sudo -v; fi && \
+		$$ZORDON_BIN sudo && \
 		if [ "$$(basename $$dir)" = "worktree" ]; then \
 			rm -rf .zordon/worktrees/feature && \
 			$$ZORDON_BIN worktree create feature && \
