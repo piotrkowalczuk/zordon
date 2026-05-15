@@ -154,6 +154,10 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, hash str
 	}); err != nil {
 		return fmt.Errorf("send configure: %w", err)
 	}
+	
+	// Clear the deadline for the streaming phase (bringup can take minutes)
+	_ = conn.SetDeadline(time.Time{})
+	
 	log.Info("zordon", "config pushed (%d services, failfast=%v), streaming bringup logs", len(af.All()), failfast)
 
 	var failed []string

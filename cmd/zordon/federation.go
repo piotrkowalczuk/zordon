@@ -121,6 +121,15 @@ func resolveChain(ctx context.Context) ([]*level, error) {
 		var st *protocol.StateInfo
 		if resp, e := control.Roundtrip(ctx, inv.SocketPath(), &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
 			st = resp.State
+		} else {
+			// Alpha not running; fallback to static evaluation.
+			if af, err := alphasfile.Open(afPath, inv, pctx); err == nil {
+				svcs := make([]*alphasfile.Service, 0, len(af.All()))
+				for _, s := range af.All() {
+					svcs = append(svcs, s)
+				}
+				st = &protocol.StateInfo{Services: svcs}
+			}
 		}
 		out = append(out, &level{afPath: afPath, isInvocation: isInv, inv: inv, parentCtx: pctx, state: st})
 		if st != nil {
