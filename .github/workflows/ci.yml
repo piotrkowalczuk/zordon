@@ -38,8 +38,8 @@ jobs:
           chmod +x zordon alpha
           sudo mv zordon alpha /usr/local/bin/
       - name: Run E2E Test
+        working-directory: examples/${{ matrix.example }}
         run: |
-          cd examples/${{ matrix.example }}
           sudo zordon sudo
           chmod +x test.sh
           zordon start --agent
