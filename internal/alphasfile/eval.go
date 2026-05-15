@@ -4,7 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/zclconf/go-cty/cty"
@@ -38,6 +41,9 @@ type resolver struct {
 
 	// names already taken (parent or local); collision is an error.
 	taken map[string]string // "tc/name" → origin ("parent" | "local")
+
+	// checkout dir of the service currently being evaluated (fs::src()).
+	curCheckout string
 
 	resolvedServices []*Service
 }
@@ -85,9 +91,10 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	// worktree-able: crate / prebuilt). Pure — no filesystem touch here;
 	// alpha materializes the worktree at this path later.
 	dir := ""
-	if sb.Git != "" || sb.Dir != "" {
+	if sb.Git != "" || sb.Src != "" {
 		dir = r.inv.CheckoutPath(sb.Name)
 	}
+	r.curCheckout = dir // what fs::src() returns while this service evals
 
 	// Stage 1: self_base — known from labels + primary, before any eval.
 	self := map[string]cty.Value{
@@ -136,11 +143,10 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	self["arguments"] = mapValToCty(args)
 
 	// Stage 5: command (may reference self.vars, self.file, self.arguments).
-	command, err := r.evalStrList(sb.Command, self, "command")
+	command, err := r.evalStrList(sb.Cmd, self, "cmd")
 	if err != nil {
 		return err
 	}
-
 	// Stage 6: sudo hooks (may reference everything resolved so far).
 	var sudo []*SudoStep
 	for _, sblk := range sb.Sudo {
@@ -181,6 +187,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		Sudo:           sudo,
 		Files:          files,
 		Dir:            dir,
+		BinDir:         r.inv.BinDir(),
 	}
 	if sb.Log != nil {
 		rt.Log = &LogConfig{Format: sb.Log.Format, Filter: sb.Log.Filter}
@@ -198,21 +205,26 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	default:
 		return fmt.Errorf("unknown toolchain %q (want go|rust|ruby)", sb.Toolchain)
 	}
-	if sb.Git != "" && sb.Dir != "" {
+	if (sb.Git != "" && sb.Src != "") || (sb.Git != "" && sb.Dir != "") {
 		return fmt.Errorf("service %q declares both git and dir; pick one primary", sb.Name)
 	}
+	src := sb.Src
+	if src == "" {
+		src = sb.Dir
+	}
+	
 	svc := &Service{
 		Toolchain: sb.Toolchain,
 		Runtime:   rt,
 		Package: &Package{
 			Toolchain: sb.Toolchain,
 			Git:       sb.Git,
-			Dir:       sb.Dir,
+			Src:       r.resolveDir(src),
 			Branch:    sb.Branch,
 			Tag:       sb.Tag,
 			Rev:       sb.Rev,
-			Crate:     sb.Crate,
-			Build:     sb.Build,
+			Exe:       sb.Exe,
+			Cmd:       strings.Join(command, " "),
 		},
 	}
 	r.resolvedServices = append(r.resolvedServices, svc)
@@ -284,8 +296,7 @@ func evalIntExpr(expr hcl.Expression, ctx *hcl.EvalContext, field string) (int, 
 	return int(i64), nil
 }
 
-// evalStrList evaluates an expression expected to be a tuple/list of strings
-// (the full argv for `command`). Nil expression ⇒ nil slice.
+	// evalStrList evaluates an expression expected to be a tuple/list of strings
 func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, field string) ([]string, error) {
 	if expr == nil {
 		return nil, nil
@@ -303,11 +314,7 @@ func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, f
 		return nil, fmt.Errorf("%s must be a list of strings, got %s", field, t.FriendlyName())
 	}
 	var out []string
-	for it := val.ElementIterator(); it.Next(); {
-		_, ev := it.Element()
-		// argv elements are strings; coerce scalars (a sole-interpolation
-		// like "${self.vars.port}" yields a number under HCL's template
-		// unwrapping — stringify it rather than reject).
+	for _, ev := range val.AsValueSlice() {
 		switch ev.Type() {
 		case cty.String:
 			out = append(out, ev.AsString())
@@ -402,11 +409,47 @@ func serviceDirOf(s *Service) string {
 // --- functions exposed in HCL expressions ---------------------------------
 
 func (r *resolver) functions() map[string]function.Function {
+	str := func(get func() string) function.Function {
+		return function.New(&function.Spec{
+			Type: function.StaticReturnType(cty.String),
+			Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
+				v := get()
+				if v == "" {
+					return cty.NilVal, errors.New("fs:: function called but no invocation/service context")
+				}
+				return cty.StringVal(v), nil
+			},
+		})
+	}
 	return map[string]function.Function{
-		"tmpdir":        r.tmpdirFunc(),
+		// fs:: namespace — per-invocation filesystem coordinates.
+		"fs::tmp": str(func() string { return r.inv.TmpDir }),       // generated files
+		"fs::src": str(func() string { return r.curCheckout }),      // this service's checkout
+		"fs::bin": str(func() string { return r.inv.BinDir() }),     // build outputs (outside src)
 		"pathhash":      r.pathhashFunc(),
 		"net::pickport": pickPortFunc(),
+		// back-compat aliases
+		"tmpdir": str(func() string { return r.inv.TmpDir }),
 	}
+}
+
+// resolveDir turns a `dir` primary into an absolute path. ~ expands to
+// $HOME; a relative path resolves against the Alphasfile's project root
+// (so a committed example can say dir = "../.." portably). Empty stays
+// empty (no dir primary).
+func (r *resolver) resolveDir(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	if strings.HasPrefix(dir, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, dir[2:])
+		}
+	}
+	if filepath.IsAbs(dir) {
+		return filepath.Clean(dir)
+	}
+	return filepath.Clean(filepath.Join(r.inv.ProjectRoot(), dir))
 }
 
 // pathhash returns the short (8 hex chars) hash that identifies this
@@ -422,18 +465,6 @@ func (r *resolver) pathhashFunc() function.Function {
 				return cty.NilVal, errors.New("pathhash() called but no invocation configured")
 			}
 			return cty.StringVal(r.inv.Hash), nil
-		},
-	})
-}
-
-func (r *resolver) tmpdirFunc() function.Function {
-	return function.New(&function.Spec{
-		Type: function.StaticReturnType(cty.String),
-		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
-			if r.inv == nil || r.inv.TmpDir == "" {
-				return cty.NilVal, errors.New("tmpdir() called but no invocation configured")
-			}
-			return cty.StringVal(r.inv.TmpDir), nil
 		},
 	})
 }

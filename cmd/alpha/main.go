@@ -518,16 +518,21 @@ func buildCmd(svc *alphasfile.Service, checkout string) (*exec.Cmd, error) {
 	if name == "" {
 		return nil, errors.New("service has no name")
 	}
+	binDir := ""
+	if svc.Runtime != nil {
+		binDir = svc.Runtime.BinDir
+	}
 	var cmd *exec.Cmd
 	switch {
 	case svc.Runtime != nil && len(svc.Runtime.Command) > 0:
 		// Explicit argv (subcommand-driven binaries / built artifacts).
 		argv := svc.Runtime.Command
 		cmd = exec.Command(argv[0], argv[1:]...)
-	case checkout != "":
-		// Worktree service with no explicit command: run the binary built
-		// by the default build step, from the checkout.
-		cmd = exec.Command("./"+name, svc.Flags()...)
+	case checkout != "" && binDir != "":
+		// Worktree service, no explicit command: run the built binary from
+		// the (out-of-tree) bin dir, with cwd = source checkout so relative
+		// config paths still resolve.
+		cmd = exec.Command(filepath.Join(binDir, name), svc.Flags()...)
 	default:
 		// Crate / prebuilt: resolve from $PATH.
 		cmd = exec.Command(name, svc.Flags()...)
@@ -539,15 +544,26 @@ func buildCmd(svc *alphasfile.Service, checkout string) (*exec.Cmd, error) {
 }
 
 // defaultBuild is the per-toolchain build run inside a fresh checkout when
-// the service doesn't override it with `build = "..."`.
-func defaultBuild(toolchain, name string) string {
-	switch toolchain {
+// the service doesn't set `build = "..."`. For Go it honors `package`
+// (the main package within the repo, default ".") so a repo whose main
+// lives in cmd/foo needs no explicit build string. Output goes to the
+// out-of-tree bin dir so a `dir` primary's worktree stays clean.
+func defaultBuild(svc *alphasfile.Service, name, binDir string) string {
+	out := filepath.Join(binDir, name)
+	switch svc.Toolchain {
 	case alphasfile.ToolchainGo:
-		return "go build -o ./" + name + " ."
+		pkg := "."
+		if svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
+			pkg = svc.Package.Exe
+		}
+		if pkg != "." {
+			return fmt.Sprintf("go build -C %q -o %q .", pkg, out)
+		}
+		return fmt.Sprintf("go build -o %q .", out)
 	case alphasfile.ToolchainRust:
 		return "cargo build --release"
 	case alphasfile.ToolchainRuby:
-		return "bundle install"
+		return "bundle install --path vendor/bundle"
 	}
 	return ""
 }
@@ -571,7 +587,7 @@ func prepare(svc *alphasfile.Service, name string, stream *safeEncoder, log *zlo
 		return "", fmt.Errorf("worktree-able service %q has no resolved checkout dir", name)
 	}
 
-	p, err := source.NewPrimary(svc.Package.Git, svc.Package.Dir, svc.Ref())
+	p, err := source.NewPrimary(svc.Package.Git, svc.Package.Src, svc.Ref())
 	if err != nil {
 		return "", err
 	}
@@ -592,9 +608,18 @@ func prepare(svc *alphasfile.Service, name string, stream *safeEncoder, log *zlo
 		return "", fmt.Errorf("git worktree: %w", err)
 	}
 
+	binDir := ""
+	if svc.Runtime != nil {
+		binDir = svc.Runtime.BinDir
+	}
+	if binDir != "" {
+		if err := os.MkdirAll(binDir, 0o755); err != nil {
+			return "", fmt.Errorf("mkdir bin dir: %w", err)
+		}
+	}
 	build := strings.TrimSpace(svc.Build())
 	if build == "" {
-		build = defaultBuild(svc.Toolchain, name)
+		build = defaultBuild(svc, name, binDir)
 	}
 	if build != "" {
 		log.Info("alpha", "prepare %s: build (%s)", name, build)

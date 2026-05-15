@@ -89,14 +89,12 @@ func runWorktree(ctx context.Context, log *zlog.Logger, args []string) error {
 		}
 		log.Info("zordon", "created worktree %q", name)
 
-		// Materialize source checkouts for the services you'll edit. The
-		// rest still run at `zordon start` (from upstream pins); these are
-		// the ones you get a working tree for now.
-		picks := args[2:]
-		if len(picks) > 0 {
-			if err := checkoutServices(ctx, log, name, dir, picks); err != nil {
-				return err
-			}
+		// Materialize source checkouts. With no service args, every
+		// worktree-able service gets a working tree (so the whole project
+		// is editable in this worktree); pass names (optionally svc@rev)
+		// to scope it down.
+		if err := checkoutServices(ctx, log, name, dir, args[2:]); err != nil {
+			return err
 		}
 		fmt.Printf("worktree ready. Bring it up with:\n  cd %s && zordon start\n", dir)
 		return nil
@@ -145,6 +143,19 @@ func checkoutServices(ctx context.Context, log *zlog.Logger, name, wtdir string,
 	for _, m := range metas {
 		byName[m.Name] = m
 	}
+	explicit := len(picks) > 0
+	if !explicit {
+		// No args ⇒ every worktree-able service gets a checkout.
+		for _, m := range metas {
+			if m.Worktreeable() {
+				picks = append(picks, m.Name)
+			}
+		}
+		if len(picks) == 0 {
+			log.Info("zordon", "no worktree-able services (all run from $PATH); nothing to check out")
+			return nil
+		}
+	}
 	runner := func(ctx context.Context, c *exec.Cmd) error {
 		c.Stdout = os.Stderr // keep stdout clean
 		c.Stderr = os.Stderr
@@ -163,7 +174,7 @@ func checkoutServices(ctx context.Context, log *zlog.Logger, name, wtdir string,
 		if rev != "" {
 			ref = rev
 		}
-		p, err := source.NewPrimary(m.Package.Git, m.Package.Dir, ref)
+		p, err := source.NewPrimary(m.Package.Git, m.Package.Src, ref)
 		if err != nil {
 			return fmt.Errorf("%s: %w", svc, err)
 		}

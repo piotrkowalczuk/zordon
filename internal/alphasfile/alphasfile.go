@@ -46,7 +46,8 @@ type RuntimeConfig struct {
 	Command        []string       `json:"command,omitempty"`
 	Sudo           []*SudoStep    `json:"sudo,omitempty"`
 	Files          []*File        `json:"files,omitempty"`
-	Dir            string         `json:"dir,omitempty"`
+	Dir            string         `json:"dir,omitempty"`     // per-invocation source checkout (= fs::src)
+	BinDir         string         `json:"bin_dir,omitempty"` // per-invocation build output (= fs::bin)
 	Readiness      *probe.Probe   `json:"readiness,omitempty"`
 }
 
@@ -57,12 +58,12 @@ type RuntimeConfig struct {
 type Package struct {
 	Toolchain string `json:"toolchain"` // go|rust|ruby
 	Git       string `json:"git,omitempty"`
-	Dir       string `json:"dir,omitempty"`
+	Src       string `json:"src,omitempty"` // Relates to the local checkout path
 	Branch    string `json:"branch,omitempty"`
 	Tag       string `json:"tag,omitempty"`
 	Rev       string `json:"rev,omitempty"`
-	Crate     string `json:"crate,omitempty"` // rust crates.io (KindNone)
-	Build     string `json:"build,omitempty"` // override; default per toolchain
+	Exe       string `json:"exe,omitempty"` // Where the binary is built
+	Cmd       string `json:"cmd,omitempty"` // Explicit execution argv if needed
 }
 
 type Service struct {
@@ -97,9 +98,9 @@ func (m *ServiceMeta) Ref() string {
 	return ""
 }
 
-// Worktreeable reports whether this service has a git/dir primary.
+// Worktreeable reports whether this service has a git/src primary.
 func (m *ServiceMeta) Worktreeable() bool {
-	return m.Package != nil && (m.Package.Git != "" || m.Package.Dir != "")
+	return m.Package != nil && (m.Package.Git != "" || m.Package.Src != "")
 }
 
 // ParseServices does a parse-only decode of an Alphasfile: it returns each
@@ -122,8 +123,8 @@ func ParseServices(path string) ([]*ServiceMeta, error) {
 	}
 	out := make([]*ServiceMeta, 0, len(root.Services))
 	for _, sb := range root.Services {
-		if sb.Git != "" && sb.Dir != "" {
-			return nil, fmt.Errorf("service %q declares both git and dir; pick one primary", sb.Name)
+		if sb.Git != "" && sb.Src != "" {
+			return nil, fmt.Errorf("service %q declares both git and src; pick one primary", sb.Name)
 		}
 		out = append(out, &ServiceMeta{
 			Name:      sb.Name,
@@ -131,12 +132,12 @@ func ParseServices(path string) ([]*ServiceMeta, error) {
 			Package: &Package{
 				Toolchain: sb.Toolchain,
 				Git:       sb.Git,
-				Dir:       sb.Dir,
+				Src:       sb.Src,
 				Branch:    sb.Branch,
 				Tag:       sb.Tag,
 				Rev:       sb.Rev,
-				Crate:     sb.Crate,
-				Build:     sb.Build,
+				Exe:       sb.Exe,
+				Cmd:       "",
 			},
 		})
 	}
@@ -167,18 +168,15 @@ func (s *Service) Ref() string {
 	return ""
 }
 
-// Worktreeable reports whether the service has a git/dir primary (so it can
+// Worktreeable reports whether the service has a git/src primary (so it can
 // get a per-invocation checkout). Crate / bare-binary services don't.
 func (s *Service) Worktreeable() bool {
-	return s.Package != nil && (s.Package.Git != "" || s.Package.Dir != "")
+	return s.Package != nil && (s.Package.Git != "" || s.Package.Src != "")
 }
 
 // Build returns the build command override, or "" for the toolchain default.
 func (s *Service) Build() string {
-	if s.Package == nil {
-		return ""
-	}
-	return s.Package.Build
+	return ""
 }
 
 // Flags renders RuntimeConfig.Arguments into argv flags. Format follows
@@ -257,32 +255,25 @@ type serviceBlock struct {
 	DoubleDash     bool      `hcl:"doubleDash,optional"`
 	SpaceSeparated bool      `hcl:"space_separated,optional"`
 
-	// source primary: git (zordon-owned bare) XOR dir (user-owned repo);
-	// neither ⇒ crate / prebuilt (not worktree-able).
+	// source primary: git XOR src; neither ⇒ prebuilt/path-based.
 	Git    string `hcl:"git,optional"`
-	Dir    string `hcl:"dir,optional"`
+	Src    string `hcl:"src,optional"`
 	Branch string `hcl:"branch,optional"`
 	Tag    string `hcl:"tag,optional"`
 	Rev    string `hcl:"rev,optional"`
-	Crate  string `hcl:"crate,optional"`
-	Build  string `hcl:"build,optional"` // override; default per toolchain
+	Exe    string `hcl:"exe,optional"`
 
-	// dynamic (DAG-evaluated, in this order:
-	//   vars → files → arguments → command → readiness.port)
+	// Legacy fields (deprecated)
+	Crate   string `hcl:"crate,optional"`
+	Package string `hcl:"package,optional"`
+	Build   string `hcl:"build,optional"`
+	Dir     string `hcl:"dir,optional"`
+
+	// dynamic
 	Vars      hcl.Expression `hcl:"vars,optional"`
 	Arguments hcl.Expression `hcl:"arguments,optional"`
-	// Command, when set, is the full argv (program + args) and replaces the
-	// default "<name> <flags>" invocation. Needed for binaries driven by a
-	// subcommand (e.g. `caddy run --config ...`). Evaluated as a list of
-	// strings, so it can interpolate self.vars / self.file / parent refs.
-	Command hcl.Expression `hcl:"command,optional"`
-	// Sudo blocks are idempotent privileged hooks run by zordon (which
-	// holds the user's terminal, so the password prompt works) after the
-	// service comes up. `check` runs WITHOUT sudo — if it exits 0 the step
-	// is already satisfied and `apply` is skipped (no password prompt).
-	// `apply` runs as `sudo /bin/sh -c <apply>` only when check fails.
-	// `verify` (optional) runs WITHOUT sudo after apply. All snippets are
-	// evaluated after command, so they can interpolate self.* / parent refs.
+	Cmd       hcl.Expression `hcl:"cmd,optional"`
+
 	Sudo      []*sudoBlock `hcl:"sudo,block"`
 	Files     []*fileBlock `hcl:"file,block"`
 	Readiness *probeSpec   `hcl:"readiness,block"`

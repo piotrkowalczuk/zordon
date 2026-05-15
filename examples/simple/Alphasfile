@@ -1,16 +1,13 @@
 # Every service has a primary repo (`git` = zordon-owned bare clone, or
-# `dir` = your own checkout) and is materialized into a per-invocation git
-# worktree, built there, and run from there. `build` overrides the
-# per-toolchain default (go: `go build -o ./<name> .`, rust:
-# `cargo build --release`, ruby: `bundle install`).
+# `src` = your own checkout) and is materialized into a per-invocation git
+# worktree, built there, and run from there.
 #
-# A service with neither git nor dir (here: the tansu crate) isn't
-# worktree-able — it's expected on $PATH (e.g. `cargo install tansu`).
+# A service with neither git nor src (e.g., prebuilt binary) expects it on $PATH.
 
 service "go" "nats-server" {
   git = "github.com/nats-io/nats-server"
   tag = "v2.14.0"
-  # default build: go build -o ./nats-server .
+  # defaults: src=git, exe=.
 
   vars = {
     client = net::pickport()
@@ -26,13 +23,14 @@ service "go" "nats-server" {
 }
 
 service "rust" "tansu" {
-  crate = "tansu" # not worktree-able; expected on $PATH
+  # prebuilt binary on path
+  exe = "tansu"
 }
 
 service "go" "prometheus" {
-  git        = "github.com/prometheus/prometheus"
-  tag        = "v3.11.3"
-  build      = "go build -o ./prometheus ./cmd/prometheus"
+  git   = "github.com/prometheus/prometheus"
+  tag   = "v3.11.3"
+  exe   = "./cmd/prometheus" # override default build target
   doubleDash = true
 
   vars = {
@@ -79,5 +77,5 @@ service "ruby" "ruby-service" {
     port = net::pickport()
   }
 
-  command = ["bundle", "exec", "ruby", "myapp.rb", "-p", "${self.vars.port}"]
+  cmd = ["bundle", "exec", "ruby", "myapp.rb", "-p", "${self.vars.port}"]
 }

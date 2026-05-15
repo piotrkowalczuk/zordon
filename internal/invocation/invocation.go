@@ -34,6 +34,20 @@ func (i *Invocation) CheckoutPath(svc string) string {
 	return filepath.Join(i.StateDir, "src", svc)
 }
 
+// BinDir is where build outputs land for this invocation — deliberately
+// OUTSIDE the source checkouts so building never dirties a `dir` primary's
+// git worktree. This is what fs::bin() returns.
+func (i *Invocation) BinDir() string {
+	return filepath.Join(i.StateDir, "bin")
+}
+
+// ProjectRoot is the directory the leaf Alphasfile lives in (the worktree's
+// <X>). Relative `dir` primaries resolve against this.
+func (i *Invocation) ProjectRoot() string {
+	// StateDir == <root>/.zordon/worktrees/<wt>
+	return filepath.Dir(filepath.Dir(filepath.Dir(i.StateDir)))
+}
+
 // SocketPath is the alpha control socket for this invocation (kept under
 // $TMPDIR to stay within the unix-socket path length limit).
 func (i *Invocation) SocketPath() string {
