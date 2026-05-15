@@ -27,7 +27,11 @@ type graph struct {
 	deps  map[string]map[string]struct{}
 }
 
-func newGraph(services []*serviceBlock) (*graph, error) {
+// newGraph builds the dependency graph over the local service blocks.
+// parentKnown is the set of service IDs already resolved by Alphasfiles
+// higher in a federation chain; references to those are valid but carry no
+// intra-graph edge (the parent is fully evaluated before this graph runs).
+func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph, error) {
 	g := &graph{
 		byID: make(map[string]*node, len(services)),
 		deps: make(map[string]map[string]struct{}, len(services)),
@@ -56,7 +60,10 @@ func newGraph(services []*serviceBlock) (*graph, error) {
 				if !ok {
 					continue
 				}
-				if _, known := g.byID[dep]; !known {
+				if _, local := g.byID[dep]; !local {
+					if _, parent := parentKnown[dep]; parent {
+						continue // parent already resolved ⇒ no edge needed
+					}
 					return nil, fmt.Errorf("%s references unknown service %s", n.id, dep)
 				}
 				if dep == n.id {
@@ -126,7 +133,10 @@ func cycleMembers(indeg map[string]int) string {
 // exprsOf returns every HCL expression in a service that may carry a
 // cross-service reference. Used to build the dep graph.
 func exprsOf(s *serviceBlock) []hcl.Expression {
-	out := []hcl.Expression{s.Vars, s.Arguments}
+	out := []hcl.Expression{s.Vars, s.Arguments, s.Command}
+	for _, sb := range s.Sudo {
+		out = append(out, sb.Check, sb.Apply, sb.Verify)
+	}
 	for _, f := range s.Files {
 		out = append(out, f.Path, f.Body)
 	}

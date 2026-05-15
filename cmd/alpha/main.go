@@ -67,15 +67,17 @@ type alphaState struct {
 	mu             sync.RWMutex
 	startedAt      time.Time
 	alphasfilePath string
+	configHash     string
 	config         *alphasfile.Alphasfile
 	running        map[string]*exec.Cmd
 	files          []string // absolute paths of file{} outputs to unlink on shutdown
 }
 
-func (s *alphaState) configure(path string, af *alphasfile.Alphasfile) {
+func (s *alphaState) configure(path, hash string, af *alphasfile.Alphasfile) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.alphasfilePath = path
+	s.configHash = hash
 	s.config = af
 }
 
@@ -107,6 +109,7 @@ func (s *alphaState) snapshot() *protocol.StateInfo {
 		PID:            os.Getpid(),
 		AlphasfilePath: s.alphasfilePath,
 		StartedAt:      s.startedAt.Format(time.RFC3339),
+		ConfigHash:     s.configHash,
 	}
 	if s.config != nil {
 		info.Services = s.config.All()
@@ -343,9 +346,9 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	}
 
 	failfast := req.Configure.Failfast
-	state.configure(req.Configure.AlphasfilePath, req.Configure.Alphasfile)
+	state.configure(req.Configure.AlphasfilePath, req.Configure.ConfigHash, req.Configure.Alphasfile)
 	services := req.Configure.Alphasfile.All()
-	files := req.Configure.Alphasfile.Files
+	files := req.Configure.Alphasfile.AllFiles()
 	log.Info("alpha", "configured from %s (%d services, %d files, failfast=%v), starting bringup",
 		req.Configure.AlphasfilePath, len(services), len(files), failfast)
 
@@ -517,6 +520,10 @@ func buildCmd(svc *alphasfile.Service, repoDir string) (*exec.Cmd, error) {
 	}
 	var cmd *exec.Cmd
 	switch {
+	case svc.Runtime != nil && len(svc.Runtime.Command) > 0:
+		// Explicit argv (subcommand-driven binaries like `caddy run ...`).
+		argv := svc.Runtime.Command
+		cmd = exec.Command(argv[0], argv[1:]...)
 	case svc.Ruby != nil && strings.TrimSpace(svc.Ruby.Run) != "":
 		fields := strings.Fields(svc.Ruby.Run)
 		cmd = exec.Command(fields[0], append(fields[1:], svc.Flags()...)...)

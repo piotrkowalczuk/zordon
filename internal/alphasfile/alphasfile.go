@@ -40,7 +40,11 @@ type RuntimeConfig struct {
 	Log            *LogConfig     `json:"log,omitempty"`
 	DoubleDash     bool           `json:"double_dash,omitempty"`
 	SpaceSeparated bool           `json:"space_separated,omitempty"`
+	Vars           map[string]any `json:"vars,omitempty"`
 	Arguments      map[string]any `json:"arguments,omitempty"`
+	Command        []string       `json:"command,omitempty"`
+	Sudo           []*SudoStep    `json:"sudo,omitempty"`
+	Files          []*File        `json:"files,omitempty"`
 	Dir            string         `json:"dir,omitempty"`
 	Readiness      *probe.Probe   `json:"readiness,omitempty"`
 }
@@ -188,12 +192,34 @@ type File struct {
 	Body string `json:"body"`
 }
 
+// SudoStep is one resolved idempotent privileged hook. Check/Apply/Verify
+// are concrete shell snippets. zordon runs Check unprivileged; if it exits
+// non-zero (or is empty) it runs Apply via sudo, then optional Verify
+// unprivileged.
+type SudoStep struct {
+	Name   string `json:"name"`
+	Check  string `json:"check,omitempty"`
+	Apply  string `json:"apply"`
+	Verify string `json:"verify,omitempty"`
+}
+
 type Alphasfile struct {
 	Services []*Service `json:"services,omitempty"`
-	Files    []*File    `json:"files,omitempty"`
 }
 
 func (af *Alphasfile) All() []*Service { return af.Services }
+
+// AllFiles flattens every service's generated files into one list (the order
+// services were resolved). Used by alpha to materialize / clean up.
+func (af *Alphasfile) AllFiles() []*File {
+	var out []*File
+	for _, s := range af.Services {
+		if s.Runtime != nil {
+			out = append(out, s.Runtime.Files...)
+		}
+	}
+	return out
+}
 
 // --- HCL2 intermediate (parser-internal) ----------------------------------
 
@@ -226,11 +252,31 @@ type serviceBlock struct {
 	Run            string    `hcl:"run,optional"`
 
 	// dynamic (DAG-evaluated, in this order:
-	//   vars → arguments → files → readiness.port)
+	//   vars → files → arguments → command → readiness.port)
 	Vars      hcl.Expression `hcl:"vars,optional"`
 	Arguments hcl.Expression `hcl:"arguments,optional"`
-	Files     []*fileBlock   `hcl:"file,block"`
-	Readiness *probeSpec     `hcl:"readiness,block"`
+	// Command, when set, is the full argv (program + args) and replaces the
+	// default "<name> <flags>" invocation. Needed for binaries driven by a
+	// subcommand (e.g. `caddy run --config ...`). Evaluated as a list of
+	// strings, so it can interpolate self.vars / self.file / parent refs.
+	Command hcl.Expression `hcl:"command,optional"`
+	// Sudo blocks are idempotent privileged hooks run by zordon (which
+	// holds the user's terminal, so the password prompt works) after the
+	// service comes up. `check` runs WITHOUT sudo — if it exits 0 the step
+	// is already satisfied and `apply` is skipped (no password prompt).
+	// `apply` runs as `sudo /bin/sh -c <apply>` only when check fails.
+	// `verify` (optional) runs WITHOUT sudo after apply. All snippets are
+	// evaluated after command, so they can interpolate self.* / parent refs.
+	Sudo      []*sudoBlock `hcl:"sudo,block"`
+	Files     []*fileBlock `hcl:"file,block"`
+	Readiness *probeSpec   `hcl:"readiness,block"`
+}
+
+type sudoBlock struct {
+	Name   string         `hcl:"name,label"`
+	Check  hcl.Expression `hcl:"check,optional"`
+	Apply  hcl.Expression `hcl:"apply"`
+	Verify hcl.Expression `hcl:"verify,optional"`
 }
 
 type logBlock struct {
@@ -265,8 +311,10 @@ type fileBlock struct {
 // Open parses and resolves an Alphasfile. stateDir is what tmpdir() returns
 // inside expressions (typically a deterministic per-Alphasfile directory
 // computed by the caller via control.StateDir). Pass an empty stateDir to
-// disable tmpdir() (it will error if used).
-func Open(path, stateDir string) (*Alphasfile, error) {
+// disable tmpdir() (it will error if used). parent pre-seeds the service
+// namespace with values resolved by Alphasfiles higher in a federation
+// chain; pass nil for a standalone Alphasfile.
+func Open(path, stateDir string, parent *ParentContext) (*Alphasfile, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("alphasfile read: %w", err)
@@ -280,7 +328,72 @@ func Open(path, stateDir string) (*Alphasfile, error) {
 	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
 		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
 	}
-	return resolve(&root, stateDir)
+	var seed map[string]map[string]cty.Value
+	if parent != nil {
+		seed = parent.byTC
+	}
+	return resolve(&root, stateDir, seed)
+}
+
+// ParentContext carries the resolved services of every Alphasfile above the
+// current one in a federation chain, projected into cty so child expressions
+// can reference them via the flat `service.<toolchain>.<name>` namespace.
+type ParentContext struct {
+	byTC map[string]map[string]cty.Value
+}
+
+// NewParentContext builds a ParentContext from already-resolved services
+// (typically obtained from a running parent alpha via the state RPC).
+// Re-projects each service into the same cty shape the resolver exposes:
+// { name, toolchain, dir, vars, arguments, file }.
+func NewParentContext(services []*Service) *ParentContext {
+	pc := &ParentContext{byTC: map[string]map[string]cty.Value{}}
+	for _, s := range services {
+		if s == nil || s.Runtime == nil {
+			continue
+		}
+		tc, name := s.Toolchain, s.Name()
+		obj := map[string]cty.Value{
+			"name":      cty.StringVal(name),
+			"toolchain": cty.StringVal(tc),
+			"dir":       cty.StringVal(serviceDirOf(s)),
+			"vars":      mapValToCty(s.Runtime.Vars),
+			"arguments": mapValToCty(s.Runtime.Arguments),
+		}
+		files := map[string]cty.Value{}
+		for _, f := range s.Runtime.Files {
+			files[f.Name] = cty.ObjectVal(map[string]cty.Value{
+				"name": cty.StringVal(f.Name),
+				"path": cty.StringVal(f.Path),
+				"body": cty.StringVal(f.Body),
+			})
+		}
+		if len(files) > 0 {
+			obj["file"] = cty.ObjectVal(files)
+		} else {
+			obj["file"] = cty.EmptyObjectVal
+		}
+		if pc.byTC[tc] == nil {
+			pc.byTC[tc] = map[string]cty.Value{}
+		}
+		pc.byTC[tc][name] = cty.ObjectVal(obj)
+	}
+	return pc
+}
+
+// Merge folds another resolved Alphasfile's services into this context so a
+// chain can accumulate top-down. Later levels see everything above them.
+func (pc *ParentContext) Merge(services []*Service) *ParentContext {
+	next := NewParentContext(services)
+	for tc, byName := range next.byTC {
+		if pc.byTC[tc] == nil {
+			pc.byTC[tc] = map[string]cty.Value{}
+		}
+		for name, v := range byName {
+			pc.byTC[tc][name] = v
+		}
+	}
+	return pc
 }
 
 // --- value coercion -------------------------------------------------------

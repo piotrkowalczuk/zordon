@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/zclconf/go-cty/cty"
@@ -32,20 +34,33 @@ type resolver struct {
 	stateDir string
 
 	// Already-evaluated services, keyed by toolchain then name. Re-projected
-	// into the EvalContext under "service" before each new eval step.
+	// into the EvalContext under "service" before each new eval step. May be
+	// pre-seeded with parent services for federation (flat namespace).
 	serviceByTC map[string]map[string]cty.Value
 
+	// names already taken (parent or local); collision is an error.
+	taken map[string]string // "tc/name" → origin ("parent" | "local")
+
 	resolvedServices []*Service
-	resolvedFiles    []*File
 }
 
-func resolve(root *rootBlock, stateDir string) (*Alphasfile, error) {
+func resolve(root *rootBlock, stateDir string, parent map[string]map[string]cty.Value) (*Alphasfile, error) {
 	r := &resolver{
 		root:        root,
 		stateDir:    stateDir,
 		serviceByTC: map[string]map[string]cty.Value{},
+		taken:       map[string]string{},
 	}
-	g, err := newGraph(root.Services)
+	parentKnown := map[string]struct{}{}
+	for tc, byName := range parent {
+		r.serviceByTC[tc] = map[string]cty.Value{}
+		for name, v := range byName {
+			r.serviceByTC[tc][name] = v
+			r.taken[tc+"/"+name] = "parent"
+			parentKnown[serviceID(tc, name)] = struct{}{}
+		}
+	}
+	g, err := newGraph(root.Services, parentKnown)
 	if err != nil {
 		return nil, err
 	}
@@ -58,10 +73,16 @@ func resolve(root *rootBlock, stateDir string) (*Alphasfile, error) {
 			return nil, fmt.Errorf("%s: %w", n.id, err)
 		}
 	}
-	return &Alphasfile{Services: r.resolvedServices, Files: r.resolvedFiles}, nil
+	return &Alphasfile{Services: r.resolvedServices}, nil
 }
 
 func (r *resolver) evalService(sb *serviceBlock) error {
+	if origin, dup := r.taken[sb.Toolchain+"/"+sb.Name]; dup {
+		return fmt.Errorf("service %s.%s collides with a %s service of the same name",
+			sb.Toolchain, sb.Name, origin)
+	}
+	r.taken[sb.Toolchain+"/"+sb.Name] = "local"
+
 	dir := serviceDir(sb)
 
 	// Stage 1: self_base — what we know just from labels + import/git URL.
@@ -81,6 +102,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 
 	// Stage 3: nested file blocks (may reference self.vars and previously-
 	// declared sibling files via self.file.<earlier_name>).
+	var files []*File
 	fileVals := map[string]cty.Value{}
 	for _, fb := range sb.Files {
 		ctx := r.ctxWith(self)
@@ -88,8 +110,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		if err != nil {
 			return err
 		}
-		f := &File{Name: fb.Name, Path: path, Body: body}
-		r.resolvedFiles = append(r.resolvedFiles, f)
+		files = append(files, &File{Name: fb.Name, Path: path, Body: body})
 		fileVals[fb.Name] = cty.ObjectVal(map[string]cty.Value{
 			"name": cty.StringVal(fb.Name),
 			"path": cty.StringVal(path),
@@ -110,7 +131,31 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	}
 	self["arguments"] = mapValToCty(args)
 
-	// Stage 5: readiness port (may reference everything in self).
+	// Stage 5: command (may reference self.vars, self.file, self.arguments).
+	command, err := r.evalStrList(sb.Command, self, "command")
+	if err != nil {
+		return err
+	}
+
+	// Stage 6: sudo hooks (may reference everything resolved so far).
+	var sudo []*SudoStep
+	for _, sblk := range sb.Sudo {
+		check, err := r.evalStr(sblk.Check, self, "sudo."+sblk.Name+".check")
+		if err != nil {
+			return err
+		}
+		apply, err := r.evalStr(sblk.Apply, self, "sudo."+sblk.Name+".apply")
+		if err != nil {
+			return err
+		}
+		verify, err := r.evalStr(sblk.Verify, self, "sudo."+sblk.Name+".verify")
+		if err != nil {
+			return err
+		}
+		sudo = append(sudo, &SudoStep{Name: sblk.Name, Check: check, Apply: apply, Verify: verify})
+	}
+
+	// Stage 7: readiness port (may reference everything in self).
 	var probePort int
 	if sb.Readiness != nil && sb.Readiness.HTTP != nil {
 		ctx := r.ctxWith(self)
@@ -126,8 +171,12 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		Color:          sb.Color,
 		DoubleDash:     sb.DoubleDash,
 		SpaceSeparated: sb.SpaceSeparated,
-		Dir:            sb.Dir,
+		Vars:           varsVal,
 		Arguments:      args,
+		Command:        command,
+		Sudo:           sudo,
+		Files:          files,
+		Dir:            sb.Dir,
 	}
 	if sb.Log != nil {
 		rt.Log = &LogConfig{Format: sb.Log.Format, Filter: sb.Log.Filter}
@@ -228,6 +277,55 @@ func evalIntExpr(expr hcl.Expression, ctx *hcl.EvalContext, field string) (int, 
 	return int(i64), nil
 }
 
+// evalStrList evaluates an expression expected to be a tuple/list of strings
+// (the full argv for `command`). Nil expression ⇒ nil slice.
+func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, field string) ([]string, error) {
+	if expr == nil {
+		return nil, nil
+	}
+	ctx := r.ctxWith(self)
+	val, diags := expr.Value(ctx)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("%s: %s", field, diags.Error())
+	}
+	if val.IsNull() {
+		return nil, nil
+	}
+	t := val.Type()
+	if !t.IsTupleType() && !t.IsListType() {
+		return nil, fmt.Errorf("%s must be a list of strings, got %s", field, t.FriendlyName())
+	}
+	var out []string
+	for it := val.ElementIterator(); it.Next(); {
+		_, ev := it.Element()
+		if ev.Type() != cty.String {
+			return nil, fmt.Errorf("%s elements must be strings, got %s", field, ev.Type().FriendlyName())
+		}
+		out = append(out, ev.AsString())
+	}
+	return out, nil
+}
+
+// evalStr evaluates an expression expected to be a string (the `sudo`
+// snippet). Nil expression ⇒ "".
+func (r *resolver) evalStr(expr hcl.Expression, self map[string]cty.Value, field string) (string, error) {
+	if expr == nil {
+		return "", nil
+	}
+	ctx := r.ctxWith(self)
+	val, diags := expr.Value(ctx)
+	if diags.HasErrors() {
+		return "", fmt.Errorf("%s: %s", field, diags.Error())
+	}
+	if val.IsNull() {
+		return "", nil
+	}
+	if val.Type() != cty.String {
+		return "", fmt.Errorf("%s must be a string, got %s", field, val.Type().FriendlyName())
+	}
+	return val.AsString(), nil
+}
+
 // ctxWith assembles the EvalContext from the resolver's running state plus
 // the per-service `self` (omitted for non-service evaluation paths, if any
 // are added in the future).
@@ -301,13 +399,48 @@ func serviceSource(sb *serviceBlock) string {
 	return ""
 }
 
+// serviceDirOf is the wire-Service analogue of serviceDir: resolves the
+// on-disk checkout dir from an already-built *Service (used when rebuilding
+// parent context from a running alpha's state).
+func serviceDirOf(s *Service) string {
+	src := s.Source()
+	if src == "" {
+		return ""
+	}
+	info, err := source.Resolve(src)
+	if err != nil {
+		return ""
+	}
+	return info.RepoDir
+}
+
 // --- functions exposed in HCL expressions ---------------------------------
 
 func (r *resolver) functions() map[string]function.Function {
 	return map[string]function.Function{
 		"tmpdir":        r.tmpdirFunc(),
+		"pathhash":      r.pathhashFunc(),
 		"net::pickport": pickPortFunc(),
 	}
+}
+
+// pathhash returns the short (8 hex chars) hash that identifies this
+// Alphasfile by its absolute path — the same token used in the socket and
+// state-dir names. Stable per path, unique across paths. Handy for
+// collision-free hostnames in a shared reverse proxy:
+// "myapp.${pathhash()}.test".
+func (r *resolver) pathhashFunc() function.Function {
+	return function.New(&function.Spec{
+		Type: function.StaticReturnType(cty.String),
+		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
+			if r.stateDir == "" {
+				return cty.NilVal, errors.New("pathhash() called but no state dir configured")
+			}
+			// stateDir basename is "zordon-<hash>" (see control.StateDir).
+			base := filepath.Base(r.stateDir)
+			return cty.StringVal(strings.TrimPrefix(base, "zordon-")), nil
+		},
+	})
 }
 
 func (r *resolver) tmpdirFunc() function.Function {

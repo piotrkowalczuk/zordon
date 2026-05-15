@@ -58,6 +58,32 @@ func socketDir() string {
 	return os.TempDir()
 }
 
+// Lock takes an exclusive, blocking flock on <stateDir>/start.lock so that
+// only one `zordon start` operates on a given Alphasfile at a time. The
+// returned func releases the lock (and must be called). stateDir is created
+// if missing.
+//
+// Federation acquires locks strictly top-down (root → invocation), a
+// consistent global order, so concurrent zordon invocations can't deadlock.
+func Lock(stateDir string) (func(), error) {
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir state dir: %w", err)
+	}
+	lockPath := filepath.Join(stateDir, "start.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open lock %s: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("flock %s: %w", lockPath, err)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
+}
+
 // Listen binds a unix socket at path with 0600 permissions.
 // Stale sockets from a dead previous alpha are removed automatically.
 func Listen(path string) (net.Listener, error) {

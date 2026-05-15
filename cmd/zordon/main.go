@@ -72,7 +72,19 @@ func main() {
 		},
 	}
 
-	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd)
+	// sudo
+	sudoFlags := ff.NewFlagSet("sudo").SetParent(rootFlags)
+	sudoCmd := &ff.Command{
+		Name:      "sudo",
+		Usage:     "zordon sudo",
+		ShortHelp: "run the idempotent privileged hooks for the whole federation chain",
+		Flags:     sudoFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runSudo(ctx, zlog.New(os.Stderr, *agent))
+		},
+	}
+
+	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd)
 
 	err := rootCmd.ParseAndRun(context.Background(), os.Args[1:])
 	switch {
@@ -104,58 +116,7 @@ func walkUp() (string, error) {
 	}
 }
 
-func loadAlphasfile() (string, *alphasfile.Alphasfile, error) {
-	path, err := walkUp()
-	if err != nil {
-		return "", nil, err
-	}
-	stateDir, err := control.StateDir(path)
-	if err != nil {
-		return path, nil, err
-	}
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		return path, nil, fmt.Errorf("mkdir state dir: %w", err)
-	}
-	af, err := alphasfile.Open(path, stateDir)
-	if err != nil {
-		return path, nil, err
-	}
-	return path, af, nil
-}
-
-func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose bool) error {
-	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
-	afPath, af, err := loadAlphasfile()
-	if err != nil {
-		return err
-	}
-	sock, err := control.SocketPath(afPath)
-	if err != nil {
-		return err
-	}
-	log.Info("zordon", "alphasfile=%s socket=%s failfast=%v", afPath, sock, failfast)
-
-	ctxStart, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	// Try to talk to an existing alpha first.
-	if c, err := control.Dial(sock, 200*time.Millisecond); err == nil {
-		c.Close()
-		log.Info("zordon", "alpha already running, pushing config")
-		return pushConfigure(ctxStart, log, sock, afPath, af, failfast)
-	}
-
-	// No alpha running; spawn one.
-	if err := spawnAlpha(alphaBin, alphaLog, sock, timeout, verbose, log); err != nil {
-		return err
-	}
-	if err := control.WaitListening(ctxStart, sock); err != nil {
-		return fmt.Errorf("waiting for alpha socket: %w", err)
-	}
-	return pushConfigure(ctxStart, log, sock, afPath, af, failfast)
-}
-
-func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath string, af *alphasfile.Alphasfile, failfast bool) error {
+func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, hash string, af *alphasfile.Alphasfile, failfast bool) error {
 	log.Info("alpha", "Understood, Zordon!")
 
 	conn, err := control.Dial(sock, 1*time.Second)
@@ -176,6 +137,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath string, a
 			AlphasfilePath: afPath,
 			Alphasfile:     af,
 			Failfast:       failfast,
+			ConfigHash:     hash,
 		},
 	}); err != nil {
 		return fmt.Errorf("send configure: %w", err)
@@ -298,51 +260,77 @@ func readHandshake(r *os.File, readyCh chan<- struct{}, errCh chan<- error, logf
 
 func runStatus(ctx context.Context, log *zlog.Logger) error {
 	_ = log // status output is structured stdout, not log-style
-	afPath, _, err := loadAlphasfile()
+
+	// Status reports the whole federation chain, not just the invocation.
+	chain, invocation, err := discoverChain()
 	if err != nil {
 		return err
 	}
-	sock, err := control.SocketPath(afPath)
-	if err != nil {
-		return err
-	}
-	resp, err := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpState})
-	if err != nil {
-		if control.IsNotRunning(err) {
-			return fmt.Errorf("no alpha running for %s", afPath)
+
+	anyRunning := false
+	for i, afPath := range chain {
+		if i > 0 {
+			fmt.Println()
 		}
-		return err
-	}
-	if resp.Error != "" {
-		return fmt.Errorf("alpha: %s", resp.Error)
-	}
-	if resp.State == nil {
-		return errors.New("alpha returned empty state")
-	}
-	st := resp.State
-	fmt.Printf("alpha pid=%d started=%s\n", st.PID, st.StartedAt)
-	fmt.Printf("alphasfile=%s\n", st.AlphasfilePath)
-	if len(st.Services) == 0 {
-		fmt.Println("services: (none configured yet)")
-		return nil
-	}
-	runningByName := make(map[string]int, len(st.Running))
-	for _, r := range st.Running {
-		runningByName[r.Name] = r.PID
-	}
-	fmt.Printf("services (%d):\n", len(st.Services))
-	for _, s := range st.Services {
-		state := "stopped"
-		if pid, ok := runningByName[s.Name()]; ok {
-			state = fmt.Sprintf("running pid=%d", pid)
+		marker := ""
+		if afPath == invocation {
+			marker = " (invocation)"
 		}
-		fmt.Printf("  - [%s] %s — %s\n", s.Toolchain, s.Name(), state)
+		hash := ""
+		if sd, e := control.StateDir(afPath); e == nil {
+			hash = strings.TrimPrefix(filepath.Base(sd), "zordon-")
+		}
+		fmt.Printf("# [%s] %s%s\n", hash, afPath, marker)
+
+		sock, err := control.SocketPath(afPath)
+		if err != nil {
+			return err
+		}
+		resp, err := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpState})
+		if err != nil {
+			if control.IsNotRunning(err) {
+				fmt.Println("  alpha: not running")
+				continue
+			}
+			fmt.Printf("  alpha: error: %v\n", err)
+			continue
+		}
+		if resp.Error != "" {
+			fmt.Printf("  alpha: error: %s\n", resp.Error)
+			continue
+		}
+		if resp.State == nil {
+			fmt.Println("  alpha: running (empty state)")
+			continue
+		}
+		anyRunning = true
+		st := resp.State
+		fmt.Printf("  alpha pid=%d started=%s\n", st.PID, st.StartedAt)
+		if len(st.Services) == 0 {
+			fmt.Println("  services: (none configured yet)")
+			continue
+		}
+		runningByName := make(map[string]int, len(st.Running))
+		for _, r := range st.Running {
+			runningByName[r.Name] = r.PID
+		}
+		fmt.Printf("  services (%d):\n", len(st.Services))
+		for _, s := range st.Services {
+			state := "stopped"
+			if pid, ok := runningByName[s.Name()]; ok {
+				state = fmt.Sprintf("running pid=%d", pid)
+			}
+			fmt.Printf("    - [%s] %s — %s\n", s.Toolchain, s.Name(), state)
+		}
+	}
+	if !anyRunning {
+		return errors.New("no alpha running in the federation chain")
 	}
 	return nil
 }
 
 func runStop(ctx context.Context, log *zlog.Logger) error {
-	afPath, _, err := loadAlphasfile()
+	afPath, err := walkUp() // no eval: stop only needs the socket path
 	if err != nil {
 		return err
 	}

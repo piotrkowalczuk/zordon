@@ -2,8 +2,8 @@
 .DS_Store
 data
 .zordon
-example/zordon
+examples/zordon
 _*.md
 .claude
 tmp
-example/.zordon
+examples/.zordon

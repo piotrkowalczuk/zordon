@@ -33,6 +33,10 @@ type ConfigureArgs struct {
 	AlphasfilePath string                 `json:"alphasfile_path"`
 	Alphasfile     *alphasfile.Alphasfile `json:"alphasfile"`
 	Failfast       bool                   `json:"failfast,omitempty"`
+	// ConfigHash identifies the (source bytes + parent context) that produced
+	// this configuration. zordon compares it against a running alpha's stored
+	// hash to detect drift in federation chains.
+	ConfigHash string `json:"config_hash,omitempty"`
 }
 
 type Response struct {
@@ -64,6 +68,7 @@ type StateInfo struct {
 	PID            int                   `json:"pid"`
 	AlphasfilePath string                `json:"alphasfile_path,omitempty"`
 	StartedAt      string                `json:"started_at"`
+	ConfigHash     string                `json:"config_hash,omitempty"`
 	Services       []*alphasfile.Service `json:"services,omitempty"`
 	Running        []ServiceStatus       `json:"running,omitempty"`
 }
