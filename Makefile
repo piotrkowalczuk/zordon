@@ -1,6 +1,6 @@
 .PHONY: build test e2e
 
-EXAMPLES := $(shell ls -d examples/*/)
+EXAMPLES ?= $(shell ls -d examples/*/)
 
 build:
 	mkdir -p bin
@@ -12,14 +12,17 @@ test:
 
 e2e: build
 	@sudo -v
-	@for dir in $(EXAMPLES); do \
+	@ZORDON_BIN="$$(pwd)/bin/zordon"; \
+	for dir in $(EXAMPLES); do \
 		echo "Running E2E for $$dir..."; \
 		(cd $$dir && \
-		sudo ../../bin/zordon sudo && \
+		sudo $$ZORDON_BIN sudo && \
 		if [ "$$(basename $$dir)" = "worktree" ]; then \
-			../../bin/zordon worktree create feature --agent && cd .zordon/worktrees/feature; \
+			rm -rf .zordon/worktrees/feature && \
+			$$ZORDON_BIN worktree create feature && \
+			cd .zordon/worktrees/feature; \
 		fi && \
-		../../bin/zordon start --agent && \
-		../../bin/zordon status --agent && \
-		../../bin/zordon stop --agent) || exit 1; \
+		$$ZORDON_BIN start --agent && \
+		$$ZORDON_BIN status --agent && \
+		$$ZORDON_BIN stop --agent) || exit 1; \
 	done

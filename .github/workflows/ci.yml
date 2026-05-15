@@ -27,25 +27,12 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          if [ -x "$(command -v apt-get)" ]; then apt-get update && apt-get install -y git golang-go; fi
-          if [ -x "$(command -v dnf)" ]; then dnf install -y git golang; fi
-          if [ -x "$(command -v pacman)" ]; then pacman -Syu --noconfirm git go; fi
+          if [ -x "$(command -v apt-get)" ]; then apt-get update && apt-get install -y git golang-go sudo make; fi
+          if [ -x "$(command -v dnf)" ]; then dnf install -y git golang sudo make; fi
+          if [ -x "$(command -v pacman)" ]; then pacman -Syu --noconfirm git go sudo make; fi
       - uses: actions/checkout@v4
-      - name: Build Zordon and Alpha
-        run: |
-          go build -o zordon ./cmd/zordon/
-          go build -o alpha ./cmd/alpha/
-          chmod +x zordon alpha
-          sudo mv zordon alpha /usr/local/bin/
+      - name: Run Tests
+        run: make test
       - name: Run E2E Test
-        working-directory: examples/${{ matrix.example }}
-        run: |
-          sudo zordon sudo
-          if [ "${{ matrix.example }}" == "worktree" ]; then
-            zordon worktree create feature --agent
-            cd .zordon/worktrees/feature
-          fi
-          zordon start --agent
-          zordon status --agent
-          zordon stop --agent
+        run: make e2e EXAMPLES=examples/${{ matrix.example }}
 
