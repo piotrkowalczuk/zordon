@@ -41,8 +41,11 @@ jobs:
         working-directory: examples/${{ matrix.example }}
         run: |
           sudo zordon sudo
-          chmod +x test.sh
+          if [ "${{ matrix.example }}" == "worktree" ]; then
+            zordon worktree create feature --agent
+            cd .zordon/worktrees/feature
+          fi
           zordon start --agent
-          ./test.sh
+          zordon status --agent
           zordon stop --agent
 
