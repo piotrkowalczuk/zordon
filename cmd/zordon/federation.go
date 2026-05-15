@@ -171,9 +171,11 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 	}()
 
 	var accumulated []*alphasfile.Service
+	var dotenvChain []string // file-level dotenv of every ancestor, root-first
 
 	for _, afPath := range chain {
 		isInvocation := afPath == invFile
+		parentDotenv := append([]string{}, dotenvChain...)
 
 		raw, err := os.ReadFile(afPath)
 		if err != nil {
@@ -215,6 +217,9 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		case st != nil && !isInvocation && st.ConfigHash == inv.Hash:
 			log.Info("zordon", "%s [%s] up-to-date (alpha pid=%d), reusing", afPath, inv.Hash, st.PID)
 			accumulated = append(accumulated, st.Services...)
+			if st.Dotenv != "" {
+				dotenvChain = append(dotenvChain, st.Dotenv)
+			}
 			continue
 
 		case st != nil:
@@ -258,11 +263,14 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			cancel()
 			return fmt.Errorf("%s: waiting for alpha socket: %w", afPath, err)
 		}
-		if err := pushConfigure(ctxLevel, log, sock, afPath, inv.Hash, af, failfast); err != nil {
+		if err := pushConfigure(ctxLevel, log, sock, afPath, inv.Hash, parentDotenv, af, failfast); err != nil {
 			cancel()
 			return fmt.Errorf("%s: %w", afPath, err)
 		}
 		cancel()
+		if af.Dotenv != "" {
+			dotenvChain = append(dotenvChain, af.Dotenv)
+		}
 
 		// Privileged hooks are NOT run here — `zordon start` stays
 		// non-interactive. Run `zordon sudo` to apply them across the chain.

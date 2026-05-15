@@ -1,0 +1,129 @@
+# examples/interpolation — a deliberately tangled interpolation graph.
+#
+# What it exercises:
+#   * cross-service refs: `api` reads `cache`'s resolved vars + dir
+#   * intra-service dependency ORDER is dynamic, not lexical: `arguments`
+#     is written ABOVE the `file` block it depends on, and the `file`
+#     body depends on `vars` declared BELOW it — both resolve because the
+#     order follows the dependency graph, not the source order
+#   * `build` is itself interpolated: ${fs::bin()} + ${pathhash()} go
+#     into ldflags, so the running binary reports its own invocation tag
+#   * env: a file-level `dotenv`, a per-service `dotenv`, and an
+#     interpolated `env {}` block — precedence is
+#       process env < file-level dotenv < service dotenv < env {}
+#   * fs::tmp / fs::bin / fs::src / pathhash / net::pickport
+#
+# Run it (commit the example first — `src` worktrees track HEAD):
+#   cd examples/interpolation
+#   zordon worktree create demo
+#   cd .zordon/worktrees/demo && zordon start
+#   curl http://127.0.0.1:<api port>/      # see every value resolved
+#
+# In the env section of the response you'll see SOURCE=env-block (the
+# env{} won), GLOBAL_ONLY survives from the file-level dotenv, and
+# API_LABEL / CACHE_ADDR are interpolated.
+
+# File-level dotenv: applied to EVERY service in this Alphasfile (and,
+# via federation walk-up, to children). Generated below by `cache`.
+dotenv = "${fs::tmp()}/global.env"
+
+service "go" "cache" {
+  src = "../.."
+  exe = "./examples/interpolation/src/app"
+
+  vars = {
+    port = net::pickport()
+  }
+
+  # Materialize the file-level .env (same path the top-level `dotenv`
+  # points at — fs::tmp() is stable per invocation).
+  file "globalenv" {
+    path = "${fs::tmp()}/global.env"
+    body = <<-EOT
+      SOURCE=global-dotenv
+      GLOBAL_ONLY=g-${pathhash()}
+      API_LABEL=from-global
+    EOT
+  }
+
+  cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "api" {
+  src = "../.."
+  exe = "./examples/interpolation/src/app"
+
+  # Declared FIRST, but depends on self.file.conf (declared last) and on
+  # the cross-service `cache`. The intra-service DAG resolves file → args.
+  arguments = {
+    "config.file" = self.file.conf.path
+  }
+
+  vars = {
+    port  = net::pickport()
+    label = "api-${pathhash()}"
+  }
+
+  # build is interpolated: inject the invocation hash into the binary and
+  # emit it into the per-invocation, out-of-tree bin dir.
+  build = "go build -ldflags \"-X main.Tag=${pathhash()}\" -o ${fs::bin()}/app ./examples/interpolation/src/app"
+
+  cmd = [
+    "${fs::bin()}/app",
+    "-addr", "127.0.0.1:${self.vars.port}",
+    "-cache", "127.0.0.1:${service.go.cache.vars.port}",
+    "-conf", "${self.file.conf.path}",
+  ]
+
+  # Per-service dotenv: overrides the file-level one. SOURCE flips to
+  # "service-dotenv", and it sets API_LABEL=from-service.
+  file "appenv" {
+    path = "${fs::tmp()}/api.env"
+    body = <<-EOT
+      SOURCE=service-dotenv
+      API_LABEL=from-service
+    EOT
+  }
+  dotenv = "${self.file.appenv.path}"
+
+  # env {} wins over both dotenv layers and is itself interpolated:
+  # SOURCE=env-block, API_LABEL from self.vars, CACHE_ADDR from the
+  # cross-service `cache`.
+  env = {
+    SOURCE     = "env-block"
+    API_LABEL  = "${self.vars.label}"
+    CACHE_ADDR = "127.0.0.1:${service.go.cache.vars.port}"
+  }
+
+  # body weaves together: own vars, a cross-service var, the cross-service
+  # checkout dir, fs::src (this service's checkout) and pathhash.
+  file "conf" {
+    path = "${fs::tmp()}/api.conf"
+    body = <<-EOT
+      label       = ${self.vars.label}
+      listen      = 127.0.0.1:${self.vars.port}
+      cache_addr  = 127.0.0.1:${service.go.cache.vars.port}
+      cache_src   = ${service.go.cache.dir}
+      my_src      = ${fs::src()}
+      invocation  = ${pathhash()}
+    EOT
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

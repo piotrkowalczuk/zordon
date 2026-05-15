@@ -43,9 +43,11 @@ type RuntimeConfig struct {
 	Log            *LogConfig     `json:"log,omitempty"`
 	DoubleDash     bool           `json:"double_dash,omitempty"`
 	SpaceSeparated bool           `json:"space_separated,omitempty"`
-	Vars           map[string]any `json:"vars,omitempty"`
-	Arguments      map[string]any `json:"arguments,omitempty"`
-	Command        []string       `json:"command,omitempty"`
+	Vars           map[string]any    `json:"vars,omitempty"`
+	Arguments      map[string]any    `json:"arguments,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`    // explicit env (overrides dotenv)
+	Dotenv         string            `json:"dotenv,omitempty"` // path to a .env loaded before Env
+	Command        []string          `json:"command,omitempty"`
 	Sudo           []*SudoStep    `json:"sudo,omitempty"`
 	Files          []*File        `json:"files,omitempty"`
 	Dir            string         `json:"dir,omitempty"`     // per-invocation source checkout (= fs::src)
@@ -266,6 +268,7 @@ type SudoStep struct {
 }
 
 type Alphasfile struct {
+	Dotenv   string     `json:"dotenv,omitempty"` // file-level .env, applied under every service's env
 	Services []*Service `json:"services,omitempty"`
 }
 
@@ -286,6 +289,7 @@ func (af *Alphasfile) AllFiles() []*File {
 // --- HCL2 intermediate (parser-internal) ----------------------------------
 
 type rootBlock struct {
+	Dotenv   hcl.Expression  `hcl:"dotenv,optional"` // file-level .env applied to every service
 	Services []*serviceBlock `hcl:"service,block"`
 }
 
@@ -314,6 +318,8 @@ type serviceBlock struct {
 	// dynamic (interpolated; order resolved by intra-service dependency DAG)
 	Vars      hcl.Expression `hcl:"vars,optional"`
 	Arguments hcl.Expression `hcl:"arguments,optional"`
+	Env       hcl.Expression `hcl:"env,optional"`
+	Dotenv    hcl.Expression `hcl:"dotenv,optional"`
 	Cmd       hcl.Expression `hcl:"cmd,optional"`
 	Build     hcl.Expression `hcl:"build,optional"`
 

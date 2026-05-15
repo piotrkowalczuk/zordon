@@ -37,6 +37,10 @@ type ConfigureArgs struct {
 	// this configuration. zordon compares it against a running alpha's stored
 	// hash to detect drift in federation chains.
 	ConfigHash string `json:"config_hash,omitempty"`
+	// ParentDotenv carries file-level `dotenv` paths from every Alphasfile
+	// higher in the federation chain (root-first). Each service applies
+	// these (then its own file-level dotenv, then its per-service env).
+	ParentDotenv []string `json:"parent_dotenv,omitempty"`
 }
 
 type Response struct {
@@ -69,6 +73,7 @@ type StateInfo struct {
 	AlphasfilePath string                `json:"alphasfile_path,omitempty"`
 	StartedAt      string                `json:"started_at"`
 	ConfigHash     string                `json:"config_hash,omitempty"`
+	Dotenv         string                `json:"dotenv,omitempty"` // file-level dotenv (for federation chain)
 	Services       []*alphasfile.Service `json:"services,omitempty"`
 	Running        []ServiceStatus       `json:"running,omitempty"`
 }

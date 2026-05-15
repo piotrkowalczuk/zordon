@@ -68,16 +68,18 @@ type alphaState struct {
 	startedAt      time.Time
 	alphasfilePath string
 	configHash     string
+	parentDotenv   []string // file-level dotenv paths inherited from federation parents
 	config         *alphasfile.Alphasfile
 	running        map[string]*exec.Cmd
 	files          []string // absolute paths of file{} outputs to unlink on shutdown
 }
 
-func (s *alphaState) configure(path, hash string, af *alphasfile.Alphasfile) {
+func (s *alphaState) configure(path, hash string, parentDotenv []string, af *alphasfile.Alphasfile) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.alphasfilePath = path
 	s.configHash = hash
+	s.parentDotenv = parentDotenv
 	s.config = af
 }
 
@@ -113,6 +115,7 @@ func (s *alphaState) snapshot() *protocol.StateInfo {
 	}
 	if s.config != nil {
 		info.Services = s.config.All()
+		info.Dotenv = s.config.Dotenv
 	}
 	for name, cmd := range s.running {
 		pid := 0
@@ -346,7 +349,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	}
 
 	failfast := req.Configure.Failfast
-	state.configure(req.Configure.AlphasfilePath, req.Configure.ConfigHash, req.Configure.Alphasfile)
+	state.configure(req.Configure.AlphasfilePath, req.Configure.ConfigHash, req.Configure.ParentDotenv, req.Configure.Alphasfile)
 	services := req.Configure.Alphasfile.All()
 	files := req.Configure.Alphasfile.AllFiles()
 	log.Info("alpha", "configured from %s (%d services, %d files, failfast=%v), starting bringup",
@@ -387,7 +390,20 @@ func bringupService(svc *alphasfile.Service, state *alphaState, cfg bringupConfi
 		return false
 	}
 
-	cmd, err := buildCmd(svc, repoDir)
+	// env precedence (low→high): process env → federation parents'
+	// file-level dotenv (root-first) → this Alphasfile's file-level
+	// dotenv → this service's dotenv → this service's env block.
+	state.mu.RLock()
+	envFiles := append([]string{}, state.parentDotenv...)
+	if state.config != nil && state.config.Dotenv != "" {
+		envFiles = append(envFiles, state.config.Dotenv)
+	}
+	state.mu.RUnlock()
+	if svc.Runtime != nil && svc.Runtime.Dotenv != "" {
+		envFiles = append(envFiles, svc.Runtime.Dotenv)
+	}
+
+	cmd, err := buildCmd(svc, repoDir, envFiles)
 	if err != nil {
 		log.Error("alpha", "build cmd %s: %v", name, err)
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
@@ -513,7 +529,65 @@ func streamLines(name, kind string, r io.Reader, stream *safeEncoder, log *zlog.
 	}
 }
 
-func buildCmd(svc *alphasfile.Service, checkout string) (*exec.Cmd, error) {
+// parseDotenv reads a .env file: `KEY=VALUE` per line, `#` comments and
+// blank lines ignored, optional surrounding single/double quotes stripped,
+// optional leading `export `. Missing file ⇒ no vars (not an error: the
+// file may legitimately be absent).
+func parseDotenv(path string) []string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, ln := range strings.Split(string(b), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		ln = strings.TrimPrefix(ln, "export ")
+		k, v, ok := strings.Cut(ln, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && (v[0] == '"' && v[len(v)-1] == '"' || v[0] == '\'' && v[len(v)-1] == '\'') {
+			v = v[1 : len(v)-1]
+		}
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
+// serviceEnv builds the child process environment: the alpha process env
+// as a base, then each dotenv file in order, then the explicit env map —
+// later entries override earlier ones.
+func serviceEnv(envFiles []string, env map[string]string) []string {
+	merged := map[string]string{}
+	put := func(kv string) {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			merged[k] = v
+		}
+	}
+	for _, kv := range os.Environ() {
+		put(kv)
+	}
+	for _, f := range envFiles {
+		for _, kv := range parseDotenv(f) {
+			put(kv)
+		}
+	}
+	for k, v := range env {
+		merged[k] = v
+	}
+	out := make([]string, 0, len(merged))
+	for k, v := range merged {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
+func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string) (*exec.Cmd, error) {
 	name := svc.Name()
 	if name == "" {
 		return nil, errors.New("service has no name")
@@ -539,6 +613,13 @@ func buildCmd(svc *alphasfile.Service, checkout string) (*exec.Cmd, error) {
 	}
 	if checkout != "" {
 		cmd.Dir = checkout
+	}
+	var envMap map[string]string
+	if svc.Runtime != nil {
+		envMap = svc.Runtime.Env
+	}
+	if len(envFiles) > 0 || len(envMap) > 0 {
+		cmd.Env = serviceEnv(envFiles, envMap)
 	}
 	return cmd, nil
 }

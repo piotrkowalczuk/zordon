@@ -81,13 +81,21 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, seed map[
 			return nil, fmt.Errorf("%s: %w", n.id, err)
 		}
 	}
-	return &Alphasfile{Services: r.resolvedServices}, nil
+	// File-level dotenv: top-level, no `self`; may use fs::/pathhash funcs.
+	gdot, err := r.evalStr(root.Dotenv, nil, "dotenv")
+	if err != nil {
+		return nil, err
+	}
+	return &Alphasfile{Dotenv: gdot, Services: r.resolvedServices}, nil
 }
 
 func (r *resolver) evalService(sb *serviceBlock) error {
-	if origin, dup := r.taken[sb.Toolchain+"/"+sb.Name]; dup {
-		return fmt.Errorf("service %s.%s collides with a %s service of the same name",
-			sb.Toolchain, sb.Name, origin)
+	// A local service with the same name as a federation-parent service
+	// COMPLETELY overrides it: the child definition replaces the parent's
+	// in this level's namespace (and runs in this level's alpha). Two
+	// local blocks with the same name in one file is still a real mistake.
+	if origin := r.taken[sb.Toolchain+"/"+sb.Name]; origin == "local" {
+		return fmt.Errorf("duplicate service %s.%s in this Alphasfile", sb.Toolchain, sb.Name)
 	}
 	r.taken[sb.Toolchain+"/"+sb.Name] = "local"
 
@@ -113,10 +121,11 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	// file body referencing self.vars.port both just work — whichever way
 	// you write it. A genuine mutual reference is a clear cycle error.
 	var (
-		varsVal   map[string]any
-		args      map[string]any
-		files     []*File
-		fileVals  = map[string]cty.Value{}
+		varsVal  map[string]any
+		args     map[string]any
+		envMap   map[string]any
+		files    []*File
+		fileVals = map[string]cty.Value{}
 	)
 	type producer struct {
 		id    string
@@ -162,6 +171,15 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		}
 		args = a
 		self["arguments"] = mapValToCty(a)
+		return nil
+	}})
+	prods = append(prods, &producer{id: "env", exprs: []hcl.Expression{sb.Env}, run: func() error {
+		e, err := r.evalMap(sb.Env, self, "env")
+		if err != nil {
+			return err
+		}
+		envMap = e
+		self["env"] = mapValToCty(e)
 		return nil
 	}})
 
@@ -210,6 +228,10 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	if err != nil {
 		return err
 	}
+	dotenv, err := r.evalStr(sb.Dotenv, self, "dotenv")
+	if err != nil {
+		return err
+	}
 	// sudo hooks (may reference everything resolved so far).
 	var sudo []*SudoStep
 	for _, sblk := range sb.Sudo {
@@ -246,6 +268,8 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		SpaceSeparated: sb.SpaceSeparated,
 		Vars:           varsVal,
 		Arguments:      args,
+		Env:            toStringMap(envMap),
+		Dotenv:         dotenv,
 		Command:        command,
 		Sudo:           sudo,
 		Files:          files,
@@ -523,6 +547,19 @@ func copyCtyMap(in map[string]cty.Value) map[string]cty.Value {
 // mapValToCty projects a Go map[string]any (the evaluated form of vars or
 // arguments) back into a cty.Value so subsequent stages can read it via
 // self.vars.<key> / self.arguments[<key>].
+// toStringMap stringifies an evaluated map (env values are always strings
+// in the process environment; numbers/bools are coerced).
+func toStringMap(m map[string]any) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = fmt.Sprintf("%v", v)
+	}
+	return out
+}
+
 func mapValToCty(args map[string]any) cty.Value {
 	if len(args) == 0 {
 		return cty.EmptyObjectVal

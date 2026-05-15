@@ -128,7 +128,7 @@ func walkUp() (string, error) {
 	}
 }
 
-func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, hash string, af *alphasfile.Alphasfile, failfast bool) error {
+func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, hash string, parentDotenv []string, af *alphasfile.Alphasfile, failfast bool) error {
 	log.Info("alpha", "Understood, Zordon!")
 
 	conn, err := control.Dial(sock, 1*time.Second)
@@ -150,6 +150,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, hash str
 			Alphasfile:     af,
 			Failfast:       failfast,
 			ConfigHash:     hash,
+			ParentDotenv:   parentDotenv,
 		},
 	}); err != nil {
 		return fmt.Errorf("send configure: %w", err)
