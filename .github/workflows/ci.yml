@@ -36,13 +36,13 @@ jobs:
           go build -o zordon ./cmd/zordon/
           go build -o alpha ./cmd/alpha/
           chmod +x zordon alpha
-      - name: Run Privileged Hooks
-        run: sudo ./zordon sudo
+          sudo mv zordon alpha /usr/local/bin/
       - name: Run E2E Test
         run: |
           cd examples/${{ matrix.example }}
+          sudo zordon sudo
           chmod +x test.sh
-          ../../zordon start --agent
+          zordon start --agent
           ./test.sh
-          ../../zordon stop --agent
+          zordon stop --agent
 
