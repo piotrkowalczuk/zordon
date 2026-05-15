@@ -7,3 +7,4 @@ _*.md
 .claude
 tmp
 examples/.zordon
+bin
