@@ -100,58 +100,117 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	}
 	r.curCheckout = dir // what fs::src() returns while this service evals
 
-	// Stage 1: self_base — known from labels + primary, before any eval.
+	// self_base — known from labels + primary, before any eval.
 	self := map[string]cty.Value{
 		"name":      cty.StringVal(sb.Name),
 		"toolchain": cty.StringVal(sb.Toolchain),
 		"dir":       cty.StringVal(dir),
 	}
 
-	// Stage 2: vars (may reference self.{name,toolchain,dir} and any
-	// already-evaluated cross-service value).
-	varsVal, err := r.evalMap(sb.Vars, self, "vars")
-	if err != nil {
-		return err
+	// Producers (vars, each file, arguments) are evaluated in dependency
+	// order, not a fixed sequence: edges come from self.<x> traversals in
+	// each expression, so `arguments` referencing self.file.cfg.path and a
+	// file body referencing self.vars.port both just work — whichever way
+	// you write it. A genuine mutual reference is a clear cycle error.
+	var (
+		varsVal   map[string]any
+		args      map[string]any
+		files     []*File
+		fileVals  = map[string]cty.Value{}
+	)
+	type producer struct {
+		id    string
+		exprs []hcl.Expression
+		run   func() error
 	}
-	self["vars"] = mapValToCty(varsVal)
-
-	// Stage 3: nested file blocks (may reference self.vars and previously-
-	// declared sibling files via self.file.<earlier_name>).
-	var files []*File
-	fileVals := map[string]cty.Value{}
+	prods := []*producer{
+		{id: "vars", exprs: []hcl.Expression{sb.Vars}, run: func() error {
+			v, err := r.evalMap(sb.Vars, self, "vars")
+			if err != nil {
+				return err
+			}
+			varsVal = v
+			self["vars"] = mapValToCty(v)
+			return nil
+		}},
+	}
 	for _, fb := range sb.Files {
-		ctx := r.ctxWith(self)
-		path, body, err := evalFileExpr(fb, ctx)
+		fb := fb
+		prods = append(prods, &producer{
+			id:    "file." + fb.Name,
+			exprs: []hcl.Expression{fb.Path, fb.Body},
+			run: func() error {
+				path, body, err := evalFileExpr(fb, r.ctxWith(self))
+				if err != nil {
+					return err
+				}
+				files = append(files, &File{Name: fb.Name, Path: path, Body: body})
+				fileVals[fb.Name] = cty.ObjectVal(map[string]cty.Value{
+					"name": cty.StringVal(fb.Name),
+					"path": cty.StringVal(path),
+					"body": cty.StringVal(body),
+				})
+				self["file"] = cty.ObjectVal(fileVals)
+				return nil
+			},
+		})
+	}
+	prods = append(prods, &producer{id: "arguments", exprs: []hcl.Expression{sb.Arguments}, run: func() error {
+		a, err := r.evalMap(sb.Arguments, self, "arguments")
 		if err != nil {
 			return err
 		}
-		files = append(files, &File{Name: fb.Name, Path: path, Body: body})
-		fileVals[fb.Name] = cty.ObjectVal(map[string]cty.Value{
-			"name": cty.StringVal(fb.Name),
-			"path": cty.StringVal(path),
-			"body": cty.StringVal(body),
-		})
-		// Make this file visible to siblings declared after it and to the
-		// remaining eval stages.
-		self["file"] = cty.ObjectVal(fileVals)
+		args = a
+		self["arguments"] = mapValToCty(a)
+		return nil
+	}})
+
+	byID := make(map[string]*producer, len(prods))
+	declOrder := make([]string, 0, len(prods))
+	for _, p := range prods {
+		byID[p.id] = p
+		declOrder = append(declOrder, p.id)
+	}
+	deps := map[string]map[string]struct{}{}
+	for _, p := range prods {
+		deps[p.id] = map[string]struct{}{}
+		for _, e := range p.exprs {
+			if e == nil {
+				continue
+			}
+			for _, t := range e.Variables() {
+				if dep, ok := selfProducerID(t); ok && dep != p.id {
+					if _, real := byID[dep]; real {
+						deps[p.id][dep] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	order, err := topoProducers(declOrder, deps)
+	if err != nil {
+		return fmt.Errorf("service %q: %w", sb.Name, err)
+	}
+	for _, id := range order {
+		if err := byID[id].run(); err != nil {
+			return err
+		}
 	}
 	if _, ok := self["file"]; !ok {
 		self["file"] = cty.EmptyObjectVal
 	}
 
-	// Stage 4: arguments (may reference self.vars and self.file).
-	args, err := r.evalMap(sb.Arguments, self, "arguments")
-	if err != nil {
-		return err
-	}
-	self["arguments"] = mapValToCty(args)
-
-	// Stage 5: command (may reference self.vars, self.file, self.arguments).
+	// Sinks: consume the fully-populated self; order among them is
+	// irrelevant since nothing reads them back.
 	command, err := r.evalStrList(sb.Cmd, self, "cmd")
 	if err != nil {
 		return err
 	}
-	// Stage 6: sudo hooks (may reference everything resolved so far).
+	build, err := r.evalStr(sb.Build, self, "build")
+	if err != nil {
+		return err
+	}
+	// sudo hooks (may reference everything resolved so far).
 	var sudo []*SudoStep
 	for _, sblk := range sb.Sudo {
 		check, err := r.evalStr(sblk.Check, self, "sudo."+sblk.Name+".check")
@@ -236,6 +295,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 			Tag:       sb.Tag,
 			Rev:       sb.Rev,
 			Exe:       sb.Exe,
+			Build:     build,
 			Cmd:       strings.Join(command, " "),
 			Worktree:  worktree,
 		},
@@ -272,6 +332,77 @@ func (r *resolver) evalMap(expr hcl.Expression, self map[string]cty.Value, field
 	out := map[string]any{}
 	for k, v := range val.AsValueMap() {
 		out[k] = ctyToAny(v)
+	}
+	return out, nil
+}
+
+// selfProducerID maps a `self.<x>...` traversal to the intra-service
+// producer node it depends on: self.vars → "vars", self.arguments →
+// "arguments", self.file.<n> → "file.<n>". self.{name,toolchain,dir} and
+// non-self roots are not producers.
+func selfProducerID(t hcl.Traversal) (string, bool) {
+	if len(t) < 2 {
+		return "", false
+	}
+	root, ok := t[0].(hcl.TraverseRoot)
+	if !ok || root.Name != "self" {
+		return "", false
+	}
+	a1, ok := t[1].(hcl.TraverseAttr)
+	if !ok {
+		return "", false
+	}
+	switch a1.Name {
+	case "vars":
+		return "vars", true
+	case "arguments":
+		return "arguments", true
+	case "file":
+		if len(t) >= 3 {
+			if a2, ok := t[2].(hcl.TraverseAttr); ok {
+				return "file." + a2.Name, true
+			}
+		}
+		return "file", true // whole self.file ⇒ depends on all files
+	}
+	return "", false
+}
+
+// topoProducers orders producer ids so every node comes after its deps.
+// declOrder (the source declaration order) breaks ties → stable and
+// deterministic. A cycle is a clear error naming the entangled nodes.
+func topoProducers(declOrder []string, deps map[string]map[string]struct{}) ([]string, error) {
+	indeg := make(map[string]int, len(declOrder))
+	for _, id := range declOrder {
+		indeg[id] = len(deps[id])
+	}
+	done := map[string]bool{}
+	out := make([]string, 0, len(declOrder))
+	for len(out) < len(declOrder) {
+		progressed := false
+		for _, id := range declOrder { // declaration order = stable tiebreak
+			if done[id] || indeg[id] != 0 {
+				continue
+			}
+			out = append(out, id)
+			done[id] = true
+			progressed = true
+			for _, other := range declOrder {
+				if _, ok := deps[other][id]; ok {
+					indeg[other]--
+				}
+			}
+		}
+		if !progressed {
+			var stuck []string
+			for _, id := range declOrder {
+				if !done[id] {
+					stuck = append(stuck, id)
+				}
+			}
+			return nil, fmt.Errorf("cyclic references among %s — these depend on each other",
+				strings.Join(stuck, ", "))
+		}
 	}
 	return out, nil
 }

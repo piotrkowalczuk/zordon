@@ -64,8 +64,9 @@ type Package struct {
 	Branch    string   `json:"branch,omitempty"`
 	Tag       string   `json:"tag,omitempty"`
 	Rev       string   `json:"rev,omitempty"`
-	Exe       string   `json:"exe,omitempty"` // build target, relative to the primary root (src dir / git clone)
-	Cmd       string   `json:"cmd,omitempty"` // Explicit execution argv if needed
+	Exe       string   `json:"exe,omitempty"`   // build target, relative to the primary root (src dir / git clone)
+	Build     string   `json:"build,omitempty"` // resolved build override ("" ⇒ toolchain default)
+	Cmd       string   `json:"cmd,omitempty"`   // Explicit execution argv if needed
 	Worktree  *Worktree `json:"worktree,omitempty"`
 }
 
@@ -213,9 +214,13 @@ func (s *Service) Worktreeable() bool {
 	return s.Package != nil && (s.Package.Git != "" || s.Package.Src != "")
 }
 
-// Build returns the build command override, or "" for the toolchain default.
+// Build returns the resolved build-command override, or "" for the
+// toolchain default.
 func (s *Service) Build() string {
-	return ""
+	if s.Package == nil {
+		return ""
+	}
+	return s.Package.Build
 }
 
 // Flags renders RuntimeConfig.Arguments into argv flags. Format follows
@@ -303,15 +308,14 @@ type serviceBlock struct {
 	Exe    string `hcl:"exe,optional"`
 
 	// Legacy fields (deprecated)
-	Crate   string `hcl:"crate,optional"`
-	Package string `hcl:"package,optional"`
-	Build   string `hcl:"build,optional"`
-	Dir     string `hcl:"dir,optional"`
+	Crate string `hcl:"crate,optional"`
+	Dir   string `hcl:"dir,optional"`
 
-	// dynamic
+	// dynamic (interpolated; order resolved by intra-service dependency DAG)
 	Vars      hcl.Expression `hcl:"vars,optional"`
 	Arguments hcl.Expression `hcl:"arguments,optional"`
 	Cmd       hcl.Expression `hcl:"cmd,optional"`
+	Build     hcl.Expression `hcl:"build,optional"`
 
 	Worktree  *worktreeBlock `hcl:"worktree,block"`
 	Sudo      []*sudoBlock   `hcl:"sudo,block"`
