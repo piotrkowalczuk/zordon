@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -221,14 +219,10 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	
 	var worktree *Worktree
 	if sb.Worktree != nil && len(sb.Worktree.Sparse) > 0 {
-		var resolvedSparse []string
-		for _, s := range sb.Worktree.Sparse {
-				// Resolve sparse paths relative to Alphasfile directory
-			resolvedSparse = append(resolvedSparse, filepath.Join(filepath.Dir(r.path), s))
-		}
-		worktree = &Worktree{
-			Sparse: resolvedSparse,
-		}
+		// Sparse cone paths are relative to the primary repo root (what
+		// `git sparse-checkout set` expects) — pass verbatim, not joined
+		// to an absolute Alphasfile path.
+		worktree = &Worktree{Sparse: cleanSparse(sb.Worktree.Sparse)}
 	}
 
 	svc := &Service{
@@ -460,15 +454,7 @@ func (r *resolver) resolveDir(dir string) string {
 	if dir == "" {
 		return ""
 	}
-	if strings.HasPrefix(dir, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, dir[2:])
-		}
-	}
-	if filepath.IsAbs(dir) {
-		return filepath.Clean(dir)
-	}
-	return filepath.Clean(filepath.Join(r.inv.ProjectRoot(), dir))
+	return resolveSrcDir(r.inv.ProjectRoot(), dir)
 }
 
 // pathhash returns the short (8 hex chars) hash that identifies this

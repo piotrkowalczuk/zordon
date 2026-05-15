@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/hcl/v2"
@@ -126,27 +128,59 @@ func ParseServices(path string) ([]*ServiceMeta, error) {
 	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
 		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
 	}
+	base := filepath.Dir(path) // relative src/sparse anchor = Alphasfile dir
 	out := make([]*ServiceMeta, 0, len(root.Services))
 	for _, sb := range root.Services {
 		if sb.Git != "" && sb.Src != "" {
 			return nil, fmt.Errorf("service %q declares both git and src; pick one primary", sb.Name)
 		}
-		out = append(out, &ServiceMeta{
-			Name:      sb.Name,
+		pkg := &Package{
 			Toolchain: sb.Toolchain,
-			Package: &Package{
-				Toolchain: sb.Toolchain,
-				Git:       sb.Git,
-				Src:       sb.Src,
-				Branch:    sb.Branch,
-				Tag:       sb.Tag,
-				Rev:       sb.Rev,
-				Exe:       sb.Exe,
-				Cmd:       "",
-			},
-		})
+			Git:       sb.Git,
+			Src:       resolveSrcDir(base, sb.Src),
+			Branch:    sb.Branch,
+			Tag:       sb.Tag,
+			Rev:       sb.Rev,
+			Exe:       sb.Exe,
+		}
+		if sb.Worktree != nil && len(sb.Worktree.Sparse) > 0 {
+			pkg.Worktree = &Worktree{Sparse: cleanSparse(sb.Worktree.Sparse)}
+		}
+		out = append(out, &ServiceMeta{Name: sb.Name, Toolchain: sb.Toolchain, Package: pkg})
 	}
 	return out, nil
+}
+
+// resolveSrcDir turns a `src` value into an absolute path: ~ expands to
+// $HOME; absolute stays; relative resolves against base (the Alphasfile's
+// directory). Empty stays empty.
+func resolveSrcDir(base, dir string) string {
+	if dir == "" {
+		return ""
+	}
+	if strings.HasPrefix(dir, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, dir[2:])
+		}
+	}
+	if filepath.IsAbs(dir) {
+		return filepath.Clean(dir)
+	}
+	return filepath.Clean(filepath.Join(base, dir))
+}
+
+// cleanSparse normalizes sparse-checkout entries to repo-root-relative cone
+// paths (git sparse-checkout wants paths relative to the repo top, not
+// absolute and without a leading "./").
+func cleanSparse(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = filepath.Clean(strings.TrimPrefix(s, "./"))
+		if s != "" && s != "." {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (s *Service) Name() string {

@@ -1,14 +1,17 @@
 # examples/worktree — parallel, isolated worktrees over THIS file.
 #
-# `src = "../.."` points the primary at the zordon repo this Alphasfile
-# lives in.
-#
-# `exe = "./src/example"` names the main package path;
-# the Go toolchain builds it into fs::bin().
+# Path resolution:
+#   * `src = "../.."` is relative to THIS Alphasfile's dir
+#     (examples/worktree) → the zordon repo root. That repo is the
+#     primary; each worktree is a `git worktree add` of it.
+#   * `exe` is the Go main package, relative to the primary (repo) root.
+#   * `worktree.sparse` paths are relative to the primary (repo) root
+#     (what `git sparse-checkout set` expects) — so the checkout holds
+#     ONLY examples/worktree/src/example, nothing else from the repo.
 
 service "go" "example" {
-  src = "./src"
-  exe = "./example"
+  src = "../.."
+  exe = "./examples/worktree/src/example"
 
   vars = {
     port = net::pickport()
@@ -21,7 +24,7 @@ service "go" "example" {
   ]
 
   worktree {
-    sparse = ["./example"]
+    sparse = ["examples/worktree/src/example"]
   }
 
   readiness {
@@ -33,4 +36,3 @@ service "go" "example" {
     failure_threshold = 50
   }
 }
-
