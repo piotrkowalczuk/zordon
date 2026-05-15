@@ -33,4 +33,11 @@ jobs:
         run: go test ./...
       - name: E2E Verification
         run: |
+          # Build zordon first to have it available for the scripts
+          go build -o zordon ./cmd/zordon/
+          # Ensure zordon is in PATH for scripts
+          export PATH=$PATH:$(pwd)
+          # Execute privileged hooks once for all potential setups
+          sudo ./zordon sudo
+          # Find and run test scripts
           find examples -name "test.sh" -executable -exec {} \;
