@@ -183,20 +183,9 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 	// ignore the error since it will fail if the reference doesn't exist.
 	_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "remove", "--force", dest))
 
-	// Use --no-checkout as requested, and perform sparse checkout setup manually.
-	args := []string{"-C", gitDir, "worktree", "add", "--no-checkout", "--force", "-B", branch, dest, start}
+	args := []string{"-C", gitDir, "worktree", "add", "--force", "-B", branch, dest, start}
 	if err := run(ctx, exec.CommandContext(ctx, "git", args...)); err != nil {
 		return fmt.Errorf("git worktree add: %w", err)
-	}
-
-	// Initialize sparse checkout
-	if err := run(ctx, exec.CommandContext(ctx, "git", "-C", dest, "sparse-checkout", "init")); err != nil {
-		return fmt.Errorf("git sparse-checkout init: %w", err)
-	}
-	
-	// Perform the checkout manually
-	if err := run(ctx, exec.CommandContext(ctx, "git", "-C", dest, "checkout", branch)); err != nil {
-		return fmt.Errorf("git checkout: %w", err)
 	}
 
 	return nil
