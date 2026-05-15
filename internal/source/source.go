@@ -36,7 +36,11 @@ type Primary struct {
 	// Ref is the default revision (branch/tag/rev) checked out into new
 	// worktrees. Empty means the primary's current HEAD.
 	Ref string
-	// Sparse is a list of paths for git sparse-checkout.
+	// Worktree contains sparse checkout configuration.
+	Worktree *Worktree
+}
+
+type Worktree struct {
 	Sparse []string
 }
 
@@ -50,7 +54,7 @@ func Home() string {
 
 // NewPrimary builds a Primary from a service's git/dir/ref fields. git and
 // dir are mutually exclusive; both empty ⇒ KindNone (not worktree-able).
-func NewPrimary(git, dir, ref string, sparse []string) (Primary, error) {
+func NewPrimary(git, dir, ref string, worktree *Worktree) (Primary, error) {
 	switch {
 	case git != "" && dir != "":
 		return Primary{}, errors.New("service declares both git and dir; pick one primary")
@@ -59,15 +63,15 @@ func NewPrimary(git, dir, ref string, sparse []string) (Primary, error) {
 		if err != nil {
 			return Primary{}, err
 		}
-		return Primary{Kind: KindGit, Repo: repo, Ref: ref, Sparse: sparse}, nil
+		return Primary{Kind: KindGit, Repo: repo, Ref: ref, Worktree: worktree}, nil
 	case dir != "":
 		abs, err := expandAbs(dir)
 		if err != nil {
 			return Primary{}, err
 		}
-		return Primary{Kind: KindDir, Repo: abs, Ref: ref, Sparse: sparse}, nil
+		return Primary{Kind: KindDir, Repo: abs, Ref: ref, Worktree: worktree}, nil
 	default:
-		return Primary{Kind: KindNone, Ref: ref, Sparse: sparse}, nil
+		return Primary{Kind: KindNone, Ref: ref, Worktree: worktree}, nil
 	}
 }
 
@@ -185,7 +189,7 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 	// ignore the error since it will fail if the reference doesn't exist.
 	_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "remove", "--force", dest))
 
-	if len(p.Sparse) > 0 {
+	if p.Worktree != nil && len(p.Worktree.Sparse) > 0 {
 		args := []string{"-C", gitDir, "worktree", "add", "--no-checkout", "--force", "-B", branch, dest, start}
 		if err := run(ctx, exec.CommandContext(ctx, "git", args...)); err != nil {
 			return fmt.Errorf("git worktree add: %w", err)
@@ -197,7 +201,7 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 		}
 
 		// Set the specific paths for sparse checkout
-		sparseArgs := append([]string{"-C", dest, "sparse-checkout", "set"}, p.Sparse...)
+		sparseArgs := append([]string{"-C", dest, "sparse-checkout", "set"}, p.Worktree.Sparse...)
 		if err := run(ctx, exec.CommandContext(ctx, "git", sparseArgs...)); err != nil {
 			return fmt.Errorf("git sparse-checkout set: %w", err)
 		}

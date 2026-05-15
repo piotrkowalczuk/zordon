@@ -174,7 +174,11 @@ func checkoutServices(ctx context.Context, log *zlog.Logger, name, wtdir string,
 		if rev != "" {
 			ref = rev
 		}
-		p, err := source.NewPrimary(m.Package.Git, m.Package.Src, ref, m.Package.Sparse)
+		var worktree *source.Worktree
+		if m.Package.Worktree != nil {
+			worktree = &source.Worktree{Sparse: m.Package.Worktree.Sparse}
+		}
+		p, err := source.NewPrimary(m.Package.Git, m.Package.Src, ref, worktree)
 		if err != nil {
 			return fmt.Errorf("%s: %w", svc, err)
 		}

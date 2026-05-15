@@ -587,7 +587,11 @@ func prepare(svc *alphasfile.Service, name string, stream *safeEncoder, log *zlo
 		return "", fmt.Errorf("worktree-able service %q has no resolved checkout dir", name)
 	}
 
-	p, err := source.NewPrimary(svc.Package.Git, svc.Package.Src, svc.Ref(), svc.Package.Sparse)
+	var worktree *source.Worktree
+	if svc.Package.Worktree != nil {
+		worktree = &source.Worktree{Sparse: svc.Package.Worktree.Sparse}
+	}
+	p, err := source.NewPrimary(svc.Package.Git, svc.Package.Src, svc.Ref(), worktree)
 	if err != nil {
 		return "", err
 	}

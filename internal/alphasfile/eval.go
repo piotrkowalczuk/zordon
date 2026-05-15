@@ -213,22 +213,10 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		src = sb.Dir
 	}
 	
-	var sparse []string
+	var worktree *Worktree
 	if sb.Worktree != nil && len(sb.Worktree.Sparse) > 0 {
-		sparse = append(sparse, sb.Worktree.Sparse...)
-	}
-	// Add exe to sparse checkout paths if explicitly set and not already included
-	if sb.Exe != "" && sb.Exe != "." {
-		exePath := filepath.Clean(sb.Exe)
-		found := false
-		for _, s := range sparse {
-			if filepath.Clean(s) == exePath {
-				found = true
-				break
-			}
-		}
-		if !found {
-			sparse = append(sparse, exePath)
+		worktree = &Worktree{
+			Sparse: append([]string{}, sb.Worktree.Sparse...),
 		}
 	}
 
@@ -244,7 +232,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 			Rev:       sb.Rev,
 			Exe:       sb.Exe,
 			Cmd:       strings.Join(command, " "),
-			Sparse:    sparse,
+			Worktree:  worktree,
 		},
 	}
 	r.resolvedServices = append(r.resolvedServices, svc)

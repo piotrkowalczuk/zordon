@@ -64,7 +64,11 @@ type Package struct {
 	Rev       string   `json:"rev,omitempty"`
 	Exe       string   `json:"exe,omitempty"` // Where the binary is built
 	Cmd       string   `json:"cmd,omitempty"` // Explicit execution argv if needed
-	Sparse    []string `json:"sparse,omitempty"`
+	Worktree  *Worktree `json:"worktree,omitempty"`
+}
+
+type Worktree struct {
+	Sparse []string `json:"sparse,omitempty"`
 }
 
 type Service struct {
