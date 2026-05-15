@@ -62,7 +62,7 @@ type Package struct {
 	Branch    string   `json:"branch,omitempty"`
 	Tag       string   `json:"tag,omitempty"`
 	Rev       string   `json:"rev,omitempty"`
-	Exe       string   `json:"exe,omitempty"` // Where the binary is built
+	Exe       string   `json:"exe,omitempty"` // build target, relative to the primary root (src dir / git clone)
 	Cmd       string   `json:"cmd,omitempty"` // Explicit execution argv if needed
 	Worktree  *Worktree `json:"worktree,omitempty"`
 }

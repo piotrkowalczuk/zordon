@@ -552,14 +552,13 @@ func defaultBuild(svc *alphasfile.Service, name, binDir string) string {
 	out := filepath.Join(binDir, name)
 	switch svc.Toolchain {
 	case alphasfile.ToolchainGo:
+		// cwd is the anchored workdir (checkout + Alphasfile offset); exe is
+		// the build target relative to it (default ".").
 		pkg := "."
 		if svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
 			pkg = svc.Package.Exe
 		}
-		if pkg != "." {
-			return fmt.Sprintf("go build -C %q -o %q .", pkg, out)
-		}
-		return fmt.Sprintf("go build -o %q .", out)
+		return fmt.Sprintf("go build -o %q %s", out, pkg)
 	case alphasfile.ToolchainRust:
 		return "cargo build --release"
 	case alphasfile.ToolchainRuby:

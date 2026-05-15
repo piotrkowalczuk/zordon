@@ -165,6 +165,34 @@ func (p Primary) Ensure(ctx context.Context, run Runner) error {
 // AddWorktree creates (or reuses) a working tree at dest, on branch
 // `branch`, starting from p.Ref (or the primary's HEAD). Reuses an existing
 // valid worktree as-is so parallel invocations stay stable across restarts.
+func absOr(p string) string {
+	if a, err := filepath.Abs(p); err == nil {
+		return a
+	}
+	return p
+}
+
+// branchWorktreePath returns the path of the worktree that currently has
+// `branch` checked out (refs/heads/<branch>), if any. Read-only query; runs
+// git directly (not via Runner) so the porcelain output can be parsed.
+func branchWorktreePath(ctx context.Context, gitDir, branch string) (string, bool) {
+	out, err := exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return "", false
+	}
+	want := "branch refs/heads/" + branch
+	var cur string
+	for _, line := range strings.Split(string(out), "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			cur = strings.TrimPrefix(line, "worktree ")
+		case line == want && cur != "":
+			return cur, true
+		}
+	}
+	return "", false
+}
+
 func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runner) error {
 	if !p.Worktreeable() {
 		return fmt.Errorf("service has no git/dir primary; not worktree-able")
@@ -184,10 +212,22 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 		start = "HEAD"
 	}
 	
-	// If the directory was manually deleted but Git still tracks it, add will fail.
-	// We attempt to remove the specific dangling reference first. It's safe to
-	// ignore the error since it will fail if the reference doesn't exist.
-	_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "remove", "--force", dest))
+	// If the directory was manually deleted but Git still tracks it, a later
+	// `worktree add` fails. `worktree prune` silently drops stale admin
+	// entries and is a no-op otherwise (unlike `worktree remove <dest>`,
+	// which prints a scary "fatal: not a working tree" when dest isn't one).
+	_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "prune"))
+
+	// prune only reclaims worktrees whose directory vanished. If the branch
+	// is still checked out at a *different* live path, `worktree add -B`
+	// would hard-fail with a raw git fatal — surface a clear error instead.
+	if other, ok := branchWorktreePath(ctx, gitDir, branch); ok {
+		if a, _ := filepath.Abs(other); filepath.Clean(a) != filepath.Clean(absOr(dest)) {
+			return fmt.Errorf("branch %q is already checked out at %s; "+
+				"remove that worktree first (e.g. `zordon worktree rm`) or point this one elsewhere",
+				branch, other)
+		}
+	}
 
 	if p.Worktree != nil && len(p.Worktree.Sparse) > 0 {
 		args := []string{"-C", gitDir, "worktree", "add", "--no-checkout", "--force", "-B", branch, dest, start}

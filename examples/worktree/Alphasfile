@@ -7,8 +7,8 @@
 # the Go toolchain builds it into fs::bin().
 
 service "go" "example" {
-  src = "../.."
-  exe = "./src/example"
+  src = "./src"
+  exe = "./example"
 
   vars = {
     port = net::pickport()
@@ -20,8 +20,8 @@ service "go" "example" {
     "-tag", "${pathhash()}",
   ]
 
-  worktree = {
-    sparse = ["./src/example"]
+  worktree {
+    sparse = ["./example"]
   }
 
   readiness {
@@ -33,3 +33,4 @@ service "go" "example" {
     failure_threshold = 50
   }
 }
+
