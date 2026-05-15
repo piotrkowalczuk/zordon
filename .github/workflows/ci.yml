@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Build Zordon
+        run: go build -o zordon ./cmd/zordon/
+      - name: Run Tests
+        run: go test ./...
+      - name: E2E Verification
+        run: |
+          chmod +x test_lifecycle.sh
+          ./test_lifecycle.sh
