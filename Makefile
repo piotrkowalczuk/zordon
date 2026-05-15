@@ -11,9 +11,11 @@ test:
 	go test ./...
 
 e2e: build
+	@sudo -v
 	@for dir in $(EXAMPLES); do \
 		echo "Running E2E for $$dir..."; \
 		(cd $$dir && \
+		sudo ../../bin/zordon sudo && \
 		if [ "$$(basename $$dir)" = "worktree" ]; then \
 			../../bin/zordon worktree create feature --agent && cd .zordon/worktrees/feature; \
 		fi && \
