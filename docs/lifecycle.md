@@ -36,12 +36,12 @@ For each service in `Configure` order:
      `git worktree add` into `…/src/<svc>` on branch `zordon/<wt>`
      (sparse cone if a `worktree { sparse = … }` block is set).
    - `crate`: no checkout.
-   - **Build** the toolchain default (or the resolved `build`
+   - **Build** the toolchain default (or `build { cmd = [...] }`
      override) into `fs::bin()` — see [Services](services/go.md).
 3. **Materialize files** — `file{}` blocks written atomically
    (temp + rename).
-4. **Start** the process (`cmd` if given, else the built binary), cwd =
-   the checkout, environment composed (see below).
+4. **Start** the process (`runtime { cmd }` if given, else the built
+   binary), cwd = the checkout, environment composed (see below).
 5. **Readiness** — a `readiness { http {…} }` probe gates READY;
    without one, "alive for `--stabilization`" (default `1s`) counts as
    ready.

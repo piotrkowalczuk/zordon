@@ -32,8 +32,8 @@ func TestExampleRubyResolves(t *testing.T) {
 	if app.Toolchain != ToolchainRuby {
 		t.Errorf("toolchain = %q, want ruby", app.Toolchain)
 	}
-	if app.Build() != "true" {
-		t.Errorf("build override = %q, want \"true\"", app.Build())
+	if got := strings.Join(app.BuildCmd(), " "); got != "true" {
+		t.Errorf("build cmd = %q, want \"true\"", got)
 	}
 	if got := strings.Join(app.Runtime.Command, " "); !strings.HasPrefix(got, "ruby examples/ruby/src/app/app.rb -addr 127.0.0.1:") {
 		t.Errorf("app cmd not resolved: %v", app.Runtime.Command)

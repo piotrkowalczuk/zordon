@@ -3,10 +3,13 @@
 ```hcl
 service "ruby" "ruby-service" {
   git = "github.com/niwasawa/ruby-sinatra-hello-world"
-  cmd = ["bundle", "exec", "ruby", "myapp.rb", "-p", "${self.vars.port}"]
 
   vars = { port = net::pickport() }
   log  { format = "plain"  filter = "^\\tfrom .*" }
+
+  runtime {
+    cmd = ["bundle", "exec", "ruby", "myapp.rb", "-p", "${self.vars.port}"]
+  }
 }
 ```
 
@@ -24,10 +27,10 @@ bundle install --path vendor/bundle
 ```
 
 Ruby has no single binary, so the run command is **not** inferred —
-give an explicit `cmd` (e.g. `bundle exec ...`, `rails server`,
-`rackup`). It runs with cwd = the per-invocation checkout, so
-`Gemfile`/app files resolve. Override the install step with
-`build = "..."` if `bundle install` isn't what you want.
+give an explicit `runtime { cmd = [...] }` (e.g. `bundle exec ...`,
+`rails server`, `rackup`). It runs with cwd = the per-invocation
+checkout, so `Gemfile`/app files resolve. Override the install step
+with `build { cmd = [...] }` if `bundle install` isn't what you want.
 
 ## Logs
 

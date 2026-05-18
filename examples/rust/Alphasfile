@@ -3,7 +3,10 @@ service "rust" "app" {
   exe = "./examples/rust/src/app"
 
   vars = { port = net::pickport() }
-  cmd  = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
 
   readiness {
     http {

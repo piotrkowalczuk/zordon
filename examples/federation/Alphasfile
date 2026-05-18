@@ -29,7 +29,9 @@ service "go" "caddy" {
     body = "# zordon federation root — children drop their vhosts here\n"
   }
 
-  cmd = ["${fs::bin()}/caddy", "run", "--config", self.file.caddyfile.path, "--adapter", "caddyfile", "--watch"]
+  runtime {
+    cmd = ["${fs::bin()}/caddy", "run", "--config", self.file.caddyfile.path, "--adapter", "caddyfile", "--watch"]
+  }
 
   readiness {
     http {
@@ -82,7 +84,9 @@ service "go" "coredns" {
     EOT
   }
 
-  cmd = ["${fs::bin()}/coredns", "-conf", self.file.corefile.path]
+  runtime {
+    cmd = ["${fs::bin()}/coredns", "-conf", self.file.corefile.path]
+  }
 
   sudo "resolver" {
     check  = "grep -qxF 'port ${self.vars.dns}' /etc/resolver/test 2>/dev/null"

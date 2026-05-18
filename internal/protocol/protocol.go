@@ -33,6 +33,9 @@ type ConfigureArgs struct {
 	AlphasfilePath string                 `json:"alphasfile_path"`
 	Alphasfile     *alphasfile.Alphasfile `json:"alphasfile"`
 	Failfast       bool                   `json:"failfast,omitempty"`
+	// Agent mirrors `zordon --agent`: when set, each service's
+	// `agent { env {} }` overlay is applied on top of build and run env.
+	Agent bool `json:"agent,omitempty"`
 	// ConfigHash identifies the (source bytes + parent context) that produced
 	// this configuration. zordon compares it against a running alpha's stored
 	// hash to detect drift in federation chains.

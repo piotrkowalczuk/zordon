@@ -46,7 +46,9 @@ service "go" "api" {
     path = "${tmpdir()}/.env"
     body = "DIR=${self.dir}\nHASH=${pathhash()}\n"
   }
-  cmd = ["./api", "-data", "${self.dir}/data"]
+  runtime {
+    cmd = ["./api", "-data", "${self.dir}/data"]
+  }
 }
 `
 	af := compile(t, src, nil)

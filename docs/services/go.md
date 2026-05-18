@@ -33,15 +33,19 @@ go build -o "<fs::bin>/<service-name>" <exe|.>
 ```
 
 The artifact lands in `fs::bin()` — outside the source checkout, so a
-`src` primary's working tree is never dirtied. With no `cmd`, zordon
-runs `<fs::bin>/<service-name>` (cwd = checkout, so relative paths like
-`config.file = "prometheus.yml"` resolve against the source). Set
-`cmd = [...]` only when you need an explicit argv (subcommands, custom
-flags); reference the binary as `${fs::bin()}/<name>`.
+`src` primary's working tree is never dirtied. With no `runtime { cmd }`,
+zordon runs `<fs::bin>/<service-name>` (cwd = checkout, so relative
+paths like `config.file = "prometheus.yml"` resolve against the
+source). Set `runtime { cmd = [...] }` only when you need an explicit
+argv (subcommands, custom flags); reference the binary as
+`${fs::bin()}/<name>`.
 
-Override the whole step with `build = "..."` (interpolated; runs with
-cwd = checkout) if the default doesn't fit (codegen, ldflags, etc.):
+Override the whole step with `build { cmd = [...] }` (argv, interpolated,
+cwd = checkout) if the default doesn't fit (codegen, ldflags, etc.) —
+wrap in `sh -lc` when you need shell expansion:
 
 ```hcl
-build = "go build -ldflags \"-X main.Tag=${pathhash()}\" -o ${fs::bin()}/app ./cmd/app"
+build {
+  cmd = ["go", "build", "-ldflags", "-X main.Tag=${pathhash()}", "-o", "${fs::bin()}/app", "./cmd/app"]
+}
 ```

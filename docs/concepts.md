@@ -85,8 +85,9 @@ static document into a description that adapts to *this* run.
 
 Because values reference each other, order is not the file's order — it
 is a **graph**. Inside a service `vars`, each `file`, `arguments`,
-`env`, `dotenv`, `cmd`, `build` are sequenced by what they actually
-reference; across services by `service.*` references. You declare
+`env`, `dotenv`, and the `build`/`runtime`/`agent` phase `cmd`/`env`
+are sequenced by what they actually reference; across services by
+`service.*` references. You declare
 relationships; the graph decides evaluation order, and a true cycle is
 an error, never a hang.
 

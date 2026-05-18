@@ -17,7 +17,9 @@ service "go" "cache" {
     EOT
   }
 
-  cmd = ["${fs::bin()}/cache", "-addr", "127.0.0.1:${self.vars.port}"]
+  runtime {
+    cmd = ["${fs::bin()}/cache", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
 
   readiness {
     http {
@@ -42,14 +44,23 @@ service "go" "api" {
     label = "api-${pathhash()}"
   }
 
-  build = "go build -ldflags \"-X main.Tag=${pathhash()}\" -o ${fs::bin()}/app ./examples/interpolation/src/app"
+  build {
+    cmd = [
+      "go", "build",
+      "-ldflags", "-X main.Tag=${pathhash()}",
+      "-o", "${fs::bin()}/app",
+      "./examples/interpolation/src/app",
+    ]
+  }
 
-  cmd = [
-    "${fs::bin()}/app",
-    "-addr", "127.0.0.1:${self.vars.port}",
-    "-cache", "127.0.0.1:${service.go.cache.vars.port}",
-    "-conf", "${self.file.conf.path}",
-  ]
+  runtime {
+    cmd = [
+      "${fs::bin()}/app",
+      "-addr", "127.0.0.1:${self.vars.port}",
+      "-cache", "127.0.0.1:${service.go.cache.vars.port}",
+      "-conf", "${self.file.conf.path}",
+    ]
+  }
 
   file "appenv" {
     path = "${fs::tmp()}/api.env"

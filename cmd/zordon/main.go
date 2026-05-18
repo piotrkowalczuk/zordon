@@ -45,7 +45,7 @@ func main() {
 		ShortHelp: "ensure alpha is running and push the Alphasfile config",
 		Flags:     startFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runStart(ctx, zlog.New(os.Stderr, *agent), *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose)
+			return runStart(ctx, zlog.New(os.Stderr, *agent), *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent)
 		},
 	}
 
@@ -141,7 +141,7 @@ func walkUp() (string, error) {
 	}
 }
 
-func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, hash string, parentDotenv []string, af *alphasfile.Alphasfile, failfast bool) error {
+func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, hash string, parentDotenv []string, af *alphasfile.Alphasfile, failfast, agent bool) error {
 	log.Info("alpha", "Understood, Zordon!")
 
 	conn, err := control.Dial(sock, 1*time.Second)
@@ -162,6 +162,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, hash str
 			AlphasfilePath: afPath,
 			Alphasfile:     af,
 			Failfast:       failfast,
+			Agent:          agent,
 			ConfigHash:     hash,
 			ParentDotenv:   parentDotenv,
 		},

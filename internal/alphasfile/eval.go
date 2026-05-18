@@ -232,13 +232,45 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 
 	// Sinks: consume the fully-populated self; order among them is
 	// irrelevant since nothing reads them back.
-	command, err := r.evalStrList(sb.Cmd, self, "cmd")
-	if err != nil {
-		return err
+	var command []string
+	if sb.Runtime != nil && sb.Runtime.Cmd != nil {
+		command, err = r.evalStrList(sb.Runtime.Cmd, self, "runtime.cmd")
+		if err != nil {
+			return err
+		}
 	}
-	build, err := r.evalStr(sb.Build, self, "build")
-	if err != nil {
-		return err
+	var buildCmd []string
+	if sb.Build != nil && sb.Build.Cmd != nil {
+		buildCmd, err = r.evalStrList(sb.Build.Cmd, self, "build.cmd")
+		if err != nil {
+			return err
+		}
+	}
+	phaseEnv := func(expr hcl.Expression, label string) (map[string]string, error) {
+		if expr == nil {
+			return nil, nil
+		}
+		m, e := r.evalMap(expr, self, label)
+		if e != nil {
+			return nil, e
+		}
+		return toStringMap(m), nil
+	}
+	var buildEnv, runEnv, agentEnv map[string]string
+	if sb.Build != nil {
+		if buildEnv, err = phaseEnv(sb.Build.Env, "build.env"); err != nil {
+			return err
+		}
+	}
+	if sb.Runtime != nil {
+		if runEnv, err = phaseEnv(sb.Runtime.Env, "runtime.env"); err != nil {
+			return err
+		}
+	}
+	if sb.Agent != nil {
+		if agentEnv, err = phaseEnv(sb.Agent.Env, "agent.env"); err != nil {
+			return err
+		}
 	}
 	dotenv, err := r.evalStr(sb.Dotenv, self, "dotenv")
 	if err != nil {
@@ -295,6 +327,9 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		Vars:           varsVal,
 		Arguments:      args,
 		Env:            toStringMap(envMap),
+		BuildEnv:       buildEnv,
+		RunEnv:         runEnv,
+		AgentEnv:       agentEnv,
 		Dotenv:         dotenv,
 		Command:        command,
 		Sudo:           sudo,
@@ -381,7 +416,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 			Features:  features,
 			Exe:       sb.Exe,
 			Bin:       sb.Bin,
-			Build:     build,
+			BuildCmd:  buildCmd,
 			Cmd:       strings.Join(command, " "),
 			Worktree:  worktree,
 			// In-place: src-only in the "main" worktree → alpha builds/runs

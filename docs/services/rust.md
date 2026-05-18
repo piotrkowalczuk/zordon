@@ -56,5 +56,5 @@ CARGO_TARGET_DIR=<cache> cargo install --path "<exe|.>" --root <stateDir> \
 `fs::bin()`, so the run path `<fs::bin>/<service-name>` finds it with
 no copy step. A stable `CARGO_TARGET_DIR` (under
 `.zordon/cache/rust/target`) keeps compilation incremental across
-runs. Override with `build = "..."` if you need something cargo
+runs. Override with `build { cmd = [...] }` if you need something cargo
 install can't express.

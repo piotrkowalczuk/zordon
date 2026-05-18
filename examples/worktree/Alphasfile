@@ -6,11 +6,13 @@ service "go" "serviceA" {
     port = net::pickport()
   }
 
-  cmd = [
-    "${fs::bin()}/serviceA",
-    "-addr", "127.0.0.1:${self.vars.port}",
-    "-tag", "${pathhash()}",
-  ]
+  runtime {
+    cmd = [
+      "${fs::bin()}/serviceA",
+      "-addr", "127.0.0.1:${self.vars.port}",
+      "-tag", "${pathhash()}",
+    ]
+  }
 
   print = "http://127.0.0.1:${self.vars.port}/  (serviceA, worktree ${pathhash()})"
 
@@ -36,11 +38,13 @@ service "go" "serviceB" {
     port = net::pickport()
   }
 
-  cmd = [
-    "${fs::bin()}/serviceB",
-    "-addr", "127.0.0.1:${self.vars.port}",
-    "-tag", "${pathhash()}",
-  ]
+  runtime {
+    cmd = [
+      "${fs::bin()}/serviceB",
+      "-addr", "127.0.0.1:${self.vars.port}",
+      "-tag", "${pathhash()}",
+    ]
+  }
 
   print = "http://127.0.0.1:${self.vars.port}/  (serviceB, worktree ${pathhash()})"
 
@@ -66,11 +70,13 @@ service "go" "serviceC" {
     port = net::pickport()
   }
 
-  cmd = [
-    "${fs::bin()}/serviceC",
-    "-addr", "127.0.0.1:${self.vars.port}",
-    "-tag", "${pathhash()}",
-  ]
+  runtime {
+    cmd = [
+      "${fs::bin()}/serviceC",
+      "-addr", "127.0.0.1:${self.vars.port}",
+      "-tag", "${pathhash()}",
+    ]
+  }
 
   print = "http://127.0.0.1:${self.vars.port}/  (serviceC, worktree ${pathhash()})"
 

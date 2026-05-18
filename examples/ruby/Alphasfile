@@ -1,9 +1,15 @@
 service "ruby" "app" {
-  src   = "../.."
-  build = "true"
+  src = "../.."
+
+  build {
+    cmd = ["true"]
+  }
 
   vars = { port = net::pickport() }
-  cmd  = ["ruby", "examples/ruby/src/app/app.rb", "-addr", "127.0.0.1:${self.vars.port}"]
+
+  runtime {
+    cmd = ["ruby", "examples/ruby/src/app/app.rb", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
 
   readiness {
     http {

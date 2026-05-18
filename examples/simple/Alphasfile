@@ -69,8 +69,11 @@ service "go" "prometheus" {
 }
 
 service "ruby" "ruby-service" {
-  git   = "github.com/niwasawa/ruby-sinatra-hello-world"
-  build = "bundle install --path vendor/bundle"
+  git = "github.com/niwasawa/ruby-sinatra-hello-world"
+
+  build {
+    cmd = ["bundle", "install", "--path", "vendor/bundle"]
+  }
 
   vars = {
     port = net::pickport()
@@ -85,7 +88,9 @@ service "ruby" "ruby-service" {
     filter = "^\\tfrom |^/Users/.*|:in `.*'|:in `<.*>'"
   }
 
-  cmd = ["bundle", "exec", "rackup", "-p", "${self.vars.port}", "-o", "0.0.0.0", "config.ru"]
+  runtime {
+    cmd = ["bundle", "exec", "rackup", "-p", "${self.vars.port}", "-o", "0.0.0.0", "config.ru"]
+  }
 
   readiness {
     http {

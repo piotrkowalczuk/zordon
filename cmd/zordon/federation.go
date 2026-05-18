@@ -139,7 +139,7 @@ func resolveChain(ctx context.Context) ([]*level, error) {
 	return out, nil
 }
 
-func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose bool) error {
+func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent bool) error {
 	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
 
 	chain, invFile, err := discoverChain()
@@ -263,7 +263,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			cancel()
 			return fmt.Errorf("%s: waiting for alpha socket: %w", afPath, err)
 		}
-		if err := pushConfigure(ctxLevel, log, sock, afPath, inv.Hash, parentDotenv, af, failfast); err != nil {
+		if err := pushConfigure(ctxLevel, log, sock, afPath, inv.Hash, parentDotenv, af, failfast, agent); err != nil {
 			cancel()
 			return fmt.Errorf("%s: %w", afPath, err)
 		}

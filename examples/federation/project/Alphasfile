@@ -1,8 +1,11 @@
 service "go" "prometheus" {
   git        = "github.com/prometheus/prometheus"
   tag        = "v3.11.3"
-  build      = "go build -o ./prometheus ./cmd/prometheus"
   doubleDash = true
+
+  build {
+    cmd = ["go", "build", "-o", "./prometheus", "./cmd/prometheus"]
+  }
 
   vars = {
     port    = net::pickport()

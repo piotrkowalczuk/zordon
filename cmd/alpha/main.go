@@ -69,18 +69,20 @@ type alphaState struct {
 	alphasfilePath string
 	configHash     string
 	parentDotenv   []string // file-level dotenv paths inherited from federation parents
+	agentMode      bool     // configured via `zordon --agent`: apply agent{} env overlay
 	config         *alphasfile.Alphasfile
 	running        map[string]*exec.Cmd
 	readiness      map[string]string // service name -> readiness state ("probing", "ready", "failed")
 	files          []string          // absolute paths of file{} outputs to unlink on shutdown
 }
 
-func (s *alphaState) configure(path, hash string, parentDotenv []string, af *alphasfile.Alphasfile) {
+func (s *alphaState) configure(path, hash string, parentDotenv []string, agent bool, af *alphasfile.Alphasfile) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.alphasfilePath = path
 	s.configHash = hash
 	s.parentDotenv = parentDotenv
+	s.agentMode = agent
 	s.config = af
 	s.readiness = make(map[string]string)
 }
@@ -454,7 +456,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		state.stopServices(toStop, cfg.shutdownGrace, log)
 	}
 
-	state.configure(req.Configure.AlphasfilePath, req.Configure.ConfigHash, req.Configure.ParentDotenv, newConfig)
+	state.configure(req.Configure.AlphasfilePath, req.Configure.ConfigHash, req.Configure.ParentDotenv, req.Configure.Agent, newConfig)
 	services := newConfig.All()
 	files := newConfig.AllFiles()
 	log.Info("alpha", "configured from %s (%d services, %d files, failfast=%v), starting bringup",
@@ -491,7 +493,11 @@ func bringupService(svc *alphasfile.Service, state *alphaState, cfg bringupConfi
 	log.Info("alpha", "bringup service=%s toolchain=%s", name, svc.Toolchain)
 	stream.Send(&protocol.Event{Kind: protocol.EventServiceStart, Service: name})
 
-	repoDir, err := prepare(svc, name, stream, log)
+	state.mu.RLock()
+	agent := state.agentMode
+	state.mu.RUnlock()
+
+	repoDir, err := prepare(svc, name, agent, stream, log)
 	if err != nil {
 		log.Error("alpha", "prepare %s: %v", name, err)
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
@@ -511,7 +517,7 @@ func bringupService(svc *alphasfile.Service, state *alphaState, cfg bringupConfi
 		envFiles = append(envFiles, svc.Runtime.Dotenv)
 	}
 
-	cmd, err := buildCmd(svc, repoDir, envFiles)
+	cmd, err := buildCmd(svc, repoDir, envFiles, agent)
 	if err != nil {
 		log.Error("alpha", "build cmd %s: %v", name, err)
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
@@ -704,7 +710,33 @@ func serviceEnv(envFiles []string, env map[string]string) []string {
 	return out
 }
 
-func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string) (*exec.Cmd, error) {
+// mergeEnv overlays maps left→right (later entries win); nil maps skipped.
+func mergeEnv(maps ...map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, m := range maps {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// phaseEnv is the explicit env map for one phase: the service-wide
+// `env {}` base, then the phase overlay (build/runtime), then the
+// `agent {}` overlay when alpha runs in --agent mode (each later layer
+// overrides earlier keys).
+func phaseEnv(svc *alphasfile.Service, phase map[string]string, agent bool) map[string]string {
+	if svc.Runtime == nil {
+		return nil
+	}
+	var ag map[string]string
+	if agent {
+		ag = svc.Runtime.AgentEnv
+	}
+	return mergeEnv(svc.Runtime.Env, phase, ag)
+}
+
+func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent bool) (*exec.Cmd, error) {
 	name := svc.Name()
 	if name == "" {
 		return nil, errors.New("service has no name")
@@ -731,12 +763,12 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string) (*exe
 	if checkout != "" {
 		cmd.Dir = checkout
 	}
-	var envMap map[string]string
+	var runEnv map[string]string
 	if svc.Runtime != nil {
-		envMap = svc.Runtime.Env
+		runEnv = phaseEnv(svc, svc.Runtime.RunEnv, agent)
 	}
-	if len(envFiles) > 0 || len(envMap) > 0 {
-		cmd.Env = serviceEnv(envFiles, envMap)
+	if len(envFiles) > 0 || len(runEnv) > 0 {
+		cmd.Env = serviceEnv(envFiles, runEnv)
 	}
 	return cmd, nil
 }
@@ -823,7 +855,7 @@ func defaultBuild(svc *alphasfile.Service, name, binDir string) string {
 //   - crate:   `cargo install <crate>` (no checkout), cwd = "".
 // Every service must be one of these (the resolver rejects sourceless
 // services); there is no prebuilt-$PATH path.
-func prepare(svc *alphasfile.Service, name string, stream *safeEncoder, log *zlog.Logger) (string, error) {
+func prepare(svc *alphasfile.Service, name string, agent bool, stream *safeEncoder, log *zlog.Logger) (string, error) {
 	if svc.Package == nil || !svc.Buildable() {
 		return "", nil
 	}
@@ -888,14 +920,24 @@ func prepare(svc *alphasfile.Service, name string, stream *safeEncoder, log *zlo
 		log.Info("alpha", "prepare %s: use-only %s (install)", name, svc.Package.Install)
 	}
 
-	build := strings.TrimSpace(svc.Build())
-	if build == "" {
-		build = defaultBuild(svc, name, binDir)
+	// Explicit `build { cmd = [...] }` is exec'd as argv (no shell). With
+	// no build block, the toolchain default runs via /bin/sh (it relies
+	// on shell: env-prefixed `GOBIN=… go install`, `&&`, etc).
+	var c *exec.Cmd
+	if bc := svc.BuildCmd(); len(bc) > 0 {
+		log.Info("alpha", "prepare %s: build (%v)", name, bc)
+		c = exec.Command(bc[0], bc[1:]...)
+	} else if def := strings.TrimSpace(defaultBuild(svc, name, binDir)); def != "" {
+		log.Info("alpha", "prepare %s: build (%s)", name, def)
+		c = exec.Command("/bin/sh", "-c", def)
 	}
-	if build != "" {
-		log.Info("alpha", "prepare %s: build (%s)", name, build)
-		c := exec.Command("/bin/sh", "-c", build)
+	if c != nil {
 		c.Dir = dest // "" ⇒ alpha's cwd; fine for `cargo install <crate>`
+		if svc.Runtime != nil {
+			if be := phaseEnv(svc, svc.Runtime.BuildEnv, agent); len(be) > 0 {
+				c.Env = serviceEnv(nil, be)
+			}
+		}
 		if err := runner(ctx, c); err != nil {
 			return "", fmt.Errorf("build: %w", err)
 		}

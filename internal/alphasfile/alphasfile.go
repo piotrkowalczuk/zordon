@@ -46,7 +46,15 @@ type RuntimeConfig struct {
 	Vars           map[string]any    `json:"vars,omitempty"`
 	Arguments      map[string]any    `json:"arguments,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`    // explicit env (overrides dotenv)
-	Dotenv         string            `json:"dotenv,omitempty"` // path to a .env loaded before Env
+	// Phase-scoped env. BuildEnv is injected only while zordon builds the
+	// service (go build / cargo install / bundle); RunEnv only into the
+	// running process; AgentEnv is an override layer applied on top (for
+	// build and run) when alpha was configured with --agent — lets an AI
+	// caller e.g. turn down log verbosity without touching the Alphasfile.
+	BuildEnv map[string]string `json:"build_env,omitempty"`
+	RunEnv   map[string]string `json:"run_env,omitempty"`
+	AgentEnv map[string]string `json:"agent_env,omitempty"`
+	Dotenv   string            `json:"dotenv,omitempty"` // path to a .env loaded before Env
 	Command        []string          `json:"command,omitempty"`
 	Sudo           []*SudoStep    `json:"sudo,omitempty"`
 	Files          []*File        `json:"files,omitempty"`
@@ -76,8 +84,8 @@ type Package struct {
 	Features  []string `json:"features,omitempty"`
 	Exe       string   `json:"exe,omitempty"`   // relative subdir within git/src where the build target lives ("" = project root)
 	Bin       string   `json:"bin,omitempty"`   // rust: cargo --bin target (multi-bin crates)
-	Build     string   `json:"build,omitempty"` // resolved build override ("" ⇒ toolchain default)
-	Cmd       string   `json:"cmd,omitempty"`   // Explicit execution argv if needed
+	BuildCmd  []string `json:"build_cmd,omitempty"` // explicit build argv (from build{cmd}); empty ⇒ toolchain default
+	Cmd       string   `json:"cmd,omitempty"`       // Explicit execution argv if needed
 	Worktree  *Worktree `json:"worktree,omitempty"`
 	// InPlace: src-only in the "main" worktree — build/run from src as-is,
 	// no git worktree add, no HEAD reset (the edit→start loop).
@@ -242,13 +250,13 @@ func (s *Service) Buildable() bool {
 	return s.Worktreeable() || s.UseOnly()
 }
 
-// Build returns the resolved build-command override, or "" for the
-// toolchain default.
-func (s *Service) Build() string {
+// BuildCmd returns the explicit build argv (from `build { cmd = [...] }`),
+// or nil for the toolchain default.
+func (s *Service) BuildCmd() []string {
 	if s.Package == nil {
-		return ""
+		return nil
 	}
-	return s.Package.Build
+	return s.Package.BuildCmd
 }
 
 // Flags renders RuntimeConfig.Arguments into argv flags. Format follows
@@ -356,18 +364,53 @@ type serviceBlock struct {
 	Arguments hcl.Expression `hcl:"arguments,optional"`
 	Env       hcl.Expression `hcl:"env,optional"`
 	Dotenv    hcl.Expression `hcl:"dotenv,optional"`
-	Cmd       hcl.Expression `hcl:"cmd,optional"`
-	Build     hcl.Expression `hcl:"build,optional"`
 	// Print is an extra line shown per service in `zordon status` —
 	// interpolated, so e.g. a Go service can surface its live endpoint:
 	// print = "http://127.0.0.1:${self.vars.port}/". URLs are emitted as
 	// clickable terminal hyperlinks.
 	Print hcl.Expression `hcl:"print,optional"`
 
+	// Phase blocks — each a full phase, not just an env container:
+	// `cmd` (argv list) + `env` (interpolated, joins the DAG). `build`
+	// is the build step (empty ⇒ toolchain default); `runtime` is the
+	// run step (its `cmd` is the service argv — there is no top-level
+	// `cmd`); `agent` is an env overlay applied in `--agent` mode (it
+	// has no `cmd`).
+	Build   *buildBlock   `hcl:"build,block"`
+	Runtime *runtimeBlock `hcl:"runtime,block"`
+	Agent   *agentBlock   `hcl:"agent,block"`
+
 	Worktree  *worktreeBlock `hcl:"worktree,block"`
 	Sudo      []*sudoBlock   `hcl:"sudo,block"`
 	Files     []*fileBlock   `hcl:"file,block"`
 	Readiness *probeSpec     `hcl:"readiness,block"`
+}
+
+// build/runtime/agent are distinct phases with distinct payloads (not
+// one generic block): `cmd` is an argv list — no implicit shell, use
+// ["sh","-lc","..."] when you need one — and `env` is interpolated,
+// joining the intra-service DAG like any other field.
+
+// buildBlock is the build step: `cmd` is the build command (empty ⇒
+// toolchain default); `env` is injected only while building
+// (go build / cargo install / bundle), never into the running process.
+type buildBlock struct {
+	Cmd hcl.Expression `hcl:"cmd,optional"`
+	Env hcl.Expression `hcl:"env,optional"`
+}
+
+// runtimeBlock is the run step: `cmd` is the service argv (there is no
+// top-level `cmd`); `env` is the running process env.
+type runtimeBlock struct {
+	Cmd hcl.Expression `hcl:"cmd,optional"`
+	Env hcl.Expression `hcl:"env,optional"`
+}
+
+// agentBlock overlays `env` on top of build AND runtime, but only when
+// alpha is configured with `zordon --agent` (an AI/automation caller).
+// It has no `cmd` — it never starts anything, only adjusts env.
+type agentBlock struct {
+	Env hcl.Expression `hcl:"env,optional"`
 }
 
 type worktreeBlock struct {

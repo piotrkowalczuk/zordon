@@ -43,7 +43,10 @@ service "go" "prometheus" {
 service "go" "my-app" {
   src = "~/code/my-app"   # your own checkout; zordon never writes to the primary
   exe = "."
-  cmd = ["${fs::bin()}/my-app", "-addr", ":8080"]
+
+  runtime {
+    cmd = ["${fs::bin()}/my-app", "-addr", ":8080"]
+  }
 }
 ```
 
@@ -66,10 +69,12 @@ toolchain defaults — keep the manifest small):
 `branch` / `tag` / `rev` pin the revision. The build is the toolchain
 default run **in the checkout** — Go: `go build` of `exe` into
 `fs::bin()` (out-of-tree, so it never dirties a `src` worktree); Rust:
-`cargo build --release`; Ruby: `bundle install`. It then runs from the
-checkout; with no `cmd` zordon runs the built binary, and `cmd = [...]`
-is an explicit argv override (needed only when the toolchain has more
-than one way to run it, e.g. `bundle exec ...` or `caddy run ...`).
+`cargo build --release`; Ruby: `bundle install`. Override it with
+`build { cmd = [...] }` (see [Phases](#phases-build-runtime-agent)).
+It runs from the checkout; with no `runtime { cmd }` zordon runs the
+built binary, and `runtime { cmd = [...] }` is an explicit argv override
+(needed only when the toolchain has more than one way to run it, e.g.
+`bundle exec ...` or `caddy run ...`).
 
 This is what makes parallel **worktrees** possible — see
 [Worktrees](worktrees.md).
@@ -81,6 +86,51 @@ This is what makes parallel **worktrees** possible — see
 `space_separated = true` for `-key value` (Ruby is always space-separated).
 Quote keys that contain dots: `"config.file" = "..."` — bare dotted keys
 parse as nested objects in HCL2.
+
+### Phases: build / runtime / agent
+
+`build`, `runtime` and `agent` are full lifecycle phases (not generic
+containers). `build` and `runtime` each take a `cmd` (argv list — no
+implicit shell) and an `env` map (interpolated, DAG-ordered like any
+other field). `agent` takes only `env`.
+
+```hcl
+service "go" "app" {
+  src = "../.."
+
+  build {
+    env = { BUILD_TAG = "release" }
+    # argv; wrap in sh -lc when you need a shell (here, $BUILD_TAG)
+    cmd = ["sh", "-lc", "go build -ldflags \"-X main.BuiltBy=$BUILD_TAG\" -o ${fs::bin()}/app ./cmd/app"]
+  }
+
+  runtime {
+    env = { LOG_LEVEL = "info" }
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  agent {
+    env = { LOG_LEVEL = "error" }   # only when `zordon --agent`
+  }
+}
+```
+
+- **`build`** — `cmd` is the build command (omit the block for the
+  toolchain default; an explicit `cmd` is exec'd as argv, no shell).
+  `build.env` is injected only while building (`go build` /
+  `cargo install` / `bundle`) and does **not** reach the running
+  process — bake what you need in at build time (e.g. ldflags).
+- **`runtime`** — `cmd` is the service argv (there is no top-level
+  `cmd`); `runtime.env` is the running process env.
+- **`agent`** — `env` only (it starts nothing). Overlaid on top of
+  *both* build and runtime env, but only when alpha was started with
+  `zordon --agent`. Use it so an automated/AI caller can e.g. quiet a
+  service without editing the Alphasfile.
+
+Layering (later wins): `env {}` (service-wide base) → the phase's
+`build`/`runtime` env → `agent` env (in `--agent` mode). This is
+independent of the **process/dotenv** chain documented in
+[Lifecycle](lifecycle.md), which still feeds the running process.
 
 ### Readiness probes
 

@@ -133,7 +133,16 @@ func cycleMembers(indeg map[string]int) string {
 // exprsOf returns every HCL expression in a service that may carry a
 // cross-service reference. Used to build the dep graph.
 func exprsOf(s *serviceBlock) []hcl.Expression {
-	out := []hcl.Expression{s.Vars, s.Arguments, s.Env, s.Dotenv, s.Cmd, s.Build}
+	out := []hcl.Expression{s.Vars, s.Arguments, s.Env, s.Dotenv}
+	if s.Build != nil {
+		out = append(out, s.Build.Env, s.Build.Cmd)
+	}
+	if s.Runtime != nil {
+		out = append(out, s.Runtime.Env, s.Runtime.Cmd)
+	}
+	if s.Agent != nil {
+		out = append(out, s.Agent.Env)
+	}
 	for _, sb := range s.Sudo {
 		out = append(out, sb.Check, sb.Apply, sb.Verify)
 	}

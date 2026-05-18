@@ -1,0 +1,36 @@
+service "go" "app" {
+  src = "../.."
+
+  vars = { port = net::pickport() }
+
+  build {
+    env = {
+      BUILD_TAG = "compiled-with-build-env"
+    }
+    # argv, no implicit shell — wrap in sh -lc to expand $BUILD_TAG
+    cmd = ["sh", "-lc", "go build -ldflags \"-X main.BuiltBy=$BUILD_TAG\" -o ${fs::bin()}/app ./examples/phases/src/app"]
+  }
+
+  runtime {
+    env = {
+      RUNTIME_ONLY = "runtime-value"
+      VERBOSITY    = "loud"
+    }
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  agent {
+    env = {
+      VERBOSITY = "quiet"
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
