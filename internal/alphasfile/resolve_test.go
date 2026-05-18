@@ -251,3 +251,4 @@ service "go" "dns" {
 		t.Errorf("sudo step not resolved: %+v", st)
 	}
 }
+

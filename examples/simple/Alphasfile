@@ -71,9 +71,11 @@ service "go" "prometheus" {
 service "ruby" "ruby-service" {
   git = "github.com/niwasawa/ruby-sinatra-hello-world"
 
-  build {
-    cmd = ["bundle", "install", "--path", "vendor/bundle"]
-  }
+  # No build {} — the toolchain default for ruby is
+  # `bundle config set --local path vendor/bundle && bundle install`,
+  # which is exactly what this service needs. Bundler 2.x removed the
+  # `--path` flag; the new form writes .bundle/config so `bundle exec`
+  # at runtime finds the gems too.
 
   vars = {
     port = net::pickport()
@@ -89,7 +91,11 @@ service "ruby" "ruby-service" {
   }
 
   runtime {
-    cmd = ["bundle", "exec", "rackup", "-p", "${self.vars.port}", "-o", "0.0.0.0", "config.ru"]
+    # `rackup` was extracted from rack 3.x into its own gem and the
+    # Sinatra-hello-world Gemfile doesn't declare it — use puma (already
+    # a dependency) to serve config.ru directly. `-b tcp://host:port`
+    # binds explicitly, no separate -o.
+    cmd = ["bundle", "exec", "puma", "-b", "tcp://0.0.0.0:${self.vars.port}", "config.ru"]
   }
 
   readiness {

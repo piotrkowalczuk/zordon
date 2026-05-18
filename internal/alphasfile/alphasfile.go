@@ -35,6 +35,12 @@ const (
 type LogConfig struct {
 	Format string `json:"format,omitempty"`
 	Filter string `json:"filter,omitempty"`
+	// TTY overrides the toolchain-derived "give the child a PTY?" choice.
+	// nil = use default for the toolchain (currently only ruby = true).
+	// Use a PTY when the runtime block-buffers stdout under a pipe (Ruby)
+	// and you want live log lines to flow without source-code changes.
+	// The cost is one PTY per service plus a few µs/line for line discipline.
+	TTY *bool `json:"tty,omitempty"`
 }
 
 type RuntimeConfig struct {
@@ -259,6 +265,29 @@ func (s *Service) BuildCmd() []string {
 	return s.Package.BuildCmd
 }
 
+// toolchainDefaults holds the per-toolchain answers to "what should this
+// field be when the user didn't say?". One place to look when adding a new
+// toolchain; one place to look when answering "why did my service get X?".
+//
+// Resolved during eval, baked into the wire-stable *Service so alpha never
+// needs to know about toolchain identities — it just reads the resolved
+// fields. Add new defaults here as they appear (env nudges for python,
+// readiness defaults, etc.).
+type toolchainDefaults struct {
+	// TTY: hand the child a PTY for stdout so it line-buffers naturally.
+	//   - go:   false (os.Stdout writes through to write(2))
+	//   - rust: false (println! uses LineWriter, flushes on '\n')
+	//   - ruby: true  (STDOUT.sync defaults to false on pipes — startup
+	//                  logs would stay buffered until process exit)
+	TTY bool
+}
+
+var toolchainDefaultsFor = map[string]toolchainDefaults{
+	ToolchainGo:   {TTY: false},
+	ToolchainRust: {TTY: false},
+	ToolchainRuby: {TTY: true},
+}
+
 // Flags renders RuntimeConfig.Arguments into argv flags. Format follows
 // DoubleDash / SpaceSeparated; Ruby is always space-separated.
 func (s *Service) Flags() []string {
@@ -428,6 +457,7 @@ type sudoBlock struct {
 type logBlock struct {
 	Format string `hcl:"format,optional"`
 	Filter string `hcl:"filter,optional"`
+	TTY    *bool  `hcl:"tty,optional"`
 }
 
 type probeSpec struct {

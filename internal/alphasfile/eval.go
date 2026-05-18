@@ -340,8 +340,18 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		BinDir:         r.inv.BinDir(),
 		Print:          printLine,
 	}
+	// Resolve per-toolchain defaults so the wire-stable Service is fully
+	// populated — alpha can read rt.Log.TTY without knowing what
+	// "ruby" means.
+	rt.Log = &LogConfig{}
 	if sb.Log != nil {
-		rt.Log = &LogConfig{Format: sb.Log.Format, Filter: sb.Log.Filter}
+		rt.Log.Format = sb.Log.Format
+		rt.Log.Filter = sb.Log.Filter
+		rt.Log.TTY = sb.Log.TTY
+	}
+	if rt.Log.TTY == nil {
+		def := toolchainDefaultsFor[sb.Toolchain].TTY
+		rt.Log.TTY = &def
 	}
 	if sb.Readiness != nil {
 		p, err := compileProbe(sb.Readiness, probePort)

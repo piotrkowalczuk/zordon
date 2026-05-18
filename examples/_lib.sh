@@ -78,12 +78,18 @@ reset_state() {
 }
 
 # start: bring the stack up; auto-stop on exit.
+#
+# alpha-log is pinned to <example>/.zordon/alpha.log so tests can assert
+# against it without colliding with other examples or stale runs in
+# /tmp/alpha.log. reset_state wipes .zordon/ first so the file starts empty.
+ALPHA_LOG="$EXROOT/.zordon/alpha.log"
 start() {
 	build_bins
 	trap 'zordon stop --agent >/dev/null 2>&1 || true; reap' EXIT
 	reset_state main
+	mkdir -p "$(dirname "$ALPHA_LOG")"
 	info "zordon start"
-	zordon start --agent --timeout 90s
+	zordon start --agent --timeout 90s --alpha-log "$ALPHA_LOG"
 }
 
 # port_of <argv-substring>: first `-addr 127.0.0.1:<port>` of a running
@@ -115,6 +121,20 @@ assert_contains() { # <haystack> <needle> [label]
 	case "$1" in
 		*"$2"*) pass "${3:-assertion}: contains '$2'";;
 		*) fail "${3:-assertion}: expected to contain '$2', got: $1";;
+	esac
+}
+
+# assert_log_contains <needle> [label]: tail of the alpha log file
+# (per-example, set by `start`) must contain <needle>. Used to verify
+# service stdout actually made it through alpha without being eaten by
+# userspace buffering — the failure mode that motivated the PTY work.
+assert_log_contains() {
+	local needle="$1" label="${2:-alpha log}" log
+	[ -r "$ALPHA_LOG" ] || fail "$label: alpha log not found at $ALPHA_LOG"
+	log="$(cat "$ALPHA_LOG")"
+	case "$log" in
+		*"$needle"*) pass "$label: contains '$needle'";;
+		*) fail "$label: expected to contain '$needle'. Log tail:\n$(tail -40 "$ALPHA_LOG")";;
 	esac
 }
 
