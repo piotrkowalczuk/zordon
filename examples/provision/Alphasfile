@@ -1,3 +1,5 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
 # examples/provision — bringup-time actions (check/cmd/verify) chained
 # via `after`, plus a detached fire-and-forget provision that runs
 # without blocking EventDone.

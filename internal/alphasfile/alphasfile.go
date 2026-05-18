@@ -369,6 +369,51 @@ type ProvisionStep struct {
 type Alphasfile struct {
 	Dotenv   string     `json:"dotenv,omitempty"` // file-level .env, applied under every service's env
 	Services []*Service `json:"services,omitempty"`
+	// Toolchain pins the version+env of each language toolchain
+	// alpha materializes via mise. Keyed by the same string as
+	// service.Toolchain (`go`, `rust`, `ruby`). Federation children
+	// inherit from parents; the resolver merges down the chain with
+	// child overriding on collision. Empty/absent = use whatever
+	// `go`/`cargo`/`bundle` is on PATH (status quo, no mise).
+	Toolchain map[string]*ToolchainConfig `json:"toolchain,omitempty"`
+	// SysEnv is the closed-world whitelist of OS env vars that pass
+	// through from alpha's parent shell into every spawned service /
+	// build / provision. Default-deny: anything not in this list is
+	// stripped. Federation merges parent ∪ child (no widening that
+	// would silently expose more of the host than each level chose).
+	//
+	// Why default-deny: an interactive shell with mise/asdf/rbenv
+	// activated exports RUBYLIB / GEM_HOME / BUNDLE_* / PYTHONPATH /
+	// CARGO_HOME / ... pointing at the user's tool world. Those
+	// override mise's PATH ordering, so a service "pinned" to ruby
+	// 3.3 via toolchain{} silently loads bundler from the user's
+	// mise install — or worse, mixes mise's interpreter with
+	// System Ruby 2.6's stdlib. Whitelisting forces the user to
+	// declare exactly what's expected.
+	SysEnv []string `json:"sysenv,omitempty"`
+}
+
+// ToolchainConfig declares the version a particular language toolchain
+// should be pinned to, the tools to install into that pinned version
+// (each version has its OWN tool world — Ruby 3.0.7's bundler is not
+// Ruby 3.3.10's bundler), and an env overlay applied to every service
+// of this toolchain (and its provisions).
+type ToolchainConfig struct {
+	Version string `json:"version"`
+	// Tools is a name→version map of language-native tools alpha
+	// ensures are installed under the pinned interpreter before any
+	// service starts. "Tool" rather than "package" because these are
+	// auxiliary binaries used by the toolchain (bundler, dlv, cargo-
+	// watch), not library deps of the user's code. The install command
+	// is language-specific:
+	//   ruby   → `gem install <name> --version <ver> --no-document`
+	//   python → `pip install <name>==<ver>`
+	//   rust   → `cargo install <name> --version <ver> --locked`
+	//   go     → `go install <name>@<ver>`
+	// All run through `mise exec <lang>@<version> -- ...` so they
+	// land in the right version's tool world.
+	Tools map[string]string `json:"tools,omitempty"`
+	Env   map[string]string `json:"env,omitempty"`
 }
 
 func (af *Alphasfile) All() []*Service { return af.Services }
@@ -388,8 +433,42 @@ func (af *Alphasfile) AllFiles() []*File {
 // --- HCL2 intermediate (parser-internal) ----------------------------------
 
 type rootBlock struct {
-	Dotenv   hcl.Expression  `hcl:"dotenv,optional"` // file-level .env applied to every service
-	Services []*serviceBlock `hcl:"service,block"`
+	Dotenv    hcl.Expression  `hcl:"dotenv,optional"` // file-level .env applied to every service
+	SysEnv    hcl.Expression  `hcl:"sysenv,optional"` // closed-world whitelist of inherited OS env vars
+	Services  []*serviceBlock `hcl:"service,block"`
+	Toolchain *toolchainBlock `hcl:"toolchain,block"`
+}
+
+// toolchainBlock is the optional top-level pin map. Each language gets
+// its own named sub-block — keeping them typed (rather than a generic
+// labeled block) means `toolchain { go { ... } nodejs { ... } }`
+// catches typos at decode time, not at runtime in alpha.
+type toolchainBlock struct {
+	Go   *langToolchainBlock `hcl:"go,block"`
+	Rust *langToolchainBlock `hcl:"rust,block"`
+	Ruby *langToolchainBlock `hcl:"ruby,block"`
+}
+
+type langToolchainBlock struct {
+	Version string         `hcl:"version"`
+	Tools   hcl.Expression `hcl:"tools,optional"`
+	Env     hcl.Expression `hcl:"env,optional"`
+}
+
+// byLabel projects the typed sub-blocks back into a label-keyed map so
+// the resolver can iterate without caring about which languages exist.
+func (t *toolchainBlock) byLabel() map[string]*langToolchainBlock {
+	out := map[string]*langToolchainBlock{}
+	if t.Go != nil {
+		out[ToolchainGo] = t.Go
+	}
+	if t.Rust != nil {
+		out[ToolchainRust] = t.Rust
+	}
+	if t.Ruby != nil {
+		out[ToolchainRuby] = t.Ruby
+	}
+	return out
 }
 
 type serviceBlock struct {
@@ -571,18 +650,17 @@ func Compile(name string, src []byte, inv *invocation.Invocation, parent *Parent
 	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
 		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
 	}
-	var seed map[string]map[string]cty.Value
-	if parent != nil {
-		seed = parent.byTC
-	}
-	return resolve(name, &root, inv, seed)
+	return resolve(name, &root, inv, parent)
 }
 
-// ParentContext carries the resolved services of every Alphasfile above the
-// current one in a federation chain, projected into cty so child expressions
-// can reference them via the flat `service.<toolchain>.<name>` namespace.
+// ParentContext carries what a federation child needs from its parents:
+// resolved services projected into cty (so cross-service refs work) AND
+// the cumulative toolchain pins (so the child inherits go/rust/ruby
+// versions from above without having to re-declare).
 type ParentContext struct {
-	byTC map[string]map[string]cty.Value
+	byTC      map[string]map[string]cty.Value
+	toolchain map[string]*ToolchainConfig
+	sysenv    []string
 }
 
 // NewParentContext builds a ParentContext from already-resolved services
@@ -590,7 +668,10 @@ type ParentContext struct {
 // Re-projects each service into the same cty shape the resolver exposes:
 // { name, toolchain, dir, vars, arguments, file }.
 func NewParentContext(services []*Service) *ParentContext {
-	pc := &ParentContext{byTC: map[string]map[string]cty.Value{}}
+	pc := &ParentContext{
+		byTC:      map[string]map[string]cty.Value{},
+		toolchain: map[string]*ToolchainConfig{},
+	}
 	for _, s := range services {
 		if s == nil || s.Runtime == nil {
 			continue
@@ -637,6 +718,58 @@ func (pc *ParentContext) Merge(services []*Service) *ParentContext {
 		}
 	}
 	return pc
+}
+
+// WithToolchain returns a context with the given toolchain map layered
+// over what's already there. Later calls (children, deeper in the
+// chain) override earlier entries on collision — exactly the federation
+// "child wins" semantic the rest of the system uses.
+func (pc *ParentContext) WithToolchain(tc map[string]*ToolchainConfig) *ParentContext {
+	if pc.toolchain == nil {
+		pc.toolchain = map[string]*ToolchainConfig{}
+	}
+	for k, v := range tc {
+		pc.toolchain[k] = v
+	}
+	return pc
+}
+
+// Toolchain returns the accumulated toolchain pins so the resolver can
+// merge them into the child's own (child wins).
+func (pc *ParentContext) Toolchain() map[string]*ToolchainConfig {
+	return pc.toolchain
+}
+
+// WithSysEnv returns a context with the given sysenv names unioned with
+// what's already there. Order-preserving with stable dedup so the merge
+// is deterministic across runs (federation chains hash the resulting
+// Alphasfile and any list reorder would flap cfg::hash()).
+func (pc *ParentContext) WithSysEnv(names []string) *ParentContext {
+	pc.sysenv = mergeSysEnv(pc.sysenv, names)
+	return pc
+}
+
+// SysEnv returns the accumulated whitelist from the federation chain.
+func (pc *ParentContext) SysEnv() []string {
+	return pc.sysenv
+}
+
+// mergeSysEnv unions two sysenv lists preserving the order of first
+// occurrence (a, then any new keys from b). Empty entries dropped.
+func mergeSysEnv(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range append(append([]string(nil), a...), b...) {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
 
 // --- value coercion -------------------------------------------------------

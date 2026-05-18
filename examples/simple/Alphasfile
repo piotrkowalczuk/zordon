@@ -1,3 +1,5 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
 service "go" "nats-server" {
   git = "github.com/nats-io/nats-server"
   tag = "v2.14.0"

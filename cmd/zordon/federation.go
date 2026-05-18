@@ -94,6 +94,8 @@ func resolveChain(ctx context.Context) ([]*level, error) {
 	}
 
 	var accumulated []*alphasfile.Service
+	accumulatedToolchain := map[string]*alphasfile.ToolchainConfig{}
+	var accumulatedSysEnv []string
 	out := make([]*level, 0, len(chain))
 	for _, afPath := range chain {
 		isInv := afPath == invFile
@@ -115,8 +117,8 @@ func resolveChain(ctx context.Context) ([]*level, error) {
 			return nil, err
 		}
 		var pctx *alphasfile.ParentContext
-		if len(accumulated) > 0 {
-			pctx = alphasfile.NewParentContext(accumulated)
+		if len(accumulated) > 0 || len(accumulatedToolchain) > 0 || len(accumulatedSysEnv) > 0 {
+			pctx = alphasfile.NewParentContext(accumulated).WithToolchain(accumulatedToolchain).WithSysEnv(accumulatedSysEnv)
 		}
 		var st *protocol.StateInfo
 		if resp, e := control.Roundtrip(ctx, inv.SocketPath(), &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
@@ -124,15 +126,44 @@ func resolveChain(ctx context.Context) ([]*level, error) {
 		} else {
 			// Alpha not running; fallback to static evaluation.
 			if af, err := alphasfile.Open(afPath, inv, pctx); err == nil {
-				st = &protocol.StateInfo{Services: append([]*alphasfile.Service(nil), af.All()...)}
+				st = &protocol.StateInfo{
+					Services:  append([]*alphasfile.Service(nil), af.All()...),
+					Toolchain: af.Toolchain,
+					SysEnv:    af.SysEnv,
+				}
 			}
 		}
 		out = append(out, &level{afPath: afPath, isInvocation: isInv, inv: inv, parentCtx: pctx, state: st})
 		if st != nil {
 			accumulated = append(accumulated, st.Services...)
+			for k, v := range st.Toolchain {
+				accumulatedToolchain[k] = v
+			}
+			accumulatedSysEnv = appendUniqueStrings(accumulatedSysEnv, st.SysEnv)
 		}
 	}
 	return out, nil
+}
+
+// appendUniqueStrings adds entries from extra to dst preserving order of
+// first occurrence. Used to accumulate sysenv whitelists down a federation
+// chain without duplicates (a key wider repeats are no-ops).
+func appendUniqueStrings(dst, extra []string) []string {
+	seen := make(map[string]struct{}, len(dst))
+	for _, s := range dst {
+		seen[s] = struct{}{}
+	}
+	for _, s := range extra {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		dst = append(dst, s)
+	}
+	return dst
 }
 
 func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent bool) error {
@@ -167,6 +198,8 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 	}()
 
 	var accumulated []*alphasfile.Service
+	accumulatedToolchain := map[string]*alphasfile.ToolchainConfig{}
+	var accumulatedSysEnv []string
 	var dotenvChain []string // file-level dotenv of every ancestor, root-first
 
 	for _, afPath := range chain {
@@ -200,8 +233,8 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		sock := inv.SocketPath()
 
 		var parentCtx *alphasfile.ParentContext
-		if len(accumulated) > 0 {
-			parentCtx = alphasfile.NewParentContext(accumulated)
+		if len(accumulated) > 0 || len(accumulatedToolchain) > 0 || len(accumulatedSysEnv) > 0 {
+			parentCtx = alphasfile.NewParentContext(accumulated).WithToolchain(accumulatedToolchain).WithSysEnv(accumulatedSysEnv)
 		}
 
 		var st *protocol.StateInfo
@@ -213,6 +246,10 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		case st != nil && !isInvocation && st.CfgHash == inv.CfgHash:
 			log.Info("zordon", "%s [%s] up-to-date (alpha pid=%d), reusing", afPath, inv.FsHash, st.PID)
 			accumulated = append(accumulated, st.Services...)
+			for k, v := range st.Toolchain {
+				accumulatedToolchain[k] = v
+			}
+			accumulatedSysEnv = appendUniqueStrings(accumulatedSysEnv, st.SysEnv)
 			if st.Dotenv != "" {
 				dotenvChain = append(dotenvChain, st.Dotenv)
 			}
@@ -272,6 +309,10 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		// non-interactive. Run `zordon sudo` to apply them across the chain.
 
 		accumulated = append(accumulated, af.All()...)
+		for k, v := range af.Toolchain {
+			accumulatedToolchain[k] = v
+		}
+		accumulatedSysEnv = appendUniqueStrings(accumulatedSysEnv, af.SysEnv)
 	}
 	return nil
 }

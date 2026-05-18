@@ -1,3 +1,23 @@
+# Closed-world env: spawned services see ONLY these host vars from the
+# zordon-invoking shell. Everything else (GOPATH, GOROOT from user mise,
+# random shell exports) is stripped, so the Go pinned below is the only
+# one services actually run with.
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  # Pin the Go version alpha will use to build and run every `service "go"`
+  # in this Alphasfile. zordon's mise install lives under ~/.zordon/
+  # — user's home mise (~/.local/share/mise) stays untouched. First run
+  # bootstraps the version (~30s); subsequent runs hit the cache.
+  go {
+    version = "1.25.6"
+    env = {
+      # Demo: arbitrary env overlay for every `service "go"`.
+      GOTRACEBACK = "all"
+    }
+  }
+}
+
 service "go" "app" {
   src = "../.."
   exe = "./examples/go/src/app"

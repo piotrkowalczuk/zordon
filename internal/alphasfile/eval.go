@@ -48,13 +48,26 @@ func buildBarrierAttrs(entityID string, states []lifecycle.State) map[string]cty
 // referencing argument values) is uncommon and can be expressed via vars.
 type resolver struct {
 	path string
-	root *rootBlock
-	inv  *invocation.Invocation
+	// afDir is the absolute directory of the Alphasfile we're resolving.
+	// Relative `src` and `dir` paths interpret against this — NOT the
+	// invocation's working directory — so an Alphasfile means the same
+	// thing whether the user runs zordon from project root or from a
+	// subdir (walkUp finds the same Alphasfile either way).
+	afDir string
+	root  *rootBlock
+	inv   *invocation.Invocation
 
 	// Already-evaluated services, keyed by toolchain then name. Re-projected
 	// into the EvalContext under "service" before each new eval step. May be
 	// pre-seeded with parent services for federation (flat namespace).
 	serviceByTC map[string]map[string]cty.Value
+
+	// toolchainCty is the projection of `toolchain { <lang> { ... } }`
+	// declarations into cty: `toolchain.<lang>.ready` etc. resolve to
+	// the canonical barrier-ref strings alpha then turns into real
+	// *barrier.Barrier handles. Populated before any service eval so
+	// service expressions can reference toolchain barriers.
+	toolchainCty map[string]cty.Value
 
 	// names already taken (parent or local); collision is an error.
 	taken map[string]string // "tc/name" → origin ("parent" | "local")
@@ -65,19 +78,27 @@ type resolver struct {
 	resolvedServices []*Service
 }
 
-func resolve(name string, root *rootBlock, inv *invocation.Invocation, seed map[string]map[string]cty.Value) (*Alphasfile, error) {
+func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *ParentContext) (*Alphasfile, error) {
+	var seed map[string]map[string]cty.Value
+	if parent != nil {
+		seed = parent.byTC
+	}
 	if seed == nil {
 		seed = map[string]map[string]cty.Value{}
 	}
+	// Compute the Alphasfile's own dir for relative path resolution.
+	// Abs() is a no-op when the path is already absolute (the production
+	// path, from cmd/zordon/federation.go); for tests passing a bare
+	// filename it makes paths predictable against the test's working dir.
+	absPath, _ := filepath.Abs(name)
 	r := &resolver{
 		path:        name,
+		afDir:       filepath.Dir(absPath),
 		root:        root,
 		inv:         inv,
 		serviceByTC: seed,
 		taken:       map[string]string{},
 	}
-	// ... rest of resolve function
-
 
 	parentKnown := map[string]struct{}{}
 	for tc, byName := range seed {
@@ -86,6 +107,43 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, seed map[
 			parentKnown[serviceID(tc, name)] = struct{}{}
 		}
 	}
+
+	// Resolve toolchain block BEFORE services so each service's HCL can
+	// reference `toolchain.<lang>.ready` etc. via the cty projection in
+	// r.toolchainCty. Toolchain values themselves don't depend on
+	// services, so ordering this first costs nothing.
+	toolchain := map[string]*ToolchainConfig{}
+	if parent != nil {
+		for k, v := range parent.toolchain {
+			toolchain[k] = v
+		}
+	}
+	if root.Toolchain != nil {
+		for lang, sub := range root.Toolchain.byLabel() {
+			envMap, err := r.evalMap(sub.Env, nil, "toolchain."+lang+".env")
+			if err != nil {
+				return nil, err
+			}
+			toolsMap, err := r.evalMap(sub.Tools, nil, "toolchain."+lang+".tools")
+			if err != nil {
+				return nil, err
+			}
+			toolchain[lang] = &ToolchainConfig{
+				Version: sub.Version,
+				Tools:   toStringMap(toolsMap),
+				Env:     toStringMap(envMap),
+			}
+		}
+	}
+	// Project pinned toolchains into cty so HCL expressions like
+	// `toolchain.ruby.ready` resolve to the canonical barrier ref
+	// `toolchain.ruby@ready`. Same self-discoverability rule as
+	// service.runtime.* — the path mirrors the block nesting.
+	r.toolchainCty = map[string]cty.Value{}
+	for lang := range toolchain {
+		r.toolchainCty[lang] = cty.ObjectVal(buildBarrierAttrs("toolchain."+lang, ToolchainBarrierStates))
+	}
+
 	g, err := newGraph(root.Services, parentKnown)
 	if err != nil {
 		return nil, err
@@ -104,7 +162,29 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, seed map[
 	if err != nil {
 		return nil, err
 	}
-	return &Alphasfile{Dotenv: gdot, Services: r.resolvedServices}, nil
+	if len(toolchain) == 0 {
+		toolchain = nil
+	}
+	// SysEnv: parent's accumulated whitelist + this level's own.
+	// Order-preserving union (see mergeSysEnv) so cfg::hash() is stable.
+	localSysEnv, err := r.evalStrList(root.SysEnv, nil, "sysenv")
+	if err != nil {
+		return nil, err
+	}
+	var parentSysEnv []string
+	if parent != nil {
+		parentSysEnv = parent.sysenv
+	}
+	sysEnv := mergeSysEnv(parentSysEnv, localSysEnv)
+	if len(sysEnv) == 0 {
+		sysEnv = nil
+	}
+	return &Alphasfile{
+		Dotenv:    gdot,
+		Services:  r.resolvedServices,
+		Toolchain: toolchain,
+		SysEnv:    sysEnv,
+	}, nil
 }
 
 func (r *resolver) evalService(sb *serviceBlock) error {
@@ -163,6 +243,11 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		runtimeAttrs["provision"] = cty.ObjectVal(provObjs)
 	}
 	self["runtime"] = cty.ObjectVal(runtimeAttrs)
+	// `self.build.<state>` mirrors the build block. Always exposed (even
+	// when no explicit build cmd) — the lifecycle still fires success
+	// the moment prepare finishes, so cross-service `after = [...
+	// .build.success]` resolves uniformly.
+	self["build"] = cty.ObjectVal(buildBarrierAttrs(serviceID+".build", BuildBarrierStates))
 
 	// Producers (vars, each file, arguments) are evaluated in dependency
 	// order, not a fixed sequence: edges come from self.<x> traversals in
@@ -726,6 +811,9 @@ func (r *resolver) ctxWith(self map[string]cty.Value) *hcl.EvalContext {
 		}
 		vars["service"] = cty.ObjectVal(toolchains)
 	}
+	if len(r.toolchainCty) > 0 {
+		vars["toolchain"] = cty.ObjectVal(copyCtyMap(r.toolchainCty))
+	}
 	if self != nil {
 		vars["self"] = cty.ObjectVal(copyCtyMap(self))
 	}
@@ -840,14 +928,17 @@ func osEnvFunc() function.Function {
 }
 
 // resolveDir turns a `dir` primary into an absolute path. ~ expands to
-// $HOME; a relative path resolves against the Alphasfile's project root
-// (so a committed example can say dir = "../.." portably). Empty stays
-// empty (no dir primary).
+// $HOME; a relative path resolves against the Alphasfile's OWN
+// directory (so the same Alphasfile means the same thing regardless of
+// where the user ran zordon from — `cd into subdir; zordon start` walks
+// up to the same file and gets the same resolved paths). Empty stays
+// empty (no dir primary). Worktree invocations adopt the project-root
+// Alphasfile, so r.afDir is project root there too.
 func (r *resolver) resolveDir(dir string) string {
 	if dir == "" {
 		return ""
 	}
-	return resolveSrcDir(r.inv.ProjectRoot(), dir)
+	return resolveSrcDir(r.afDir, dir)
 }
 
 // fsHashFunc returns the short (16 hex chars) hash that identifies this

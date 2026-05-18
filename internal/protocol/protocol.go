@@ -76,14 +76,16 @@ const (
 )
 
 type StateInfo struct {
-	PID            int                   `json:"pid"`
-	AlphasfilePath string                `json:"alphasfile_path,omitempty"`
-	StartedAt      string                `json:"started_at"`
-	FsHash         string                `json:"fs_hash,omitempty"`  // instance identity (location)
-	CfgHash        string                `json:"cfg_hash,omitempty"` // manifest identity (Alphasfile+parent ctx)
-	Dotenv         string                `json:"dotenv,omitempty"`   // file-level dotenv (for federation chain)
-	Services       []*alphasfile.Service `json:"services,omitempty"`
-	Running        []ServiceStatus       `json:"running,omitempty"`
+	PID            int                                    `json:"pid"`
+	AlphasfilePath string                                 `json:"alphasfile_path,omitempty"`
+	StartedAt      string                                 `json:"started_at"`
+	FsHash         string                                 `json:"fs_hash,omitempty"`  // instance identity (location)
+	CfgHash        string                                 `json:"cfg_hash,omitempty"` // manifest identity (Alphasfile+parent ctx)
+	Dotenv         string                                 `json:"dotenv,omitempty"`   // file-level dotenv (for federation chain)
+	Services       []*alphasfile.Service                  `json:"services,omitempty"`
+	Toolchain      map[string]*alphasfile.ToolchainConfig `json:"toolchain,omitempty"` // for federation child inheritance
+	SysEnv         []string                               `json:"sysenv,omitempty"`    // closed-world env whitelist (federation accumulates)
+	Running        []ServiceStatus                        `json:"running,omitempty"`
 }
 
 type ServiceStatus struct {

@@ -28,8 +28,107 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/source"
+	"github.com/piotrkowalczuk/zordon/internal/tools"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
+
+// applyToolchainEnv looks up the materialized toolchain entity for the
+// service's language label and overlays its cached env (and any
+// toolchain.<lang>.env user overlay) onto cmd.Env. No-op when toolchain
+// isn't pinned (status quo: use whatever's on PATH from sysenv).
+//
+// The actual install (EnsureMise / EnsureTools / mise install runtime
+// version) happens ONCE per (lang, version) on a dedicated toolchainCtx
+// goroutine launched at configure time — see bringupToolchain. This
+// function blocks on that goroutine reaching `ready` (typical case: it
+// already has by the time a service spawn reaches here, because the
+// implicit `toolchain.<lang>@ready` dep gates runtime.after).
+//
+// Returns an error if the toolchain entity reached terminal failure,
+// so the caller can fail the service spawn loudly rather than launch
+// it with an env from a broken toolchain.
+func applyToolchainEnv(cmd *exec.Cmd, toolchainLang string, state *alphaState, log *zlog.Logger) error {
+	_ = log // reserved for future "waited for ready" debug logs
+	state.mu.RLock()
+	tc := state.toolchains[toolchainLang]
+	state.mu.RUnlock()
+	if tc == nil {
+		// No toolchain entity ⇒ Alphasfile didn't pin this lang.
+		// Spawn runs with whatever cmd.Env already has from serviceEnv.
+		return nil
+	}
+	// Block until the toolchain reaches a terminal state. In normal
+	// flow the implicit runtime.after dep already unblocked this
+	// service when ready fired; the wait here is the belt-and-braces
+	// fallback for code paths (provisions, build cmd) that might not
+	// have been gated explicitly.
+	select {
+	case <-tc.lifecycle.Barrier("ready").Wait():
+	case <-tc.lifecycle.Barrier(alphasfile.ToolchainTerminalFailure).Wait():
+		return fmt.Errorf("toolchain %s@%s: install failed (see earlier `toolchain` log lines)", tc.lang, tc.version)
+	}
+	cmd.Env = mergeEnvLists(cmd.Env, tc.env)
+	if len(tc.userEnv) > 0 {
+		cmd.Env = mergeEnvLists(cmd.Env, tc.userEnv)
+	}
+	return nil
+}
+
+// mergeEnvLists folds overlay into base, returning a flat KEY=VAL list
+// with overlay winning on key collisions. Used to layer mise's env +
+// toolchain.<lang>.env on top of what buildCmd/serviceEnv produced.
+func mergeEnvLists(base []string, overlay map[string]string) []string {
+	if len(overlay) == 0 {
+		return base
+	}
+	merged := map[string]string{}
+	for _, kv := range base {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			merged[k] = v
+		}
+	}
+	for k, v := range overlay {
+		merged[k] = v
+	}
+	out := make([]string, 0, len(merged))
+	for k, v := range merged {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
+// logWriter adapts a zlog.Logger as an io.Writer so subprocess output
+// (mise install / cargo install progress) lands in alpha's log under
+// a recognizable source tag.
+type writeLog struct {
+	log *zlog.Logger
+	src string
+}
+
+func (w *writeLog) Write(p []byte) (int, error) {
+	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
+		if line != "" {
+			w.log.Info(w.src, "%s", line)
+		}
+	}
+	return len(p), nil
+}
+
+func logWriter(log *zlog.Logger, src string) io.Writer { return &writeLog{log: log, src: src} }
+
+// killGroup sends sig to the process group led by pid. Every service /
+// provision spawn sets Setpgid: true, so the process is its own group
+// leader (pid == pgid) and a signal to the negative pid hits the whole
+// group — the service plus any subprocesses it forked itself. Without
+// this, only the group leader would receive the signal; its children
+// would be reparented to init and linger as orphans.
+//
+// The function is best-effort: kill returns ESRCH if the group is
+// already gone, which is fine because the caller's loop drains the
+// done channel anyway.
+func killGroup(pid int, sig syscall.Signal) error {
+	return syscall.Kill(-pid, sig)
+}
 
 func main() {
 	rootFlags := ff.NewFlagSet("alpha")
@@ -75,10 +174,11 @@ type alphaState struct {
 	parentDotenv   []string // file-level dotenv paths inherited from federation parents
 	agentMode      bool     // configured via `zordon --agent`: apply agent{} env overlay
 	config         *alphasfile.Alphasfile
-	services       map[string]*serviceCtx   // keyed by service name
-	provisions     map[string]*provisionCtx // keyed by provision ID ("service.<tc>.<svc>.runtime.provision.<name>")
-	readiness      map[string]string        // service name -> readiness state ("probing", "ready", "failed")
-	files          []string                 // absolute paths of file{} outputs to unlink on shutdown
+	services       map[string]*serviceCtx    // keyed by service name
+	provisions     map[string]*provisionCtx  // keyed by provision ID ("service.<tc>.<svc>.runtime.provision.<name>")
+	toolchains     map[string]*toolchainCtx  // keyed by lang ("go", "rust", "ruby")
+	readiness      map[string]string         // service name -> readiness state ("probing", "ready", "failed")
+	files          []string                  // absolute paths of file{} outputs to unlink on shutdown
 
 	// shutdownCh is closed exactly once to signal whole-alpha shutdown.
 	// Each service supervisor selects on it; the runAlpha main goroutine
@@ -130,6 +230,8 @@ type barrierTarget struct {
 // resolveBarrier parses a canonical ref and returns the concrete
 // barriers behind it. Grammar:
 //
+//	toolchain.<lang>@<state>                                    — toolchain barrier
+//	service.<tc>.<svc>.build@<state>                            — service build barrier
 //	service.<tc>.<svc>.runtime@<state>                          — service runtime barrier
 //	service.<tc>.<svc>.runtime.provision.<name>@<state>          — provision barrier
 //
@@ -142,6 +244,22 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 		return nil, fmt.Errorf("barrier ref %q has no @state suffix", ref)
 	}
 	entityID, state := ref[:at], lifecycle.State(ref[at+1:])
+	// Toolchain ref: `toolchain.<lang>`. Cheapest to check first by
+	// prefix because nothing else starts with it.
+	if strings.HasPrefix(entityID, "toolchain.") {
+		lang := strings.TrimPrefix(entityID, "toolchain.")
+		s.mu.RLock()
+		tc := s.toolchains[lang]
+		s.mu.RUnlock()
+		if tc == nil {
+			return nil, fmt.Errorf("unknown toolchain %q (not pinned in Alphasfile.toolchain{})", entityID)
+		}
+		t := tc.Barrier(state)
+		if t == nil {
+			return nil, fmt.Errorf("toolchain %q has no %q state", entityID, state)
+		}
+		return &barrierTarget{target: t, fail: tc.TerminalFailure()}, nil
+	}
 	// Provision ref: ends with `.runtime.provision.<name>`.
 	if idx := strings.Index(entityID, ".runtime.provision."); idx >= 0 {
 		s.mu.RLock()
@@ -155,6 +273,28 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 			return nil, fmt.Errorf("provision %q has no %q state", entityID, state)
 		}
 		return &barrierTarget{target: t, fail: pc.TerminalFailure()}, nil
+	}
+	// Service build ref: ends with `.build` (and isn't a provision).
+	// Check before `.runtime` so a future `service.X.build.subblock`
+	// doesn't get misdispatched.
+	if strings.HasSuffix(entityID, ".build") {
+		svcID := strings.TrimSuffix(entityID, ".build")
+		parts := strings.SplitN(svcID, ".", 3)
+		if len(parts) != 3 || parts[0] != "service" {
+			return nil, fmt.Errorf("bad barrier entity ID %q", entityID)
+		}
+		svcName := parts[2]
+		s.mu.RLock()
+		sc := s.services[svcName]
+		s.mu.RUnlock()
+		if sc == nil {
+			return nil, fmt.Errorf("unknown service %q", entityID)
+		}
+		t := sc.BuildBarrier(state)
+		if t == nil {
+			return nil, fmt.Errorf("service %q has no %q build state", entityID, state)
+		}
+		return &barrierTarget{target: t, fail: sc.BuildTerminalFailure()}, nil
 	}
 	// Service runtime ref: ends with `.runtime` (and isn't a provision).
 	if strings.HasSuffix(entityID, ".runtime") {
@@ -176,7 +316,7 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 		}
 		return &barrierTarget{target: t, fail: sc.TerminalFailure()}, nil
 	}
-	return nil, fmt.Errorf("bad barrier entity ID %q (expected service.<tc>.<n>.runtime[.provision.<p>])", entityID)
+	return nil, fmt.Errorf("bad barrier entity ID %q (expected toolchain.<lang> | service.<tc>.<n>.{build,runtime[.provision.<p>]})", entityID)
 }
 
 func (s *alphaState) requestShutdown() {
@@ -208,6 +348,125 @@ func (s *alphaState) drainedCh() <-chan struct{} {
 	return out
 }
 
+// toolchainCtx is one materialized language pin (e.g. ruby@3.3.10) —
+// installing the interpreter via mise, installing the declared tools
+// (gem install bundler, ...), then caching the resolved env so every
+// service of that language can layer it onto cmd.Env in O(1) without
+// re-running mise per spawn.
+//
+// One instance per (lang, version) declared in Alphasfile.Toolchain.
+// Allocated and Reach("installing")'d in handleConfigure before any
+// service goroutine sees its first `runtime.after` barrier; the
+// bringupToolchain goroutine then drives EnsureMise → EnsureTools →
+// MiseEnv and Reaches "ready" (or "failed") on completion.
+//
+// All operations are serialized per (lang, version) by tools.Acquire
+// — same lock that prevented the gem-install race when applyToolchain-
+// Env did this work inline.
+type toolchainCtx struct {
+	lang    string
+	version string
+	// env is the result of `mise env --json <lang>@<version>`, set
+	// before Reach("ready"). Read only after waiting on the ready
+	// barrier — the write happens-before that close.
+	env map[string]string
+	// userEnv is the Alphasfile-declared overlay (`toolchain { <lang>
+	// { env = {...} } }`). Set at allocation; never mutated.
+	userEnv map[string]string
+	// tools is the name→version map of language-native tools to
+	// install into this pinned interpreter (bundler@2.5.3, dlv@..., etc).
+	tools     map[string]string
+	lifecycle *lifecycle.Instance
+	doneBar   *barrier.Barrier // Any(ready, failed)
+}
+
+func newToolchainCtx(lang, version string, toolsMap, userEnv map[string]string) *toolchainCtx {
+	tc := &toolchainCtx{
+		lang:      lang,
+		version:   version,
+		tools:     toolsMap,
+		userEnv:   userEnv,
+		lifecycle: lifecycle.NewInstance(alphasfile.ToolchainLifecycle),
+		doneBar:   barrier.New(),
+	}
+	barrier.Any(tc.doneBar,
+		tc.lifecycle.Barrier("ready"),
+		tc.lifecycle.Barrier(alphasfile.ToolchainTerminalFailure))
+	return tc
+}
+
+func (tc *toolchainCtx) Barrier(s lifecycle.State) *barrier.Barrier {
+	if s == alphasfile.SyntheticStateDone {
+		return tc.doneBar
+	}
+	return tc.lifecycle.Barrier(s)
+}
+
+func (tc *toolchainCtx) TerminalFailure() *barrier.Barrier {
+	return tc.lifecycle.Barrier(alphasfile.ToolchainTerminalFailure)
+}
+
+// bringupToolchain runs the install side-effects for one pinned
+// toolchain on a dedicated goroutine: EnsureMise (cargo install if
+// first run) → tools.Acquire (per-(lang,version) flock) →
+// EnsureTools (gem install bundler, etc.) → MiseEnv (read PATH/etc.
+// in JSON). On success: cache env, Reach("ready"). On any error:
+// Reach("failed") so service goroutines waiting on toolchain@ready
+// unblock via terminal-failure pairing rather than deadlocking.
+//
+// Idempotent enough that a federation level booting after a parent
+// has already materialized the same version will short-circuit on
+// the existing installs/locks and finish in milliseconds.
+func bringupToolchain(tc *toolchainCtx, log *zlog.Logger) {
+	tc.lifecycle.Reach("installing")
+	log.Info("alpha", "toolchain %s@%s: installing", tc.lang, tc.version)
+
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		log.Error("alpha", "toolchain %s: user home: %v", tc.lang, err)
+		tc.lifecycle.Reach("failed")
+		return
+	}
+	zordonHome := filepath.Join(userHome, ".zordon")
+	bin, err := tools.EnsureMise(zordonHome, logWriter(log, "mise-install"))
+	if err != nil {
+		log.Error("alpha", "toolchain %s: ensure mise: %v", tc.lang, err)
+		tc.lifecycle.Reach("failed")
+		return
+	}
+	// ResolveDataDir uses the user's home as the walk-up anchor —
+	// alpha doesn't have a per-service cwd to pivot from at this
+	// stage (we materialize toolchains BEFORE services run).
+	dataDir := tools.ResolveDataDir(userHome, userHome, tc.lang, tc.version)
+	release, err := tools.Acquire(dataDir, tc.lang, tc.version)
+	if err != nil {
+		log.Error("alpha", "toolchain %s: acquire: %v", tc.lang, err)
+		tc.lifecycle.Reach("failed")
+		return
+	}
+	defer release()
+
+	// Tools must be installed before MiseEnv because mise env's
+	// PATH lists the per-version bin dir — but the gem/bundler
+	// binaries land under `installs/<lang>/<version>/lib/.../gems/...`
+	// only after gem install runs.
+	envWriter := logWriter(log, "mise-tool")
+	if err := tools.EnsureTools(bin, dataDir, tc.lang, tc.version, tc.tools, envWriter); err != nil {
+		log.Error("alpha", "toolchain %s: ensure tools: %v", tc.lang, err)
+		tc.lifecycle.Reach("failed")
+		return
+	}
+	env, err := tools.MiseEnv(bin, dataDir, tc.lang, tc.version, logWriter(log, "mise"))
+	if err != nil {
+		log.Error("alpha", "toolchain %s: mise env: %v", tc.lang, err)
+		tc.lifecycle.Reach("failed")
+		return
+	}
+	tc.env = env
+	tc.lifecycle.Reach("ready")
+	log.Info("alpha", "toolchain %s@%s: ready", tc.lang, tc.version)
+}
+
 // serviceCtx is one running service plus the channels that drive its
 // lifecycle. The supervisor goroutine is the sole owner of cmd.Wait —
 // no other goroutine calls it — so the "exec: Wait was already called"
@@ -235,6 +494,18 @@ type serviceCtx struct {
 	// of predecessors can model "either of these happened".
 	doneBar *barrier.Barrier
 
+	// build is the parallel one-shot lifecycle for the service's build
+	// phase (the `build { cmd = [...] }` step, or the toolchain default
+	// when absent). Exposed as `service.<tc>.<n>.build@<state>` so other
+	// services sharing the source checkout can wait on success before
+	// their own runtime starts (`vendor/bundle` populated, generated
+	// code present, etc.) — see karafka/sidekiq waiting on bnpl.build.
+	//
+	// Services with no build cmd reach `success` synthetically the
+	// moment the prepare step finishes (Pass-like behavior).
+	build        *lifecycle.Instance
+	buildDoneBar *barrier.Barrier // Any(build.success, build.failure)
+
 	// exitErr is the result of cmd.Wait. Written by supervisor before
 	// closing done; the close is the happens-before edge for any reader
 	// that has already received <-done.
@@ -243,18 +514,40 @@ type serviceCtx struct {
 
 func newServiceCtx(name, toolchain string) *serviceCtx {
 	sc := &serviceCtx{
-		name:      name,
-		toolchain: toolchain,
-		stopCh:    make(chan struct{}),
-		done:      make(chan struct{}),
-		lifecycle: lifecycle.NewInstance(alphasfile.ServiceLifecycle),
-		doneBar:   barrier.New(),
+		name:         name,
+		toolchain:    toolchain,
+		stopCh:       make(chan struct{}),
+		done:         make(chan struct{}),
+		lifecycle:    lifecycle.NewInstance(alphasfile.ServiceLifecycle),
+		doneBar:      barrier.New(),
+		build:        lifecycle.NewInstance(alphasfile.BuildLifecycle),
+		buildDoneBar: barrier.New(),
 	}
 	barrier.Any(sc.doneBar,
 		sc.lifecycle.Barrier("ready"),
 		sc.lifecycle.Barrier(alphasfile.ServiceTerminalFailure))
+	barrier.Any(sc.buildDoneBar,
+		sc.build.Barrier("success"),
+		sc.build.Barrier(alphasfile.BuildTerminalFailure))
 	sc.lifecycle.Reach("scheduled")
+	sc.build.Reach("scheduled")
 	return sc
+}
+
+// BuildBarrier returns the build-phase barrier for state s, or the
+// composed done barrier when s == SyntheticStateDone.
+func (sc *serviceCtx) BuildBarrier(s lifecycle.State) *barrier.Barrier {
+	if s == alphasfile.SyntheticStateDone {
+		return sc.buildDoneBar
+	}
+	return sc.build.Barrier(s)
+}
+
+// BuildTerminalFailure is the build's terminal-failure barrier, paired
+// with every BuildBarrier in resolveBarrier so waiters don't deadlock
+// when a build fails.
+func (sc *serviceCtx) BuildTerminalFailure() *barrier.Barrier {
+	return sc.build.Barrier(alphasfile.BuildTerminalFailure)
 }
 
 func (sc *serviceCtx) requestStop() {
@@ -354,11 +647,38 @@ func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace
 	pc.lifecycle.Reach("running")
 	log.Info("alpha", "provision[%s]: running", pc.id)
 
-	// Per-provision env = process env + step.Env overlay. We don't
-	// reach for the parent service's RunEnv here — provisions are
-	// orchestration, not the service itself; if you need parent vars,
-	// reference them via interpolation in cmd.
-	env := os.Environ()
+	// Per-provision env precedence (low → high):
+	//   sysenv-filtered process env
+	//   parent service's env { } block
+	//   parent service's runtime.env (if any) — keeps migrate scripts in
+	//                                           sync with the daemon's vars
+	//   parent service's agent.env when --agent
+	//   provision step's own env { }
+	//
+	// Inheriting the parent service's env is what `db_url = ...` in
+	// service.env needs to be visible to a `migrate` provision without
+	// the user having to retype it.
+	state.mu.RLock()
+	var sysenv []string
+	var parentSvc *alphasfile.Service
+	agentMode := state.agentMode
+	if state.config != nil {
+		sysenv = state.config.SysEnv
+		for _, s := range state.config.All() {
+			if s.Name() == parent.name {
+				parentSvc = s
+				break
+			}
+		}
+	}
+	state.mu.RUnlock()
+	env := filterEnviron(os.Environ(), sysenv)
+	if parentSvc != nil {
+		parentEnv := phaseEnv(parentSvc, parentSvc.Runtime.RunEnv, agentMode)
+		for k, v := range parentEnv {
+			env = append(env, k+"="+v)
+		}
+	}
 	for k, v := range pc.step.Env {
 		env = append(env, k+"="+v)
 	}
@@ -366,14 +686,14 @@ func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace
 	streamKind := "provision:" + pc.step.Name
 	// Idempotency check: if it passes, skip the heavyweight cmd.
 	if strings.TrimSpace(pc.step.Check) != "" {
-		if err := runShell(pc, state, grace, pc.step.Check, env, parent.name, streamKind+":check", stream, log); err == nil {
+		if err := runShell(pc, state, grace, pc.step.Check, env, parent.name, parent.toolchain, streamKind+":check", stream, log); err == nil {
 			log.Info("alpha", "provision[%s]: check passed, skipping cmd", pc.id)
 			pc.lifecycle.Reach("success")
 			return
 		}
 	}
 
-	if err := runShell(pc, state, grace, pc.step.Cmd, env, parent.name, streamKind+":cmd", stream, log); err != nil {
+	if err := runShell(pc, state, grace, pc.step.Cmd, env, parent.name, parent.toolchain, streamKind+":cmd", stream, log); err != nil {
 		log.Error("alpha", "provision[%s]: cmd failed: %v", pc.id, err)
 		pc.lifecycle.Reach("failure")
 		if failfast && !pc.step.Detached {
@@ -383,7 +703,7 @@ func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace
 	}
 
 	if strings.TrimSpace(pc.step.Verify) != "" {
-		if err := runShell(pc, state, grace, pc.step.Verify, env, parent.name, streamKind+":verify", stream, log); err != nil {
+		if err := runShell(pc, state, grace, pc.step.Verify, env, parent.name, parent.toolchain, streamKind+":verify", stream, log); err != nil {
 			log.Error("alpha", "provision[%s]: verify failed (best-effort, not fatal): %v", pc.id, err)
 		}
 	}
@@ -396,10 +716,20 @@ func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace
 // the provision's env, streams its stdout+stderr through the safe
 // encoder, and reacts to pc.stopCh / state.shutdownCh by SIGTERM →
 // grace → SIGKILL. Returns the cmd.Wait() error (nil on exit 0).
-func runShell(pc *provisionCtx, state *alphaState, grace time.Duration, snippet string, env []string, svcName, label string, stream *safeEncoder, log *zlog.Logger) error {
+func runShell(pc *provisionCtx, state *alphaState, grace time.Duration, snippet string, env []string, svcName, toolchainLang, label string, stream *safeEncoder, log *zlog.Logger) error {
 	cmd := exec.Command("/bin/sh", "-c", snippet)
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Provisions inherit their parent service's toolchain pin so a
+	// `service "go" "x"` migration provision runs with the same Go
+	// version the daemon runs with — no surprise version skew between
+	// the runtime and its orchestration steps.
+	if toolchainLang != "" {
+		if err := applyToolchainEnv(cmd, toolchainLang, state, log); err != nil {
+			return fmt.Errorf("toolchain: %w", err)
+		}
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -432,12 +762,13 @@ func runShell(pc *provisionCtx, state *alphaState, grace time.Duration, snippet 
 	case <-pc.stopCh:
 	case <-state.shutdownCh:
 	}
-	// External cancel — SIGTERM, grace, SIGKILL.
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	// External cancel — SIGTERM the group (service plus any forked
+	// children), grace, then SIGKILL the group.
+	_ = killGroup(cmd.Process.Pid, syscall.SIGTERM)
 	select {
 	case <-cmdDone:
 	case <-time.After(grace):
-		_ = cmd.Process.Kill()
+		_ = killGroup(cmd.Process.Pid, syscall.SIGKILL)
 		<-cmdDone
 	}
 	streamWg.Wait()
@@ -502,6 +833,15 @@ func (s *alphaState) addProvision(pc *provisionCtx) {
 	s.provisions[pc.id] = pc
 }
 
+func (s *alphaState) addToolchain(tc *toolchainCtx) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.toolchains == nil {
+		s.toolchains = make(map[string]*toolchainCtx)
+	}
+	s.toolchains[tc.lang] = tc
+}
+
 func (s *alphaState) setReadiness(name, state string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -524,6 +864,8 @@ func (s *alphaState) snapshot() *protocol.StateInfo {
 	if s.config != nil {
 		info.Services = s.config.All()
 		info.Dotenv = s.config.Dotenv
+		info.Toolchain = s.config.Toolchain
+		info.SysEnv = s.config.SysEnv
 	}
 	for name, sc := range s.services {
 		pid := 0
@@ -891,6 +1233,27 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		return
 	}
 
+	// Materialize every pinned toolchain BEFORE services try to spawn.
+	// One goroutine per (lang, version): EnsureMise + EnsureTools +
+	// MiseEnv, cached on tc.env, Reach("ready"). Service goroutines
+	// pick this up via the implicit `toolchain.<lang>@ready` dep
+	// injected into runtime.after below — and via applyToolchainEnv's
+	// belt-and-braces wait for code paths that don't go through the
+	// after loop (provisions, build cmd).
+	//
+	// Allocated even when toolchains are already cached on disk: the
+	// bringupToolchain goroutine short-circuits to Reach("ready") in
+	// microseconds when the install is a no-op, and other entities can
+	// always resolve `toolchain.X@ready` as a barrier.
+	for lang, tcCfg := range newConfig.Toolchain {
+		if tcCfg == nil || tcCfg.Version == "" {
+			continue
+		}
+		tc := newToolchainCtx(lang, tcCfg.Version, tcCfg.Tools, tcCfg.Env)
+		state.addToolchain(tc)
+		go bringupToolchain(tc, log)
+	}
+
 	// Pre-allocate every entity FIRST so cross-refs in `after` resolve
 	// the moment we spawn goroutines. Each ctx exposes its barriers
 	// immediately even though cmd hasn't been started yet — the bringup
@@ -983,6 +1346,29 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	log.Info("alpha", "bringup complete")
 }
 
+// implicitRuntimeAfter returns the full list of barrier refs a service
+// must wait on before its build/runtime start — the user-declared
+// `runtime.after` prepended by the implicit toolchain dep when the
+// service's language is pinned in Alphasfile.toolchain{}.
+//
+// The toolchain entity becomes a hard precondition because every spawn
+// (build cmd, runtime cmd, provision shells) layers tc.env onto its
+// cmd.Env via applyToolchainEnv — and that env can only be cached once
+// `mise install` + `gem install bundler` etc. have completed.
+func implicitRuntimeAfter(svc *alphasfile.Service, state *alphaState) []string {
+	var deps []string
+	state.mu.RLock()
+	_, pinned := state.toolchains[svc.Toolchain]
+	state.mu.RUnlock()
+	if pinned {
+		deps = append(deps, "toolchain."+svc.Toolchain+"@ready")
+	}
+	if svc.Runtime != nil {
+		deps = append(deps, svc.Runtime.After...)
+	}
+	return deps
+}
+
 // bringupAndSupervise runs one service's full lifecycle on a single
 // goroutine: wait for runtime.after deps → prepare/build/start → race
 // probe vs cmd self-exit → reach ready or failed → supervise until
@@ -1003,29 +1389,39 @@ func bringupAndSupervise(svc *alphasfile.Service, sc *serviceCtx, state *alphaSt
 	// 1. Wait for runtime.after deps. With no deps the loop's a no-op
 	//    and we proceed immediately — pre-allocated barriers + uniform
 	//    select treatment, no special case.
-	if svc.Runtime != nil {
-		for _, ref := range svc.Runtime.After {
-			bt, err := state.resolveBarrier(ref)
-			if err != nil {
-				log.Error("alpha", "service[%s]: unresolvable dep %s: %v", name, ref, err)
-				sc.lifecycle.Reach("failed")
-				stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "dep: " + err.Error()})
-				return
-			}
-			select {
-			case <-bt.target.Wait():
-			case <-bt.fail.Wait():
-				log.Error("alpha", "service[%s]: dep %s reached terminal failure", name, ref)
-				sc.lifecycle.Reach("failed")
-				stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "dep " + ref + " failed"})
-				return
-			case <-sc.stopCh:
-				sc.lifecycle.Reach("failed")
-				return
-			case <-state.shutdownCh:
-				sc.lifecycle.Reach("failed")
-				return
-			}
+	//
+	// Implicit dep: if this service's toolchain is pinned (an entity
+	// exists for it), prepend `toolchain.<lang>@ready` so build AND
+	// runtime AND provisions are gated on the toolchain having
+	// materialized. Done here (not in the resolver) because pinning is
+	// alpha-state's concern — federation children may pin a toolchain
+	// that the resolver doesn't see locally.
+	after := implicitRuntimeAfter(svc, state)
+	for _, ref := range after {
+		bt, err := state.resolveBarrier(ref)
+		if err != nil {
+			log.Error("alpha", "service[%s]: unresolvable dep %s: %v", name, ref, err)
+			sc.lifecycle.Reach("failed")
+			sc.build.Reach("failure")
+			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "dep: " + err.Error()})
+			return
+		}
+		select {
+		case <-bt.target.Wait():
+		case <-bt.fail.Wait():
+			log.Error("alpha", "service[%s]: dep %s reached terminal failure", name, ref)
+			sc.lifecycle.Reach("failed")
+			sc.build.Reach("failure")
+			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "dep " + ref + " failed"})
+			return
+		case <-sc.stopCh:
+			sc.lifecycle.Reach("failed")
+			sc.build.Reach("failure")
+			return
+		case <-state.shutdownCh:
+			sc.lifecycle.Reach("failed")
+			sc.build.Reach("failure")
+			return
 		}
 	}
 
@@ -1038,29 +1434,37 @@ func bringupAndSupervise(svc *alphasfile.Service, sc *serviceCtx, state *alphaSt
 
 	// 2. Prepare (worktree materialize + build). Serialize per-primary
 	//    so parallel bringups of services sharing a repo don't race on
-	//    `git clone --bare`.
+	//    `git clone --bare`. Around the prepare call, drive the build
+	//    lifecycle: running → success/failure. Cross-service waiters on
+	//    `service.X.build@success` block here.
+	sc.build.Reach("running")
 	primaryKey := primaryKeyOf(svc)
+	var repoDir string
 	if primaryKey != "" {
 		mu := state.primaryLockFor(primaryKey)
 		mu.Lock()
-		repoDir, err := prepare(svc, name, agent, stream, log)
+		d, err := prepare(svc, name, agent, state, stream, log)
 		mu.Unlock()
 		if err != nil {
 			log.Error("alpha", "prepare %s: %v", name, err)
 			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
+			sc.build.Reach("failure")
 			sc.lifecycle.Reach("failed")
 			return
 		}
-		bringupAndSuperviseStart(svc, sc, state, cfg, stream, log, failfast, repoDir, agent)
-		return
+		repoDir = d
+	} else {
+		d, err := prepare(svc, name, agent, state, stream, log)
+		if err != nil {
+			log.Error("alpha", "prepare %s: %v", name, err)
+			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
+			sc.build.Reach("failure")
+			sc.lifecycle.Reach("failed")
+			return
+		}
+		repoDir = d
 	}
-	repoDir, err := prepare(svc, name, agent, stream, log)
-	if err != nil {
-		log.Error("alpha", "prepare %s: %v", name, err)
-		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
-		sc.lifecycle.Reach("failed")
-		return
-	}
+	sc.build.Reach("success")
 	bringupAndSuperviseStart(svc, sc, state, cfg, stream, log, failfast, repoDir, agent)
 }
 
@@ -1093,15 +1497,19 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 	// dotenv → this service's dotenv → this service's env block.
 	state.mu.RLock()
 	envFiles := append([]string{}, state.parentDotenv...)
-	if state.config != nil && state.config.Dotenv != "" {
-		envFiles = append(envFiles, state.config.Dotenv)
+	var sysenv []string
+	if state.config != nil {
+		if state.config.Dotenv != "" {
+			envFiles = append(envFiles, state.config.Dotenv)
+		}
+		sysenv = state.config.SysEnv
 	}
 	state.mu.RUnlock()
 	if svc.Runtime != nil && svc.Runtime.Dotenv != "" {
 		envFiles = append(envFiles, svc.Runtime.Dotenv)
 	}
 
-	cmd, err := buildCmd(svc, repoDir, envFiles, agent)
+	cmd, err := buildCmd(svc, repoDir, envFiles, agent, sysenv)
 	if err != nil {
 		log.Error("alpha", "build cmd %s: %v", name, err)
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
@@ -1109,6 +1517,16 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 		return
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Layer mise + toolchain.<lang>.env onto cmd.Env. No-op when the
+	// service's toolchain isn't pinned at all (Alphasfile lacks a
+	// `toolchain { ... }` block) — falls back to system tools.
+	if err := applyToolchainEnv(cmd, svc.Toolchain, state, log); err != nil {
+		log.Error("alpha", "toolchain %s: %v", name, err)
+		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "toolchain: " + err.Error()})
+		sc.lifecycle.Reach("failed")
+		return
+	}
 
 	stdout, stderr, ttyCleanup, err := attachStdio(cmd, *svc.Runtime.Log.TTY)
 	if err != nil {
@@ -1148,11 +1566,11 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 		if err != nil {
 			state.setReadiness(name, "failed")
 			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "readiness: " + err.Error()})
-			_ = cmd.Process.Signal(syscall.SIGTERM)
+			_ = killGroup(cmd.Process.Pid, syscall.SIGTERM)
 			select {
 			case sc.exitErr = <-waitErr:
 			case <-time.After(cfg.shutdownGrace):
-				_ = cmd.Process.Kill()
+				_ = killGroup(cmd.Process.Pid, syscall.SIGKILL)
 				sc.exitErr = <-waitErr
 			}
 			sc.lifecycle.Reach("failed")
@@ -1198,14 +1616,14 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 		return
 	}
 	// External stop.
-	log.Info("alpha", "SIGTERM %s pid=%d", name, cmd.Process.Pid)
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	log.Info("alpha", "SIGTERM %s pgid=%d", name, cmd.Process.Pid)
+	_ = killGroup(cmd.Process.Pid, syscall.SIGTERM)
 	select {
 	case sc.exitErr = <-waitErr:
 		log.Info("alpha", "%s exited after SIGTERM", name)
 	case <-time.After(cfg.shutdownGrace):
-		log.Info("alpha", "SIGKILL %s pid=%d (grace expired)", name, cmd.Process.Pid)
-		_ = cmd.Process.Kill()
+		log.Info("alpha", "SIGKILL %s pgid=%d (grace expired)", name, cmd.Process.Pid)
+		_ = killGroup(cmd.Process.Pid, syscall.SIGKILL)
 		sc.exitErr = <-waitErr
 	}
 	sc.lifecycle.Reach("stopped")
@@ -1325,17 +1743,22 @@ func parseDotenv(path string) []string {
 	return out
 }
 
-// serviceEnv builds the child process environment: the alpha process env
-// as a base, then each dotenv file in order, then the explicit env map —
-// later entries override earlier ones.
-func serviceEnv(envFiles []string, env map[string]string) []string {
+// serviceEnv builds the child process environment: the sysenv-filtered
+// alpha process env as a base, then each dotenv file in order, then the
+// explicit env map — later entries override earlier ones.
+//
+// `allow` is the closed-world whitelist of OS env var names (from
+// Alphasfile.SysEnv, federation-accumulated). Default-deny: anything
+// not in `allow` is dropped from the parent shell's exports. Set to nil
+// for an empty whitelist (strictest); see filterEnviron.
+func serviceEnv(envFiles []string, env map[string]string, allow []string) []string {
 	merged := map[string]string{}
 	put := func(kv string) {
 		if k, v, ok := strings.Cut(kv, "="); ok {
 			merged[k] = v
 		}
 	}
-	for _, kv := range os.Environ() {
+	for _, kv := range filterEnviron(os.Environ(), allow) {
 		put(kv)
 	}
 	for _, f := range envFiles {
@@ -1349,6 +1772,36 @@ func serviceEnv(envFiles []string, env map[string]string) []string {
 	out := make([]string, 0, len(merged))
 	for k, v := range merged {
 		out = append(out, k+"="+v)
+	}
+	return out
+}
+
+// filterEnviron keeps only the KEY=VAL entries whose KEY is in the allow
+// list. Order is preserved (callers' dedup happens later). Closed-world:
+// nil/empty allow ⇒ empty output (the user explicitly chose to expose
+// nothing of the host shell to spawned services).
+//
+// This is the single chokepoint where the user's interactive shell stops
+// leaking into spawned services. Anything not whitelisted here — RUBYLIB,
+// GEM_HOME, BUNDLE_*, PYTHONPATH, CARGO_HOME, mise shims — vanishes.
+func filterEnviron(env, allow []string) []string {
+	if len(allow) == 0 {
+		return nil
+	}
+	keep := make(map[string]struct{}, len(allow))
+	for _, k := range allow {
+		keep[k] = struct{}{}
+	}
+	out := make([]string, 0, len(allow))
+	for _, kv := range env {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if _, ok := keep[k]; !ok {
+			continue
+		}
+		out = append(out, kv)
 	}
 	return out
 }
@@ -1379,7 +1832,7 @@ func phaseEnv(svc *alphasfile.Service, phase map[string]string, agent bool) map[
 	return mergeEnv(svc.Runtime.Env, phase, ag)
 }
 
-func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent bool) (*exec.Cmd, error) {
+func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent bool, sysenv []string) (*exec.Cmd, error) {
 	name := svc.Name()
 	if name == "" {
 		return nil, errors.New("service has no name")
@@ -1410,9 +1863,11 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent
 	if svc.Runtime != nil {
 		runEnv = phaseEnv(svc, svc.Runtime.RunEnv, agent)
 	}
-	if len(envFiles) > 0 || len(runEnv) > 0 {
-		cmd.Env = serviceEnv(envFiles, runEnv)
-	}
+	// ALWAYS set cmd.Env (even when no dotenv / no overlay): with cmd.Env
+	// nil, exec inherits the full alpha process env — defeating the
+	// closed-world whitelist. serviceEnv with empty sysenv returns no
+	// host vars, which is the desired strictest default.
+	cmd.Env = serviceEnv(envFiles, runEnv, sysenv)
 	return cmd, nil
 }
 
@@ -1501,7 +1956,7 @@ func defaultBuild(svc *alphasfile.Service, name, binDir string) string {
 //   - crate:   `cargo install <crate>` (no checkout), cwd = "".
 // Every service must be one of these (the resolver rejects sourceless
 // services); there is no prebuilt-$PATH path.
-func prepare(svc *alphasfile.Service, name string, agent bool, stream *safeEncoder, log *zlog.Logger) (string, error) {
+func prepare(svc *alphasfile.Service, name string, agent bool, state *alphaState, stream *safeEncoder, log *zlog.Logger) (string, error) {
 	if svc.Package == nil || !svc.Buildable() {
 		return "", nil
 	}
@@ -1579,10 +2034,27 @@ func prepare(svc *alphasfile.Service, name string, agent bool, stream *safeEncod
 	}
 	if c != nil {
 		c.Dir = dest // "" ⇒ alpha's cwd; fine for `cargo install <crate>`
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		var be map[string]string
 		if svc.Runtime != nil {
-			if be := phaseEnv(svc, svc.Runtime.BuildEnv, agent); len(be) > 0 {
-				c.Env = serviceEnv(nil, be)
-			}
+			be = phaseEnv(svc, svc.Runtime.BuildEnv, agent)
+		}
+		state.mu.RLock()
+		var sysenv []string
+		if state.config != nil {
+			sysenv = state.config.SysEnv
+		}
+		state.mu.RUnlock()
+		// ALWAYS set Env (even empty) — nil would inherit alpha's full env
+		// and undo the closed-world whitelist.
+		c.Env = serviceEnv(nil, be, sysenv)
+		// Layer mise + toolchain.<lang>.env onto the build cmd too, so
+		// `bundle install` / `cargo build` / `go build` see the pinned
+		// interpreter — not whatever the user shell happens to expose.
+		// Without this, ruby builds load bundler from user's mise install
+		// and crash when stdlib loads come from System Ruby instead.
+		if err := applyToolchainEnv(c, svc.Toolchain, state, log); err != nil {
+			return "", fmt.Errorf("build toolchain: %w", err)
 		}
 		if err := runner(ctx, c); err != nil {
 			return "", fmt.Errorf("build: %w", err)

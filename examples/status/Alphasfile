@@ -1,3 +1,5 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
 service "go" "app" {
   src = "../.."
   exe = "./examples/status/src/app"

@@ -1,3 +1,18 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  # Pin Rust to a specific stable release. mise installs the toolchain
+  # under ~/.zordon/toolchain/installs/rust/<version>, so user's rustup
+  # / system rust stay independent. First run bootstraps (slow); after
+  # that the cargo cache makes warm rebuilds fast.
+  rust {
+    version = "1.83.0"
+    env = {
+      RUST_BACKTRACE = "1"
+    }
+  }
+}
+
 service "rust" "app" {
   src = "../.."
   exe = "./examples/rust/src/app"

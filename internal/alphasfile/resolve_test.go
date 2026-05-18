@@ -229,6 +229,34 @@ service "go" "x" {
 	}
 }
 
+// Relative `src` paths resolve against the Alphasfile's OWN directory
+// (the file that contains them), not against CWD where zordon happened
+// to be invoked from. Without this, running `zordon start` from a
+// subdir would compute different paths than running it from the
+// project root — same Alphasfile, different resolved checkouts. Worktrees
+// have the same need (they adopt the project-root Alphasfile and run
+// from a state subdir).
+func TestResolveSrc_resolvesAgainstAlphasfileDir(t *testing.T) {
+	// Compile with an absolute Alphasfile path so the test pins exactly
+	// where afDir lands; relative `src = "../tools"` then expands to
+	// /tmp/proj-root/tools (one level up from /tmp/proj-root/inner/).
+	src := `
+service "go" "tooling" {
+  src = "../tools"
+}
+`
+	afPath := "/tmp/test-resolve-src/proj/Alphasfile"
+	af, err := Compile(afPath, []byte(src), testInv(), nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	got := svcByName(af, "tooling").Package.Src
+	want := "/tmp/test-resolve-src/tools"
+	if got != want {
+		t.Errorf("src resolved to %q; want %q (relative to Alphasfile dir, not CWD)", got, want)
+	}
+}
+
 func TestResolveSudoStepsResolved(t *testing.T) {
 	src := `
 service "go" "dns" {

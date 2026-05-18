@@ -1,3 +1,27 @@
+# Closed-world env: services see ONLY these host vars from the shell
+# zordon was invoked from. Anything else (RUBYLIB, GEM_HOME, BUNDLE_*,
+# user-shell mise activation) is stripped — so a service "pinned" to
+# ruby@3.3.10 below actually uses THAT ruby, not whatever the user
+# shell happens to expose.
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  # Ruby toolchains in mise live as fully separate worlds: every pinned
+  # version has its own gem set (and its own bundler!), so packages
+  # declared here get installed via `gem install` inside THIS Ruby
+  # install — never leaking into another version's world.
+  ruby {
+    version = "3.3.6"
+    tools = {
+      # bundler is the classic "version-per-Ruby" tool — a Gemfile.lock
+      # pinned to 2.5.6 won't load on a stock Ruby 3.3 because the
+      # bundled one is newer. Declaring it here guarantees the right
+      # version is present BEFORE bundle install runs.
+      bundler = "2.5.6"
+    }
+  }
+}
+
 service "ruby" "app" {
   src = "../.."
 

@@ -20,7 +20,7 @@ func TestBuildCmdInjectsEnv(t *testing.T) {
 		},
 		Package: &alphasfile.Package{Toolchain: alphasfile.ToolchainGo, Src: "/tmp/x"},
 	}
-	cmd, err := buildCmd(svc, "/tmp/x", nil, false)
+	cmd, err := buildCmd(svc, "/tmp/x", nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,6 +35,70 @@ func TestBuildCmdInjectsEnv(t *testing.T) {
 			}
 		}
 		t.Fatalf("ZTEST_INJECT=yes missing from cmd.Env (ZTEST_* = %v)", got)
+	}
+}
+
+// Closed-world sysenv whitelist: with no allow list, the spawned cmd's
+// env contains NONE of the host shell's exports — even widely-present
+// vars like HOME and PATH are filtered out. This is the chokepoint that
+// stops user shell mise/asdf/rbenv pollution leaking into services.
+func TestServiceEnv_emptyAllowDropsHostVars(t *testing.T) {
+	t.Setenv("RUBYLIB", "/host/poison")
+	t.Setenv("BUNDLE_GEMFILE", "/host/poison/Gemfile")
+	t.Setenv("HOME", "/Users/test")
+
+	got := serviceEnv(nil, nil, nil)
+
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "RUBYLIB=") || strings.HasPrefix(kv, "BUNDLE_") || strings.HasPrefix(kv, "HOME=") {
+			t.Errorf("host var leaked through empty whitelist: %s", kv)
+		}
+	}
+}
+
+// With an explicit whitelist, only those keys cross over; everything
+// else (RUBYLIB, BUNDLE_*, etc.) is stripped.
+func TestServiceEnv_whitelistDropsEverythingElse(t *testing.T) {
+	t.Setenv("HOME", "/Users/test")
+	t.Setenv("LANG", "en_US.UTF-8")
+	t.Setenv("RUBYLIB", "/host/poison")
+	t.Setenv("GEM_HOME", "/host/poison")
+	t.Setenv("BUNDLE_GEMFILE", "/host/poison/Gemfile")
+
+	got := serviceEnv(nil, nil, []string{"HOME", "LANG"})
+
+	want := map[string]string{"HOME": "/Users/test", "LANG": "en_US.UTF-8"}
+	gotMap := map[string]string{}
+	for _, kv := range got {
+		k, v, _ := strings.Cut(kv, "=")
+		gotMap[k] = v
+	}
+	for k, v := range want {
+		if gotMap[k] != v {
+			t.Errorf("whitelisted %s missing or wrong: got %q, want %q", k, gotMap[k], v)
+		}
+	}
+	for _, leaked := range []string{"RUBYLIB", "GEM_HOME", "BUNDLE_GEMFILE"} {
+		if _, ok := gotMap[leaked]; ok {
+			t.Errorf("non-whitelisted %s leaked through: %s", leaked, gotMap[leaked])
+		}
+	}
+}
+
+// Explicit env map overlays on top of the (filtered) host env.
+func TestServiceEnv_explicitOverlay(t *testing.T) {
+	t.Setenv("LANG", "C")
+	got := serviceEnv(nil, map[string]string{"PATH": "/svc/bin", "EXTRA": "yes"}, []string{"LANG"})
+	gotMap := map[string]string{}
+	for _, kv := range got {
+		k, v, _ := strings.Cut(kv, "=")
+		gotMap[k] = v
+	}
+	if gotMap["LANG"] != "C" {
+		t.Errorf("whitelisted LANG dropped: %v", gotMap)
+	}
+	if gotMap["PATH"] != "/svc/bin" || gotMap["EXTRA"] != "yes" {
+		t.Errorf("explicit overlay missing: %v", gotMap)
 	}
 }
 
