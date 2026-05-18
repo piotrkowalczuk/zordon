@@ -19,12 +19,25 @@ import (
 
 const MainWorktree = "main"
 
+// Invocation carries two orthogonal identities:
+//
+//   - FsHash is the filesystem-location identity. It depends only on Dir, so
+//     two runs from the same directory get the same FsHash, allowing zordon
+//     to re-attach to an already-running alpha. It names the socket / tmp
+//     dir and answers "is this the same alpha instance?".
+//
+//   - CfgHash is the manifest identity. It depends on the Alphasfile bytes
+//     and the resolved parent context, so it changes whenever the manifest
+//     (or any federation parent it sees) changes. It answers "is the
+//     configuration of this alpha still current?" and drives drift
+//     detection in federation chains.
 type Invocation struct {
 	Dir      string            // normalized invocation dir (project root or worktree dir)
 	Worktree string            // "main" or "<name>"
 	StateDir string            // <X>/.zordon/worktrees/<Worktree>
-	Hash     string            // sha8(Dir + alphasfile bytes + parent ctx)
-	TmpDir   string            // $TMPDIR/zordon-<Hash>  (short; sockets live here)
+	FsHash   string            // sha8(Dir)               — instance identity
+	CfgHash  string            // sha8(afBytes+parentCtx) — manifest identity
+	TmpDir   string            // $TMPDIR/zordon-<FsHash>  (short; sockets live here)
 	Env      map[string]string // injected into spawned services
 }
 
@@ -72,12 +85,17 @@ func projectRootAndWorktree(dir string) (root, worktree string) {
 	return clean, MainWorktree
 }
 
-// hash binds the invocation dir into one short id. Two runs from the same
-// directory get the same hash, allowing zordon to "re-attach" to an already
-// running alpha for that project.
-func hash(dir string) string {
+// shortSum returns the first 16 hex chars of sha256(parts joined by 0-byte).
+// Joining with NUL keeps boundaries unambiguous so two distinct inputs can
+// never collide by concatenation.
+func shortSum(parts ...[]byte) string {
 	h := sha256.New()
-	h.Write([]byte(dir))
+	for i, p := range parts {
+		if i > 0 {
+			h.Write([]byte{0})
+		}
+		h.Write(p)
+	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
@@ -107,18 +125,21 @@ func NewAt(alphasfileDir string, afBytes, parentCtx []byte) (*Invocation, error)
 
 func build(dir, root, wt string, afBytes, parentCtx []byte) (*Invocation, error) {
 	stateDir := filepath.Join(root, ".zordon", "worktrees", wt)
-	h := hash(dir)
-	tmp := filepath.Join(os.TempDir(), "zordon-"+h)
+	fsh := shortSum([]byte(dir))
+	cfgh := shortSum(afBytes, parentCtx)
+	tmp := filepath.Join(os.TempDir(), "zordon-"+fsh)
 	return &Invocation{
 		Dir:      dir,
 		Worktree: wt,
 		StateDir: stateDir,
-		Hash:     h,
+		FsHash:   fsh,
+		CfgHash:  cfgh,
 		TmpDir:   tmp,
 		Env: map[string]string{
 			"ZORDON_WORKTREE":  wt,
 			"ZORDON_STATE_DIR": stateDir,
-			"ZORDON_HASH":      h,
+			"ZORDON_FS_HASH":   fsh,
+			"ZORDON_CFG_HASH":  cfgh,
 		},
 	}, nil
 }

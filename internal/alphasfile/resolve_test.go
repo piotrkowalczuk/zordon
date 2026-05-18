@@ -14,7 +14,8 @@ func testInv() *invocation.Invocation {
 		Dir:      "/proj",
 		Worktree: "main",
 		StateDir: "/proj/.zordon/worktrees/main",
-		Hash:     "abcd1234ef567890",
+		FsHash:   "abcd1234ef567890",
+		CfgHash:  "00000000cfg00000",
 		TmpDir:   "/tmp/zordon-abcd1234ef567890",
 	}
 }
@@ -41,10 +42,10 @@ func TestResolveInvocationDerivedValues(t *testing.T) {
 	src := `
 service "go" "api" {
   git = "github.com/acme/api"
-  vars = { hash = pathhash(), tmp = tmpdir() }
+  vars = { fs = fs::hash(), cfg = cfg::hash(), tmp = fs::tmp() }
   file "env" {
-    path = "${tmpdir()}/.env"
-    body = "DIR=${self.dir}\nHASH=${pathhash()}\n"
+    path = "${fs::tmp()}/.env"
+    body = "DIR=${self.dir}\nFS=${fs::hash()}\nCFG=${cfg::hash()}\n"
   }
   runtime {
     cmd = ["./api", "-data", "${self.dir}/data"]
@@ -56,11 +57,14 @@ service "go" "api" {
 	if api == nil {
 		t.Fatal("service api not resolved")
 	}
-	if got := api.Runtime.Vars["hash"]; got != "abcd1234ef567890" {
-		t.Errorf("pathhash() = %v, want invocation hash", got)
+	if got := api.Runtime.Vars["fs"]; got != "abcd1234ef567890" {
+		t.Errorf("fs::hash() = %v, want invocation FsHash", got)
+	}
+	if got := api.Runtime.Vars["cfg"]; got != "00000000cfg00000" {
+		t.Errorf("cfg::hash() = %v, want invocation CfgHash", got)
 	}
 	if got := api.Runtime.Vars["tmp"]; got != "/tmp/zordon-abcd1234ef567890" {
-		t.Errorf("tmpdir() = %v", got)
+		t.Errorf("fs::tmp() = %v", got)
 	}
 	wantDir := "/proj/.zordon/worktrees/main/src/api"
 	if api.Runtime.Dir != wantDir {
@@ -73,7 +77,9 @@ service "go" "api" {
 	if f.Path != "/tmp/zordon-abcd1234ef567890/.env" {
 		t.Errorf("file path = %q", f.Path)
 	}
-	if !strings.Contains(f.Body, "DIR="+wantDir) || !strings.Contains(f.Body, "HASH=abcd1234ef567890") {
+	if !strings.Contains(f.Body, "DIR="+wantDir) ||
+		!strings.Contains(f.Body, "FS=abcd1234ef567890") ||
+		!strings.Contains(f.Body, "CFG=00000000cfg00000") {
 		t.Errorf("file body interpolation wrong:\n%s", f.Body)
 	}
 	wantCmd := []string{"./api", "-data", wantDir + "/data"}

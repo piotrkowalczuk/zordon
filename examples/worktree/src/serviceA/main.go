@@ -15,7 +15,7 @@ const service = "serviceA"
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
-	tag := flag.String("tag", "", "invocation tag (pathhash)")
+	tag := flag.String("tag", "", "invocation tag (fs::hash)")
 	flag.Parse()
 
 	cwd, _ := os.Getwd()

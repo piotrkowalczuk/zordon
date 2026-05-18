@@ -141,7 +141,7 @@ func walkUp() (string, error) {
 	}
 }
 
-func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, hash string, parentDotenv []string, af *alphasfile.Alphasfile, failfast, agent bool) error {
+func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, af *alphasfile.Alphasfile, failfast, agent bool) error {
 	log.Info("alpha", "Understood, Zordon!")
 
 	conn, err := control.Dial(sock, 1*time.Second)
@@ -163,7 +163,8 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, hash str
 			Alphasfile:     af,
 			Failfast:       failfast,
 			Agent:          agent,
-			ConfigHash:     hash,
+			FsHash:         fsHash,
+			CfgHash:        cfgHash,
 			ParentDotenv:   parentDotenv,
 		},
 	}); err != nil {
@@ -310,7 +311,7 @@ func runStatus(ctx context.Context, log *zlog.Logger) error {
 		if lv.isInvocation {
 			marker = fmt.Sprintf(" (invocation, worktree=%s)", lv.inv.Worktree)
 		}
-		fmt.Printf("# [%s] %s%s\n", lv.inv.Hash, lv.afPath, marker)
+		fmt.Printf("# [%s] %s%s\n", lv.inv.FsHash, lv.afPath, marker)
 
 		if lv.state == nil {
 			fmt.Println("  alpha: not running")

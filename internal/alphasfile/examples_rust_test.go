@@ -17,7 +17,7 @@ func TestExampleRustResolves(t *testing.T) {
 		t.Fatal(err)
 	}
 	iv := &invocation.Invocation{
-		Hash: "h0", TmpDir: "/tmp/zordon-h0",
+		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
 		StateDir: "/repo/examples/rust/.zordon/worktrees/main",
 	}
 	af, err := Compile("/repo/examples/rust/Alphasfile", b, iv, nil)

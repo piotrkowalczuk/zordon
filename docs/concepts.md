@@ -78,7 +78,8 @@ contained; everything the rest of the system touches is the same shape.
 ## Functions and the graph
 
 Expressions are not strings. `net::pickport()`, `fs::tmp()`,
-`pathhash()`, `os::env()` are **functions evaluated during resolution** —
+`fs::hash()`, `cfg::hash()`, `src::hash()`, `os::env()` are
+**functions evaluated during resolution** —
 some have identity (a port is drawn once and reused everywhere it's
 referenced), some are pure coordinates of the invocation. They turn a
 static document into a description that adapts to *this* run.

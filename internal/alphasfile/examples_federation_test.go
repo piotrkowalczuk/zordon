@@ -9,7 +9,7 @@ import (
 )
 
 // Regression oracle for the federation project's `print`: it must
-// surface the per-worktree domain (prometheus.<pathhash>.test) on the
+// surface the per-worktree domain (prometheus.<fs::hash>.test) on the
 // Caddy port pulled from the federation parent context. Pure Compile.
 func TestExampleFederationPrint(t *testing.T) {
 	b, err := os.ReadFile("../../examples/federation/project/Alphasfile")
@@ -17,7 +17,7 @@ func TestExampleFederationPrint(t *testing.T) {
 		t.Fatal(err)
 	}
 	iv := &invocation.Invocation{
-		Hash: "feedface00001111", TmpDir: "/tmp/zordon-feedface00001111",
+		FsHash: "feedface00001111", TmpDir: "/tmp/zordon-feedface00001111",
 		Worktree: invocation.MainWorktree,
 		StateDir: "/repo/examples/federation/project/.zordon/worktrees/main",
 	}

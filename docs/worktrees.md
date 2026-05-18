@@ -30,12 +30,17 @@ ones).
 
 `zordon start` from `.zordon/worktrees/<name>/` walks up, finds the
 project's `Alphasfile`, and adopts it as the leaf — same file on disk,
-different invocation. The invocation hash is
-`sha(invocation_dir + alphasfile_bytes + parent_context)`, so `main` and
-`feature` get **distinct hashes ⇒ distinct sockets, state dirs, and
-fresh `pickport()` values** — they run side by side without colliding.
-`zordon status` shows which worktree each level is and its hash; that
-hash is also what `pathhash()` returns.
+different invocation. Every level carries two short hashes:
+
+- **`fs::hash()`** — `sha(invocation_dir)`. Identifies *which alpha
+  instance* this is; names the socket / tmp dir. `main` and `feature`
+  get distinct `fs::hash()` ⇒ distinct sockets, state dirs, and fresh
+  `pickport()` values — they run side by side without colliding.
+- **`cfg::hash()`** — `sha(alphasfile_bytes + parent_context)`. Identifies
+  *the manifest content*. Changes when you edit the Alphasfile (or a
+  parent's resolved services change). Drives federation drift detection.
+
+`zordon status` shows each level's `fs::hash()`.
 
 Each worktree-able service is materialized via `git worktree add` from
 its primary and built there, so editing code in one worktree's checkout

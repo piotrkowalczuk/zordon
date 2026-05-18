@@ -46,6 +46,6 @@ wrap in `sh -lc` when you need shell expansion:
 
 ```hcl
 build {
-  cmd = ["go", "build", "-ldflags", "-X main.Tag=${pathhash()}", "-o", "${fs::bin()}/app", "./cmd/app"]
+  cmd = ["go", "build", "-ldflags", "-X main.Tag=${src::hash()}", "-o", "${fs::bin()}/app", "./cmd/app"]
 }
 ```

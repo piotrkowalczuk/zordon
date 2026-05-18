@@ -15,18 +15,25 @@ arguments / readiness probe that consume them.
 - `net::pickport()` — returns a free TCP port (binds to `:0`, closes,
   reports the port). Each call returns a new port — store it in `vars`
   if you need to reuse it.
-- `fs::tmp()` — a per-invocation scratch dir under `$TMPDIR/zordon-<hash>/`
-  for generated files. Stable within one evaluation. (`tmpdir()` is a
-  back-compat alias.)
+- `fs::tmp()` — a per-invocation scratch dir under `$TMPDIR/zordon-<fs::hash>/`
+  for generated files. Stable within one evaluation.
 - `fs::src()` — the calling service's source checkout (its per-invocation
   `git worktree`). Same as `self.dir`.
 - `fs::bin()` — the per-invocation build-output dir, deliberately
   **outside** the source checkout so building never dirties a `src`
   primary's worktree. The default Go build drops `<name>` here; reference
   it from `cmd` as `${fs::bin()}/<name>`.
-- `pathhash()` — the short hash identifying this invocation (worktree).
-  Distinct per worktree → handy for collision-free names, e.g.
-  `app.${pathhash()}.test`.
+- `fs::hash()` — short hash identifying this **alpha instance** by its
+  filesystem location (project root + worktree). Stable across edits;
+  distinct per worktree. Handy for collision-free names, e.g.
+  `app.${fs::hash()}.test`.
+- `cfg::hash()` — short hash of the **manifest** (Alphasfile bytes +
+  resolved parent context). Changes whenever the manifest does — what
+  federation drift detection compares.
+- `src::hash()` — short identity of the calling service's **source code**
+  (`git rev-parse HEAD` of `fs::src()`). Useful as a build-cache key or
+  a `-ldflags "-X main.Tag=..."` stamp; pair with `fs::hash()` when you
+  also need the location.
 
 ### `self` inside a service
 

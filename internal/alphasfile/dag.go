@@ -157,7 +157,7 @@ func exprsOf(s *serviceBlock) []hcl.Expression {
 
 // traversalToServiceID maps a Traversal like service.go.prometheus.* to
 // "service.go.prometheus". Returns false for traversals rooted elsewhere
-// (self, tmpdir, etc.).
+// (self, fs::tmp, etc.).
 func traversalToServiceID(trav hcl.Traversal) (string, bool) {
 	if len(trav) < 3 {
 		return "", false

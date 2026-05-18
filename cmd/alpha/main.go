@@ -67,7 +67,8 @@ type alphaState struct {
 	mu             sync.RWMutex
 	startedAt      time.Time
 	alphasfilePath string
-	configHash     string
+	fsHash         string   // filesystem-location identity (== inv.FsHash)
+	cfgHash        string   // manifest identity (Alphasfile+parent ctx); drives drift detection
 	parentDotenv   []string // file-level dotenv paths inherited from federation parents
 	agentMode      bool     // configured via `zordon --agent`: apply agent{} env overlay
 	config         *alphasfile.Alphasfile
@@ -76,11 +77,12 @@ type alphaState struct {
 	files          []string          // absolute paths of file{} outputs to unlink on shutdown
 }
 
-func (s *alphaState) configure(path, hash string, parentDotenv []string, agent bool, af *alphasfile.Alphasfile) {
+func (s *alphaState) configure(path, fsHash, cfgHash string, parentDotenv []string, agent bool, af *alphasfile.Alphasfile) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.alphasfilePath = path
-	s.configHash = hash
+	s.fsHash = fsHash
+	s.cfgHash = cfgHash
 	s.parentDotenv = parentDotenv
 	s.agentMode = agent
 	s.config = af
@@ -125,7 +127,8 @@ func (s *alphaState) snapshot() *protocol.StateInfo {
 		PID:            os.Getpid(),
 		AlphasfilePath: s.alphasfilePath,
 		StartedAt:      s.startedAt.Format(time.RFC3339),
-		ConfigHash:     s.configHash,
+		FsHash:         s.fsHash,
+		CfgHash:        s.cfgHash,
 	}
 	if s.config != nil {
 		info.Services = s.config.All()
@@ -456,7 +459,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		state.stopServices(toStop, cfg.shutdownGrace, log)
 	}
 
-	state.configure(req.Configure.AlphasfilePath, req.Configure.ConfigHash, req.Configure.ParentDotenv, req.Configure.Agent, newConfig)
+	state.configure(req.Configure.AlphasfilePath, req.Configure.FsHash, req.Configure.CfgHash, req.Configure.ParentDotenv, req.Configure.Agent, newConfig)
 	services := newConfig.All()
 	files := newConfig.AllFiles()
 	log.Info("alpha", "configured from %s (%d services, %d files, failfast=%v), starting bringup",

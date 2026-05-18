@@ -129,6 +129,13 @@ type Runner func(ctx context.Context, cmd *exec.Cmd) error
 
 // Ensure makes the primary available. KindGit: bare-clone on first use,
 // otherwise fetch all refs. KindDir: assert it's a git repo. KindNone: noop.
+//
+// The bare clone is a partial clone (--filter=blob:none): all refs and
+// commit metadata are downloaded so any branch/tag/rev resolves, but blob
+// content is fetched lazily on first checkout. This is fast on cold start
+// AND `branch`/`tag`/`rev` pinning works without surprise — a plain
+// --depth=1 clone only carries the default branch's HEAD and a tag like
+// v2.14.0 would not exist in the bare repo.
 func (p Primary) Ensure(ctx context.Context, run Runner) error {
 	if run == nil {
 		return errors.New("source.Ensure: nil runner")
@@ -143,18 +150,38 @@ func (p Primary) Ensure(ctx context.Context, run Runner) error {
 		return nil
 	case KindGit:
 		bare := p.BarePath()
+		// Legacy bare repos were created with --depth=1 (only the default
+		// branch's HEAD), so a tag like v2.14.0 resolves to "invalid
+		// reference". `fetch --unshallow` would deepen them but only by
+		// pulling the entire history with blobs — minutes for a big repo —
+		// because --filter only applies to repos that are already partial
+		// clones. Faster and simpler: wipe and re-clone as a partial clone
+		// (metadata-only, blobs lazy on first checkout).
+		if _, err := os.Stat(bare); err == nil {
+			if out, _ := exec.CommandContext(ctx, "git", "-C", bare,
+				"rev-parse", "--is-shallow-repository").Output(); strings.TrimSpace(string(out)) == "true" {
+				if err := os.RemoveAll(bare); err != nil {
+					return fmt.Errorf("remove stale shallow bare %s: %w", bare, err)
+				}
+			}
+		}
 		if _, err := os.Stat(bare); os.IsNotExist(err) {
 			if err := os.MkdirAll(filepath.Dir(bare), 0o755); err != nil {
 				return fmt.Errorf("mkdir bare parent: %w", err)
 			}
-			if err := run(ctx, exec.CommandContext(ctx, "git", "clone", "--bare", "--depth=1", p.cloneURL(), bare)); err != nil {
+			if err := run(ctx, exec.CommandContext(ctx, "git", "clone",
+				"--bare", "--filter=blob:none", p.cloneURL(), bare)); err != nil {
 				return fmt.Errorf("git clone --bare: %w", err)
 			}
 			return nil
 		} else if err != nil {
 			return err
 		}
-		if err := run(ctx, exec.CommandContext(ctx, "git", "-C", bare, "fetch", "--depth=1", "--tags", "--force", "origin", "+refs/heads/*:refs/heads/*")); err != nil {
+		// Refresh both heads and tags so newly-pushed refs become visible.
+		if err := run(ctx, exec.CommandContext(ctx, "git", "-C", bare, "fetch",
+			"--force", "origin",
+			"+refs/heads/*:refs/heads/*",
+			"+refs/tags/*:refs/tags/*")); err != nil {
 			return fmt.Errorf("git fetch bare: %w", err)
 		}
 		return nil

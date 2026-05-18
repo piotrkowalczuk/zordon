@@ -214,8 +214,8 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		}
 
 		switch {
-		case st != nil && !isInvocation && st.ConfigHash == inv.Hash:
-			log.Info("zordon", "%s [%s] up-to-date (alpha pid=%d), reusing", afPath, inv.Hash, st.PID)
+		case st != nil && !isInvocation && st.CfgHash == inv.CfgHash:
+			log.Info("zordon", "%s [%s] up-to-date (alpha pid=%d), reusing", afPath, inv.FsHash, st.PID)
 			accumulated = append(accumulated, st.Services...)
 			if st.Dotenv != "" {
 				dotenvChain = append(dotenvChain, st.Dotenv)
@@ -227,7 +227,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			if !isInvocation {
 				reason = "drift detected (config changed since alpha started)"
 			}
-			log.Info("zordon", "%s [%s]: %s, restarting alpha pid=%d", afPath, inv.Hash, reason, st.PID)
+			log.Info("zordon", "%s [%s]: %s, restarting alpha pid=%d", afPath, inv.FsHash, reason, st.PID)
 			if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
 				log.Error("zordon", "shutdown %s: %v", afPath, e)
 			}
@@ -248,7 +248,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		if err := os.MkdirAll(filepath.Dir(levelLog), 0o755); err != nil {
 			return fmt.Errorf("mkdir state dir: %w", err)
 		}
-		// The socket lives in inv.TmpDir ($TMPDIR/zordon-<hash>); alpha
+		// The socket lives in inv.TmpDir ($TMPDIR/zordon-<FsHash>); alpha
 		// can't bind into a missing directory.
 		if err := os.MkdirAll(inv.TmpDir, 0o755); err != nil {
 			return fmt.Errorf("mkdir tmp dir: %w", err)
@@ -263,7 +263,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			cancel()
 			return fmt.Errorf("%s: waiting for alpha socket: %w", afPath, err)
 		}
-		if err := pushConfigure(ctxLevel, log, sock, afPath, inv.Hash, parentDotenv, af, failfast, agent); err != nil {
+		if err := pushConfigure(ctxLevel, log, sock, afPath, inv.FsHash, inv.CfgHash, parentDotenv, af, failfast, agent); err != nil {
 			cancel()
 			return fmt.Errorf("%s: %w", afPath, err)
 		}

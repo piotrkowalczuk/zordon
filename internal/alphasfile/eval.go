@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -82,7 +84,7 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, seed map[
 			return nil, fmt.Errorf("%s: %w", n.id, err)
 		}
 	}
-	// File-level dotenv: top-level, no `self`; may use fs::/pathhash funcs.
+	// File-level dotenv: top-level, no `self`; may use fs::/cfg:: funcs.
 	gdot, err := r.evalStr(root.Dotenv, nil, "dotenv")
 	if err != nil {
 		return nil, err
@@ -703,15 +705,18 @@ func (r *resolver) functions() map[string]function.Function {
 		})
 	}
 	return map[string]function.Function{
-		// fs:: namespace — per-invocation filesystem coordinates.
-		"fs::tmp": str(func() string { return r.inv.TmpDir }),  // generated files
-		"fs::src": str(func() string { return r.curCheckout }), // this service's checkout
-		"fs::bin": str(func() string { return r.inv.BinDir() }), // build outputs (outside src)
-		"pathhash":      r.pathhashFunc(),
+		// fs:: namespace — per-invocation filesystem coordinates and identity.
+		"fs::tmp":  str(func() string { return r.inv.TmpDir }),   // generated files
+		"fs::src":  str(func() string { return r.curCheckout }),  // this service's checkout
+		"fs::bin":  str(func() string { return r.inv.BinDir() }), // build outputs (outside src)
+		"fs::hash": r.fsHashFunc(),                               // instance identity (location)
+		// cfg:: namespace — manifest identity (Alphasfile bytes + parent ctx).
+		"cfg::hash": r.cfgHashFunc(),
+		// src:: namespace — current service's source code identity.
+		"src::hash": r.srcHashFunc(),
+
 		"net::pickport": pickPortFunc(),
 		"os::env":       osEnvFunc(),
-		// back-compat aliases
-		"tmpdir": str(func() string { return r.inv.TmpDir }),
 	}
 }
 
@@ -748,19 +753,60 @@ func (r *resolver) resolveDir(dir string) string {
 	return resolveSrcDir(r.inv.ProjectRoot(), dir)
 }
 
-// pathhash returns the short (8 hex chars) hash that identifies this
-// Alphasfile by its absolute path — the same token used in the socket and
-// state-dir names. Stable per path, unique across paths. Handy for
-// collision-free hostnames in a shared reverse proxy:
-// "myapp.${pathhash()}.test".
-func (r *resolver) pathhashFunc() function.Function {
+// fsHashFunc returns the short (16 hex chars) hash that identifies this
+// alpha instance by its filesystem location (invocation dir + worktree).
+// Stable per directory across runs and edits; unique across worktrees.
+// Same token names the socket and tmp dir. Handy for collision-free
+// hostnames in a shared reverse proxy: "myapp.${fs::hash()}.test".
+func (r *resolver) fsHashFunc() function.Function {
 	return function.New(&function.Spec{
 		Type: function.StaticReturnType(cty.String),
 		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
-			if r.inv == nil || r.inv.Hash == "" {
-				return cty.NilVal, errors.New("pathhash() called but no invocation configured")
+			if r.inv == nil || r.inv.FsHash == "" {
+				return cty.NilVal, errors.New("fs::hash() called but no invocation configured")
 			}
-			return cty.StringVal(r.inv.Hash), nil
+			return cty.StringVal(r.inv.FsHash), nil
+		},
+	})
+}
+
+// cfgHashFunc returns the short hash of the manifest (Alphasfile bytes +
+// resolved parent context). Changes whenever any part of the manifest the
+// alpha sees changes — what federation drift detection compares.
+func (r *resolver) cfgHashFunc() function.Function {
+	return function.New(&function.Spec{
+		Type: function.StaticReturnType(cty.String),
+		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
+			if r.inv == nil || r.inv.CfgHash == "" {
+				return cty.NilVal, errors.New("cfg::hash() called but no invocation configured")
+			}
+			return cty.StringVal(r.inv.CfgHash), nil
+		},
+	})
+}
+
+// srcHashFunc returns the short identity of the current service's source
+// code. For a git-tracked checkout (dir/src primary, or a materialized git
+// worktree) that's `git rev-parse --short HEAD`; otherwise it errors. Use
+// it as a build cache key or a "code generation" stamp — pair with
+// fs::hash() when you also need the location.
+func (r *resolver) srcHashFunc() function.Function {
+	return function.New(&function.Spec{
+		Type: function.StaticReturnType(cty.String),
+		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
+			dir := r.curCheckout
+			if dir == "" {
+				return cty.NilVal, errors.New("src::hash(): no source primary for this service (use-only or no checkout)")
+			}
+			if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+				return cty.NilVal, fmt.Errorf("src::hash(): %s is not a git working tree (run zordon start once to materialize)", dir)
+			}
+			cmd := exec.Command("git", "-C", dir, "rev-parse", "--short=16", "HEAD")
+			out, err := cmd.Output()
+			if err != nil {
+				return cty.NilVal, fmt.Errorf("src::hash(): git rev-parse HEAD in %s: %w", dir, err)
+			}
+			return cty.StringVal(strings.TrimSpace(string(out))), nil
 		},
 	})
 }

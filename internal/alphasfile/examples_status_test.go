@@ -16,7 +16,7 @@ func TestExampleStatusResolves(t *testing.T) {
 		t.Fatal(err)
 	}
 	iv := &invocation.Invocation{
-		Hash: "h0", TmpDir: "/tmp/zordon-h0",
+		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
 		Worktree: invocation.MainWorktree,
 		StateDir: "/repo/examples/status/.zordon/worktrees/main",
 	}

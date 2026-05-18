@@ -12,7 +12,7 @@ service "go" "cache" {
     path = "${fs::tmp()}/global.env"
     body = <<-EOT
       SOURCE=global-dotenv
-      GLOBAL_ONLY=g-${pathhash()}
+      GLOBAL_ONLY=g-${fs::hash()}
       API_LABEL=from-global
     EOT
   }
@@ -41,13 +41,13 @@ service "go" "api" {
 
   vars = {
     port  = net::pickport()
-    label = "api-${pathhash()}"
+    label = "api-${fs::hash()}"
   }
 
   build {
     cmd = [
       "go", "build",
-      "-ldflags", "-X main.Tag=${pathhash()}",
+      "-ldflags", "-X main.Tag=${fs::hash()}",
       "-o", "${fs::bin()}/app",
       "./examples/interpolation/src/app",
     ]
@@ -85,7 +85,7 @@ service "go" "api" {
       cache_addr  = 127.0.0.1:${service.go.cache.vars.port}
       cache_src   = ${service.go.cache.dir}
       my_src      = ${fs::src()}
-      invocation  = ${pathhash()}
+      invocation  = ${fs::hash()}
     EOT
   }
 

@@ -36,10 +36,14 @@ type ConfigureArgs struct {
 	// Agent mirrors `zordon --agent`: when set, each service's
 	// `agent { env {} }` overlay is applied on top of build and run env.
 	Agent bool `json:"agent,omitempty"`
-	// ConfigHash identifies the (source bytes + parent context) that produced
-	// this configuration. zordon compares it against a running alpha's stored
-	// hash to detect drift in federation chains.
-	ConfigHash string `json:"config_hash,omitempty"`
+	// FsHash is the filesystem-location identity of this invocation (depends
+	// only on the directory). Sent for symmetry / verification; the socket
+	// path already encodes it.
+	FsHash string `json:"fs_hash,omitempty"`
+	// CfgHash is the manifest identity: sha of (Alphasfile bytes + resolved
+	// parent context). zordon compares it against a running alpha's stored
+	// CfgHash to detect drift in federation chains.
+	CfgHash string `json:"cfg_hash,omitempty"`
 	// ParentDotenv carries file-level `dotenv` paths from every Alphasfile
 	// higher in the federation chain (root-first). Each service applies
 	// these (then its own file-level dotenv, then its per-service env).
@@ -75,8 +79,9 @@ type StateInfo struct {
 	PID            int                   `json:"pid"`
 	AlphasfilePath string                `json:"alphasfile_path,omitempty"`
 	StartedAt      string                `json:"started_at"`
-	ConfigHash     string                `json:"config_hash,omitempty"`
-	Dotenv         string                `json:"dotenv,omitempty"` // file-level dotenv (for federation chain)
+	FsHash         string                `json:"fs_hash,omitempty"`  // instance identity (location)
+	CfgHash        string                `json:"cfg_hash,omitempty"` // manifest identity (Alphasfile+parent ctx)
+	Dotenv         string                `json:"dotenv,omitempty"`   // file-level dotenv (for federation chain)
 	Services       []*alphasfile.Service `json:"services,omitempty"`
 	Running        []ServiceStatus       `json:"running,omitempty"`
 }

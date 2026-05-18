@@ -48,7 +48,7 @@ service "go" "prometheus" {
   }
 
   file "config" {
-    path = "${tmpdir()}/prometheus.yml"
+    path = "${fs::tmp()}/prometheus.yml"
     body = <<-EOT
       global:
         scrape_interval: 15s

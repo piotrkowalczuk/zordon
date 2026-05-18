@@ -9,11 +9,11 @@ service "go" "prometheus" {
 
   vars = {
     port    = net::pickport()
-    address = "prometheus.${pathhash()}.test"
+    address = "prometheus.${fs::hash()}.test"
   }
 
   file "prometheus_config" {
-    path = "${tmpdir()}/prometheus.yml"
+    path = "${fs::tmp()}/prometheus.yml"
     body = <<-EOT
       global:
         scrape_interval: 15s
@@ -37,7 +37,7 @@ service "go" "prometheus" {
     "web.listen-address" = ":${self.vars.port}"
   }
 
-  print = "http://${self.vars.address}:${service.go.caddy.vars.http}/  (via Caddy, worktree ${pathhash()})"
+  print = "http://${self.vars.address}:${service.go.caddy.vars.http}/  (via Caddy, worktree ${fs::hash()})"
 
   readiness {
     http {

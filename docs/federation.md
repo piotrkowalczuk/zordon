@@ -72,7 +72,7 @@ The federation example uses two such hooks:
 
 - **coredns/resolver** — writes `/etc/resolver/test` so macOS sends
   `*.test` lookups to the local CoreDNS (CoreDNS serves the whole `.test`
-  TLD; projects pick collision-free names via `pathhash()`, e.g.
+  TLD; projects pick collision-free names via `fs::hash()`, e.g.
   `prometheus.<hash>.test`).
 - **caddy/http80** — fronts Caddy on `:80` without running it as root:
   Caddy stays on its unprivileged pickport and a `pf` rule redirects

@@ -10,11 +10,11 @@ service "go" "serviceA" {
     cmd = [
       "${fs::bin()}/serviceA",
       "-addr", "127.0.0.1:${self.vars.port}",
-      "-tag", "${pathhash()}",
+      "-tag", "${fs::hash()}",
     ]
   }
 
-  print = "http://127.0.0.1:${self.vars.port}/  (serviceA, worktree ${pathhash()})"
+  print = "http://127.0.0.1:${self.vars.port}/  (serviceA, worktree ${fs::hash()})"
 
   worktree {
     sparse = ["examples/worktree/src/serviceA"]
@@ -42,11 +42,11 @@ service "go" "serviceB" {
     cmd = [
       "${fs::bin()}/serviceB",
       "-addr", "127.0.0.1:${self.vars.port}",
-      "-tag", "${pathhash()}",
+      "-tag", "${fs::hash()}",
     ]
   }
 
-  print = "http://127.0.0.1:${self.vars.port}/  (serviceB, worktree ${pathhash()})"
+  print = "http://127.0.0.1:${self.vars.port}/  (serviceB, worktree ${fs::hash()})"
 
   worktree {
     sparse = ["examples/worktree/src/serviceB"]
@@ -74,11 +74,11 @@ service "go" "serviceC" {
     cmd = [
       "${fs::bin()}/serviceC",
       "-addr", "127.0.0.1:${self.vars.port}",
-      "-tag", "${pathhash()}",
+      "-tag", "${fs::hash()}",
     ]
   }
 
-  print = "http://127.0.0.1:${self.vars.port}/  (serviceC, worktree ${pathhash()})"
+  print = "http://127.0.0.1:${self.vars.port}/  (serviceC, worktree ${fs::hash()})"
 
   worktree {
     sparse = ["examples/worktree/src/serviceC"]
