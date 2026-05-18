@@ -1,0 +1,99 @@
+# Dynamic configuration
+
+The `Alphasfile` is evaluated as a DAG before bringup: expressions in one
+service can reference values computed in another, and zordon orders the
+evaluation so dependencies resolve first. This is what makes the local
+stack reproducible — no shell glue to wire ports together, no `.env`
+files committed by hand.
+
+Everything that belongs to a service lives inside its block: locally-cached
+values (`vars`), generated files (`file "<name>" { ... }`), and the
+arguments / readiness probe that consume them.
+
+### Helpers
+
+- `net::pickport()` — returns a free TCP port (binds to `:0`, closes,
+  reports the port). Each call returns a new port — store it in `vars`
+  if you need to reuse it.
+- `fs::tmp()` — a per-invocation scratch dir under `$TMPDIR/zordon-<hash>/`
+  for generated files. Stable within one evaluation. (`tmpdir()` is a
+  back-compat alias.)
+- `fs::src()` — the calling service's source checkout (its per-invocation
+  `git worktree`). Same as `self.dir`.
+- `fs::bin()` — the per-invocation build-output dir, deliberately
+  **outside** the source checkout so building never dirties a `src`
+  primary's worktree. The default Go build drops `<name>` here; reference
+  it from `cmd` as `${fs::bin()}/<name>`.
+- `pathhash()` — the short hash identifying this invocation (worktree).
+  Distinct per worktree → handy for collision-free names, e.g.
+  `app.${pathhash()}.test`.
+
+### `self` inside a service
+
+Inside a service, `self` exposes the service's own resolved values. It
+fills in incrementally as evaluation progresses through these stages:
+
+1. `self.{name, toolchain, dir}` — known immediately from the block labels
+   and `import`/`git`.
+2. `self.vars` — populated after `vars = { ... }` is evaluated.
+3. `self.file.<name>` — `{ path, body }` of each nested `file` block,
+   added as they're evaluated.
+4. `self.arguments` — populated after `arguments = { ... }`.
+
+The `readiness.http.port` expression runs last, so it sees all of the above.
+
+### Cross-service references
+
+After a service is fully evaluated, the same data is exposed under
+`service.<toolchain>.<name>` for downstream services:
+
+- `service.go.foo.vars.<key>`
+- `service.go.foo.arguments["<key>"]`
+- `service.go.foo.file.<name>.path`
+- `service.go.foo.dir`
+
+The DAG ensures the referenced service is evaluated first.
+
+### Example
+
+```hcl
+service "go" "prometheus" {
+  git        = "github.com/prometheus/prometheus"
+  tag        = "v3.11.3"
+  exe        = "./cmd/prometheus"
+  doubleDash = true
+
+  vars = {
+    port = net::pickport()
+  }
+
+  file "config" {
+    path = "${fs::tmp()}/prometheus.yml"
+    body = <<-EOT
+      global:
+        scrape_interval: 15s
+      scrape_configs: []
+    EOT
+  }
+
+  arguments = {
+    "config.file"        = self.file.config.path
+    "web.listen-address" = ":${self.vars.port}"
+  }
+
+  readiness {
+    http {
+      path = "/-/ready"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 30
+  }
+}
+```
+
+One `pickport()` call lands in `vars`; the same port flows into the
+listen address, the readiness probe, and (if needed) any other service
+referencing `service.go.prometheus.vars.port`. The config file is
+materialized into `fs::tmp()` at configure time and unlinked when
+`zordon stop` shuts alpha down.
