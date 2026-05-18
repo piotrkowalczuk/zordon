@@ -22,7 +22,9 @@ import (
 	"github.com/peterbourgon/ff/v4"
 	"github.com/peterbourgon/ff/v4/ffhelp"
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
+	"github.com/piotrkowalczuk/zordon/internal/barrier"
 	"github.com/piotrkowalczuk/zordon/internal/control"
+	"github.com/piotrkowalczuk/zordon/internal/lifecycle"
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/source"
@@ -73,9 +75,10 @@ type alphaState struct {
 	parentDotenv   []string // file-level dotenv paths inherited from federation parents
 	agentMode      bool     // configured via `zordon --agent`: apply agent{} env overlay
 	config         *alphasfile.Alphasfile
-	services       map[string]*serviceCtx
-	readiness      map[string]string // service name -> readiness state ("probing", "ready", "failed")
-	files          []string          // absolute paths of file{} outputs to unlink on shutdown
+	services       map[string]*serviceCtx   // keyed by service name
+	provisions     map[string]*provisionCtx // keyed by provision ID ("service.<tc>.<svc>.runtime.provision.<name>")
+	readiness      map[string]string        // service name -> readiness state ("probing", "ready", "failed")
+	files          []string                 // absolute paths of file{} outputs to unlink on shutdown
 
 	// shutdownCh is closed exactly once to signal whole-alpha shutdown.
 	// Each service supervisor selects on it; the runAlpha main goroutine
@@ -90,6 +93,59 @@ type alphaState struct {
 	// composes with select / context timeouts in shutdown sequencing.
 	handlersMu   sync.Mutex
 	handlerDones []chan struct{}
+}
+
+// barrierTarget bundles the two channels alpha hands to any waiter on a
+// barrier ref: target fires when the entity reaches the requested state,
+// fail fires when the entity terminates in a state that means the target
+// will never be reached. Waiters select on both so neither deadlock nor
+// silent skip is possible.
+type barrierTarget struct {
+	target *barrier.Barrier
+	fail   *barrier.Barrier
+}
+
+// resolveBarrier parses a canonical ref ("service.<tc>.<svc>@<state>" or
+// "service.<tc>.<svc>.runtime.provision.<name>@<state>") and returns the
+// concrete barriers behind it. Returns nil target if the entity isn't
+// known (typo, parent-federation, dropped service).
+func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
+	at := strings.LastIndexByte(ref, '@')
+	if at < 0 {
+		return nil, fmt.Errorf("barrier ref %q has no @state suffix", ref)
+	}
+	entityID, state := ref[:at], lifecycle.State(ref[at+1:])
+	// Provision ref: service.<tc>.<svc>.runtime.provision.<name>
+	if idx := strings.Index(entityID, ".runtime.provision."); idx >= 0 {
+		s.mu.RLock()
+		pc := s.provisions[entityID]
+		s.mu.RUnlock()
+		if pc == nil {
+			return nil, fmt.Errorf("unknown provision %q", entityID)
+		}
+		t := pc.Barrier(state)
+		if t == nil {
+			return nil, fmt.Errorf("provision %q has no %q state", entityID, state)
+		}
+		return &barrierTarget{target: t, fail: pc.TerminalFailure()}, nil
+	}
+	// Service ref: service.<tc>.<name>
+	parts := strings.SplitN(entityID, ".", 3)
+	if len(parts) != 3 || parts[0] != "service" {
+		return nil, fmt.Errorf("bad barrier entity ID %q", entityID)
+	}
+	svcName := parts[2]
+	s.mu.RLock()
+	sc := s.services[svcName]
+	s.mu.RUnlock()
+	if sc == nil {
+		return nil, fmt.Errorf("unknown service %q", entityID)
+	}
+	t := sc.Barrier(state)
+	if t == nil {
+		return nil, fmt.Errorf("service %q has no %q state", entityID, state)
+	}
+	return &barrierTarget{target: t, fail: sc.TerminalFailure()}, nil
 }
 
 func (s *alphaState) requestShutdown() {
@@ -122,38 +178,277 @@ func (s *alphaState) drainedCh() <-chan struct{} {
 }
 
 // serviceCtx is one running service plus the channels that drive its
-// lifecycle. The supervisor goroutine is the sole owner of cmd.Wait — no
-// other goroutine calls it — so the "exec: Wait was already called"
+// lifecycle. The supervisor goroutine is the sole owner of cmd.Wait —
+// no other goroutine calls it — so the "exec: Wait was already called"
 // race that the old two-watchers design had can't happen.
 //
-//	stopCh closed → "stop just this service" (reconfigure path)
-//	shutdownCh    → "stop all services" (failfast / signal)
-//	cmd self-exit → supervisor handles it (failfast trigger if `ready`)
-//	done closed   → supervisor has finished; safe to read exitErr
+//	stopCh closed   → "stop just this service" (reconfigure path)
+//	shutdownCh      → "stop all services" (failfast / signal)
+//	cmd self-exit   → supervisor handles it (failfast trigger if `ready`)
+//	done closed     → supervisor has finished; safe to read exitErr
+//
+// lifecycle holds the scheduled→running→{ready,failed}→stopped DAG. Reaches
+// at the natural transition points; status barriers are exposed to other
+// entities (provisions, cross-service waiters) via the barrierLookup.
 type serviceCtx struct {
-	name     string
-	cmd      *exec.Cmd
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	done     chan struct{}
+	name      string
+	toolchain string
+	cmd       *exec.Cmd
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	done      chan struct{}
 
-	// ready flips when waitReady succeeded; supervisor reads it on
-	// self-exit to decide whether to trigger failfast.
-	ready atomic.Bool
+	lifecycle *lifecycle.Instance
+	// doneBar is the synthetic "outcome decided" barrier (Any(ready,
+	// failed)). It lives outside the lifecycle DAG because no single set
+	// of predecessors can model "either of these happened".
+	doneBar *barrier.Barrier
+
 	// exitErr is the result of cmd.Wait. Written by supervisor before
 	// closing done; the close is the happens-before edge for any reader
 	// that has already received <-done.
 	exitErr error
 }
 
+func newServiceCtx(name, toolchain string, cmd *exec.Cmd) *serviceCtx {
+	sc := &serviceCtx{
+		name:      name,
+		toolchain: toolchain,
+		cmd:       cmd,
+		stopCh:    make(chan struct{}),
+		done:      make(chan struct{}),
+		lifecycle: lifecycle.NewInstance(alphasfile.ServiceLifecycle),
+		doneBar:   barrier.New(),
+	}
+	barrier.Any(sc.doneBar,
+		sc.lifecycle.Barrier("ready"),
+		sc.lifecycle.Barrier(alphasfile.ServiceTerminalFailure))
+	sc.lifecycle.Reach("scheduled")
+	return sc
+}
+
 func (sc *serviceCtx) requestStop() {
 	sc.stopOnce.Do(func() { close(sc.stopCh) })
 }
 
+// provisionCtx is one bringup action — same channel/lifecycle shape as
+// serviceCtx but with a transient-task vocabulary (scheduled / running /
+// success / failure) and bringup-blocking semantics governed by Detached.
+//
+// A goroutine waits on the resolved barrier deps, optionally runs the
+// idempotent check, runs cmd, then verify. The process gets a stable
+// stopCh and the global state.shutdownCh just like services, so shutdown
+// converges on the same mechanism.
+type provisionCtx struct {
+	id        string // canonical "service.<tc>.<svc>.runtime.provision.<name>"
+	serviceID string // parent service identity
+	step      *alphasfile.ProvisionStep
+
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	done     chan struct{}
+
+	lifecycle *lifecycle.Instance
+	doneBar   *barrier.Barrier // Any(success, failure)
+}
+
+func newProvisionCtx(serviceID string, step *alphasfile.ProvisionStep) *provisionCtx {
+	pc := &provisionCtx{
+		id:        serviceID + ".runtime.provision." + step.Name,
+		serviceID: serviceID,
+		step:      step,
+		stopCh:    make(chan struct{}),
+		done:      make(chan struct{}),
+		lifecycle: lifecycle.NewInstance(alphasfile.ProvisionLifecycle),
+		doneBar:   barrier.New(),
+	}
+	barrier.Any(pc.doneBar,
+		pc.lifecycle.Barrier("success"),
+		pc.lifecycle.Barrier(alphasfile.ProvisionTerminalFailure))
+	return pc
+}
+
+func (pc *provisionCtx) requestStop() {
+	pc.stopOnce.Do(func() { close(pc.stopCh) })
+}
+
+func (pc *provisionCtx) Barrier(s lifecycle.State) *barrier.Barrier {
+	if s == alphasfile.SyntheticStateDone {
+		return pc.doneBar
+	}
+	return pc.lifecycle.Barrier(s)
+}
+
+func (pc *provisionCtx) TerminalFailure() *barrier.Barrier {
+	return pc.lifecycle.Barrier(alphasfile.ProvisionTerminalFailure)
+}
+
+// runProvision is the per-provision goroutine: own barrier lifecycle,
+// waits on deps (implicit parent.ready + explicit `after` refs), runs
+// check (skip cmd if check=0), runs cmd, runs verify (best effort).
+// Reach success/failure terminal, close done. Failure under failfast on
+// a non-detached provision triggers global shutdown.
+func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace time.Duration, stream *safeEncoder, log *zlog.Logger, failfast bool) {
+	defer close(pc.done)
+	defer state.removeProvision(pc.id)
+
+	pc.lifecycle.Reach("scheduled")
+
+	type dep struct {
+		ref    string
+		target *barrier.Barrier
+		fail   *barrier.Barrier
+	}
+	// Implicit: every provision waits for its parent service's ready.
+	// Without this, provisions with no `after` would race the service's
+	// own bringup; the implicit dep makes the common case "do this once
+	// the service is up" the default.
+	deps := []dep{{
+		ref:    "service." + parent.toolchain + "." + parent.name + "@ready",
+		target: parent.Barrier("ready"),
+		fail:   parent.TerminalFailure(),
+	}}
+	for _, ref := range pc.step.After {
+		bt, err := state.resolveBarrier(ref)
+		if err != nil {
+			log.Error("alpha", "provision[%s]: %v", pc.id, err)
+			pc.lifecycle.Reach("failure")
+			return
+		}
+		deps = append(deps, dep{ref: ref, target: bt.target, fail: bt.fail})
+	}
+
+	for _, d := range deps {
+		select {
+		case <-d.target.Wait():
+		case <-d.fail.Wait():
+			log.Error("alpha", "provision[%s]: dep %s reached terminal failure; skipping", pc.id, d.ref)
+			pc.lifecycle.Reach("failure")
+			return
+		case <-pc.stopCh:
+			pc.lifecycle.Reach("failure")
+			return
+		case <-state.shutdownCh:
+			pc.lifecycle.Reach("failure")
+			return
+		}
+	}
+
+	pc.lifecycle.Reach("running")
+	log.Info("alpha", "provision[%s]: running", pc.id)
+
+	// Per-provision env = process env + step.Env overlay. We don't
+	// reach for the parent service's RunEnv here — provisions are
+	// orchestration, not the service itself; if you need parent vars,
+	// reference them via interpolation in cmd.
+	env := os.Environ()
+	for k, v := range pc.step.Env {
+		env = append(env, k+"="+v)
+	}
+
+	streamKind := "provision:" + pc.step.Name
+	// Idempotency check: if it passes, skip the heavyweight cmd.
+	if strings.TrimSpace(pc.step.Check) != "" {
+		if err := runShell(pc, state, grace, pc.step.Check, env, parent.name, streamKind+":check", stream, log); err == nil {
+			log.Info("alpha", "provision[%s]: check passed, skipping cmd", pc.id)
+			pc.lifecycle.Reach("success")
+			return
+		}
+	}
+
+	if err := runShell(pc, state, grace, pc.step.Cmd, env, parent.name, streamKind+":cmd", stream, log); err != nil {
+		log.Error("alpha", "provision[%s]: cmd failed: %v", pc.id, err)
+		pc.lifecycle.Reach("failure")
+		if failfast && !pc.step.Detached {
+			state.requestShutdown()
+		}
+		return
+	}
+
+	if strings.TrimSpace(pc.step.Verify) != "" {
+		if err := runShell(pc, state, grace, pc.step.Verify, env, parent.name, streamKind+":verify", stream, log); err != nil {
+			log.Error("alpha", "provision[%s]: verify failed (best-effort, not fatal): %v", pc.id, err)
+		}
+	}
+
+	log.Info("alpha", "provision[%s]: success", pc.id)
+	pc.lifecycle.Reach("success")
+}
+
+// runShell executes a single shell snippet (check / cmd / verify) with
+// the provision's env, streams its stdout+stderr through the safe
+// encoder, and reacts to pc.stopCh / state.shutdownCh by SIGTERM →
+// grace → SIGKILL. Returns the cmd.Wait() error (nil on exit 0).
+func runShell(pc *provisionCtx, state *alphaState, grace time.Duration, snippet string, env []string, svcName, label string, stream *safeEncoder, log *zlog.Logger) error {
+	cmd := exec.Command("/bin/sh", "-c", snippet)
+	cmd.Env = env
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	var streamWg sync.WaitGroup
+	streamWg.Add(2)
+	go func() { defer streamWg.Done(); streamLines(svcName, label, stdout, stream, log) }()
+	go func() { defer streamWg.Done(); streamLines(svcName, label, stderr, stream, log) }()
+
+	cmdDone := make(chan struct{})
+	var cmdErr error
+	go func() {
+		cmdErr = cmd.Wait()
+		close(cmdDone)
+	}()
+
+	select {
+	case <-cmdDone:
+		streamWg.Wait()
+		return cmdErr
+	case <-pc.stopCh:
+	case <-state.shutdownCh:
+	}
+	// External cancel — SIGTERM, grace, SIGKILL.
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-cmdDone:
+	case <-time.After(grace):
+		_ = cmd.Process.Kill()
+		<-cmdDone
+	}
+	streamWg.Wait()
+	return fmt.Errorf("cancelled")
+}
+
+// Barrier returns the barrier for an HCL-visible state. "done" is the
+// synthetic Any(ready, failed); other states delegate to the lifecycle
+// instance.
+func (sc *serviceCtx) Barrier(s lifecycle.State) *barrier.Barrier {
+	if s == alphasfile.SyntheticStateDone {
+		return sc.doneBar
+	}
+	return sc.lifecycle.Barrier(s)
+}
+
+// TerminalFailure returns the barrier alpha pairs with any waiter on
+// this service so the waiter unblocks on terminal failure instead of
+// deadlocking on a status that won't be reached.
+func (sc *serviceCtx) TerminalFailure() *barrier.Barrier {
+	return sc.lifecycle.Barrier(alphasfile.ServiceTerminalFailure)
+}
+
 // supervise owns cmd.Wait for the lifetime of the service. It waits for
-// whichever comes first — external stop or self-exit — and reaps the
-// process cleanly. close(sc.done) is deferred so any goroutine selecting
-// on <-sc.done is unblocked exactly once, no matter which path was taken.
+// whichever comes first — external stop or self-exit — reaches the
+// matching lifecycle state, then reaps the process cleanly.
+// close(sc.done) is deferred so any goroutine selecting on <-sc.done is
+// unblocked exactly once, no matter which path was taken.
 func (sc *serviceCtx) supervise(state *alphaState, grace time.Duration, failfast bool, log *zlog.Logger) {
 	defer close(sc.done)
 	defer state.removeService(sc.name)
@@ -175,12 +470,17 @@ func (sc *serviceCtx) supervise(state *alphaState, grace time.Duration, failfast
 		} else {
 			log.Info("alpha", "%s exited cleanly", sc.name)
 		}
-		// Only "exited after ready" warrants triggering global failfast;
-		// "exited before ready" is bringup's failure to surface through
-		// the EventServiceFail path bringupService already drives.
-		if sc.ready.Load() && failfast {
-			log.Info("alpha", "failfast: %s exited after ready, requesting alpha shutdown", sc.name)
-			state.requestShutdown()
+		if sc.lifecycle.Reached("ready") {
+			sc.lifecycle.Reach("stopped")
+			// Only "exited after ready" warrants triggering global
+			// failfast; "exited before ready" is bringup's failure that
+			// the EventServiceFail path already surfaces.
+			if failfast {
+				log.Info("alpha", "failfast: %s exited after ready, requesting alpha shutdown", sc.name)
+				state.requestShutdown()
+			}
+		} else {
+			sc.lifecycle.Reach("failed")
 		}
 		return
 	}
@@ -195,6 +495,11 @@ func (sc *serviceCtx) supervise(state *alphaState, grace time.Duration, failfast
 		log.Info("alpha", "SIGKILL %s pid=%d (grace expired)", sc.name, sc.cmd.Process.Pid)
 		_ = sc.cmd.Process.Kill()
 		sc.exitErr = <-waitErr
+	}
+	if sc.lifecycle.Reached("ready") {
+		sc.lifecycle.Reach("stopped")
+	} else {
+		sc.lifecycle.Reach("failed")
 	}
 }
 
@@ -223,6 +528,21 @@ func (s *alphaState) addService(sc *serviceCtx) {
 		s.services = make(map[string]*serviceCtx)
 	}
 	s.services[sc.name] = sc
+}
+
+func (s *alphaState) addProvision(pc *provisionCtx) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.provisions == nil {
+		s.provisions = make(map[string]*provisionCtx)
+	}
+	s.provisions[pc.id] = pc
+}
+
+func (s *alphaState) removeProvision(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.provisions, id)
 }
 
 func (s *alphaState) setReadiness(name, state string) {
@@ -269,14 +589,20 @@ func (s *alphaState) snapshot() *protocol.StateInfo {
 	return info
 }
 
-// shutdownAll closes every supervisor's stopCh and waits for their done
-// channels. The supervisor itself handles SIGTERM/grace/SIGKILL, so this
-// function carries no timer logic of its own. Files generated by
-// materializeFiles are removed at the end.
+// shutdownAll closes every supervisor's stopCh (services AND provisions)
+// and waits for their done channels. Each supervisor handles its own
+// SIGTERM/grace/SIGKILL logic, so this function carries no timer of its
+// own. Files generated by materializeFiles are removed at the end.
+//
+// Provisions get the same teardown semantics as services because they
+// own subprocesses too — detached or not, they need a clean shutdown
+// path when alpha is going away.
 func (s *alphaState) shutdownAll(log *zlog.Logger) {
 	s.mu.Lock()
 	services := s.services
+	provisions := s.provisions
 	s.services = nil
+	s.provisions = nil
 	files := s.files
 	s.files = nil
 	s.mu.Unlock()
@@ -284,8 +610,14 @@ func (s *alphaState) shutdownAll(log *zlog.Logger) {
 	for _, sc := range services {
 		sc.requestStop()
 	}
+	for _, pc := range provisions {
+		pc.requestStop()
+	}
 	for _, sc := range services {
 		<-sc.done
+	}
+	for _, pc := range provisions {
+		<-pc.done
 	}
 
 	for _, p := range files {
@@ -302,22 +634,44 @@ func (s *alphaState) shutdownAll(log *zlog.Logger) {
 // disturbing the ones whose code/manifest didn't change. Generated files
 // are left in place (cleaned only on full shutdownAll). The supervisors
 // of the affected services log their own SIGTERM/SIGKILL lifecycle.
+//
+// Provisions belonging to the stopped services get the same treatment —
+// otherwise a detached provision launched by the previous configuration
+// would keep running past its parent's death, and a fresh configure
+// would register a new ctx with the same ID, leaking the old one.
 func (s *alphaState) stopServices(names map[string]bool) {
 	s.mu.Lock()
-	picked := make([]*serviceCtx, 0, len(names))
+	pickedSvcs := make([]*serviceCtx, 0, len(names))
 	for name := range names {
 		if sc := s.services[name]; sc != nil {
-			picked = append(picked, sc)
+			pickedSvcs = append(pickedSvcs, sc)
 			delete(s.services, name)
+		}
+	}
+	var pickedProvs []*provisionCtx
+	for id, pc := range s.provisions {
+		for _, sc := range pickedSvcs {
+			prefix := "service." + sc.toolchain + "." + sc.name + ".runtime.provision."
+			if strings.HasPrefix(id, prefix) {
+				pickedProvs = append(pickedProvs, pc)
+				delete(s.provisions, id)
+				break
+			}
 		}
 	}
 	s.mu.Unlock()
 
-	for _, sc := range picked {
+	for _, sc := range pickedSvcs {
 		sc.requestStop()
 	}
-	for _, sc := range picked {
+	for _, pc := range pickedProvs {
+		pc.requestStop()
+	}
+	for _, sc := range pickedSvcs {
 		<-sc.done
+	}
+	for _, pc := range pickedProvs {
+		<-pc.done
 	}
 }
 
@@ -587,6 +941,10 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		return
 	}
 
+	// Track services that were just brought up — provisions only spawn
+	// for those (provisions of preserved services already ran in their
+	// previous bringup; rerunning would violate idempotency expectations).
+	var brought []*alphasfile.Service
 	for _, svc := range services {
 		if running[svc.Name()] && !toStop[svc.Name()] {
 			continue // Already running and unchanged
@@ -599,7 +957,60 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 			state.requestShutdown()
 			return
 		}
+		if ok {
+			brought = append(brought, svc)
+		}
 	}
+
+	// Launch provisions for every newly-brought-up service. Each one
+	// gets its own goroutine that waits on deps then runs check/cmd/
+	// verify. We collect refs to the non-detached ones so EventDone can
+	// block on their completion.
+	type prov struct {
+		pc       *provisionCtx
+		detached bool
+	}
+	var provs []prov
+	for _, svc := range brought {
+		if svc.Runtime == nil || len(svc.Runtime.Provision) == 0 {
+			continue
+		}
+		state.mu.RLock()
+		parent := state.services[svc.Name()]
+		state.mu.RUnlock()
+		if parent == nil {
+			continue
+		}
+		for _, step := range svc.Runtime.Provision {
+			pc := newProvisionCtx("service."+svc.Toolchain+"."+svc.Name(), step)
+			state.addProvision(pc)
+			go runProvision(pc, state, parent, cfg.shutdownGrace, stream, log, failfast)
+			provs = append(provs, prov{pc: pc, detached: step.Detached})
+		}
+	}
+
+	// Wait for non-detached provisions before declaring bringup complete.
+	// Detached ones keep running in the background; alpha shutdown will
+	// reap them along with the services.
+	for _, p := range provs {
+		if p.detached {
+			continue
+		}
+		select {
+		case <-p.pc.doneBar.Wait():
+			if !p.pc.lifecycle.Reached("success") && failfast {
+				log.Info("alpha", "failfast: provision %s did not succeed, aborting", p.pc.id)
+				state.shutdownAll(log)
+				stream.Send(&protocol.Event{Kind: protocol.EventError, Error: fmt.Sprintf("failfast: provision %s failed", p.pc.id)})
+				state.requestShutdown()
+				return
+			}
+		case <-state.shutdownCh:
+			// Someone else triggered shutdown; bringup is done.
+			return
+		}
+	}
+
 	stream.Send(&protocol.Event{Kind: protocol.EventDone})
 	log.Info("alpha", "bringup complete")
 }
@@ -661,14 +1072,10 @@ func bringupService(svc *alphasfile.Service, state *alphaState, cfg bringupConfi
 	// propagate when the child exits.
 	ttyCleanup()
 
-	sc := &serviceCtx{
-		name:   name,
-		cmd:    cmd,
-		stopCh: make(chan struct{}),
-		done:   make(chan struct{}),
-	}
+	sc := newServiceCtx(name, svc.Toolchain, cmd)
 	state.addService(sc)
 	state.setReadiness(name, "probing")
+	sc.lifecycle.Reach("running")
 	log.Info("alpha", "started %s pid=%d argv=%v", name, cmd.Process.Pid, cmd.Args)
 
 	go streamLines(name, "stdout", stdout, stream, log)
@@ -693,7 +1100,7 @@ func bringupService(svc *alphasfile.Service, state *alphaState, cfg bringupConfi
 			<-sc.done
 			return false
 		}
-		sc.ready.Store(true)
+		sc.lifecycle.Reach("ready")
 		state.setReadiness(name, "ready")
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceReady, Service: name})
 		return true

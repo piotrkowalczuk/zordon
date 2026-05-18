@@ -1,0 +1,73 @@
+# examples/provision — bringup-time actions (check/cmd/verify) chained
+# via `after`, plus a detached fire-and-forget provision that runs
+# without blocking EventDone.
+#
+# Every provision has an *implicit* dep on its parent service's `ready`
+# barrier, so all of these wait for the HTTP server to pass readiness
+# before any of them fire. The explicit `after` adds dependencies on
+# OTHER provisions (chained: init-state → smoke-test → record-completion).
+#
+# All shell snippets use universally-available unix tools (test, mkdir,
+# touch, curl, grep, echo, date) — no extra runtime deps.
+
+service "go" "app" {
+  src = "../.."
+
+  vars = { port = net::pickport() }
+
+  build {
+    cmd = ["go", "build", "-o", "${fs::bin()}/app", "./examples/go/src/app"]
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    # Idempotent state setup. `check` runs first; if it exits 0 (i.e.
+    # the marker already exists), `cmd` is skipped — this is the
+    # "re-running the configure step is cheap" property. `verify` then
+    # asserts the post-state regardless of which path was taken.
+    provision "init-state" {
+      check  = "test -f $ZORDON_STATE_DIR/markers/init"
+      cmd    = "mkdir -p $ZORDON_STATE_DIR/markers && touch $ZORDON_STATE_DIR/markers/init"
+      verify = "test -f $ZORDON_STATE_DIR/markers/init"
+    }
+
+    # Talks to the running HTTP server, so the implicit self.ready dep
+    # matters here. Also chained after init-state — won't run until the
+    # marker dir exists.
+    provision "smoke-test" {
+      cmd   = "curl -fsS http://127.0.0.1:${self.vars.port}/ | grep -q go-example"
+      after = [self.runtime.provision.init-state.success]
+    }
+
+    # Final marker, gated on the smoke-test passing. If smoke-test fails
+    # under failfast=true (the default), this provision's `failure`
+    # barrier fires via the deps' terminal-failure pairing and the
+    # bringup as a whole errors out — no orphan completion record.
+    provision "record-completion" {
+      cmd   = "echo $(date -u +%s) > $ZORDON_STATE_DIR/markers/complete"
+      after = [self.runtime.provision.smoke-test.success]
+    }
+
+    # Detached: bringup completes (EventDone) without waiting for this
+    # to finish. Useful for warmups, notifications, async housekeeping.
+    # The marker may not exist yet when `zordon start` returns; the
+    # detached process keeps running and gets cleaned up at alpha shutdown.
+    #
+    # `/bin/sleep` (absolute path, integer seconds) so the snippet
+    # survives PATH shenanigans (some go-install put a non-POSIX
+    # `sleep` earlier on $PATH) and avoids the fractional-seconds
+    # extension that POSIX doesn't actually mandate.
+    provision "post-up-notify" {
+      cmd      = "/bin/sleep 1 && echo notify > $ZORDON_STATE_DIR/markers/notify"
+      detached = true
+    }
+  }
+
+  readiness {
+    http {
+      port = self.vars.port
+      path = "/"
+    }
+  }
+}

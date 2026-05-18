@@ -63,6 +63,7 @@ type RuntimeConfig struct {
 	Dotenv   string            `json:"dotenv,omitempty"` // path to a .env loaded before Env
 	Command        []string          `json:"command,omitempty"`
 	Sudo           []*SudoStep    `json:"sudo,omitempty"`
+	Provision      []*ProvisionStep `json:"provision,omitempty"`
 	Files          []*File        `json:"files,omitempty"`
 	Dir            string         `json:"dir,omitempty"`     // per-invocation source checkout (= fs::src)
 	BinDir         string         `json:"bin_dir,omitempty"` // per-invocation build output (= fs::bin)
@@ -330,6 +331,36 @@ type SudoStep struct {
 	Verify string `json:"verify,omitempty"`
 }
 
+// ProvisionStep is one declared bringup-time action attached to a
+// service's runtime. Same shape as sudo (check/cmd/verify) plus a
+// per-step env overlay and an `after` dependency list. Provisions run
+// during bringup after the parent service becomes ready (implicit dep),
+// so bringup isn't reported complete until they've all finished.
+//
+// after entries name what this step depends on; alpha resolves them at
+// runtime against the live service set:
+//
+//	"<name>"                                local provision in the same service
+//	"service.<tc>.<svc>.ready"              wait for another service ready
+//	"service.<tc>.<svc>.provision.<name>"   wait for another provision
+type ProvisionStep struct {
+	Name   string            `json:"name"`
+	Check  string            `json:"check,omitempty"`
+	Cmd    string            `json:"cmd"`
+	Verify string            `json:"verify,omitempty"`
+	Env    map[string]string `json:"env,omitempty"`
+	// After holds the resolved barrier refs ("service.go.db@ready",
+	// "service.go.api.runtime.provision.create-tables@success", ...).
+	// alpha parses these at bringup and selects on (target, terminal-
+	// failure) pairs to keep waiters deadlock-free.
+	After []string `json:"after,omitempty"`
+	// Detached: when true, bringup completion (EventDone) doesn't wait
+	// for this provision to finish. Useful for warmups / notifications
+	// that shouldn't block declaring the stack "up". Detached failures
+	// don't trigger failfast (you opted out of synchronous coupling).
+	Detached bool `json:"detached,omitempty"`
+}
+
 type Alphasfile struct {
 	Dotenv   string     `json:"dotenv,omitempty"` // file-level .env, applied under every service's env
 	Services []*Service `json:"services,omitempty"`
@@ -429,10 +460,30 @@ type buildBlock struct {
 }
 
 // runtimeBlock is the run step: `cmd` is the service argv (there is no
-// top-level `cmd`); `env` is the running process env.
+// top-level `cmd`); `env` is the running process env. `provision`
+// blocks are bringup-time actions that fire once the service (and any
+// declared `after` deps) reaches ready.
 type runtimeBlock struct {
-	Cmd hcl.Expression `hcl:"cmd,optional"`
-	Env hcl.Expression `hcl:"env,optional"`
+	Cmd       hcl.Expression    `hcl:"cmd,optional"`
+	Env       hcl.Expression    `hcl:"env,optional"`
+	Provision []*provisionBlock `hcl:"provision,block"`
+}
+
+// provisionBlock is one bringup action. cmd is required; check/verify
+// are interpolated shell snippets like sudo's. env overlays the
+// service's runtime env for this step only. after is an HCL list whose
+// elements are barrier traversals (e.g. service.go.db.ready); keeping
+// it as hcl.Expression lets the DAG resolver see those traversals and
+// order service evaluation accordingly. detached=true means bringup
+// doesn't wait for this provision's success before sending EventDone.
+type provisionBlock struct {
+	Name     string         `hcl:"name,label"`
+	Check    hcl.Expression `hcl:"check,optional"`
+	Cmd      hcl.Expression `hcl:"cmd"`
+	Verify   hcl.Expression `hcl:"verify,optional"`
+	Env      hcl.Expression `hcl:"env,optional"`
+	After    hcl.Expression `hcl:"after,optional"`
+	Detached bool           `hcl:"detached,optional"`
 }
 
 // agentBlock overlays `env` on top of build AND runtime, but only when

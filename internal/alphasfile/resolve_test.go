@@ -252,3 +252,69 @@ service "go" "dns" {
 	}
 }
 
+// Resolve provisions: check/cmd/verify get interpolated against self
+// and cross-service vars; env is captured as a string map; after refs
+// resolve to canonical "<entityID>@<state>" strings ready for alpha
+// to look up at bringup. Cross-service barrier traversals (e.g.
+// service.go.db.ready) also drive the dep graph — without that edge
+// db.vars wouldn't be resolved before api's provision evaluates.
+func TestResolveProvisionsResolved(t *testing.T) {
+	src := `
+service "go" "db" {
+  git  = "github.com/acme/db"
+  vars = { port = 5432, password = "secret" }
+}
+service "go" "api" {
+  git  = "github.com/acme/api"
+  vars = { port = 8080 }
+  runtime {
+    provision "create-tables" {
+      check  = "psql -p ${service.go.db.vars.port} -tc 'SELECT 1'"
+      cmd    = "psql -p ${service.go.db.vars.port} -f schema.sql"
+      verify = "psql -p ${service.go.db.vars.port} -tc 'SELECT 1 FROM users LIMIT 0'"
+      env    = { PGPASSWORD = service.go.db.vars.password }
+      after  = [service.go.db.ready]
+    }
+    provision "seed" {
+      cmd      = "psql -f seed.sql"
+      after    = [self.runtime.provision.create-tables.success]
+      detached = true
+    }
+  }
+}
+`
+	af := compile(t, src, nil)
+	api := svcByName(af, "api")
+	if api == nil || len(api.Runtime.Provision) != 2 {
+		t.Fatalf("want 2 provisions on api, got %+v", api)
+	}
+	create := api.Runtime.Provision[0]
+	if create.Name != "create-tables" {
+		t.Errorf("first provision name = %q, want create-tables", create.Name)
+	}
+	if !strings.Contains(create.Check, "psql -p 5432") {
+		t.Errorf("check not interpolated with db port: %q", create.Check)
+	}
+	if !strings.Contains(create.Cmd, "psql -p 5432 -f schema.sql") {
+		t.Errorf("cmd not interpolated: %q", create.Cmd)
+	}
+	if create.Env["PGPASSWORD"] != "secret" {
+		t.Errorf("env PGPASSWORD = %q, want secret", create.Env["PGPASSWORD"])
+	}
+	if len(create.After) != 1 || create.After[0] != "service.go.db@ready" {
+		t.Errorf("after = %v, want [service.go.db@ready]", create.After)
+	}
+	if create.Detached {
+		t.Errorf("create-tables.Detached = true, want false (default)")
+	}
+
+	seed := api.Runtime.Provision[1]
+	if !seed.Detached {
+		t.Errorf("seed.Detached = false, want true (explicit)")
+	}
+	wantSeedAfter := "service.go.api.runtime.provision.create-tables@success"
+	if len(seed.After) != 1 || seed.After[0] != wantSeedAfter {
+		t.Errorf("seed.After = %v, want [%s]", seed.After, wantSeedAfter)
+	}
+}
+

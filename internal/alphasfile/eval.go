@@ -15,7 +15,22 @@ import (
 	"github.com/zclconf/go-cty/cty/function"
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
+	"github.com/piotrkowalczuk/zordon/internal/lifecycle"
 )
+
+// buildBarrierAttrs returns one cty.StringVal per state, each holding
+// the canonical "<entityID>@<state>" barrier ref. Used by evalService
+// to give cty objects a referenceable status surface — HCL traversals
+// like `service.go.api.ready` ultimately resolve to the matching ref
+// string, which alpha then maps back to a real *barrier.Barrier at
+// bringup time.
+func buildBarrierAttrs(entityID string, states []lifecycle.State) map[string]cty.Value {
+	attrs := make(map[string]cty.Value, len(states))
+	for _, s := range states {
+		attrs[string(s)] = cty.StringVal(entityID + "@" + string(s))
+	}
+	return attrs
+}
 
 // resolver walks the service DAG and produces the wire-stable *Alphasfile.
 //
@@ -122,11 +137,29 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	}
 	r.curCheckout = dir // what fs::src() returns while this service evals
 
-	// self_base — known from labels + primary, before any eval.
+	// self_base — known from labels + primary, before any eval. Includes
+	// the static barrier-status attrs (scheduled/running/ready/stopped/
+	// done) and the runtime.provision.<name>.<status> sub-objects so HCL
+	// traversals like `self.ready` or `self.runtime.provision.x.success`
+	// resolve to canonical "<entityID>@<state>" ref strings during eval.
+	serviceID := "service." + sb.Toolchain + "." + sb.Name
 	self := map[string]cty.Value{
 		"name":      cty.StringVal(sb.Name),
 		"toolchain": cty.StringVal(sb.Toolchain),
 		"dir":       cty.StringVal(dir),
+	}
+	for k, v := range buildBarrierAttrs(serviceID, ServiceBarrierStates) {
+		self[k] = v
+	}
+	if sb.Runtime != nil && len(sb.Runtime.Provision) > 0 {
+		provObjs := make(map[string]cty.Value, len(sb.Runtime.Provision))
+		for _, pb := range sb.Runtime.Provision {
+			provID := serviceID + ".runtime.provision." + pb.Name
+			provObjs[pb.Name] = cty.ObjectVal(buildBarrierAttrs(provID, ProvisionBarrierStates))
+		}
+		self["runtime"] = cty.ObjectVal(map[string]cty.Value{
+			"provision": cty.ObjectVal(provObjs),
+		})
 	}
 
 	// Producers (vars, each file, arguments) are evaluated in dependency
@@ -300,6 +333,51 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		sudo = append(sudo, &SudoStep{Name: sblk.Name, Check: check, Apply: apply, Verify: verify})
 	}
 
+	// provision hooks: same shape as sudo plus env + after + detached.
+	// after is a list of barrier refs (canonical "<entityID>@<state>"
+	// strings); alpha parses them at bringup and selects on the matching
+	// barriers. References can be local (self.runtime.provision.X.<s>)
+	// or cross-service (service.<tc>.<svc>.<s>).
+	var provisions []*ProvisionStep
+	if sb.Runtime != nil {
+		for _, pb := range sb.Runtime.Provision {
+			label := "provision." + pb.Name
+			check, err := r.evalStr(pb.Check, self, label+".check")
+			if err != nil {
+				return err
+			}
+			cmd, err := r.evalStr(pb.Cmd, self, label+".cmd")
+			if err != nil {
+				return err
+			}
+			verify, err := r.evalStr(pb.Verify, self, label+".verify")
+			if err != nil {
+				return err
+			}
+			var penv map[string]string
+			if pb.Env != nil {
+				m, err := r.evalMap(pb.Env, self, label+".env")
+				if err != nil {
+					return err
+				}
+				penv = toStringMap(m)
+			}
+			afterList, err := r.evalStrList(pb.After, self, label+".after")
+			if err != nil {
+				return err
+			}
+			provisions = append(provisions, &ProvisionStep{
+				Name:     pb.Name,
+				Check:    check,
+				Cmd:      cmd,
+				Verify:   verify,
+				Env:      penv,
+				After:    afterList,
+				Detached: pb.Detached,
+			})
+		}
+	}
+
 	// Stage 7: readiness port (may reference everything in self).
 	var probePort int
 	if sb.Readiness != nil {
@@ -335,6 +413,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		Dotenv:         dotenv,
 		Command:        command,
 		Sudo:           sudo,
+		Provision:      provisions,
 		Files:          files,
 		Dir:            dir,
 		BinDir:         r.inv.BinDir(),
