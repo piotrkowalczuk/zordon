@@ -1,0 +1,44 @@
+# examples/go — the Go toolchain in its three source modes.
+#
+#   local      : src (+exe) — a checkout you own; zordon worktrees it
+#   local+git  : git + src   — git seeds src, worktree from src
+#   use-only   : package      — `go install <pkg>@<ver>` into fs::bin,
+#                               no worktree (a tool you run, not edit)
+#
+# `zordon start` here brings up `app` (runnable: src points at this repo).
+# The other two are reference shapes for the same toolchain.
+
+
+service "go" "app" {
+  src = "../.."
+  exe = "./examples/go/src/app"
+
+  vars = { port = net::pickport() }
+  cmd  = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "app_pinned" {
+  # local+git: git is the origin; if `src` is absent zordon clones it
+  # there, if present it verifies origin matches. Worktree from src.
+  git = "github.com/piotrkowalczuk/zordon"
+  tag = "v0.0.0"          # default revision for the worktree
+  exe = "./examples/go/src/app"
+
+  vars = { port = net::pickport() }
+  cmd  = ["${fs::bin()}/app_pinned", "-addr", "127.0.0.1:${self.vars.port}"]
+}
+
+service "go" "dlv" {
+  # use-only: installed, not worktree-able, not editable.
+  package = "github.com/go-delve/delve/cmd/dlv@latest"
+  cmd     = ["${fs::bin()}/dlv", "version"]
+}
