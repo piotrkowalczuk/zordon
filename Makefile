@@ -8,7 +8,10 @@ build:
 	go build -o bin/alpha ./cmd/alpha/
 
 test:
-	go test ./...
+	go test -cover -coverprofile=cover.out -count=2 -race ./...
+
+lint:
+	go tool staticcheck ./...
 
 # Each example owns a test.sh that asserts the claim it demonstrates
 # (not just bringup). A missing prerequisite is a SKIP (exit 0), a
