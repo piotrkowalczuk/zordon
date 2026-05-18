@@ -1,26 +1,13 @@
-# Federation root: shared infrastructure every project below can lean on.
-#
-# Caddy runs as a reverse proxy that hot-reloads from a config directory:
-# any service lower in the chain just drops its own `<name>.caddy` fragment
-# into service.go.caddy.vars.config_dir and Caddy (`--watch`) picks it up.
-# No admin API, no per-app glue code.
-#
-# CoreDNS resolves *.test -> 127.0.0.1 so the vhosts are reachable
-# by name.
-
 service "go" "caddy" {
   git   = "github.com/caddyserver/caddy"
   tag   = "v2.10.0"
   exe   = "./cmd/caddy"
-  # defaults: src=git, exe=./caddy ./cmd/caddy
 
   vars = {
     http       = net::pickport()
     config_dir = "${tmpdir()}/conf.d"
   }
 
-  # Main Caddyfile: a health endpoint for readiness + a glob import of the
-  # drop-in directory children write into.
   file "caddyfile" {
     path = "${tmpdir()}/Caddyfile"
     body = <<-EOT
@@ -37,8 +24,6 @@ service "go" "caddy" {
     EOT
   }
 
-  # Seed fragment: makes config_dir exist before Caddy starts (and is a
-  # harmless comment as far as Caddy is concerned).
   file "seed" {
     path = "${self.vars.config_dir}/00-root.caddy"
     body = "# zordon federation root — children drop their vhosts here\n"
@@ -56,16 +41,6 @@ service "go" "caddy" {
     failure_threshold = 50
   }
 
-  # Front Caddy on :80 without running it as root: Caddy stays on its
-  # unprivileged pickport; pf redirects loopback :80 -> that port. Idempotent
-  # via a per-port marker + a one-time /etc/pf.conf anchor hook (both checked
-  # WITHOUT sudo, so steady state never prompts). A backup is kept at
-  # /etc/pf.conf.zordon.bak.
-  #
-  # Revert:
-  #   sudo pfctl -a zordon -F all
-  #   sudo sed -i '' '/rdr-anchor "zordon"/d' /etc/pf.conf
-  #   sudo pfctl -f /etc/pf.conf
   sudo "http80" {
     check  = "test -f '${tmpdir()}/pf80.${self.vars.http}' && grep -q 'rdr-anchor \"zordon\"' /etc/pf.conf"
     apply  = <<-EOT
@@ -90,15 +65,11 @@ service "go" "caddy" {
 service "go" "coredns" {
   git = "github.com/coredns/coredns"
   tag = "v1.14.3"
-  # defaults: src=git, exe=.
 
   vars = {
     dns = net::pickport()
   }
 
-  # Serve the whole `.test` TLD (RFC 6761 — reserved, never public, and
-  # NOT mDNS like `.local`). Children pick collision-free hostnames under
-  # it via pathhash(): "<svc>.<hash>.test".
   file "corefile" {
     path = "${tmpdir()}/Corefile"
     body = <<-EOT
@@ -113,11 +84,6 @@ service "go" "coredns" {
 
   cmd = ["${fs::bin()}/coredns", "-conf", self.file.corefile.path]
 
-  # Point macOS's resolver for *.test at this CoreDNS instance so the
-  # browser (not just `dig @127.0.0.1 -p`) resolves the vhosts. Idempotent:
-  # `check` (no sudo) passes when the file already has the current port, so
-  # steady-state restarts don't prompt for a password. Only a changed DNS
-  # port triggers `apply` (one prompt), then `verify` confirms it.
   sudo "resolver" {
     check  = "grep -qxF 'port ${self.vars.dns}' /etc/resolver/test 2>/dev/null"
     apply  = <<-EOT

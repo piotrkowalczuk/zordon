@@ -72,17 +72,12 @@ func projectRootAndWorktree(dir string) (root, worktree string) {
 	return clean, MainWorktree
 }
 
-// hash binds the invocation dir, the Alphasfile bytes, and the parent
-// federation context into one short id. Two runs of the same file from
-// different invocation dirs (e.g. main vs a worktree) get distinct hashes
-// ⇒ disjoint state, sockets, and pickport() draws.
-func hash(dir string, alphasfile, parentCtx []byte) string {
+// hash binds the invocation dir into one short id. Two runs from the same
+// directory get the same hash, allowing zordon to "re-attach" to an already
+// running alpha for that project.
+func hash(dir string) string {
 	h := sha256.New()
 	h.Write([]byte(dir))
-	h.Write([]byte{0})
-	h.Write(alphasfile)
-	h.Write([]byte{0})
-	h.Write(parentCtx)
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
@@ -112,7 +107,7 @@ func NewAt(alphasfileDir string, afBytes, parentCtx []byte) (*Invocation, error)
 
 func build(dir, root, wt string, afBytes, parentCtx []byte) (*Invocation, error) {
 	stateDir := filepath.Join(root, ".zordon", "worktrees", wt)
-	h := hash(dir, afBytes, parentCtx)
+	h := hash(dir)
 	tmp := filepath.Join(os.TempDir(), "zordon-"+h)
 	return &Invocation{
 		Dir:      dir,

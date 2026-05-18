@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strings"
 
@@ -99,11 +100,22 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	}
 	r.taken[sb.Toolchain+"/"+sb.Name] = "local"
 
-	// dir = this service's per-invocation checkout (empty if not
-	// worktree-able: crate / prebuilt). Pure — no filesystem touch here;
-	// alpha materializes the worktree at this path later.
+	// dir = where this service's code lives for this invocation.
+	//
+	//   src-only in the "main" worktree → the src dir itself, used IN
+	//     PLACE (your live working tree; zordon never copies or git-
+	//     worktrees it, so uncommitted edits just work — the edit→start
+	//     loop). "main" is only a mental label; in practice it means
+	//     "use src directly".
+	//   anything else (named worktree, or a git primary) → a per-
+	//     invocation checkout alpha materializes via git worktree add.
+	//
+	// Pure: no filesystem touch here.
 	dir := ""
-	if sb.Git != "" || sb.Src != "" {
+	switch {
+	case sb.Src != "" && sb.Git == "" && r.inv.Worktree == invocation.MainWorktree:
+		dir = r.resolveDir(sb.Src)
+	case sb.Git != "" || sb.Src != "":
 		dir = r.inv.CheckoutPath(sb.Name)
 	}
 	r.curCheckout = dir // what fs::src() returns while this service evals
@@ -232,6 +244,10 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	if err != nil {
 		return err
 	}
+	printLine, err := r.evalStr(sb.Print, self, "print")
+	if err != nil {
+		return err
+	}
 	// sudo hooks (may reference everything resolved so far).
 	var sudo []*SudoStep
 	for _, sblk := range sb.Sudo {
@@ -252,11 +268,21 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 
 	// Stage 7: readiness port (may reference everything in self).
 	var probePort int
-	if sb.Readiness != nil && sb.Readiness.HTTP != nil {
+	if sb.Readiness != nil {
 		ctx := r.ctxWith(self)
-		probePort, err = evalIntExpr(sb.Readiness.HTTP.Port, ctx, "readiness.http.port")
-		if err != nil {
-			return err
+		var (
+			expr  hcl.Expression
+			field string
+		)
+		switch {
+		case sb.Readiness.HTTP != nil:
+			expr, field = sb.Readiness.HTTP.Port, "readiness.http.port"
+		}
+		if expr != nil {
+			probePort, err = evalIntExpr(expr, ctx, field)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -275,6 +301,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		Files:          files,
 		Dir:            dir,
 		BinDir:         r.inv.BinDir(),
+		Print:          printLine,
 	}
 	if sb.Log != nil {
 		rt.Log = &LogConfig{Format: sb.Log.Format, Filter: sb.Log.Filter}
@@ -292,14 +319,45 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	default:
 		return fmt.Errorf("unknown toolchain %q (want go|rust|ruby)", sb.Toolchain)
 	}
-	if (sb.Git != "" && sb.Src != "") || (sb.Git != "" && sb.Dir != "") {
-		return fmt.Errorf("service %q declares both git and dir; pick one primary", sb.Name)
+	// Use-only: the install coordinate is read from the field that
+	// matches the toolchain (`package` for go, `cargo` for rust).
+	// Cross-toolchain fields are a mistake.
+	var install, instVersion string
+	var features []string
+	switch sb.Toolchain {
+	case ToolchainGo:
+		if sb.Cargo != "" || len(sb.Features) > 0 {
+			return fmt.Errorf("service %q is go but declares rust use-only fields (cargo/features)", sb.Name)
+		}
+		install = strings.TrimSpace(sb.Package)
+	case ToolchainRust:
+		if sb.Package != "" {
+			return fmt.Errorf("service %q is rust but declares go use-only field (package)", sb.Name)
+		}
+		install = strings.TrimSpace(sb.Cargo)
+		features = sb.Features
+		instVersion = strings.TrimSpace(sb.Version)
+	default:
+		if sb.Package != "" || sb.Cargo != "" {
+			return fmt.Errorf("service %q: %s has no use-only mode", sb.Name, sb.Toolchain)
+		}
 	}
+
+	// Modes: use-only (install) XOR worktree (src, optionally seeded by git).
 	src := sb.Src
-	if src == "" {
-		src = sb.Dir
+	switch {
+	case install != "":
+		if sb.Git != "" || src != "" {
+			return fmt.Errorf("service %q declares use-only (%s) together with git/src; pick one", sb.Name, sb.Toolchain)
+		}
+	case src == "" && sb.Git == "":
+		field := "package"
+		if sb.Toolchain == ToolchainRust {
+			field = "cargo"
+		}
+		return fmt.Errorf("service %q has no source: declare src, git, or %s (use-only)", sb.Name, field)
 	}
-	
+
 	var worktree *Worktree
 	if sb.Worktree != nil && len(sb.Worktree.Sparse) > 0 {
 		// Sparse cone paths are relative to the primary repo root (what
@@ -318,10 +376,17 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 			Branch:    sb.Branch,
 			Tag:       sb.Tag,
 			Rev:       sb.Rev,
+			Install:   install,
+			Version:   instVersion,
+			Features:  features,
 			Exe:       sb.Exe,
+			Bin:       sb.Bin,
 			Build:     build,
 			Cmd:       strings.Join(command, " "),
 			Worktree:  worktree,
+			// In-place: src-only in the "main" worktree → alpha builds/runs
+			// from src as-is (no git worktree add, no HEAD reset).
+			InPlace: sb.Src != "" && sb.Git == "" && r.inv.Worktree == invocation.MainWorktree,
 		},
 	}
 	r.resolvedServices = append(r.resolvedServices, svc)
@@ -604,14 +669,37 @@ func (r *resolver) functions() map[string]function.Function {
 	}
 	return map[string]function.Function{
 		// fs:: namespace — per-invocation filesystem coordinates.
-		"fs::tmp": str(func() string { return r.inv.TmpDir }),       // generated files
-		"fs::src": str(func() string { return r.curCheckout }),      // this service's checkout
-		"fs::bin": str(func() string { return r.inv.BinDir() }),     // build outputs (outside src)
+		"fs::tmp": str(func() string { return r.inv.TmpDir }),  // generated files
+		"fs::src": str(func() string { return r.curCheckout }), // this service's checkout
+		"fs::bin": str(func() string { return r.inv.BinDir() }), // build outputs (outside src)
 		"pathhash":      r.pathhashFunc(),
 		"net::pickport": pickPortFunc(),
+		"os::env":       osEnvFunc(),
 		// back-compat aliases
 		"tmpdir": str(func() string { return r.inv.TmpDir }),
 	}
+}
+
+// osEnvFunc reads a host environment variable at evaluation time (in the
+// zordon process, so it sees your shell env). os::env("NAME") errors if
+// NAME is unset; os::env("NAME", "default") returns the default instead.
+func osEnvFunc() function.Function {
+	return function.New(&function.Spec{
+		Params: []function.Parameter{{Name: "name", Type: cty.String}},
+		VarParam: &function.Parameter{Name: "default", Type: cty.String,
+			AllowNull: true},
+		Type: function.StaticReturnType(cty.String),
+		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
+			name := args[0].AsString()
+			if v, ok := os.LookupEnv(name); ok {
+				return cty.StringVal(v), nil
+			}
+			if len(args) > 1 {
+				return cty.StringVal(args[1].AsString()), nil
+			}
+			return cty.NilVal, fmt.Errorf("os::env(%q): environment variable not set (pass a second arg for a default)", name)
+		},
+	})
 }
 
 // resolveDir turns a `dir` primary into an absolute path. ~ expands to

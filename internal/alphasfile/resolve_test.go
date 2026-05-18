@@ -121,15 +121,33 @@ service "go" "app" {
 	}
 }
 
-func TestResolveGitDirExclusive(t *testing.T) {
+func TestResolveUseOnlyExcludesSrc(t *testing.T) {
 	_, err := Compile("t", []byte(`
-service "go" "x" {
-  git = "github.com/a/b"
-  dir = "/home/me/x"
+service "rust" "x" {
+  src   = "../.."
+  cargo = "tansu"
 }
 `), testInv(), nil)
-	if err == nil || !strings.Contains(err.Error(), "both git and dir") {
-		t.Fatalf("want git/dir exclusivity error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "use-only") {
+		t.Fatalf("want use-only/src exclusivity error, got %v", err)
+	}
+}
+
+func TestResolveGitSeedsSrc(t *testing.T) {
+	// git + src is allowed: git is the origin that seeds src; worktree
+	// from src. Both present must not error.
+	af := compile(t, `
+service "go" "api" {
+  git = "github.com/a/api"
+  src = "../checkouts/api"
+}
+`, nil)
+	s := svcByName(af, "api")
+	if s == nil || !s.Worktreeable() || s.UseOnly() {
+		t.Fatalf("git+src must be a worktree service: %+v", s.Package)
+	}
+	if s.Package.Git != "github.com/a/api" || s.Package.Src == "" {
+		t.Errorf("git+src not carried: %+v", s.Package)
 	}
 }
 
@@ -143,15 +161,63 @@ service "go" "dup" { git = "github.com/a/c" }
 	}
 }
 
-func TestResolveNonWorktreeableHasNoDir(t *testing.T) {
-	// crate / bare binary: no git, no dir ⇒ not worktree-able, dir empty.
-	af := compile(t, `service "rust" "tansu" { crate = "tansu" }`, nil)
+func TestResolveUseOnlyNoWorktree(t *testing.T) {
+	// rust use-only block: installed, not worktree-able, no checkout dir.
+	af := compile(t, `
+service "rust" "tansu" {
+  cargo = "tansu"
+}
+`, nil)
 	s := svcByName(af, "tansu")
-	if s.Worktreeable() {
-		t.Error("crate service should not be worktree-able")
+	if !s.UseOnly() || s.Worktreeable() || !s.Buildable() {
+		t.Errorf("use-only flags wrong: useOnly=%v wt=%v build=%v", s.UseOnly(), s.Worktreeable(), s.Buildable())
+	}
+	if s.Package.Install != "tansu" {
+		t.Errorf("install = %q, want tansu", s.Package.Install)
 	}
 	if s.Runtime.Dir != "" {
-		t.Errorf("non-worktree service dir = %q, want empty", s.Runtime.Dir)
+		t.Errorf("use-only dir = %q, want empty", s.Runtime.Dir)
+	}
+}
+
+func TestResolveGoUseOnly(t *testing.T) {
+	af := compile(t, `
+service "go" "dlv" {
+  package = "github.com/go-delve/delve/cmd/dlv@latest"
+}
+`, nil)
+	s := svcByName(af, "dlv")
+	if !s.UseOnly() || s.Package.Install != "github.com/go-delve/delve/cmd/dlv@latest" {
+		t.Errorf("go use-only wrong: useOnly=%v install=%q", s.UseOnly(), s.Package.Install)
+	}
+}
+
+func TestResolveRustUseOnlyFeaturesVersion(t *testing.T) {
+	af := compile(t, `
+service "rust" "tansu" {
+  cargo    = "tansu"
+  version  = "0.6.0"
+  features = ["a", "b"]
+}
+`, nil)
+	s := svcByName(af, "tansu")
+	if s.Package.Install != "tansu" || s.Package.Version != "0.6.0" {
+		t.Errorf("cargo/version wrong: %+v", s.Package)
+	}
+	if len(s.Package.Features) != 2 || s.Package.Features[0] != "a" || s.Package.Features[1] != "b" {
+		t.Errorf("features = %v", s.Package.Features)
+	}
+}
+
+func TestResolveToolchainFieldMismatch(t *testing.T) {
+	// rust use-only field on a go service is a typed mistake.
+	_, err := Compile("t", []byte(`
+service "go" "x" {
+  cargo = "tansu"
+}
+`), testInv(), nil)
+	if err == nil || !strings.Contains(err.Error(), "rust use-only") {
+		t.Fatalf("want toolchain/field mismatch error, got %v", err)
 	}
 }
 

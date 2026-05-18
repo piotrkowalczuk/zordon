@@ -1,13 +1,6 @@
-# Every service has a primary repo (`git` = zordon-owned bare clone, or
-# `src` = your own checkout) and is materialized into a per-invocation git
-# worktree, built there, and run from there.
-#
-# A service with neither git nor src (e.g., prebuilt binary) expects it on $PATH.
-
 service "go" "nats-server" {
   git = "github.com/nats-io/nats-server"
   tag = "v2.14.0"
-  # defaults: src=git, exe=.
 
   vars = {
     client = net::pickport()
@@ -23,14 +16,24 @@ service "go" "nats-server" {
 }
 
 service "rust" "tansu" {
-  # prebuilt binary on path
-  exe = "tansu"
+  cargo      = "tansu"
+  features   = ["dynostore"]
+  doubleDash = true
+
+  vars = {
+    kafka = net::pickport()
+  }
+
+  arguments = {
+    listener-url            = "tcp://127.0.0.1:${self.vars.kafka}"
+    advertised-listener-url = "tcp://127.0.0.1:${self.vars.kafka}"
+  }
 }
 
 service "go" "prometheus" {
   git   = "github.com/prometheus/prometheus"
   tag   = "v3.11.3"
-  exe   = "./cmd/prometheus" # override default build target
+  exe   = "./cmd/prometheus"
   doubleDash = true
 
   vars = {
@@ -41,6 +44,7 @@ service "go" "prometheus" {
     "config.file"        = self.file.config.path
     "log.format"         = "json"
     "web.listen-address" = ":${self.vars.port}"
+    "storage.tsdb.path"  = "${fs::tmp()}/prometheus-data"
   }
 
   file "config" {
@@ -68,14 +72,25 @@ service "ruby" "ruby-service" {
   git   = "github.com/niwasawa/ruby-sinatra-hello-world"
   build = "bundle install --path vendor/bundle"
 
+  vars = {
+    port = net::pickport()
+  }
+
+  env = {
+    PORT = self.vars.port
+  }
+
   log {
     format = "plain"
     filter = "^\\tfrom |^/Users/.*|:in `.*'|:in `<.*>'"
   }
 
-  vars = {
-    port = net::pickport()
-  }
+  cmd = ["bundle", "exec", "rackup", "-p", "${self.vars.port}", "-o", "0.0.0.0", "config.ru"]
 
-  cmd = ["bundle", "exec", "ruby", "myapp.rb", "-p", "${self.vars.port}"]
+  readiness {
+    http {
+      port = self.vars.port
+      path = "/"
+    }
+  }
 }

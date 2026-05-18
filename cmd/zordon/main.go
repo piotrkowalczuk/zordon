@@ -38,6 +38,7 @@ func main() {
 	startAlphaLog := startFlags.StringLong("alpha-log", "/tmp/alpha.log", "log file for alpha")
 	startTimeout := startFlags.DurationLong("timeout", 30*time.Second, "max wait for alpha to become ready")
 	startFailfast := startFlags.BoolLong("failfast", "abort bringup and shut down alpha on first service failure")
+	*startFailfast = true // default to true
 	startCmd := &ff.Command{
 		Name:      "start",
 		Usage:     "zordon start [FLAGS]",
@@ -309,17 +310,35 @@ func runStatus(ctx context.Context, log *zlog.Logger) error {
 			fmt.Println("  services: (none configured yet)")
 			continue
 		}
-		runningByName := make(map[string]int, len(st.Running))
+		runningByName := make(map[string]protocol.ServiceStatus, len(st.Running))
 		for _, r := range st.Running {
-			runningByName[r.Name] = r.PID
+			runningByName[r.Name] = r
 		}
 		fmt.Printf("  services (%d):\n", len(st.Services))
 		for _, s := range st.Services {
 			state := "stopped"
-			if pid, ok := runningByName[s.Name()]; ok {
-				state = fmt.Sprintf("running pid=%d", pid)
+			if status, ok := runningByName[s.Name()]; ok {
+				health := ""
+				if p := s.Runtime.Readiness; p != nil {
+					// Perform a live, single-shot probe.
+					pctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+					err := p.Check(pctx)
+					cancel()
+
+					if err == nil {
+						health = " [ready]"
+					} else {
+						health = fmt.Sprintf(" [unhealthy: %v]", err)
+					}
+				}
+				state = fmt.Sprintf("running pid=%d%s", status.PID, health)
 			}
 			fmt.Printf("    - [%s] %s — %s\n", s.Toolchain, s.Name(), state)
+			if s.Runtime != nil && s.Runtime.Print != "" {
+				// Plain text: the value is the composed (interpolated)
+				// string; the terminal linkifies any URL itself.
+				fmt.Printf("        %s\n", s.Runtime.Print)
+			}
 		}
 	}
 	if !anyRunning {

@@ -10,19 +10,13 @@ build:
 test:
 	go test ./...
 
+# Each example owns a test.sh that asserts the claim it demonstrates
+# (not just bringup). A missing prerequisite is a SKIP (exit 0), a
+# broken claim is a hard failure.
 e2e: build
-	@ZORDON_BIN="$$(pwd)/bin/zordon"; \
-	for dir in $(EXAMPLES); do \
-		echo "Running E2E for $$dir..."; \
-		(cd $$dir && \
-		if [ "$$(basename $$dir)" = "federation" ]; then sudo -v; fi && \
-		$$ZORDON_BIN sudo && \
-		if [ "$$(basename $$dir)" = "worktree" ]; then \
-			rm -rf .zordon/worktrees/feature && \
-			$$ZORDON_BIN worktree create feature && \
-			cd .zordon/worktrees/feature; \
-		fi && \
-		$$ZORDON_BIN start --agent && \
-		$$ZORDON_BIN status --agent && \
-		$$ZORDON_BIN stop --agent) || exit 1; \
+	@for dir in $(EXAMPLES); do \
+		t="$$dir/test.sh"; \
+		[ -f "$$t" ] || { echo "no test.sh in $$dir, skipping"; continue; }; \
+		echo "==> $$dir"; \
+		bash "$$t" || exit 1; \
 	done

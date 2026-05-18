@@ -79,8 +79,9 @@ type StateInfo struct {
 }
 
 type ServiceStatus struct {
-	Name string `json:"name"`
-	PID  int    `json:"pid"`
+	Name      string `json:"name"`
+	PID       int    `json:"pid"`
+	Readiness string `json:"readiness,omitempty"` // "probing", "ready", "failed"
 }
 
 // Encoder writes newline-delimited JSON messages.

@@ -1,6 +1,6 @@
-service "go" "app" {
+service "rust" "app" {
   src = "../.."
-  exe = "./examples/go/src/app"
+  exe = "./examples/rust/src/app"
 
   vars = { port = net::pickport() }
   cmd  = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]

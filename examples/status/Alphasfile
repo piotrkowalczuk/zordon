@@ -1,0 +1,17 @@
+service "go" "app" {
+  src = "../.."
+  exe = "./examples/status/src/app"
+
+  vars  = { port = net::pickport() }
+  cmd   = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+  print = "http://127.0.0.1:${self.vars.port}/  (app endpoint)"
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

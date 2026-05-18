@@ -71,7 +71,8 @@ type alphaState struct {
 	parentDotenv   []string // file-level dotenv paths inherited from federation parents
 	config         *alphasfile.Alphasfile
 	running        map[string]*exec.Cmd
-	files          []string // absolute paths of file{} outputs to unlink on shutdown
+	readiness      map[string]string // service name -> readiness state ("probing", "ready", "failed")
+	files          []string          // absolute paths of file{} outputs to unlink on shutdown
 }
 
 func (s *alphaState) configure(path, hash string, parentDotenv []string, af *alphasfile.Alphasfile) {
@@ -81,6 +82,7 @@ func (s *alphaState) configure(path, hash string, parentDotenv []string, af *alp
 	s.configHash = hash
 	s.parentDotenv = parentDotenv
 	s.config = af
+	s.readiness = make(map[string]string)
 }
 
 func (s *alphaState) addFile(p string) {
@@ -98,10 +100,20 @@ func (s *alphaState) addProcess(name string, cmd *exec.Cmd) {
 	s.running[name] = cmd
 }
 
+func (s *alphaState) setReadiness(name, state string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readiness == nil {
+		s.readiness = make(map[string]string)
+	}
+	s.readiness[name] = state
+}
+
 func (s *alphaState) removeProcess(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.running, name)
+	delete(s.readiness, name)
 }
 
 func (s *alphaState) snapshot() *protocol.StateInfo {
@@ -122,7 +134,11 @@ func (s *alphaState) snapshot() *protocol.StateInfo {
 		if cmd.Process != nil {
 			pid = cmd.Process.Pid
 		}
-		info.Running = append(info.Running, protocol.ServiceStatus{Name: name, PID: pid})
+		info.Running = append(info.Running, protocol.ServiceStatus{
+			Name:      name,
+			PID:       pid,
+			Readiness: s.readiness[name],
+		})
 	}
 	return info
 }
@@ -135,24 +151,39 @@ func (s *alphaState) shutdownAll(grace time.Duration, log *zlog.Logger) {
 	s.files = nil
 	s.mu.Unlock()
 
+	if len(procs) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
 	for name, cmd := range procs {
 		if cmd.Process == nil {
 			continue
 		}
-		log.Info("alpha", "SIGTERM %s pid=%d", name, cmd.Process.Pid)
-		_ = cmd.Process.Signal(syscall.SIGTERM)
+		wg.Add(1)
+		go func(name string, cmd *exec.Cmd) {
+			defer wg.Done()
+			log.Info("alpha", "SIGTERM %s pid=%d", name, cmd.Process.Pid)
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+
+			// Wait for the process to exit or for the grace period to expire.
+			done := make(chan struct{})
+			go func() {
+				_ = cmd.Wait()
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				log.Info("alpha", "%s exited after SIGTERM", name)
+			case <-time.After(grace):
+				log.Info("alpha", "SIGKILL %s pid=%d (grace period expired)", name, cmd.Process.Pid)
+				_ = cmd.Process.Kill()
+				<-done
+			}
+		}(name, cmd)
 	}
-	time.Sleep(grace)
-	for name, cmd := range procs {
-		if cmd.Process == nil {
-			continue
-		}
-		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
-			continue
-		}
-		log.Info("alpha", "SIGKILL %s pid=%d", name, cmd.Process.Pid)
-		_ = cmd.Process.Kill()
-	}
+	wg.Wait()
 
 	for _, p := range files {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
@@ -161,6 +192,47 @@ func (s *alphaState) shutdownAll(grace time.Duration, log *zlog.Logger) {
 			log.Info("alpha", "removed file %s", p)
 		}
 	}
+}
+
+// stopServices stops only the named running services (SIGTERM, grace,
+// SIGKILL) and drops them from s.running, leaving every other service
+// untouched. Used on reconfigure so a changed service restarts without
+// disturbing the ones whose code/manifest didn't change. Generated files
+// are left in place (cleaned only on full shutdownAll).
+func (s *alphaState) stopServices(names map[string]bool, grace time.Duration, log *zlog.Logger) {
+	s.mu.Lock()
+	procs := map[string]*exec.Cmd{}
+	for name := range names {
+		if cmd := s.running[name]; cmd != nil {
+			procs[name] = cmd
+			delete(s.running, name)
+		}
+	}
+	s.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for name, cmd := range procs {
+		if cmd.Process == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(name string, cmd *exec.Cmd) {
+			defer wg.Done()
+			log.Info("alpha", "SIGTERM %s pid=%d (reconfigure)", name, cmd.Process.Pid)
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			done := make(chan struct{})
+			go func() { _ = cmd.Wait(); close(done) }()
+			select {
+			case <-done:
+				log.Info("alpha", "%s exited after SIGTERM", name)
+			case <-time.After(grace):
+				log.Info("alpha", "SIGKILL %s pid=%d (grace expired)", name, cmd.Process.Pid)
+				_ = cmd.Process.Kill()
+				<-done
+			}
+		}(name, cmd)
+	}
+	wg.Wait()
 }
 
 // materializeFiles writes generated file{} blocks to disk atomically (write
@@ -349,9 +421,42 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	}
 
 	failfast := req.Configure.Failfast
-	state.configure(req.Configure.AlphasfilePath, req.Configure.ConfigHash, req.Configure.ParentDotenv, req.Configure.Alphasfile)
-	services := req.Configure.Alphasfile.All()
-	files := req.Configure.Alphasfile.AllFiles()
+	newConfig := req.Configure.Alphasfile
+	
+	// Determine services to stop: those running but missing or changed in newConfig
+	toStop := make(map[string]bool)
+	state.mu.RLock()
+	oldConfig := state.config
+	running := make(map[string]bool)
+	for name := range state.running {
+		running[name] = true
+	}
+	state.mu.RUnlock()
+
+	if oldConfig != nil {
+		newSvcs := make(map[string]*alphasfile.Service)
+		for _, s := range newConfig.All() {
+			newSvcs[s.Name()] = s
+		}
+		
+		for _, oldSvc := range oldConfig.All() {
+			name := oldSvc.Name()
+			if !running[name] { continue }
+			
+			newSvc, exists := newSvcs[name]
+			if !exists || fmt.Sprintf("%v", oldSvc) != fmt.Sprintf("%v", newSvc) {
+				toStop[name] = true
+			}
+		}
+	}
+	
+	if len(toStop) > 0 {
+		state.stopServices(toStop, cfg.shutdownGrace, log)
+	}
+
+	state.configure(req.Configure.AlphasfilePath, req.Configure.ConfigHash, req.Configure.ParentDotenv, newConfig)
+	services := newConfig.All()
+	files := newConfig.AllFiles()
 	log.Info("alpha", "configured from %s (%d services, %d files, failfast=%v), starting bringup",
 		req.Configure.AlphasfilePath, len(services), len(files), failfast)
 
@@ -365,6 +470,9 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	}
 
 	for _, svc := range services {
+		if running[svc.Name()] && !toStop[svc.Name()] {
+			continue // Already running and unchanged
+		}
 		ok := bringupService(svc, state, cfg, stream, log, failfast, requestShutdown)
 		if !ok && failfast {
 			log.Info("alpha", "failfast: %s did not come up, aborting remaining bringup", svc.Name())
@@ -428,28 +536,32 @@ func bringupService(svc *alphasfile.Service, state *alphaState, cfg bringupConfi
 		return false
 	}
 	state.addProcess(name, cmd)
+	state.setReadiness(name, "probing")
 	log.Info("alpha", "started %s pid=%d argv=%v", name, cmd.Process.Pid, cmd.Args)
 
 	go streamLines(name, "stdout", stdout, stream, log)
 	go streamLines(name, "stderr", stderr, stream, log)
 
-	var sent sync.Once
-	bringupFailed := atomic.Bool{}
+	var (
+		sent          sync.Once
+		bringupFailed atomic.Bool
+		resultCh      = make(chan bool, 1)
+	)
 	probeCtx, cancelProbe := context.WithCancel(context.Background())
 	defer cancelProbe()
 
 	go func() {
 		err := cmd.Wait()
 		cancelProbe()
-		readyBeforeExit := true
 		sent.Do(func() {
-			readyBeforeExit = false
 			bringupFailed.Store(true)
+			state.setReadiness(name, "failed")
 			msg := "exited before ready"
 			if err != nil {
 				msg = err.Error()
 			}
 			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: msg})
+			resultCh <- false
 		})
 		state.removeProcess(name)
 		if err != nil {
@@ -457,29 +569,31 @@ func bringupService(svc *alphasfile.Service, state *alphaState, cfg bringupConfi
 		} else {
 			log.Info("alpha", "%s exited cleanly", name)
 		}
-		if readyBeforeExit && failfast {
+		if !bringupFailed.Load() && failfast {
 			log.Info("alpha", "failfast: %s exited after ready, requesting alpha shutdown", name)
 			requestShutdown()
 		}
 	}()
 
-	waitReady(probeCtx, svc, name, cfg.stabilization, stream, log, &sent, &bringupFailed)
-	return !bringupFailed.Load()
+	waitReady(probeCtx, svc, name, cfg.stabilization, stream, log, &sent, resultCh, state)
+	return <-resultCh
 }
 
 // waitReady picks readiness strategy: probe if configured, else time-based
 // stabilization. Sends EventServiceReady or EventServiceFail via sent.Do so
 // the cmd.Wait watcher can race it cleanly.
-func waitReady(ctx context.Context, svc *alphasfile.Service, name string, stabilization time.Duration, stream *safeEncoder, log *zlog.Logger, sent *sync.Once, failed *atomic.Bool) {
+func waitReady(ctx context.Context, svc *alphasfile.Service, name string, stabilization time.Duration, stream *safeEncoder, log *zlog.Logger, sent *sync.Once, resultCh chan<- bool, state *alphaState) {
 	p := readinessOf(svc)
 	if p == nil {
 		select {
 		case <-time.After(stabilization):
 		case <-ctx.Done():
-			return
+			return // goroutine already handled failure
 		}
 		sent.Do(func() {
+			state.setReadiness(name, "ready")
 			stream.Send(&protocol.Event{Kind: protocol.EventServiceReady, Service: name})
+			resultCh <- true
 		})
 		return
 	}
@@ -497,13 +611,16 @@ func waitReady(ctx context.Context, svc *alphasfile.Service, name string, stabil
 			return // cmd.Wait already won the race
 		}
 		sent.Do(func() {
-			failed.Store(true)
+			state.setReadiness(name, "failed")
 			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "readiness: " + err.Error()})
+			resultCh <- false
 		})
 		return
 	}
 	sent.Do(func() {
+		state.setReadiness(name, "ready")
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceReady, Service: name})
+		resultCh <- true
 	})
 }
 
@@ -602,13 +719,13 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string) (*exe
 		// Explicit argv (subcommand-driven binaries / built artifacts).
 		argv := svc.Runtime.Command
 		cmd = exec.Command(argv[0], argv[1:]...)
-	case checkout != "" && binDir != "":
-		// Worktree service, no explicit command: run the built binary from
-		// the (out-of-tree) bin dir, with cwd = source checkout so relative
-		// config paths still resolve.
+	case binDir != "" && svc.Buildable():
+		// Every service is built by zordon (git/src checkout or crate
+		// cargo-install) into the out-of-tree bin dir; run it from there.
+		// cwd = source checkout (when there is one) so relative config
+		// paths resolve.
 		cmd = exec.Command(filepath.Join(binDir, name), svc.Flags()...)
 	default:
-		// Crate / prebuilt: resolve from $PATH.
 		cmd = exec.Command(name, svc.Flags()...)
 	}
 	if checkout != "" {
@@ -631,6 +748,35 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string) (*exe
 // out-of-tree bin dir so a `dir` primary's worktree stays clean.
 func defaultBuild(svc *alphasfile.Service, name, binDir string) string {
 	out := filepath.Join(binDir, name)
+	root := filepath.Dir(binDir) // binDir = <stateDir>/bin
+	projectRoot := filepath.Dir(filepath.Dir(filepath.Dir(root)))
+	rustCache := filepath.Join(projectRoot, ".zordon", "cache", "rust", "target")
+
+	// Use-only: install the dependency's binary into fs::bin, no checkout.
+	if svc.UseOnly() {
+		switch svc.Toolchain {
+		case alphasfile.ToolchainGo:
+			// go install drops the binary (named after the package's last
+			// path element) into GOBIN — point that at fs::bin.
+			return fmt.Sprintf("GOBIN=%q go install %s", binDir, svc.Package.Install)
+		case alphasfile.ToolchainRust:
+			opts := ""
+			if len(svc.Package.Features) > 0 {
+				opts += fmt.Sprintf(" --features %q", strings.Join(svc.Package.Features, ","))
+			}
+			if v := strings.TrimSpace(svc.Package.Version); v != "" {
+				opts += fmt.Sprintf(" --version %q", v)
+			}
+			if b := strings.TrimSpace(svc.Package.Bin); b != "" {
+				opts += fmt.Sprintf(" --bin %q", b)
+			}
+			// crates are immutable ⇒ no --force (reuse if already installed).
+			return fmt.Sprintf("CARGO_TARGET_DIR=%q cargo install %q --root %q%s --locked",
+				rustCache, svc.Package.Install, root, opts)
+		}
+		return ""
+	}
+
 	switch svc.Toolchain {
 	case alphasfile.ToolchainGo:
 		// cwd is the anchored workdir (checkout + Alphasfile offset); exe is
@@ -641,7 +787,22 @@ func defaultBuild(svc *alphasfile.Service, name, binDir string) string {
 		}
 		return fmt.Sprintf("go build -o %q %s", out, pkg)
 	case alphasfile.ToolchainRust:
-		return "cargo build --release"
+		// Worktree rust: `cargo install --path` from the checkout into
+		// <stateDir>/bin (== binDir). Stable CARGO_TARGET_DIR keeps
+		// compilation incremental across runs; --force so code edits land.
+		opts := ""
+		if svc.Package != nil && len(svc.Package.Features) > 0 {
+			opts += fmt.Sprintf(" --features %q", strings.Join(svc.Package.Features, ","))
+		}
+		if svc.Package != nil && strings.TrimSpace(svc.Package.Bin) != "" {
+			opts += fmt.Sprintf(" --bin %q", svc.Package.Bin)
+		}
+		path := "."
+		if svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
+			path = svc.Package.Exe
+		}
+		return fmt.Sprintf("CARGO_TARGET_DIR=%q cargo install --path %q --root %q%s --locked --force",
+			rustCache, path, root, opts)
 	case alphasfile.ToolchainRuby:
 		return "bundle install --path vendor/bundle"
 	}
@@ -655,42 +816,19 @@ func defaultBuild(svc *alphasfile.Service, name, binDir string) string {
 //
 // Returns the checkout dir (empty for non-worktree services) so the caller
 // can set exec.Cmd.Dir.
+// prepare produces the service's binary into the out-of-tree bin dir and
+// returns the directory to use as the run cwd:
+//   - git/src: materialize a per-invocation worktree, build in it, cwd =
+//     checkout.
+//   - crate:   `cargo install <crate>` (no checkout), cwd = "".
+// Every service must be one of these (the resolver rejects sourceless
+// services); there is no prebuilt-$PATH path.
 func prepare(svc *alphasfile.Service, name string, stream *safeEncoder, log *zlog.Logger) (string, error) {
-	if !svc.Worktreeable() || svc.Package == nil {
+	if svc.Package == nil || !svc.Buildable() {
 		return "", nil
-	}
-	dest := ""
-	if svc.Runtime != nil {
-		dest = svc.Runtime.Dir
-	}
-	if dest == "" {
-		return "", fmt.Errorf("worktree-able service %q has no resolved checkout dir", name)
-	}
-
-	var worktree *source.Worktree
-	if svc.Package.Worktree != nil {
-		worktree = &source.Worktree{Sparse: svc.Package.Worktree.Sparse}
-	}
-	p, err := source.NewPrimary(svc.Package.Git, svc.Package.Src, svc.Ref(), worktree)
-	if err != nil {
-		return "", err
 	}
 	runner := newPrepareRunner(name, stream, log)
 	ctx := context.Background()
-
-	log.Info("alpha", "prepare %s: ensuring primary (%s)", name, p.Kind)
-	if err := p.Ensure(ctx, runner); err != nil {
-		return "", fmt.Errorf("ensure primary: %w", err)
-	}
-
-	wt := os.Getenv("ZORDON_WORKTREE")
-	if wt == "" {
-		wt = "main"
-	}
-	log.Info("alpha", "prepare %s: worktree -> %s (branch zordon/%s)", name, dest, wt)
-	if err := p.AddWorktree(ctx, dest, "zordon/"+wt, runner); err != nil {
-		return "", fmt.Errorf("git worktree: %w", err)
-	}
 
 	binDir := ""
 	if svc.Runtime != nil {
@@ -701,6 +839,55 @@ func prepare(svc *alphasfile.Service, name string, stream *safeEncoder, log *zlo
 			return "", fmt.Errorf("mkdir bin dir: %w", err)
 		}
 	}
+
+	dest := "" // run cwd; "" for crate (no checkout)
+	switch {
+	case svc.Package.InPlace:
+		// src-only in the "main" worktree: use the live src tree as-is —
+		// no git worktree add, no HEAD reset. Uncommitted edits just work.
+		if svc.Runtime != nil {
+			dest = svc.Runtime.Dir
+		}
+		if dest == "" {
+			return "", fmt.Errorf("in-place service %q has no resolved src dir", name)
+		}
+		log.Info("alpha", "prepare %s: in place %s (no worktree)", name, dest)
+	case svc.Worktreeable():
+		if svc.Runtime != nil {
+			dest = svc.Runtime.Dir
+		}
+		if dest == "" {
+			return "", fmt.Errorf("worktree-able service %q has no resolved checkout dir", name)
+		}
+		var worktree *source.Worktree
+		if svc.Package.Worktree != nil {
+			worktree = &source.Worktree{Sparse: svc.Package.Worktree.Sparse}
+		}
+		p, err := source.NewPrimary(svc.Package.Git, svc.Package.Src, svc.Ref(), worktree)
+		if err != nil {
+			return "", err
+		}
+		log.Info("alpha", "prepare %s: ensuring primary (%s)", name, p.Kind)
+		if err := p.Ensure(ctx, runner); err != nil {
+			return "", fmt.Errorf("ensure primary: %w", err)
+		}
+		wt := os.Getenv("ZORDON_WORKTREE")
+		if wt == "" {
+			wt = "main"
+		}
+		// Branch is per (worktree, service): a monorepo where several
+		// services share one primary repo would otherwise all want
+		// `zordon/<wt>` and the 2nd `git worktree add` would fail with
+		// "branch already checked out". Slashes are valid in ref names.
+		branch := "zordon/" + wt + "/" + name
+		log.Info("alpha", "prepare %s: worktree -> %s (branch %s)", name, dest, branch)
+		if err := p.AddWorktree(ctx, dest, branch, runner); err != nil {
+			return "", fmt.Errorf("git worktree: %w", err)
+		}
+	default:
+		log.Info("alpha", "prepare %s: use-only %s (install)", name, svc.Package.Install)
+	}
+
 	build := strings.TrimSpace(svc.Build())
 	if build == "" {
 		build = defaultBuild(svc, name, binDir)
@@ -708,7 +895,7 @@ func prepare(svc *alphasfile.Service, name string, stream *safeEncoder, log *zlo
 	if build != "" {
 		log.Info("alpha", "prepare %s: build (%s)", name, build)
 		c := exec.Command("/bin/sh", "-c", build)
-		c.Dir = dest
+		c.Dir = dest // "" ⇒ alpha's cwd; fine for `cargo install <crate>`
 		if err := runner(ctx, c); err != nil {
 			return "", fmt.Errorf("build: %w", err)
 		}

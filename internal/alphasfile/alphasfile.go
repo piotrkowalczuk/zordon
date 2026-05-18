@@ -52,6 +52,7 @@ type RuntimeConfig struct {
 	Files          []*File        `json:"files,omitempty"`
 	Dir            string         `json:"dir,omitempty"`     // per-invocation source checkout (= fs::src)
 	BinDir         string         `json:"bin_dir,omitempty"` // per-invocation build output (= fs::bin)
+	Print          string         `json:"print,omitempty"`   // extra `zordon status` line (resolved)
 	Readiness      *probe.Probe   `json:"readiness,omitempty"`
 }
 
@@ -66,10 +67,21 @@ type Package struct {
 	Branch    string   `json:"branch,omitempty"`
 	Tag       string   `json:"tag,omitempty"`
 	Rev       string   `json:"rev,omitempty"`
-	Exe       string   `json:"exe,omitempty"`   // build target, relative to the primary root (src dir / git clone)
+	// Use-only: install a dependency instead of giving it a worktree.
+	// Install is the resolved coordinate — Go: `pkg@version` for
+	// `go install`; Rust: the crate name for `cargo install`. Features is
+	// Rust-only. Mutually exclusive with git/src.
+	Install   string   `json:"install,omitempty"`
+	Version   string   `json:"version,omitempty"` // rust use-only: cargo install --version
+	Features  []string `json:"features,omitempty"`
+	Exe       string   `json:"exe,omitempty"`   // relative subdir within git/src where the build target lives ("" = project root)
+	Bin       string   `json:"bin,omitempty"`   // rust: cargo --bin target (multi-bin crates)
 	Build     string   `json:"build,omitempty"` // resolved build override ("" ⇒ toolchain default)
 	Cmd       string   `json:"cmd,omitempty"`   // Explicit execution argv if needed
 	Worktree  *Worktree `json:"worktree,omitempty"`
+	// InPlace: src-only in the "main" worktree — build/run from src as-is,
+	// no git worktree add, no HEAD reset (the edit→start loop).
+	InPlace bool `json:"in_place,omitempty"`
 }
 
 type Worktree struct {
@@ -211,9 +223,23 @@ func (s *Service) Ref() string {
 }
 
 // Worktreeable reports whether the service has a git/src primary (so it can
-// get a per-invocation checkout). Crate / bare-binary services don't.
+// get a per-invocation checkout). Crate services don't (cargo install).
 func (s *Service) Worktreeable() bool {
-	return s.Package != nil && (s.Package.Git != "" || s.Package.Src != "")
+	return s.Package != nil && !s.UseOnly() &&
+		(s.Package.Git != "" || s.Package.Src != "")
+}
+
+// UseOnly reports a use-only service: installed (go/cargo install) into
+// fs::bin, no worktree, not editable.
+func (s *Service) UseOnly() bool {
+	return s.Package != nil && s.Package.Install != ""
+}
+
+// Buildable reports whether zordon produces this service's binary itself
+// (a checkout build, or a use-only install). Every service must be
+// buildable — there is no "use a prebuilt $PATH binary" path.
+func (s *Service) Buildable() bool {
+	return s.Worktreeable() || s.UseOnly()
 }
 
 // Build returns the resolved build-command override, or "" for the
@@ -303,17 +329,27 @@ type serviceBlock struct {
 	DoubleDash     bool      `hcl:"doubleDash,optional"`
 	SpaceSeparated bool      `hcl:"space_separated,optional"`
 
-	// source primary: git XOR src; neither ⇒ prebuilt/path-based.
+	// Worktree source: a local checkout zordon never writes to. `git`
+	// (optional) is its origin — if set, zordon seeds `src` from it (clone
+	// if absent; verify origin matches if present). `exe`/`bin` locate the
+	// build target inside it.
 	Git    string `hcl:"git,optional"`
 	Src    string `hcl:"src,optional"`
 	Branch string `hcl:"branch,optional"`
 	Tag    string `hcl:"tag,optional"`
 	Rev    string `hcl:"rev,optional"`
-	Exe    string `hcl:"exe,optional"`
+	Exe    string `hcl:"exe,optional"` // git/src: subdir holding the build target ("" = root)
+	Bin    string `hcl:"bin,optional"` // rust: cargo --bin target to install (multi-bin crates)
 
-	// Legacy fields (deprecated)
-	Crate string `hcl:"crate,optional"`
-	Dir   string `hcl:"dir,optional"`
+	// Use-only source: install the dependency's binary into fs::bin, no
+	// worktree. The field used depends on the toolchain label: Go reads
+	// `package` (`go install <package>`), Rust reads `cargo`
+	// (`cargo install <cargo>` + `version`/`features`). Presence of either
+	// is mutually exclusive with git/src.
+	Package  string   `hcl:"package,optional"`
+	Cargo    string   `hcl:"cargo,optional"`
+	Version  string   `hcl:"version,optional"`
+	Features []string `hcl:"features,optional"`
 
 	// dynamic (interpolated; order resolved by intra-service dependency DAG)
 	Vars      hcl.Expression `hcl:"vars,optional"`
@@ -322,6 +358,11 @@ type serviceBlock struct {
 	Dotenv    hcl.Expression `hcl:"dotenv,optional"`
 	Cmd       hcl.Expression `hcl:"cmd,optional"`
 	Build     hcl.Expression `hcl:"build,optional"`
+	// Print is an extra line shown per service in `zordon status` —
+	// interpolated, so e.g. a Go service can surface its live endpoint:
+	// print = "http://127.0.0.1:${self.vars.port}/". URLs are emitted as
+	// clickable terminal hyperlinks.
+	Print hcl.Expression `hcl:"print,optional"`
 
 	Worktree  *worktreeBlock `hcl:"worktree,block"`
 	Sudo      []*sudoBlock   `hcl:"sudo,block"`
@@ -332,6 +373,7 @@ type serviceBlock struct {
 type worktreeBlock struct {
 	Sparse []string `hcl:"sparse,optional"`
 }
+
 
 type sudoBlock struct {
 	Name   string         `hcl:"name,label"`

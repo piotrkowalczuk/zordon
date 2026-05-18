@@ -1,30 +1,81 @@
-# examples/worktree — parallel, isolated worktrees over THIS file.
-#
-# Path resolution:
-#   * `src = "../.."` is relative to THIS Alphasfile's dir
-#     (examples/worktree) → the zordon repo root. That repo is the
-#     primary; each worktree is a `git worktree add` of it.
-#   * `exe` is the Go main package, relative to the primary (repo) root.
-#   * `worktree.sparse` paths are relative to the primary (repo) root
-#     (what `git sparse-checkout set` expects) — so the checkout holds
-#     ONLY examples/worktree/src/example, nothing else from the repo.
-
-service "go" "example" {
+service "go" "serviceA" {
   src = "../.."
-  exe = "./examples/worktree/src/example"
+  exe = "./examples/worktree/src/serviceA"
 
   vars = {
     port = net::pickport()
   }
 
   cmd = [
-    "${fs::bin()}/example",
+    "${fs::bin()}/serviceA",
     "-addr", "127.0.0.1:${self.vars.port}",
     "-tag", "${pathhash()}",
   ]
 
+  print = "http://127.0.0.1:${self.vars.port}/  (serviceA, worktree ${pathhash()})"
+
   worktree {
-    sparse = ["examples/worktree/src/example"]
+    sparse = ["examples/worktree/src/serviceA"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "serviceB" {
+  src = "../.."
+  exe = "./examples/worktree/src/serviceB"
+
+  vars = {
+    port = net::pickport()
+  }
+
+  cmd = [
+    "${fs::bin()}/serviceB",
+    "-addr", "127.0.0.1:${self.vars.port}",
+    "-tag", "${pathhash()}",
+  ]
+
+  print = "http://127.0.0.1:${self.vars.port}/  (serviceB, worktree ${pathhash()})"
+
+  worktree {
+    sparse = ["examples/worktree/src/serviceB"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "serviceC" {
+  src = "../.."
+  exe = "./examples/worktree/src/serviceC"
+
+  vars = {
+    port = net::pickport()
+  }
+
+  cmd = [
+    "${fs::bin()}/serviceC",
+    "-addr", "127.0.0.1:${self.vars.port}",
+    "-tag", "${pathhash()}",
+  ]
+
+  print = "http://127.0.0.1:${self.vars.port}/  (serviceC, worktree ${pathhash()})"
+
+  worktree {
+    sparse = ["examples/worktree/src/serviceC"]
   }
 
   readiness {

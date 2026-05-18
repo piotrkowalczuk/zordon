@@ -1,0 +1,33 @@
+service "go" "app" {
+  src = "../.."
+  exe = "./examples/env/src/app"
+
+  vars = { port = net::pickport() }
+
+  file "denv" {
+    path = "${fs::tmp()}/app.env"
+    body = <<-EOT
+      DOTENV_FROM_FILE=1
+      OVERRIDE_ME=from-dotenv
+    EOT
+  }
+
+  dotenv = "${self.file.denv.path}"
+
+  env = {
+    ENV_STATIC  = "hello"
+    ENV_DYN     = "127.0.0.1:${self.vars.port}"
+    OVERRIDE_ME = "from-env"
+  }
+
+  cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

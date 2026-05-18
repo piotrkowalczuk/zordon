@@ -1,9 +1,9 @@
-service "go" "app" {
-  src = "../.."
-  exe = "./examples/go/src/app"
+service "ruby" "app" {
+  src   = "../.."
+  build = "true"
 
   vars = { port = net::pickport() }
-  cmd  = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+  cmd  = ["ruby", "examples/ruby/src/app/app.rb", "-addr", "127.0.0.1:${self.vars.port}"]
 
   readiness {
     http {

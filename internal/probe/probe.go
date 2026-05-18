@@ -120,6 +120,19 @@ func (p *Probe) Wait(ctx context.Context, report func(ok bool, reason string)) e
 	}
 }
 
+// Check performs a single probe attempt. Returns nil on success, or an error
+// with the failure reason.
+func (p *Probe) Check(ctx context.Context) error {
+	if p == nil {
+		return errors.New("nil probe")
+	}
+	ok, reason := p.try(ctx, p.timeout())
+	if ok {
+		return nil
+	}
+	return errors.New(reason)
+}
+
 func (p *Probe) try(ctx context.Context, timeout time.Duration) (bool, string) {
 	if p.HTTP != nil {
 		return p.tryHTTP(ctx, timeout)

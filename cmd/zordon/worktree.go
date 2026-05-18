@@ -128,8 +128,10 @@ func runWorktree(ctx context.Context, log *zlog.Logger, args []string) error {
 // <wtdir>/src/<svc> for each picked service ("svc" or "svc@rev"). For a
 // `dir` primary it `git worktree add`s from the user's repo; for a `git`
 // primary it bare-clones into ~/.zordon/src on first use, then worktree-adds
-// from that. The dest path and branch (zordon/<name>) match exactly what
-// alpha computes at `zordon start`, so start reuses these checkouts.
+// from that. The dest path and per-service branch (zordon/<name>/<svc>)
+// match exactly what alpha computes at `zordon start`, so start reuses
+// these checkouts (and monorepo services sharing one primary don't
+// collide on a shared branch).
 func checkoutServices(ctx context.Context, log *zlog.Logger, name, wtdir string, picks []string) error {
 	af, err := walkUp()
 	if err != nil {
@@ -191,8 +193,9 @@ func checkoutServices(ctx context.Context, log *zlog.Logger, name, wtdir string,
 		if refMsg == "" {
 			refMsg = "HEAD"
 		}
-		log.Info("zordon", "%s: git worktree add %s @ %s (branch zordon/%s)", svc, dest, refMsg, name)
-		if err := p.AddWorktree(ctx, dest, "zordon/"+name, runner); err != nil {
+		branch := "zordon/" + name + "/" + svc
+		log.Info("zordon", "%s: git worktree add %s @ %s (branch %s)", svc, dest, refMsg, branch)
+		if err := p.AddWorktree(ctx, dest, branch, runner); err != nil {
 			return fmt.Errorf("%s: %w", svc, err)
 		}
 	}

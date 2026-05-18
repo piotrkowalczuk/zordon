@@ -1,18 +1,3 @@
-# A project that plugs into the federation root one level up.
-#
-# The project doesn't talk to Caddy at all — it just drops a vhost
-# fragment into the directory Caddy watches (discovered through the
-# federation chain: service.go.caddy.vars.config_dir). Caddy hot-reloads
-# and prometheus.<pathhash>.test starts reverse-proxying to it.
-#
-# Run `zordon start` from here: zordon walks up, ensures the federation
-# root (Caddy + CoreDNS) is healthy, then brings this up with the
-# parent's resolved Caddy port / config dir injected.
-#
-# Prometheus is just a stand-in for "some OSS Go web app" — any binary
-# that serves HTTP slots in identically; only the fragment below is
-# project-specific.
-
 service "go" "prometheus" {
   git        = "github.com/prometheus/prometheus"
   tag        = "v3.11.3"
@@ -34,7 +19,6 @@ service "go" "prometheus" {
     EOT
   }
 
-  # The whole integration with the federation root: one dropped vhost.
   file "caddy_vhost" {
     path = "${service.go.caddy.vars.config_dir}/prometheus.caddy"
     body = <<-EOT
@@ -49,6 +33,8 @@ service "go" "prometheus" {
     "log.format"         = "json"
     "web.listen-address" = ":${self.vars.port}"
   }
+
+  print = "http://${self.vars.address}:${service.go.caddy.vars.http}/  (via Caddy, worktree ${pathhash()})"
 
   readiness {
     http {
