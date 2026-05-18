@@ -137,30 +137,32 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 	}
 	r.curCheckout = dir // what fs::src() returns while this service evals
 
-	// self_base — known from labels + primary, before any eval. Includes
-	// the static barrier-status attrs (scheduled/running/ready/stopped/
-	// done) and the runtime.provision.<name>.<status> sub-objects so HCL
-	// traversals like `self.ready` or `self.runtime.provision.x.success`
-	// resolve to canonical "<entityID>@<state>" ref strings during eval.
+	// self_base — known from labels + primary, before any eval.
+	//
+	// Status barriers and provisions hang off `self.runtime.*` so the
+	// reference path mirrors the HCL block nesting: a user staring at
+	// `runtime { provision "x" { ... } }` can guess the canonical path
+	// `self.runtime.provision.x.<status>` without consulting docs. The
+	// rule: traversal shape ≡ schema shape. Resolved scalars/maps that
+	// belong to the service entity itself (name, toolchain, dir, vars,
+	// arguments, file) stay at self.* because that's where they live
+	// in HCL too.
 	serviceID := "service." + sb.Toolchain + "." + sb.Name
 	self := map[string]cty.Value{
 		"name":      cty.StringVal(sb.Name),
 		"toolchain": cty.StringVal(sb.Toolchain),
 		"dir":       cty.StringVal(dir),
 	}
-	for k, v := range buildBarrierAttrs(serviceID, ServiceBarrierStates) {
-		self[k] = v
-	}
+	runtimeAttrs := buildBarrierAttrs(serviceID+".runtime", ServiceBarrierStates)
 	if sb.Runtime != nil && len(sb.Runtime.Provision) > 0 {
 		provObjs := make(map[string]cty.Value, len(sb.Runtime.Provision))
 		for _, pb := range sb.Runtime.Provision {
 			provID := serviceID + ".runtime.provision." + pb.Name
 			provObjs[pb.Name] = cty.ObjectVal(buildBarrierAttrs(provID, ProvisionBarrierStates))
 		}
-		self["runtime"] = cty.ObjectVal(map[string]cty.Value{
-			"provision": cty.ObjectVal(provObjs),
-		})
+		runtimeAttrs["provision"] = cty.ObjectVal(provObjs)
 	}
+	self["runtime"] = cty.ObjectVal(runtimeAttrs)
 
 	// Producers (vars, each file, arguments) are evaluated in dependency
 	// order, not a fixed sequence: edges come from self.<x> traversals in
@@ -297,8 +299,13 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 			return err
 		}
 	}
+	var runtimeAfter []string
 	if sb.Runtime != nil {
 		if runEnv, err = phaseEnv(sb.Runtime.Env, "runtime.env"); err != nil {
+			return err
+		}
+		runtimeAfter, err = r.evalStrList(sb.Runtime.After, self, "runtime.after")
+		if err != nil {
 			return err
 		}
 	}
@@ -412,6 +419,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		AgentEnv:       agentEnv,
 		Dotenv:         dotenv,
 		Command:        command,
+		After:          runtimeAfter,
 		Sudo:           sudo,
 		Provision:      provisions,
 		Files:          files,

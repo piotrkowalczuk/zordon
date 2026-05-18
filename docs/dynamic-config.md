@@ -37,17 +37,100 @@ arguments / readiness probe that consume them.
 
 ### `self` inside a service
 
-Inside a service, `self` exposes the service's own resolved values. It
-fills in incrementally as evaluation progresses through these stages:
+`self` is the alias for **this service** — fixed for the entire `service`
+block, *not* a "current scope" that changes inside nested blocks. So
+`self` in a `provision`, `file`, `sudo`, or `runtime` block all point at
+the same outer service object. There's no provision-scoped `self`;
+nested blocks inherit the service's `self`. Pragmatically you almost
+always want service-level state (vars, ports, dir) from inside any of
+those nested blocks, so this saves a level of indirection.
+
+`self` fills in incrementally as evaluation progresses through stages
+of the service:
 
 1. `self.{name, toolchain, dir}` — known immediately from the block labels
    and `import`/`git`.
-2. `self.vars` — populated after `vars = { ... }` is evaluated.
-3. `self.file.<name>` — `{ path, body }` of each nested `file` block,
+2. `self.runtime.*` — barrier surface for the service's lifecycle
+   (see "Barriers" below). Available from the start; the values are
+   reference strings, the actual events fire at runtime.
+3. `self.vars` — populated after `vars = { ... }` is evaluated.
+4. `self.file.<name>` — `{ path, body }` of each nested `file` block,
    added as they're evaluated.
-4. `self.arguments` — populated after `arguments = { ... }`.
+5. `self.arguments` — populated after `arguments = { ... }`.
 
 The `readiness.http.port` expression runs last, so it sees all of the above.
+
+### Barriers
+
+A **barrier** is a synchronization point: an event that fires once and
+never un-fires, that other entities can wait on. Every service and every
+provision has a set of barriers attached to its lifecycle.
+
+Reference paths mirror HCL block nesting (the rule is
+**self-discoverable**: if you can write the block, you can guess the
+reference). Service runtime states hang off `self.runtime`; provisions
+hang off `self.runtime.provision.<name>` because that's where you
+declare them in HCL.
+
+#### Service runtime barriers
+
+These mirror the long-running daemon's lifecycle:
+
+| Path | Fires when |
+|---|---|
+| `self.runtime.scheduled` | service is queued for bringup; `after` deps not yet checked |
+| `self.runtime.running` | the service's `cmd` process has been spawned |
+| `self.runtime.ready` | readiness probe (or stabilization timer) passed |
+| `self.runtime.stopped` | process exited cleanly after being ready |
+| `self.runtime.done` | outcome decided — `ready` *or* terminal failure |
+
+There's also `self.runtime.failed` (terminal failure during bringup) but
+it isn't exposed in HCL on purpose: waiting on it is "run on failure",
+which is a different orchestration pattern (cleanup hook) than the
+forward-progress dependencies that `after` expresses. When a dep enters
+a terminal failure, waiters on its `ready` barrier are unblocked
+automatically and inherit the failure — no deadlock, no need to
+explicitly list `failed`.
+
+#### Provision barriers
+
+Provisions are transient tasks, so their vocabulary is `success`/`failure`
+rather than the daemon's `ready`/`stopped`:
+
+| Path | Fires when |
+|---|---|
+| `self.runtime.provision.<name>.scheduled` | provision is queued, deps not yet checked |
+| `self.runtime.provision.<name>.running` | `cmd` has started |
+| `self.runtime.provision.<name>.success` | `cmd` exited 0 (and `verify` passed if present) |
+| `self.runtime.provision.<name>.done` | outcome decided — `success` *or* `failure` |
+
+#### Cross-service barriers
+
+Same paths but rooted at the full service identity:
+
+```hcl
+service.go.db.runtime.ready                       # wait for db to be operational
+service.go.api.runtime.provision.migrate.success  # wait for api's migrate provision
+```
+
+The DAG resolver pulls these refs through and orders service *evaluation*
+so the referenced service exists in the resolved Alphasfile by the time
+alpha boots. At runtime, alpha's bringup goroutines do the actual
+waiting via channels.
+
+#### Where barriers are used
+
+The two consumers are:
+
+- `runtime.after = [...]` — list of barriers that must fire before the
+  service's `cmd` starts.
+- `provision "<n>" { after = [...] }` — same, for the provision's `cmd`.
+
+With an empty (or absent) `after`, the entity starts immediately —
+services run in parallel by default; declare deps explicitly when
+ordering matters. Detached provisions (`detached = true`) start the same
+way but bringup doesn't block on their `success` before declaring the
+stack up.
 
 ### Cross-service references
 

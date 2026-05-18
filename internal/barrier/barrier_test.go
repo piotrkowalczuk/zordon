@@ -65,3 +65,27 @@ func TestAny_extraSourcesAfterTargetFiresAreNoOps(t *testing.T) {
 	// Should not panic or misbehave when other sources fire later.
 	b.Trigger()
 }
+
+func TestPass_alreadyTriggered(t *testing.T) {
+	p := Pass()
+	if !p.Triggered() {
+		t.Fatal("Pass() returned an untriggered barrier")
+	}
+	select {
+	case <-p.Wait():
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("Pass().Wait() blocked")
+	}
+}
+
+func TestPass_returnsSingleton(t *testing.T) {
+	// Capture in vars so the linter doesn't fold both calls to a
+	// constant. We *want* to assert pointer-equality at runtime to lock
+	// in the singleton contract — callers who pin the pointer between
+	// dep registrations rely on it.
+	a := Pass()
+	b := Pass()
+	if a != b {
+		t.Fatal("Pass() must return the same singleton instance")
+	}
+}

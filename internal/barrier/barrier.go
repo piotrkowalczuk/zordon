@@ -61,3 +61,13 @@ func Any(target *Barrier, sources ...*Barrier) {
 		}(s)
 	}
 }
+
+// passed is the singleton "already-fired" barrier returned by Pass.
+var passed = func() *Barrier { b := New(); b.Trigger(); return b }()
+
+// Pass returns a singleton, pre-triggered Barrier. Use it where "no
+// dependency" needs to be expressed as "one always-satisfied dependency"
+// so the consumer doesn't need a special case for the empty-deps path.
+// All callers share the same underlying chan, which is fine because
+// closed channels are read-only from the receive side.
+func Pass() *Barrier { return passed }

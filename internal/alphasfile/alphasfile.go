@@ -62,6 +62,11 @@ type RuntimeConfig struct {
 	AgentEnv map[string]string `json:"agent_env,omitempty"`
 	Dotenv   string            `json:"dotenv,omitempty"` // path to a .env loaded before Env
 	Command        []string          `json:"command,omitempty"`
+	// After holds runtime-level barrier refs. alpha's per-service
+	// bringup goroutine selects on each before starting cmd; with no
+	// entries the service starts in parallel with everything else.
+	// Same canonical-string grammar as ProvisionStep.After.
+	After          []string          `json:"after,omitempty"`
 	Sudo           []*SudoStep    `json:"sudo,omitempty"`
 	Provision      []*ProvisionStep `json:"provision,omitempty"`
 	Files          []*File        `json:"files,omitempty"`
@@ -460,12 +465,18 @@ type buildBlock struct {
 }
 
 // runtimeBlock is the run step: `cmd` is the service argv (there is no
-// top-level `cmd`); `env` is the running process env. `provision`
-// blocks are bringup-time actions that fire once the service (and any
-// declared `after` deps) reaches ready.
+// top-level `cmd`); `env` is the running process env. `after` is a list
+// of barrier refs (same grammar as provision.after) — the service's
+// own bringup goroutine selects on each before starting cmd, so
+// runtime-level ordering is *explicit*: with no `after`, services come
+// up in parallel and may race each other.
+//
+// `provision` blocks are bringup-time actions that fire once their own
+// `after` deps are satisfied.
 type runtimeBlock struct {
 	Cmd       hcl.Expression    `hcl:"cmd,optional"`
 	Env       hcl.Expression    `hcl:"env,optional"`
+	After     hcl.Expression    `hcl:"after,optional"`
 	Provision []*provisionBlock `hcl:"provision,block"`
 }
 

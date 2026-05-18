@@ -273,7 +273,7 @@ service "go" "api" {
       cmd    = "psql -p ${service.go.db.vars.port} -f schema.sql"
       verify = "psql -p ${service.go.db.vars.port} -tc 'SELECT 1 FROM users LIMIT 0'"
       env    = { PGPASSWORD = service.go.db.vars.password }
-      after  = [service.go.db.ready]
+      after  = [service.go.db.runtime.ready]
     }
     provision "seed" {
       cmd      = "psql -f seed.sql"
@@ -301,8 +301,8 @@ service "go" "api" {
 	if create.Env["PGPASSWORD"] != "secret" {
 		t.Errorf("env PGPASSWORD = %q, want secret", create.Env["PGPASSWORD"])
 	}
-	if len(create.After) != 1 || create.After[0] != "service.go.db@ready" {
-		t.Errorf("after = %v, want [service.go.db@ready]", create.After)
+	if len(create.After) != 1 || create.After[0] != "service.go.db.runtime@ready" {
+		t.Errorf("after = %v, want [service.go.db.runtime@ready]", create.After)
 	}
 	if create.Detached {
 		t.Errorf("create-tables.Detached = true, want false (default)")

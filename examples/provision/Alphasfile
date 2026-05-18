@@ -2,10 +2,11 @@
 # via `after`, plus a detached fire-and-forget provision that runs
 # without blocking EventDone.
 #
-# Every provision has an *implicit* dep on its parent service's `ready`
-# barrier, so all of these wait for the HTTP server to pass readiness
-# before any of them fire. The explicit `after` adds dependencies on
-# OTHER provisions (chained: init-state → smoke-test → record-completion).
+# Deps are EXPLICIT. There is no implicit "wait for parent service" —
+# if a provision needs the service operational, list `self.runtime.ready`
+# (or cross-service `service.<tc>.<n>.runtime.ready`) in `after`. With no
+# deps, the
+# provision races bringup and runs immediately.
 #
 # All shell snippets use universally-available unix tools (test, mkdir,
 # touch, curl, grep, echo, date) — no extra runtime deps.
@@ -22,22 +23,30 @@ service "go" "app" {
   runtime {
     cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
 
-    # Idempotent state setup. `check` runs first; if it exits 0 (i.e.
-    # the marker already exists), `cmd` is skipped — this is the
-    # "re-running the configure step is cheap" property. `verify` then
-    # asserts the post-state regardless of which path was taken.
+    # The service's own cmd waits for init-state to finish before it
+    # starts. Without this, runtime.cmd would race init-state in
+    # parallel — fine for things that don't depend on the marker dir,
+    # but a real DB-migrations / config-bootstrap setup wants the
+    # pre-flight done before the daemon starts.
+    after = [self.runtime.provision.init-state.success]
+
+    # Idempotent state setup. No `after` — runs immediately, in parallel
+    # with the service's prepare/build phase. `check` runs first; if
+    # it exits 0 the marker already exists, `cmd` is skipped. `verify`
+    # asserts the post-state regardless.
     provision "init-state" {
       check  = "test -f $ZORDON_STATE_DIR/markers/init"
       cmd    = "mkdir -p $ZORDON_STATE_DIR/markers && touch $ZORDON_STATE_DIR/markers/init"
       verify = "test -f $ZORDON_STATE_DIR/markers/init"
     }
 
-    # Talks to the running HTTP server, so the implicit self.ready dep
-    # matters here. Also chained after init-state — won't run until the
-    # marker dir exists.
+    # Talks to the running HTTP server. Only needs self.runtime.ready —
+    # init-state was already a transitive predecessor of runtime.ready
+    # (runtime.after wired that), so the marker dir is guaranteed
+    # to exist by the time we curl.
     provision "smoke-test" {
       cmd   = "curl -fsS http://127.0.0.1:${self.vars.port}/ | grep -q go-example"
-      after = [self.runtime.provision.init-state.success]
+      after = [self.runtime.ready]
     }
 
     # Final marker, gated on the smoke-test passing. If smoke-test fails
@@ -60,6 +69,7 @@ service "go" "app" {
     # extension that POSIX doesn't actually mandate.
     provision "post-up-notify" {
       cmd      = "/bin/sleep 1 && echo notify > $ZORDON_STATE_DIR/markers/notify"
+      after    = [self.runtime.ready]
       detached = true
     }
   }

@@ -138,11 +138,12 @@ func exprsOf(s *serviceBlock) []hcl.Expression {
 		out = append(out, s.Build.Env, s.Build.Cmd)
 	}
 	if s.Runtime != nil {
-		out = append(out, s.Runtime.Env, s.Runtime.Cmd)
+		// runtime.after carries cross-service barrier traversals
+		// (e.g. service.go.db.ready). Pulling it through exprsOf wires
+		// those into the resolver's DAG so referenced services are
+		// evaluated first — same path as cross-service var refs.
+		out = append(out, s.Runtime.Env, s.Runtime.Cmd, s.Runtime.After)
 		for _, pb := range s.Runtime.Provision {
-			// after carries the most interesting cross-service traversals
-			// (e.g. service.go.db.ready); cmd/check/verify can interpolate
-			// other services' values too.
 			out = append(out, pb.Check, pb.Cmd, pb.Verify, pb.Env, pb.After)
 		}
 	}
