@@ -9,7 +9,22 @@ need curl
 start
 port="$(port_of "/app -addr")" || fail "could not discover app port"
 env="$(http_get "http://127.0.0.1:$port/env")" || fail "/env not responding"
-assert_contains "$env" "ENV_STATIC=hello"          "static env value"
-assert_contains "$env" "DOTENV_FROM_FILE=1"        "dotenv value injected"
-assert_contains "$env" "OVERRIDE_ME=from-env"      "env{} overrides dotenv"
-assert_contains "$env" "ENV_DYN=127.0.0.1:$port"   "dynamic env value"
+
+# /env dumps the whole os.Environ(); the process legitimately inherits
+# the parent env, so we don't assert "only these". We DO assert that
+# every Alphasfile-managed key resolves to EXACTLY the expected line,
+# appears EXACTLY once, and that the overridden dotenv value is gone.
+assert_line() { # <key=value>
+	grep -Fxq -- "$1" <<<"$env" || fail "expected exact env line '$1'"
+	local k="${1%%=*}" n
+	n="$(grep -c "^${k}=" <<<"$env")"
+	[ "$n" = 1 ] || fail "env key $k appears $n times, want exactly 1"
+	pass "exact, unique: $1"
+}
+assert_line "ENV_STATIC=hello"
+assert_line "DOTENV_FROM_FILE=1"
+assert_line "ENV_DYN=127.0.0.1:$port"
+assert_line "OVERRIDE_ME=from-env"   # env{} wins over dotenv
+grep -Fxq -- "OVERRIDE_ME=from-dotenv" <<<"$env" \
+	&& fail "overridden dotenv value leaked (OVERRIDE_ME=from-dotenv present)" \
+	|| pass "overridden dotenv value absent"

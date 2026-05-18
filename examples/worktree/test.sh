@@ -31,8 +31,26 @@ for svc in serviceA serviceB serviceC; do
 	assert_contains "$body" "service=$svc" "$svc identifies itself"
 done
 
-# Sparse: serviceA's per-service checkout carries only its own subtree.
-co="$EXDIR/.zordon/worktrees/feature/src/serviceA"
-assert_present "$co/examples/worktree/src/serviceA/main.go"
-assert_absent  "$co/examples/worktree/src/serviceB"
-assert_absent  "$co/examples/worktree/src/serviceC"
+# Worktree structure: each service gets its OWN sparse per-service
+# checkout under .zordon/worktrees/feature/src/<svc> that carries only
+# its own subtree and excludes the sibling services' sources.
+base="$EXDIR/.zordon/worktrees/feature/src"
+all="serviceA serviceB serviceC"
+for svc in $all; do
+	co="$base/$svc"
+	assert_present "$co/.git"
+	assert_present "$co/examples/worktree/src/$svc/main.go"
+	for other in $all; do
+		[ "$other" = "$svc" ] && continue
+		assert_absent "$co/examples/worktree/src/$other"
+	done
+done
+
+# The three checkouts must be distinct directories on distinct
+# per-service branches (zordon/feature/<svc>), not one shared tree.
+for svc in $all; do
+	b="$(git -C "$base/$svc" rev-parse --abbrev-ref HEAD)"
+	[ "$b" = "zordon/feature/$svc" ] \
+		&& pass "$svc on its own branch ($b)" \
+		|| fail "$svc expected branch zordon/feature/$svc, got '$b'"
+done

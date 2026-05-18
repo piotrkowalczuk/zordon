@@ -97,7 +97,19 @@ func main() {
 		},
 	}
 
-	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wtCmd)
+	// get
+	getFlags := ff.NewFlagSet("get").SetParent(rootFlags)
+	getCmd := &ff.Command{
+		Name:      "get",
+		Usage:     "zordon get <expr>",
+		ShortHelp: "print a resolved value (dotted path or Go template) e.g. service.go.prometheus.vars.address",
+		Flags:     getFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runGet(ctx, args)
+		},
+	}
+
+	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wtCmd, getCmd)
 
 	err := rootCmd.ParseAndRun(context.Background(), os.Args[1:])
 	switch {

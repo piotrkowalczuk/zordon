@@ -20,6 +20,7 @@ zordon start              # resolve, build, bring the stack up, stream logs
 zordon status             # what's running across the whole chain right now?
 zordon stop               # shut this level's services down
 zordon worktree create x  # a parallel, isolated copy of the whole stack
+zordon get <expr>         # print one resolved value (path or Go template)
 ```
 
 `zordon start` returns as soon as every service is READY (so your shell

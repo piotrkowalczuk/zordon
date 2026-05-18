@@ -97,3 +97,33 @@ listen address, the readiness probe, and (if needed) any other service
 referencing `service.go.prometheus.vars.port`. The config file is
 materialized into `fs::tmp()` at configure time and unlinked when
 `zordon stop` shuts alpha down.
+
+### Reading resolved values
+
+`zordon get <expr>` prints a single resolved value — the same numbers
+the running stack actually uses (it queries the live alpha; with nothing
+running it falls back to a static evaluation, exactly like `zordon
+status`). Useful for wiring scripts to a `pickport()` address without
+parsing logs.
+
+The tree is keyed `service.<toolchain>.<name>.<field>`, where the fields
+are the resolved runtime config: `vars`, `arguments`, `env`, `command`,
+`dir`, `bin_dir`, `print`, plus live `pid`/`ready`/`running`.
+
+```sh
+zordon get service.go.prometheus.vars.address      # 127.0.0.1:9090
+zordon get service.go.prometheus.command.0         # prometheus
+zordon get service.go.prometheus.ready             # true
+```
+
+Anything containing `{{` is evaluated as a Go template against the same
+tree (a `json` function is available for composite values):
+
+```sh
+zordon get '{{ .service.go.prometheus.vars.port }}'
+zordon get '{{ json .service.go.prometheus.command }}'
+```
+
+Scalars print raw (newline-terminated, scriptable); maps and slices
+print as compact JSON. An unknown path fails with the list of available
+keys at that level.
