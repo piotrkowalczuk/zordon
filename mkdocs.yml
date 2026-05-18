@@ -1,0 +1,54 @@
+site_name: Zordon
+site_description: A process supervisor for local agentic workflows — supervised host processes, declared in an Alphasfile.
+site_url: https://piotrkowalczuk.github.io/zordon/
+repo_url: https://github.com/piotrkowalczuk/zordon
+repo_name: piotrkowalczuk/zordon
+edit_uri: edit/master/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+nav:
+  - Overview: index.md
+  - Getting started: getting-started.md
+  - Concepts: concepts.md
+  - Architecture: architecture.md
+  - Lifecycle: lifecycle.md
+  - Alphasfile: alphasfile.md
+  - Dynamic configuration: dynamic-config.md
+  - Services:
+      - Go: services/go.md
+      - Rust: services/rust.md
+      - Ruby: services/ruby.md
+  - Worktrees: worktrees.md
+  - Federation: federation.md
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+
+plugins:
+  - search
