@@ -160,12 +160,6 @@ func (p *Project) CopyTree(srcRel, dstRel string) *Project {
 // can chain.
 func (p *Project) WriteFile(relPath, content string) *Project {
 	p.t.Helper()
-	// WithToolchain: prepend the flag-pinned Go toolchain block so
-	// fixtures stay plain HCL. HCL block order is irrelevant, so a
-	// straight prefix is safe.
-	if p.cfg.injectGoToolchain && filepath.Base(relPath) == "Alphasfile" {
-		content = goToolchainHCL(p.cfg.goToolchain) + content
-	}
 	full := filepath.Join(p.root, relPath)
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		p.t.Fatalf("WriteFile(%q): mkdir parent: %v", relPath, err)
