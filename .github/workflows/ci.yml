@@ -31,6 +31,10 @@ jobs:
     env:
       CGO_ENABLED: "1"
       GO_VERSION: "1.25.6"
+      # Presence is the switch: conformance fixtures only get a mise
+      # toolchain block when this (or -test.toolchain.go.version) is
+      # set. The golden Go services need go 1.26, so pin it here.
+      ZORDON_TEST_GO_VERSION: "1.26.2"
     steps:
       - name: Install dependencies
         run: |

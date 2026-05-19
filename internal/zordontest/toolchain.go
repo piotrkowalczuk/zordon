@@ -10,29 +10,24 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 )
 
-const defaultGoVersion = "1.26.2"
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
-}
-
-// goVersionFlag is the single source of truth for the Go toolchain
-// version conformance fixtures pin (via mise). Drive it per run with:
+// goVersionFlag gates AND pins the Go toolchain conformance fixtures
+// provision via mise. PRESENCE is the switch:
 //
 //	go test ./tests/conformance/... -test.toolchain.go.version=1.27.0
 //
-// Default falls back to $ZORDON_TEST_GO_VERSION then a constant. The
-// flag is ALWAYS respected: the version never comes from the caller's
-// struct, only from here — what mise actually installs is the property
-// worth exercising (the distro matrix alone only varies which Go
-// COMPILED zordon: low value, Go is back-compatible, no reflect/ABI).
+// Unset (and no $ZORDON_TEST_GO_VERSION) ⇒ zordontest injects NO
+// toolchain block at all — fixtures run against the ambient Go, no
+// mise. Set ⇒ a minimal `toolchain { go { version } }` is injected
+// (WithToolchain's struct may add tools/env on top). There is no baked
+// default: not pinning is a deliberate, observable choice, not a
+// silent fallback. The version comes ONLY from here, never the
+// caller's struct — what mise installs is the property worth
+// exercising (the distro matrix alone only varies which Go COMPILED
+// zordon: low value, Go is back-compatible, no reflect/ABI surface).
 var goVersionFlag = flag.String(
 	"test.toolchain.go.version",
-	firstNonEmpty(os.Getenv("ZORDON_TEST_GO_VERSION"), defaultGoVersion),
-	"Go toolchain version conformance fixtures pin via mise",
+	os.Getenv("ZORDON_TEST_GO_VERSION"),
+	"Go toolchain version conformance fixtures pin via mise; unset = no toolchain injected",
 )
 
 // HCL-encode types mirroring zordon's toolchain grammar exactly
@@ -60,6 +55,9 @@ type tcRoot struct {
 // parses flags before any test runs, so the flag is set by the time a
 // fixture calls WriteFile (NOT valid from a package-var initializer).
 func goToolchainHCL(tc alphasfile.ToolchainConfig) string {
+	if *goVersionFlag == "" {
+		return "" // flag (and env) absent ⇒ inject nothing
+	}
 	g := &tcGoBlock{Version: *goVersionFlag}
 	if len(tc.Tools) > 0 {
 		g.Tools = tc.Tools

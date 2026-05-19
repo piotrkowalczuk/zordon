@@ -26,6 +26,17 @@ type rtRoot struct {
 }
 
 func TestGoToolchainHCL_SerializeDeserializeRoundtrip(t *testing.T) {
+	saved := *goVersionFlag
+	defer func() { *goVersionFlag = saved }()
+
+	// Gate: absent flag ⇒ inject nothing.
+	*goVersionFlag = ""
+	if s := goToolchainHCL(alphasfile.ToolchainConfig{}); s != "" {
+		t.Fatalf("unset flag must inject nothing, got:\n%s", s)
+	}
+
+	// Present ⇒ serialize → deserialize round-trip.
+	*goVersionFlag = "1.26.2"
 	got := goToolchainHCL(alphasfile.ToolchainConfig{
 		Tools: map[string]string{"dlv": "1.22.0"},
 		Env:   map[string]string{"CGO_ENABLED": "0"},

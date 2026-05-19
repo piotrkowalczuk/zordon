@@ -69,18 +69,20 @@ func WithExpectedLeftovers() Option {
 	return func(c *config) { c.expectLeftovers = true }
 }
 
-// WithToolchain makes the project prepend a Go toolchain block to
-// every Alphasfile it writes. The version is ALWAYS the one resolved
-// from -test.toolchain.go.version (default $ZORDON_TEST_GO_VERSION,
-// then a constant) — the optional alphasfile.ToolchainConfig only sets
-// what's INSIDE the block (Tools/Env); its Version field is ignored.
+// WithToolchain opts the project into Go toolchain injection, BUT the
+// -test.toolchain.go.version flag (or $ZORDON_TEST_GO_VERSION) is the
+// actual switch: with neither set, nothing is injected and fixtures
+// run against the ambient Go; with it set, a minimal
+// `toolchain { go { version } }` is prepended to every Alphasfile the
+// project writes. The version is ALWAYS the flag's — the optional
+// alphasfile.ToolchainConfig only sets what's INSIDE the block
+// (Tools/Env); its Version field is ignored.
 //
-// WithToolchain() with no arg still injects the block (flag version,
-// no tools). Fixtures stay plain HCL — the block is serialized from a
-// typed value via gohcl and deserialized by zordon's own decoder, a
-// real round-trip rather than a hand-built string. Tests that must run
-// WITHOUT a toolchain (e.g. a forced build-failure that shouldn't wait
-// on mise) simply omit this option.
+// The block is serialized from a typed value via gohcl and
+// deserialized by zordon's own decoder — a real round-trip, not a
+// hand-built string. Tests that must never get a toolchain (e.g. a
+// forced build-failure that shouldn't wait on mise) simply omit this
+// option entirely.
 func WithToolchain(tc ...alphasfile.ToolchainConfig) Option {
 	return func(c *config) {
 		c.injectGoToolchain = true
