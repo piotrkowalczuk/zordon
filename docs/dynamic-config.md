@@ -147,10 +147,48 @@ The two consumers are:
 - `provision "<n>" { after = [...] }` — same, for the provision's `cmd`.
 
 With an empty (or absent) `after`, the entity starts immediately —
-services run in parallel by default; declare deps explicitly when
-ordering matters. Detached provisions (`detached = true`) start the same
-way but bringup doesn't block on their `success` before declaring the
-stack up.
+services and provisions run in parallel by default; declare deps
+explicitly when ordering matters. A provision whose snippet needs its
+own service operational must say so: `after = [self.runtime.ready]`.
+Detached provisions (`detached = true`) start the same way but bringup
+doesn't block on their `success` before declaring the stack up.
+
+**Any provision can be invoked by another service** — `never` is not
+required. A service invokes a peer's provision by pointing its own
+provision's `cmd` at it (a bare reference, not a shell string):
+
+```hcl
+service "go" "kafka" {
+  runtime {
+    provision "create-topic" {
+      after = never
+      cmd   = "kafka-topics --create --topic $TOPIC"
+    }
+  }
+}
+
+service "go" "app" {
+  runtime {
+    provision "topic" {
+      cmd   = service.go.kafka.runtime.provision.create-topic  # not a string
+      env   = { TOPIC = "app-events" }
+      after = [self.runtime.ready]  # invoke once app is up
+    }
+  }
+}
+```
+
+The invoker runs the provider's resolved `check`/`cmd`/`verify` snippets
+under its **own** barrier (`service.go.app.runtime.provision.topic@success`)
+and **own** env/cwd. N consumers each get an independent run with their
+own parameters. The invoking provision must not set `check`/`verify`
+(the template owns them).
+
+`after = never` on the target is **optional**. Without it, the provision
+still auto-runs for its own service (immediately, or per its own
+`after`) *and* is invokable by peers. `after = never` simply means
+"expose this action but don't auto-run it for me" — useful when only
+consumers should ever trigger it.
 
 ### Cross-service references
 

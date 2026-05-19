@@ -365,6 +365,23 @@ type ProvisionStep struct {
 	// that shouldn't block declaring the stack "up". Detached failures
 	// don't trigger failfast (you opted out of synchronous coupling).
 	Detached bool `json:"detached,omitempty"`
+	// Latent: provision declared with `after = never`. It is registered
+	// (its barrier resolves, and it can be used as a CmdRef template) but
+	// NOT auto-run at bringup. A latent provision is a reusable action a
+	// service exposes for *other* services to invoke for themselves —
+	// e.g. a kafka service declares `create-topic` once; each consumer
+	// invokes it with its own TOPIC. Mutually exclusive with After refs.
+	Latent bool `json:"latent,omitempty"`
+	// CmdRef, when set, means this provision has no inline cmd of its
+	// own: it runs another (latent) provision's resolved check/cmd/
+	// verify snippets, but under THIS provision's barrier and with THIS
+	// step's env overlay (layered on the invoking service's env). Value
+	// is the canonical target ID
+	// "service.<tc>.<svc>.runtime.provision.<name>". The snippet is the
+	// provider's (resolved at the provider's eval time); parameterization
+	// flows through env the snippet reads at runtime (e.g. ${TOPIC}).
+	// Note: the snippet runs in the *invoking* service's cwd.
+	CmdRef string `json:"cmd_ref,omitempty"`
 }
 
 type Alphasfile struct {

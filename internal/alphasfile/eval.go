@@ -32,6 +32,47 @@ func buildBarrierAttrs(entityID string, states []lifecycle.State) map[string]cty
 	return attrs
 }
 
+// neverSentinel is the value the bare `never` keyword resolves to in
+// `after = never`. It is not a barrier ref (those always contain '@'),
+// so it's unambiguous: a provision whose only after entry is this
+// sentinel is latent — registered but not auto-run at bringup.
+const neverSentinel = "never"
+
+// provisionRefMarker is the substring that distinguishes a *provision*
+// barrier-attr object from a service/build/toolchain one. A cmd that is
+// a bare traversal to service.<tc>.<svc>.runtime.provision.<name>
+// resolves (via buildBarrierAttrs) to an object whose "success" attr is
+// "<id>.runtime.provision.<name>@success" — we strip the @state suffix
+// to recover the canonical target ID and treat the cmd as a CmdRef.
+const provisionRefMarker = ".runtime.provision."
+
+// provisionRefOf reports whether expr is a bare reference to another
+// provision (its cty value is a provision barrier-attr object) and, if
+// so, returns the canonical target provision ID. A normal shell snippet
+// (string, possibly templated) returns ("", false, nil); only genuine
+// evaluation errors propagate.
+func (r *resolver) provisionRefOf(expr hcl.Expression, self map[string]cty.Value) (string, bool, error) {
+	if expr == nil {
+		return "", false, nil
+	}
+	val, diags := expr.Value(r.ctxWith(self))
+	if diags.HasErrors() {
+		return "", false, fmt.Errorf("%s", diags.Error())
+	}
+	if val.IsNull() || !val.Type().IsObjectType() || !val.Type().HasAttribute("success") {
+		return "", false, nil
+	}
+	succ := val.GetAttr("success")
+	if succ.Type() != cty.String {
+		return "", false, nil
+	}
+	s := succ.AsString()
+	if !strings.Contains(s, provisionRefMarker) || !strings.HasSuffix(s, "@success") {
+		return "", false, nil
+	}
+	return strings.TrimSuffix(s, "@success"), true, nil
+}
+
 // resolver walks the service DAG and produces the wire-stable *Alphasfile.
 //
 // Within each service, evaluation goes through a fixed sequence so that
@@ -438,13 +479,29 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 			if err != nil {
 				return err
 			}
-			cmd, err := r.evalStr(pb.Cmd, self, label+".cmd")
+			// cmd is either an inline shell snippet (string) or a bare
+			// reference to another (latent) provision used as a template.
+			cmdRef, isRef, err := r.provisionRefOf(pb.Cmd, self)
 			if err != nil {
-				return err
+				return fmt.Errorf("%s.cmd: %w", label, err)
+			}
+			var cmd string
+			if isRef {
+				if cmdRef == serviceID+".runtime.provision."+pb.Name {
+					return fmt.Errorf("%s.cmd: provision cannot reference itself", label)
+				}
+			} else {
+				cmd, err = r.evalStr(pb.Cmd, self, label+".cmd")
+				if err != nil {
+					return err
+				}
 			}
 			verify, err := r.evalStr(pb.Verify, self, label+".verify")
 			if err != nil {
 				return err
+			}
+			if isRef && (strings.TrimSpace(check) != "" || strings.TrimSpace(verify) != "") {
+				return fmt.Errorf("%s: check/verify are not allowed when cmd references another provision (the template owns them)", label)
 			}
 			var penv map[string]string
 			if pb.Env != nil {
@@ -454,9 +511,27 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 				}
 				penv = toStringMap(m)
 			}
-			afterList, err := r.evalStrList(pb.After, self, label+".after")
+			// `after` accepts the bare keyword `never` (a latent
+			// provision: registered but not auto-run) OR a list of
+			// barrier refs — never both.
+			afterList, err := r.evalStrOrList(pb.After, self, label+".after")
 			if err != nil {
 				return err
+			}
+			latent := false
+			afterClean := afterList[:0]
+			for _, a := range afterList {
+				if a == neverSentinel {
+					latent = true
+					continue
+				}
+				afterClean = append(afterClean, a)
+			}
+			if latent && len(afterClean) > 0 {
+				return fmt.Errorf("%s.after: `never` cannot be combined with other refs", label)
+			}
+			if latent && pb.Detached {
+				return fmt.Errorf("%s: `detached` is meaningless on a latent (`after = never`) provision", label)
 			}
 			provisions = append(provisions, &ProvisionStep{
 				Name:     pb.Name,
@@ -464,8 +539,10 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 				Cmd:      cmd,
 				Verify:   verify,
 				Env:      penv,
-				After:    afterList,
+				After:    afterClean,
 				Detached: pb.Detached,
+				Latent:   latent,
+				CmdRef:   cmdRef,
 			})
 		}
 	}
@@ -825,7 +902,10 @@ func (r *resolver) evalStr(expr hcl.Expression, self map[string]cty.Value, field
 // the per-service `self` (omitted for non-service evaluation paths, if any
 // are added in the future).
 func (r *resolver) ctxWith(self map[string]cty.Value) *hcl.EvalContext {
-	vars := map[string]cty.Value{}
+	// `never` is the keyword that marks a provision latent
+	// (`after = never`). Defined as a plain string so the bare
+	// identifier resolves; it never matches a real barrier ref ('@').
+	vars := map[string]cty.Value{"never": cty.StringVal(neverSentinel)}
 	if len(r.serviceByTC) > 0 {
 		toolchains := map[string]cty.Value{}
 		for tc, services := range r.serviceByTC {
