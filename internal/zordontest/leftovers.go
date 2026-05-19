@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/registry"
@@ -41,10 +42,27 @@ func (p *Project) AssertNoLeftovers(t *testing.T) {
 		return
 	}
 
-	entries, err := registry.ListByFsHash(p.home, fs)
-	if err != nil {
-		t.Errorf("AssertNoLeftovers: registry read failed: %v", err)
-		return
+	// `zordon stop` returns as soon as alpha ACKs OpShutdown — NOT when
+	// teardown finishes. The supervisor's registry.Remove runs only
+	// after the service (and its tommy wrapper) fully exit, which is
+	// inherently async and bounded by alpha's --shutdown-grace. So poll
+	// for the entry to clear rather than sampling once and racing the
+	// teardown: instant on the happy path (already empty), only waits
+	// when something is genuinely lingering — in which case a real
+	// leak never clears and we still fail, just a few seconds later.
+	var entries []registry.Entry
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		var err error
+		entries, err = registry.ListByFsHash(p.home, fs)
+		if err != nil {
+			t.Errorf("AssertNoLeftovers: registry read failed: %v", err)
+			return
+		}
+		if len(entries) == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	if len(entries) > 0 {
 		// Reap so the next test gets a clean registry, then report
