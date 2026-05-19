@@ -64,11 +64,6 @@ var ToolchainLifecycle = lifecycle.NewDef(
 //
 //	scheduled → running → success    (build cmd exit 0)
 //	                   → failure     (build cmd non-zero)
-//
-// Cross-service refs land as `service.<tc>.<n>.build@<state>` — useful
-// when several services share a single source checkout: e.g. karafka /
-// sidekiq runtime can wait on `service.ruby.bnpl.build@success` so the
-// shared `vendor/bundle` is populated before they bundle-exec.
 var BuildLifecycle = lifecycle.NewDef(
 	[]lifecycle.State{"scheduled", "running", "success", "failure"},
 	[]lifecycle.Edge{
@@ -99,19 +94,19 @@ var ServiceBarrierStates = []lifecycle.State{
 	"scheduled", "running", "ready", "stopped", "done",
 }
 
-// ProvisionBarrierStates: HCL surface for provision barriers. "failure"
+// ProvisionBarrierStates HCL surface for provision barriers. "failure"
 // is not exposed for the same reason as service.failed.
 var ProvisionBarrierStates = []lifecycle.State{
 	"scheduled", "running", "success", "done",
 }
 
-// BuildBarrierStates: HCL surface for build barriers. Same vocabulary
+// BuildBarrierStates HCL surface for build barriers. Same vocabulary
 // as provisions since a build is a one-shot task.
 var BuildBarrierStates = []lifecycle.State{
 	"scheduled", "running", "success", "done",
 }
 
-// ToolchainBarrierStates: HCL surface for toolchain barriers. "ready"
+// ToolchainBarrierStates HCL surface for toolchain barriers. "ready"
 // is the success terminal; "done" composes ready ∪ failed for "either
 // outcome" deps.
 var ToolchainBarrierStates = []lifecycle.State{

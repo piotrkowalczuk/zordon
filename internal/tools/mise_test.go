@@ -25,7 +25,7 @@ func TestResolveDataDir_walkUpFindsNearestExisting(t *testing.T) {
 	// Place a "go 1.25" install at project root only.
 	mustMkdir(t, filepath.Join(project, ".zordon", "toolchain", "installs", "go", "1.25.6"))
 
-	got := ResolveDataDir(deep, home, "go", "1.25.6")
+	got := ResolveDataDir(deep, filepath.Join(home, ".zordon", "toolchain"), "go", "1.25.6")
 	want := filepath.Join(project, ".zordon", "toolchain")
 	if got != want {
 		t.Errorf("ResolveDataDir = %s; want project-level %s", got, want)
@@ -43,7 +43,7 @@ func TestResolveDataDir_innerOverridesOuter(t *testing.T) {
 	mustMkdir(t, filepath.Join(home, ".zordon", "toolchain", "installs", "go", "1.25.6"))
 	mustMkdir(t, filepath.Join(project, ".zordon", "toolchain", "installs", "go", "1.25.6"))
 
-	got := ResolveDataDir(project, home, "go", "1.25.6")
+	got := ResolveDataDir(project, filepath.Join(home, ".zordon", "toolchain"), "go", "1.25.6")
 	want := filepath.Join(project, ".zordon", "toolchain")
 	if got != want {
 		t.Errorf("ResolveDataDir = %s; want closest %s", got, want)
@@ -57,16 +57,16 @@ func TestResolveDataDir_noInstallReturnsHomeDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Nothing pre-installed anywhere.
-	got := ResolveDataDir(project, home, "go", "1.25.6")
-	want := filepath.Join(home, ".zordon", "toolchain")
-	if got != want {
-		t.Errorf("ResolveDataDir = %s; want home default %s", got, want)
+	defaultDD := filepath.Join(home, ".zordon", "toolchain")
+	got := ResolveDataDir(project, defaultDD, "go", "1.25.6")
+	if got != defaultDD {
+		t.Errorf("ResolveDataDir = %s; want defaultDataDir %s", got, defaultDD)
 	}
 }
 
 func TestResolveDataDir_versionSpecific(t *testing.T) {
 	// 1.25.6 installed at project, 1.26.0 NOT installed. Resolving
-	// 1.26.0 must skip the 1.25.6 directory and fall back to home.
+	// 1.26.0 must skip the 1.25.6 directory and fall back to default.
 	home := t.TempDir()
 	project := filepath.Join(home, "work", "proj")
 	if err := os.MkdirAll(project, 0o755); err != nil {
@@ -74,11 +74,41 @@ func TestResolveDataDir_versionSpecific(t *testing.T) {
 	}
 	mustMkdir(t, filepath.Join(project, ".zordon", "toolchain", "installs", "go", "1.25.6"))
 
-	got := ResolveDataDir(project, home, "go", "1.26.0")
-	want := filepath.Join(home, ".zordon", "toolchain")
+	defaultDD := filepath.Join(home, ".zordon", "toolchain")
+	got := ResolveDataDir(project, defaultDD, "go", "1.26.0")
+	want := defaultDD
 	if got != want {
 		t.Errorf("ResolveDataDir for 1.26.0 = %s; want home default %s "+
 			"(local 1.25.6 must not match)", got, want)
+	}
+}
+
+// REGRESSION: with `from` pointing at a test-cache dir, walk-up MUST
+// NOT escape past defaultDataDir's parent. Without the bound, a real
+// install in the developer's `~/.zordon/toolchain/installs/<tool>/<ver>`
+// would be found by the walk and silently reused — tests would
+// pollute the developer's actual zordon install.
+//
+// Simulated layout (no real ~/.zordon needed): a user-home variant
+// further up the tree must not be reached from below the bound.
+func TestResolveDataDir_doesNotLeakAboveDefaultDataDir(t *testing.T) {
+	// Simulated layout:
+	//   <tmp>/userhome/.zordon/toolchain/installs/go/1.25.6  ← shouldn't be found
+	//   <tmp>/userhome/projects/repo/.zordon/                ← bound (defaultDataDir's parent)
+	//                  /toolchain                            ← defaultDataDir
+	tmp := t.TempDir()
+	userHome := filepath.Join(tmp, "userhome")
+	repo := filepath.Join(userHome, "projects", "repo")
+	testCache := filepath.Join(repo, ".zordon")
+	if err := os.MkdirAll(testCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustMkdir(t, filepath.Join(userHome, ".zordon", "toolchain", "installs", "go", "1.25.6"))
+
+	defaultDD := filepath.Join(testCache, "toolchain")
+	got := ResolveDataDir(testCache, defaultDD, "go", "1.25.6")
+	if got != defaultDD {
+		t.Errorf("walk-up leaked above bound: ResolveDataDir = %s; want %s", got, defaultDD)
 	}
 }
 

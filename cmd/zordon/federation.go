@@ -17,15 +17,30 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
+	"github.com/piotrkowalczuk/zordon/internal/zordonhome"
 )
 
-// discoverChain returns every Alphasfile from the leaf up to (and including)
-// $HOME, root-first, with the optional global ~/.zordon/Alphasfile
-// prepended. The last element is the invocation (leaf) Alphasfile.
+// discoverChain returns every Alphasfile from the leaf up to (and
+// including) ZORDON_HOME's parent directory, root-first, with the
+// optional global <ZORDON_HOME>/Alphasfile prepended. The last
+// element is the invocation (leaf) Alphasfile.
 //
-// When zordon is run from <X>/.zordon/worktrees/<name>/, walkUp naturally
-// climbs to <X>/Alphasfile and adopts it as the leaf — the worktree shares
-// the project's file; only its Invocation (state dir, hash) differs.
+// Why bound at filepath.Dir(ZORDON_HOME) rather than $HOME:
+//
+//	ZORDON_HOME defines the "zordon-world" — where artifacts live and
+//	how far zordon's view extends. In production with the default
+//	ZORDON_HOME=~/.zordon, the bound is ~/ — identical to the
+//	historical $HOME semantic, so user-facing behavior is unchanged.
+//	When ZORDON_HOME is redirected (test harness, sandboxed runner,
+//	multi-tenant CI), the bound moves with it: an agent running
+//	zordon with ZORDON_HOME=/sandbox/zordon won't traverse past
+//	/sandbox/ during federation discovery, which is the same scope
+//	the toolchain cache and registry already live in.
+//
+// When zordon is run from <X>/.zordon/worktrees/<name>/, walkUp
+// naturally climbs to <X>/Alphasfile and adopts it as the leaf —
+// the worktree shares the project's file; only its Invocation
+// (state dir, hash) differs.
 func discoverChain() (chain []string, invocationFile string, err error) {
 	invocationFile, err = walkUp()
 	if err != nil {
@@ -36,7 +51,14 @@ func discoverChain() (chain []string, invocationFile string, err error) {
 		return nil, "", err
 	}
 
-	home, _ := os.UserHomeDir()
+	// Bound = parent of ZORDON_HOME. Walk-up stops AT this dir
+	// (inclusive — we still scan the bound itself for an Alphasfile).
+	// Empty bound means no override available, so don't enforce
+	// a stop here — let parent==dir filesystem-root catch handle it.
+	var bound string
+	if zh := zordonhome.Resolve(""); zh != "" {
+		bound = filepath.Dir(zh)
+	}
 
 	var found []string
 	dir := filepath.Dir(invocationFile)
@@ -45,7 +67,7 @@ func discoverChain() (chain []string, invocationFile string, err error) {
 		if st, e := os.Stat(cand); e == nil && !st.IsDir() {
 			found = append(found, cand)
 		}
-		if home != "" && dir == home {
+		if bound != "" && dir == bound {
 			break
 		}
 		parent := filepath.Dir(dir)
@@ -59,8 +81,8 @@ func discoverChain() (chain []string, invocationFile string, err error) {
 	}
 	chain = found
 
-	if home != "" {
-		global := filepath.Join(home, ".zordon", "Alphasfile")
+	if zh := zordonhome.Resolve(""); zh != "" {
+		global := filepath.Join(zh, "Alphasfile")
 		if st, e := os.Stat(global); e == nil && !st.IsDir() && !slices.Contains(chain, global) {
 			chain = append([]string{global}, chain...)
 		}
@@ -250,9 +272,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 				accumulatedToolchain[k] = v
 			}
 			accumulatedSysEnv = appendUniqueStrings(accumulatedSysEnv, st.SysEnv)
-			if st.Dotenv != "" {
-				dotenvChain = append(dotenvChain, st.Dotenv)
-			}
+			dotenvChain = append(dotenvChain, st.Dotenv...)
 			continue
 
 		case st != nil:
@@ -301,9 +321,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			return fmt.Errorf("%s: %w", afPath, err)
 		}
 		cancel()
-		if af.Dotenv != "" {
-			dotenvChain = append(dotenvChain, af.Dotenv)
-		}
+		dotenvChain = append(dotenvChain, af.Dotenv...)
 
 		// Privileged hooks are NOT run here — `zordon start` stays
 		// non-interactive. Run `zordon sudo` to apply them across the chain.

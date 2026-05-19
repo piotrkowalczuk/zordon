@@ -92,6 +92,25 @@ a terminal failure, waiters on its `ready` barrier are unblocked
 automatically and inherit the failure — no deadlock, no need to
 explicitly list `failed`.
 
+#### Service build barriers
+
+Every service has a one-shot build phase (a checkout or a `cargo
+install` or a `go install` — see [Alphasfile](alphasfile.md#service-block)).
+Its barriers are exposed alongside `self.runtime`:
+
+| Path | Fires when |
+|---|---|
+| `self.build.scheduled` | build is queued, deps not yet checked |
+| `self.build.running` | the build cmd is executing |
+| `self.build.success` | build cmd exited 0 (or there was no build to run) |
+| `self.build.done` | outcome decided — `success` *or* `failure` |
+
+Use `self.build.success` (or the cross-service form below) to gate
+tooling that operates on the built artifact BEFORE the runtime is
+exposed — e.g. a smoke check on the binary, a static-analysis step, a
+publish to a registry. Without a distinct build barrier you'd have to
+wait for `runtime.ready`, which means the service is already live.
+
 #### Provision barriers
 
 Provisions are transient tasks, so their vocabulary is `success`/`failure`
@@ -110,6 +129,7 @@ Same paths but rooted at the full service identity:
 
 ```hcl
 service.go.db.runtime.ready                       # wait for db to be operational
+service.go.api.build.success                      # wait for api's build to finish
 service.go.api.runtime.provision.migrate.success  # wait for api's migrate provision
 ```
 

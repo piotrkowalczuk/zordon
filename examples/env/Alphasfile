@@ -11,10 +11,21 @@ service "go" "app" {
     body = <<-EOT
       DOTENV_FROM_FILE=1
       OVERRIDE_ME=from-dotenv
+      DOTENV_ORDER=first
     EOT
   }
 
-  dotenv = "${self.file.denv.path}"
+  file "denv2" {
+    path = "${fs::tmp()}/app.local.env"
+    body = <<-EOT
+      DOTENV2_FROM_FILE=1
+      DOTENV_ORDER=second
+    EOT
+  }
+
+  # dotenv accepts a list: files load in order, later wins over earlier
+  # (and env{} still wins over all of them).
+  dotenv = [self.file.denv.path, self.file.denv2.path]
 
   env = {
     ENV_STATIC  = "hello"

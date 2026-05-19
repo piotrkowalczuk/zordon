@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,6 +24,16 @@ import (
 )
 
 func main() {
+	// Ignore SIGPIPE on stdout/stderr. Go's default for SIGPIPE on the
+	// std fds is to kill the process — fine for one-shot CLIs, fatal
+	// for `zordon start | tail -N`: tail closes its read end after N
+	// lines and the next zordon log line sees a broken pipe, taking
+	// zordon down mid-bringup and leaving alpha + service children
+	// orphaned. Signal.Notify with no select drains the signal into
+	// the channel buffer where it's silently dropped — equivalent to
+	// SIG_IGN for our purposes.
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
+
 	rootFlags := ff.NewFlagSet("zordon")
 	verbose := rootFlags.Bool('v', "verbose", "verbose logging")
 	agent := rootFlags.BoolLong("agent", "machine-friendly output: '<ms-since-start> <src> <LEVEL> <msg>'")

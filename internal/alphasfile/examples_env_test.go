@@ -53,23 +53,28 @@ func TestExampleEnvResolves(t *testing.T) {
 		t.Errorf("env{} must win over dotenv: OVERRIDE_ME=%q", s.Runtime.Env["OVERRIDE_ME"])
 	}
 
-	want := "/tmp/zordon-h0/app.env"
-	if s.Runtime.Dotenv != want {
-		t.Errorf("dotenv path = %q, want %q (the generated file{})", s.Runtime.Dotenv, want)
+	want := []string{"/tmp/zordon-h0/app.env", "/tmp/zordon-h0/app.local.env"}
+	if len(s.Runtime.Dotenv) != len(want) || s.Runtime.Dotenv[0] != want[0] || s.Runtime.Dotenv[1] != want[1] {
+		t.Errorf("dotenv paths = %q, want %q (the generated file{}s, in order)", s.Runtime.Dotenv, want)
 	}
-	var denv *File
+	files := map[string]*File{}
 	for _, f := range s.Runtime.Files {
-		if f.Name == "denv" {
-			denv = f
-		}
+		files[f.Name] = f
 	}
-	if denv == nil {
-		t.Fatal("file{} denv not resolved")
+	denv, denv2 := files["denv"], files["denv2"]
+	if denv == nil || denv2 == nil {
+		t.Fatal("file{} denv/denv2 not resolved")
 	}
-	if denv.Path != want {
-		t.Errorf("denv file path = %q, want %q", denv.Path, want)
+	if denv.Path != want[0] {
+		t.Errorf("denv file path = %q, want %q", denv.Path, want[0])
+	}
+	if denv2.Path != want[1] {
+		t.Errorf("denv2 file path = %q, want %q", denv2.Path, want[1])
 	}
 	if !strings.Contains(denv.Body, "DOTENV_FROM_FILE=1") || !strings.Contains(denv.Body, "OVERRIDE_ME=from-dotenv") {
 		t.Errorf("denv body wrong:\n%s", denv.Body)
+	}
+	if !strings.Contains(denv2.Body, "DOTENV2_FROM_FILE=1") || !strings.Contains(denv2.Body, "DOTENV_ORDER=second") {
+		t.Errorf("denv2 body wrong:\n%s", denv2.Body)
 	}
 }

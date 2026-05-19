@@ -10,3 +10,5 @@ examples/.zordon
 bin
 .venv
 *.out
+alpha.log
+/app

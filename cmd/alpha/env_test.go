@@ -20,7 +20,7 @@ func TestBuildCmdInjectsEnv(t *testing.T) {
 		},
 		Package: &alphasfile.Package{Toolchain: alphasfile.ToolchainGo, Src: "/tmp/x"},
 	}
-	cmd, err := buildCmd(svc, "/tmp/x", nil, false, nil)
+	cmd, err := buildCmd(svc, "/tmp/x", nil, false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestServiceEnv_emptyAllowDropsHostVars(t *testing.T) {
 	t.Setenv("BUNDLE_GEMFILE", "/host/poison/Gemfile")
 	t.Setenv("HOME", "/Users/test")
 
-	got := serviceEnv(nil, nil, nil)
+	got := serviceEnv(nil, nil, nil, nil)
 
 	for _, kv := range got {
 		if strings.HasPrefix(kv, "RUBYLIB=") || strings.HasPrefix(kv, "BUNDLE_") || strings.HasPrefix(kv, "HOME=") {
@@ -65,7 +65,7 @@ func TestServiceEnv_whitelistDropsEverythingElse(t *testing.T) {
 	t.Setenv("GEM_HOME", "/host/poison")
 	t.Setenv("BUNDLE_GEMFILE", "/host/poison/Gemfile")
 
-	got := serviceEnv(nil, nil, []string{"HOME", "LANG"})
+	got := serviceEnv(nil, nil, []string{"HOME", "LANG"}, nil)
 
 	want := map[string]string{"HOME": "/Users/test", "LANG": "en_US.UTF-8"}
 	gotMap := map[string]string{}
@@ -88,7 +88,7 @@ func TestServiceEnv_whitelistDropsEverythingElse(t *testing.T) {
 // Explicit env map overlays on top of the (filtered) host env.
 func TestServiceEnv_explicitOverlay(t *testing.T) {
 	t.Setenv("LANG", "C")
-	got := serviceEnv(nil, map[string]string{"PATH": "/svc/bin", "EXTRA": "yes"}, []string{"LANG"})
+	got := serviceEnv(nil, map[string]string{"PATH": "/svc/bin", "EXTRA": "yes"}, []string{"LANG"}, nil)
 	gotMap := map[string]string{}
 	for _, kv := range got {
 		k, v, _ := strings.Cut(kv, "=")

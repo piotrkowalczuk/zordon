@@ -17,6 +17,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/piotrkowalczuk/zordon/internal/zordonhome"
 )
 
 type Kind string
@@ -44,10 +46,13 @@ type Worktree struct {
 	Sparse []string
 }
 
-// Home returns the on-disk root for zordon-managed source.
+// Home returns the on-disk root for zordon-managed source — bare
+// git mirrors live under <Home()>/src/<repo>.git. Honors
+// $ZORDON_HOME so the test harness can redirect; falls back to
+// <UserHomeDir>/.zordon in production.
 func Home() string {
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".zordon")
+	if h := zordonhome.Resolve(""); h != "" {
+		return h
 	}
 	return ".zordon"
 }

@@ -158,7 +158,7 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 		}
 	}
 	// File-level dotenv: top-level, no `self`; may use fs::/cfg:: funcs.
-	gdot, err := r.evalStr(root.Dotenv, nil, "dotenv")
+	gdot, err := r.evalStrOrList(root.Dotenv, nil, "dotenv")
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +399,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 			return err
 		}
 	}
-	dotenv, err := r.evalStr(sb.Dotenv, self, "dotenv")
+	dotenv, err := r.evalStrOrList(sb.Dotenv, self, "dotenv")
 	if err != nil {
 		return err
 	}
@@ -779,6 +779,28 @@ func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, f
 	return out, nil
 }
 
+// evalStrOrList evaluates an expression that may be either a single string
+// or a list of strings, always yielding []string. A bare string becomes a
+// one-element slice. Nil/null ⇒ nil. Used by `dotenv`, which accepts both
+// `dotenv = ".env"` and `dotenv = [".env", ".env.local"]`.
+func (r *resolver) evalStrOrList(expr hcl.Expression, self map[string]cty.Value, field string) ([]string, error) {
+	if expr == nil {
+		return nil, nil
+	}
+	ctx := r.ctxWith(self)
+	val, diags := expr.Value(ctx)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("%s: %s", field, diags.Error())
+	}
+	if val.IsNull() {
+		return nil, nil
+	}
+	if val.Type() == cty.String {
+		return []string{val.AsString()}, nil
+	}
+	return r.evalStrList(expr, self, field)
+}
+
 // evalStr evaluates an expression expected to be a string (the `sudo`
 // snippet). Nil expression ⇒ "".
 func (r *resolver) evalStr(expr hcl.Expression, self map[string]cty.Value, field string) (string, error) {
@@ -902,6 +924,14 @@ func (r *resolver) functions() map[string]function.Function {
 
 		"net::pickport": pickPortFunc(),
 		"os::env":       osEnvFunc(),
+
+		// test:: namespace — observation/control primitives for the
+		// conformance harness. Available only when zordon runs with
+		// $ZORDON_TEST_HARNESS=1 (set by the harness on every spawn);
+		// in production they error out so users can't accidentally
+		// build them into a real Alphasfile.
+		"test::log":  testLogFunc(),
+		"test::fail": testFailFunc(),
 	}
 }
 

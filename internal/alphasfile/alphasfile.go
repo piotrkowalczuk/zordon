@@ -22,6 +22,7 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/probe"
+	"github.com/piotrkowalczuk/zordon/internal/zos"
 )
 
 const (
@@ -51,16 +52,16 @@ type RuntimeConfig struct {
 	SpaceSeparated bool           `json:"space_separated,omitempty"`
 	Vars           map[string]any    `json:"vars,omitempty"`
 	Arguments      map[string]any    `json:"arguments,omitempty"`
-	Env            map[string]string `json:"env,omitempty"`    // explicit env (overrides dotenv)
+	Env            zos.EnvironmentVariables `json:"env,omitempty"`    // explicit env (overrides dotenv)
 	// Phase-scoped env. BuildEnv is injected only while zordon builds the
 	// service (go build / cargo install / bundle); RunEnv only into the
 	// running process; AgentEnv is an override layer applied on top (for
 	// build and run) when alpha was configured with --agent — lets an AI
 	// caller e.g. turn down log verbosity without touching the Alphasfile.
-	BuildEnv map[string]string `json:"build_env,omitempty"`
-	RunEnv   map[string]string `json:"run_env,omitempty"`
-	AgentEnv map[string]string `json:"agent_env,omitempty"`
-	Dotenv   string            `json:"dotenv,omitempty"` // path to a .env loaded before Env
+	BuildEnv zos.EnvironmentVariables `json:"build_env,omitempty"`
+	RunEnv   zos.EnvironmentVariables `json:"run_env,omitempty"`
+	AgentEnv zos.EnvironmentVariables `json:"agent_env,omitempty"`
+	Dotenv   []string          `json:"dotenv,omitempty"` // paths to .env files loaded before Env (in order)
 	Command        []string          `json:"command,omitempty"`
 	// After holds runtime-level barrier refs. alpha's per-service
 	// bringup goroutine selects on each before starting cmd; with no
@@ -353,7 +354,7 @@ type ProvisionStep struct {
 	Check  string            `json:"check,omitempty"`
 	Cmd    string            `json:"cmd"`
 	Verify string            `json:"verify,omitempty"`
-	Env    map[string]string `json:"env,omitempty"`
+	Env    zos.EnvironmentVariables `json:"env,omitempty"`
 	// After holds the resolved barrier refs ("service.go.db@ready",
 	// "service.go.api.runtime.provision.create-tables@success", ...).
 	// alpha parses these at bringup and selects on (target, terminal-
@@ -367,7 +368,7 @@ type ProvisionStep struct {
 }
 
 type Alphasfile struct {
-	Dotenv   string     `json:"dotenv,omitempty"` // file-level .env, applied under every service's env
+	Dotenv   []string   `json:"dotenv,omitempty"` // file-level .env files, applied under every service's env (in order)
 	Services []*Service `json:"services,omitempty"`
 	// Toolchain pins the version+env of each language toolchain
 	// alpha materializes via mise. Keyed by the same string as
@@ -382,22 +383,22 @@ type Alphasfile struct {
 	// stripped. Federation merges parent ∪ child (no widening that
 	// would silently expose more of the host than each level chose).
 	//
-	// Why default-deny: an interactive shell with mise/asdf/rbenv
-	// activated exports RUBYLIB / GEM_HOME / BUNDLE_* / PYTHONPATH /
-	// CARGO_HOME / ... pointing at the user's tool world. Those
-	// override mise's PATH ordering, so a service "pinned" to ruby
-	// 3.3 via toolchain{} silently loads bundler from the user's
-	// mise install — or worse, mixes mise's interpreter with
-	// System Ruby 2.6's stdlib. Whitelisting forces the user to
-	// declare exactly what's expected.
+	// Why default-deny: an interactive shell with a version manager
+	// activated exports per-language path vars (RUBYLIB / GEM_HOME /
+	// BUNDLE_* / PYTHONPATH / CARGO_HOME / ...) pointing at the user's
+	// tool world. Those override mise's PATH ordering, so a service
+	// "pinned" via toolchain{} silently loads its tooling from the
+	// shell's install — or mixes interpreters from incompatible
+	// installs. Whitelisting forces the user to declare exactly what
+	// the spawn is allowed to inherit.
 	SysEnv []string `json:"sysenv,omitempty"`
 }
 
 // ToolchainConfig declares the version a particular language toolchain
 // should be pinned to, the tools to install into that pinned version
-// (each version has its OWN tool world — Ruby 3.0.7's bundler is not
-// Ruby 3.3.10's bundler), and an env overlay applied to every service
-// of this toolchain (and its provisions).
+// (each version has its OWN tool world — a tool installed for one
+// patch is not visible to another), and an env overlay applied to
+// every service of this toolchain (and its provisions).
 type ToolchainConfig struct {
 	Version string `json:"version"`
 	// Tools is a name→version map of language-native tools alpha
@@ -412,8 +413,8 @@ type ToolchainConfig struct {
 	//   go     → `go install <name>@<ver>`
 	// All run through `mise exec <lang>@<version> -- ...` so they
 	// land in the right version's tool world.
-	Tools map[string]string `json:"tools,omitempty"`
-	Env   map[string]string `json:"env,omitempty"`
+	Tools map[string]string        `json:"tools,omitempty"`
+	Env   zos.EnvironmentVariables `json:"env,omitempty"`
 }
 
 func (af *Alphasfile) All() []*Service { return af.Services }

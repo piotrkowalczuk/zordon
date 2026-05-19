@@ -53,11 +53,24 @@ For each service in `Configure` order:
 
 Lowest to highest, last wins:
 
-1. `alpha`'s process environment
-2. federation-parent **file-level** `dotenv` (root-first)
-3. this Alphasfile's file-level `dotenv`
-4. the service's `dotenv`
-5. the service's `env { }` block
+1. `alpha`'s process environment, **filtered by `sysenv`** (closed-world
+   whitelist — anything not listed is stripped; defaults to empty)
+2. **toolchain env** — `mise env --json` output for the pinned
+   `toolchain.<lang>.version`, with per-language pin reinforcement
+   (e.g. `GOTOOLCHAIN=local` for Go), then the user's
+   `toolchain.<lang>.env` overlay
+3. federation-parent **file-level** `dotenv` (root-first)
+4. this Alphasfile's file-level `dotenv`
+5. the service's `dotenv`
+6. the service's `env { }` block, then the matching phase's `env { }`
+   (`runtime`/`build`), and finally `agent { env { } }` when alpha
+   runs in `--agent` mode
+
+The toolchain is the **initial** environment: it lays down PATH /
+GOROOT / GEM_PATH / GOTOOLCHAIN / etc. so language tooling resolves to
+the pinned install. Per-service config (`dotenv`, `env`, phase env)
+layers on top, so users override toolchain defaults — never the other
+way around.
 
 All of `dotenv`/`env` are interpolated and DAG-ordered like any other
 field.

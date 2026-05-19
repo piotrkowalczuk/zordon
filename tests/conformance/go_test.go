@@ -1,0 +1,928 @@
+// Package conformance contains behavioral tests of zordon's externally
+// observable behavior — driven through the zordon CLI using the
+// zordontest harness, asserting on HTTP responses, log contents,
+// registry state, and exit codes.
+//
+// These tests are NOT zordontest's own tests (that library's
+// self-tests live in internal/zordontest/project_test.go). They use
+// zordontest as a tool to exercise zordon end-to-end and pin specific
+// behaviors of the supervisor + Alphasfile evaluator + toolchain
+// bringup pipeline.
+//
+// File-per-language convention: tests/conformance/<lang>_test.go
+// holds the minimal-manifest variants and toolchain-specific
+// scenarios for that language. Cross-language scenarios (federation,
+// concurrent bringup, registry collision) get their own files.
+//
+// Cost: first run cold-caches mise (~5-7 min cargo install) and any
+// pinned toolchain (~1-2 min mise install). Subsequent runs reuse
+// <repo>/.zordon and finish in seconds. The per-test timeout is
+// generous; CI should set --timeout >= 20m for a guaranteed-clean run.
+package conformance_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/piotrkowalczuk/zordon/internal/zordontest"
+)
+
+// Each oneof choice in `service "go" { ... }` gets a minimal-manifest
+// regression below:
+//
+//	primary:    src | git | package         (3 variants — git, package TODO)
+//	build:      default (from exe) | explicit cmd
+//	readiness:  http probe | none (stabilization-only)
+//
+// Tests share golden/go/echo as the source fixture so build-cache
+// hits across them on the shared <repo>/.zordon cache.
+
+// TestGoService_srcDefaultBuild_httpReadiness is the canonical minimal
+// shape: src primary + exe-derived default build + explicit runtime
+// cmd + HTTP readiness probe. Catches regressions where any of those
+// four pieces breaks the happy path.
+func TestGoService_srcDefaultBuild_httpReadiness(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	const port = 27654
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src = "./src/svc1"
+  exe = "."
+
+  vars = { port = %d }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, port))
+
+	mustStart(t, p)
+	mustGetEcho(t, port)
+}
+
+// TestGoService_srcExplicitBuildCmd swaps `exe`-derived defaultBuild
+// for an explicit `build { cmd = [...] }` block. Exercises the
+// `svc.BuildCmd()` branch in prepare() — a distinct code path from
+// defaultBuild and worth its own regression so a break there doesn't
+// hide behind the default-path's test passing.
+func TestGoService_srcExplicitBuildCmd(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	const port = 27655
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src = "./src/svc1"
+
+  build {
+    cmd = ["go", "build", "-o", "${fs::bin()}/svc1", "."]
+  }
+
+  vars = { port = %d }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, port))
+
+	mustStart(t, p)
+	mustGetEcho(t, port)
+}
+
+// TestGoService_noReadinessUsesStabilization asserts that a service
+// with NO readiness block reaches "ready" via the stabilization
+// timer (the "stayed alive for N ms = ready" fallback). Without
+// this regression, breakage in the stabilization path would only
+// affect daemons without probes — exactly the case least likely to
+// be caught manually.
+//
+// We still hit the echo endpoint after a brief delay to confirm
+// the service IS up; the test's claim is that zordon didn't time
+// out waiting for a probe that wasn't defined.
+func TestGoService_noReadinessUsesStabilization(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	const port = 27656
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src = "./src/svc1"
+  exe = "."
+
+  vars = { port = %d }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+}
+`, port))
+
+	mustStart(t, p)
+	// Stabilization is ~1s by default; service binds quickly but
+	// zordon doesn't probe, so wait a beat before asserting.
+	time.Sleep(2 * time.Second)
+	mustGetEcho(t, port)
+}
+
+// TestGoService_envBlockReachesRuntime asserts that a service-level
+// `env { }` block actually lands in the spawned process's env. The
+// golden echo service mirrors os.Environ() in its JSON response, so
+// we read it back and look for the key we set.
+func TestGoService_envBlockReachesRuntime(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	const port = 27660
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src = "./src/svc1"
+  exe = "."
+
+  vars = { port = %d }
+
+  env = {
+    GREETING = "hello-from-env-block"
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, port))
+
+	mustStart(t, p)
+	echo := mustDecodeEcho(t, port)
+	if got := echo.Env["GREETING"]; got != "hello-from-env-block" {
+		t.Errorf("GREETING in service env = %q; want %q", got, "hello-from-env-block")
+	}
+}
+
+// TestGoService_runtimeEnvOverridesBaseEnv pins the precedence:
+// service-level `env { K=A }` is the BASE, phase `runtime { env { K=B } }`
+// overlays on top. The service must see B. Without this regression a
+// silent swap of merge order would let stale base values leak through.
+func TestGoService_runtimeEnvOverridesBaseEnv(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	const port = 27661
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src = "./src/svc1"
+  exe = "."
+
+  vars = { port = %d }
+
+  env = {
+    LAYER = "base"
+  }
+
+  runtime {
+    env = {
+      LAYER = "runtime"
+    }
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, port))
+
+	mustStart(t, p)
+	echo := mustDecodeEcho(t, port)
+	if got := echo.Env["LAYER"]; got != "runtime" {
+		t.Errorf("LAYER = %q; want runtime to override base", got)
+	}
+}
+
+// TestGoService_varsInterpolationInCmd covers cross-cutting: `vars`
+// declared at the service level + ${self.vars.X} interpolated into
+// the runtime cmd argv. Both the cmd template (alphasfile resolver)
+// and arg passing (alpha spawn) have to work for the service to
+// receive the value.
+//
+// The fixture's echo includes argv in its JSON output, so we can
+// confirm the resolved value reached the binary as a literal flag.
+func TestGoService_varsInterpolationInCmd(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	const port = 27662
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src = "./src/svc1"
+  exe = "."
+
+  vars = {
+    port = %d
+    tag  = "alpha-bravo"
+  }
+
+  runtime {
+    cmd = [
+      "${fs::bin()}/svc1",
+      "-addr", "127.0.0.1:${self.vars.port}",
+      "-tag", "${self.vars.tag}",
+    ]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, port))
+
+	mustStart(t, p)
+	echo := mustDecodeEcho(t, port)
+	// echo.Argv is os.Args of the spawned process: [<bin>, -addr, ..., -tag, alpha-bravo]
+	joined := strings.Join(echo.Argv, " ")
+	if !strings.Contains(joined, "-tag alpha-bravo") {
+		t.Errorf("argv missing interpolated -tag alpha-bravo: %v", echo.Argv)
+	}
+}
+
+// TestGoService_fileBlockMaterialized covers the `file { }` block:
+// alpha writes the body to disk at the resolved path BEFORE the
+// service starts. We assert by reading the file from the test side
+// — golden/go/echo doesn't read files, so we exercise the on-disk
+// effect directly (the most reliable assertion: the file is there
+// and contains exactly what the Alphasfile said it should).
+//
+// Using vars + interpolation in the body proves the file body goes
+// through the same evaluator as cmd/argv.
+func TestGoService_fileBlockMaterialized(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	const port = 27663
+	// Pin the generated file to a stable relative path so we can
+	// read it back from the test.
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src = "./src/svc1"
+  exe = "."
+
+  vars = {
+    port = %d
+    who  = "world"
+  }
+
+  file "config" {
+    path = "${fs::tmp()}/generated.conf"
+    body = "hello, ${self.vars.who} on port ${self.vars.port}\n"
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, port))
+
+	mustStart(t, p)
+
+	// fs::tmp() resolves to $TMPDIR/zordon-<fsHash>; the test doesn't
+	// know fsHash directly, but the file path was interpolated into
+	// the Alphasfile and `zordon get` can resolve it.
+	// `file` is keyed by the HCL block's name label — `file "config"
+	// { ... }` → service.go.svc1.file.config.*.
+	confPath := p.Get("service.go.svc1.file.config.path")
+	data, err := readFile(t, confPath)
+	if err != nil {
+		t.Fatalf("read generated file %s: %v", confPath, err)
+	}
+	want := fmt.Sprintf("hello, world on port %d\n", port)
+	if data != want {
+		t.Errorf("generated file body = %q; want %q", data, want)
+	}
+}
+
+// TestGoService_sysenvWhitelistStripsHostVar pins the closed-world
+// guarantee: an env var present in the harness's process env but
+// NOT in Alphasfile.sysenv must NOT reach the spawned service. Same
+// var IS reachable when sysenv allows it through. Two assertions
+// in one test because they're the two halves of the same contract
+// — splitting wouldn't add signal.
+func TestGoService_sysenvWhitelistStripsHostVar(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+	t.Setenv("HOST_VAR_ALLOWED", "yes-allowed")
+	t.Setenv("HOST_VAR_DENIED", "should-be-stripped")
+
+	const port = 27664
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR", "HOST_VAR_ALLOWED"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src = "./src/svc1"
+  exe = "."
+
+  vars = { port = %d }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, port))
+
+	mustStart(t, p)
+	echo := mustDecodeEcho(t, port)
+	if got := echo.Env["HOST_VAR_ALLOWED"]; got != "yes-allowed" {
+		t.Errorf("whitelisted HOST_VAR_ALLOWED = %q; want yes-allowed", got)
+	}
+	if _, present := echo.Env["HOST_VAR_DENIED"]; present {
+		t.Errorf("HOST_VAR_DENIED leaked through despite not being in sysenv")
+	}
+}
+
+// TestGoService_provisionChainOrdering uses the test:: HCL namespace
+// to verify that a provision chain runs in the expected order. p1
+// has no `after`, p2 depends on p1.success. After bringup, the
+// test log should contain "p1" then "p2" — never in reverse,
+// never with "p2" alone.
+//
+// This is the same pattern any user could employ to test their own
+// provision chains: drop test::log into provision cmds and assert
+// on the resulting log lines.
+func TestGoService_provisionChainOrdering(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	const port = 27665
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src = "./src/svc1"
+  exe = "."
+
+  vars = { port = %d }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    provision "p1" {
+      cmd = test::log("p1")
+    }
+
+    provision "p2" {
+      after = [self.runtime.provision.p1.success]
+      cmd   = test::log("p2")
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, port))
+
+	mustStart(t, p)
+	got := p.TestLog()
+	want := []string{"p1", "p2"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("provision order = %v; want %v", got, want)
+	}
+}
+
+// TestGoService_provisionFailureSkipsDependent: a provision that
+// fails (via test::fail) must short-circuit its dependent — the
+// dependent's cmd must NOT run, so its test::log marker NEVER
+// appears in the log. Failfast also tears down the whole bringup;
+// we tolerate the non-zero exit and just inspect the log.
+//
+// This is the negative-path twin of TestGoService_provisionChainOrdering:
+// chain semantics are pinned both for success propagation AND
+// failure propagation.
+func TestGoService_provisionFailureSkipsDependent(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	const port = 27666
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src = "./src/svc1"
+  exe = "."
+
+  vars = { port = %d }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    provision "broken" {
+      cmd = test::fail("intentional failure for test")
+    }
+
+    provision "should-not-run" {
+      after = [self.runtime.provision.broken.success]
+      cmd   = test::log("UNREACHABLE")
+    }
+  }
+}
+`, port))
+
+	// Failfast will kill the bringup; we expect non-zero exit.
+	res := p.Zordon("start",
+		"--timeout", "5m",
+		"--alpha-log", p.AlphaLogPath(),
+	).WithTimeout(6 * time.Minute).Run(t)
+	if res.ExitCode == 0 {
+		t.Fatalf("zordon start: exit 0 but expected failure (broken provision should have triggered failfast)")
+	}
+
+	for _, ln := range p.TestLog() {
+		if ln == "UNREACHABLE" {
+			t.Errorf("dependent provision ran despite its dep failing — chain breaker broken")
+		}
+	}
+}
+
+// TestGoService_modcacheSharedByDefaultIsolatedOnOverride is the
+// behavioral proof that zordon's "trust mise + Go defaults" stance
+// for the build/mod cache is sound:
+//
+//   - Service "fetcher": its provision runs `go mod download <pkg>`.
+//     The module lands in the default GOMODCACHE
+//     ($HOME/go/pkg/mod/cache/download/<pkg>/@v/<ver>.zip).
+//   - Service "shared-check": its provision (after fetcher.success)
+//     asserts the very same file exists in default GOMODCACHE.
+//     If this fails, default cache is NOT shared and zordon would
+//     need to manage it.
+//   - Service "isolated-check": its provision overrides GOMODCACHE
+//     via per-step env, then asserts the file does NOT exist in
+//     the isolated path. If this fails, our isolation mechanism
+//     (via runtime/provision env) is broken.
+//
+// All three services share one Alphasfile so the chain runs in
+// one zordon start: each provision's exit code IS the assertion.
+// No HTTP probing of runtime needed — provisions either succeed
+// (zordon emits success barrier) or fail (failfast triggers).
+//
+// Module choice: rsc.io/quote v1.5.2 — tiny (one .go file), public,
+// commonly used in Go docs as a hello-world module; first download
+// is fast even on cold CI runners.
+func TestGoService_modcacheSharedByDefaultIsolatedOnOverride(t *testing.T) {
+	const (
+		modulePath    = "rsc.io/quote"
+		moduleVersion = "v1.5.2"
+		// Where Go's default GOMODCACHE stores the download zip.
+		// $HOME/go/pkg/mod/ is Go's default GOPATH/pkg/mod.
+		sharedZipRel = "go/pkg/mod/cache/download/rsc.io/quote/@v/v1.5.2.zip"
+	)
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+	p.CopyTree("golden/go/echo", "src/svc2")
+	p.CopyTree("golden/go/echo", "src/svc3")
+
+	isolatedModCache := filepath.Join(p.Dir(), "isolated-modcache")
+
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "fetcher" {
+  src = "./src/svc1"
+  exe = "."
+  vars = { port = 27680 }
+
+  runtime {
+    cmd = ["${fs::bin()}/fetcher", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    provision "download" {
+      cmd = "go mod download %[1]s@%[2]s"
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "shared-check" {
+  src = "./src/svc2"
+  exe = "."
+  vars = { port = 27681 }
+
+  runtime {
+    cmd = ["${fs::bin()}/shared-check", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    provision "assert-shared" {
+      after = [service.go.fetcher.runtime.provision.download.success]
+      cmd   = "test -f $HOME/%[3]s"
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "isolated-check" {
+  src = "./src/svc3"
+  exe = "."
+  vars = { port = 27682 }
+
+  runtime {
+    cmd = ["${fs::bin()}/isolated-check", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    provision "assert-isolated" {
+      after = [service.go.fetcher.runtime.provision.download.success]
+      env   = { GOMODCACHE = "%[4]s" }
+      cmd   = "! test -f %[4]s/cache/download/%[1]s/@v/%[2]s.zip"
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, modulePath, moduleVersion, sharedZipRel, isolatedModCache))
+
+	mustStart(t, p)
+	// If any of the three provisions had failed, mustStart would have
+	// fataled on a non-zero zordon exit (failfast). Reaching here means
+	// all three claims hold: download happened, default cache is shared,
+	// per-step GOMODCACHE override genuinely isolates.
+}
+
+// TestGoService_buildBarrierFiresBeforeRuntime pins the distinction
+// between `service.<tc>.<n>.build.<state>` and `service.<tc>.<n>.runtime.<state>`
+// — two separate barriers exposed by every service. A provision wired
+// to `build.success` must observe the build's completion as a distinct
+// event, BEFORE `runtime.ready`. Without that distinction, the
+// build-time barrier would have no purpose: anything depending on it
+// would effectively wait for the runtime, defeating the use case
+// (running tooling against a freshly built artifact before exposing it).
+//
+// Asserted via the test:: log order:
+//   "after-build" fires from a provision gated on first.build.success
+//   "after-runtime" fires from a provision gated on first.runtime.ready
+// Build precedes runtime structurally (you can't be running before
+// you're built), so the log MUST contain after-build then after-runtime.
+func TestGoService_buildBarrierFiresBeforeRuntime(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/first")
+	p.CopyTree("golden/go/echo", "src/second")
+
+	const portFirst, portSecond = 27670, 27671
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "first" {
+  src = "./src/first"
+  exe = "."
+
+  vars = { port = %d }
+
+  runtime {
+    cmd = ["${fs::bin()}/first", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "second" {
+  src = "./src/second"
+  exe = "."
+
+  vars = { port = %d }
+
+  runtime {
+    cmd = ["${fs::bin()}/second", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    provision "after-build" {
+      after = [service.go.first.build.success]
+      cmd   = test::log("after-build")
+    }
+
+    provision "after-runtime" {
+      after = [service.go.first.runtime.ready]
+      cmd   = test::log("after-runtime")
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, portFirst, portSecond))
+
+	mustStart(t, p)
+	got := p.TestLog()
+	idxBuild, idxRuntime := -1, -1
+	for i, ln := range got {
+		switch ln {
+		case "after-build":
+			idxBuild = i
+		case "after-runtime":
+			idxRuntime = i
+		}
+	}
+	if idxBuild < 0 || idxRuntime < 0 {
+		t.Fatalf("missing markers in test log: %v", got)
+	}
+	if idxBuild >= idxRuntime {
+		t.Errorf("build.success fired at or after runtime.ready (idx %d vs %d) — barriers may have collapsed: %v",
+			idxBuild, idxRuntime, got)
+	}
+}
+
+// TestGoService_provisionCwdMatchesServiceSrcDir pins the rule that a
+// provision shell runs with cwd == its parent service's resolved
+// `Runtime.Dir`. Without it, language-native tooling (go run ./cmd/...,
+// bundle exec, rails) couldn't locate project manifests relative to the
+// checkout, and users would need an explicit `cd` in every provision
+// cmd — exactly the foot-gun the rule was added to prevent.
+//
+// We capture the provision's pwd to a file under fs::tmp(), then
+// compare against the service's resolved dir read via `zordon get`.
+// Equality is the assertion; the values are both absolute paths
+// resolved by alpha at bringup, so they round-trip exactly.
+func TestGoService_provisionCwdMatchesServiceSrcDir(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	const port = 27672
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src = "./src/svc1"
+  exe = "."
+
+  vars = {
+    port    = %d
+    cwdfile = "${fs::tmp()}/cwd.txt"
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    provision "capture-cwd" {
+      cmd = "pwd > ${self.vars.cwdfile}"
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, port))
+
+	mustStart(t, p)
+	cwdFile := p.Get("service.go.svc1.vars.cwdfile")
+	gotCwd, err := readFile(t, cwdFile)
+	if err != nil {
+		t.Fatalf("read cwd capture %s: %v", cwdFile, err)
+	}
+	gotCwd = strings.TrimSpace(gotCwd)
+	wantDir := p.Get("service.go.svc1.dir")
+	if gotCwd != wantDir {
+		t.Errorf("provision cwd = %q; want service src dir %q", gotCwd, wantDir)
+	}
+}
+
+// --- shared helpers (package-local) ----------------------------
+
+func mustStart(t *testing.T, p *zordontest.Project) {
+	t.Helper()
+	res := p.Zordon("start",
+		"--timeout", "15m",
+		"--alpha-log", p.AlphaLogPath(),
+	).WithTimeout(16 * time.Minute).Run(t)
+	if res.ExitCode != 0 {
+		t.Fatalf("zordon start: exit %d\nstdout: %s\nstderr: %s",
+			res.ExitCode, res.Stdout, res.Stderr)
+	}
+}
+
+// echoResponse is the JSON shape golden/go/echo's GET / returns.
+// Tests that only care about reachability use mustGetEcho; tests
+// that inspect specific fields use mustDecodeEcho.
+type echoResponse struct {
+	Env            map[string]string `json:"env"`
+	Cwd            string            `json:"cwd"`
+	Argv           []string          `json:"argv"`
+	RuntimeVersion string            `json:"runtime_version"`
+}
+
+func mustGetEcho(t *testing.T, port int) {
+	t.Helper()
+	echo := mustDecodeEcho(t, port)
+	if !strings.HasPrefix(echo.RuntimeVersion, "go1.26") {
+		t.Errorf("runtime_version = %q; want go1.26.x (pinned toolchain)", echo.RuntimeVersion)
+	}
+}
+
+func mustDecodeEcho(t *testing.T, port int) echoResponse {
+	t.Helper()
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d\nbody: %s", resp.StatusCode, body)
+	}
+	var echo echoResponse
+	if err := json.NewDecoder(strings.NewReader(string(body))).Decode(&echo); err != nil {
+		t.Fatalf("decode echo: %v\nbody: %s", err, body)
+	}
+	return echo
+}
+
+// readFile is a thin testing.T-aware wrapper that returns content
+// as string for tests asserting on generated-file bodies.
+func readFile(t *testing.T, path string) (string, error) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}

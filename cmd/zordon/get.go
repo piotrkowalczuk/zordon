@@ -39,6 +39,34 @@ func runGet(ctx context.Context, args []string) error {
 	return nil
 }
 
+// byName converts a list-of-entries-with-name (e.g. node["files"] =
+// [{name: "config", ...}, {name: "secret", ...}]) into a map keyed by
+// each entry's name, suitable for service.X.file.<name>.* access.
+// Entries lacking a string `name` field are skipped. Returns an
+// empty map when the source key is absent or not a list — every
+// service has a `file` / `provision` namespace even if empty, so
+// users can rely on the dotted path resolving (to nothing) rather
+// than erroring out.
+func byName(node map[string]any, srcKey string) map[string]any {
+	out := map[string]any{}
+	list, ok := node[srcKey].([]any)
+	if !ok {
+		return out
+	}
+	for _, e := range list {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := m["name"].(string)
+		if name == "" {
+			continue
+		}
+		out[name] = m
+	}
+	return out
+}
+
 // buildTree projects every resolved service in the chain into a generic
 // tree keyed `service.<toolchain>.<name>`. Each node is the service's
 // RuntimeConfig (decoded via its JSON tags: vars, arguments, env, dir,
@@ -61,6 +89,15 @@ func buildTree(levels []*level) map[string]any {
 			if b, err := json.Marshal(s.Runtime); err == nil {
 				_ = json.Unmarshal(b, &node)
 			}
+			// HCL declares `file "<name>" { ... }` and `provision "<name>"
+			// { ... }` blocks — labeled with a name, mirroring the
+			// service shape. The resolved Go struct stores them as a
+			// list for ordering, but user-facing get paths should mirror
+			// the HCL: `service.X.file.<name>.path` (keyed by the same
+			// label HCL used), not `service.X.files.0.path` (positional,
+			// brittle to reorder). Same for provisions.
+			node["file"] = byName(node, "files")
+			node["provision"] = byName(node, "provision")
 			node["toolchain"] = s.Toolchain
 			if st, ok := running[s.Runtime.Name]; ok {
 				node["pid"] = st.PID

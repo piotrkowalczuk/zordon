@@ -91,28 +91,41 @@ func lockFile(path string) (release func(), err error) {
 	return func() { f.Close() }, nil
 }
 
-// ResolveDataDir walks up from `from` toward `userHome`, picking the
-// nearest level that already has `installs/<tool>/<version>` under its
+// ResolveDataDir walks up from `from`, picking the nearest ancestor
+// that already has `installs/<tool>/<version>` under its
 // `.zordon/toolchain/`. That dir becomes MISE_DATA_DIR — installed
-// versions there are reused, and any `mise install` would write there.
+// versions there are reused, and any `mise install` would write
+// there.
 //
-// If nothing in the chain has the version, returns the default global
-// cache `<userHome>/.zordon/toolchain` so the next `mise install`
-// populates it for all projects.
-func ResolveDataDir(from, userHome, tool, version string) string {
-	homeDefault := filepath.Join(userHome, ".zordon", "toolchain")
+// Walk-up is BOUNDED by `filepath.Dir(defaultDataDir)` — i.e., we
+// never walk above the directory that contains the default cache.
+// Without this bound a custom test cache rooted inside a sandbox
+// would walk all the way up and silently reuse the developer's
+// real `~/.zordon/toolchain`, polluting it with test artifacts.
+// In production (from == zordonHome, defaultDataDir == zordonHome+/toolchain)
+// the bound is a no-op: the first iteration is already at it.
+//
+// If nothing in the chain has the version, returns `defaultDataDir`
+// — the cache location chosen by the caller — so the next
+// `mise install` populates it.
+//
+// `defaultDataDir` is what production wants as "<zordonHome>/toolchain"
+// and what tests want as "<testCache>/toolchain"; we don't synthesize
+// the path so the caller controls the convention.
+func ResolveDataDir(from, defaultDataDir, tool, version string) string {
+	bound := filepath.Dir(defaultDataDir)
 	dir := from
 	for {
 		candidate := filepath.Join(dir, ".zordon", "toolchain")
 		if _, err := os.Stat(filepath.Join(candidate, "installs", tool, version)); err == nil {
 			return candidate
 		}
-		if dir == userHome {
-			return homeDefault
+		if dir == bound {
+			return defaultDataDir
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return homeDefault
+			return defaultDataDir
 		}
 		dir = parent
 	}

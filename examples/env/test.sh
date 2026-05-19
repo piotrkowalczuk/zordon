@@ -23,8 +23,13 @@ assert_line() { # <key=value>
 }
 assert_line "ENV_STATIC=hello"
 assert_line "DOTENV_FROM_FILE=1"
+assert_line "DOTENV2_FROM_FILE=1"          # second dotenv file in the list
 assert_line "ENV_DYN=127.0.0.1:$port"
-assert_line "OVERRIDE_ME=from-env"   # env{} wins over dotenv
+assert_line "OVERRIDE_ME=from-env"         # env{} wins over dotenv
+assert_line "DOTENV_ORDER=second"          # later dotenv file wins over earlier
 grep -Fxq -- "OVERRIDE_ME=from-dotenv" <<<"$env" \
 	&& fail "overridden dotenv value leaked (OVERRIDE_ME=from-dotenv present)" \
 	|| pass "overridden dotenv value absent"
+grep -Fxq -- "DOTENV_ORDER=first" <<<"$env" \
+	&& fail "earlier dotenv value leaked (DOTENV_ORDER=first present)" \
+	|| pass "earlier dotenv value overridden by later file"

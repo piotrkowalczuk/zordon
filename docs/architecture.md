@@ -49,8 +49,9 @@ One `alpha` per chain level, long-lived. It:
   each service runs **prepare** (git worktree / `cargo install`, then
   the toolchain build into `fs::bin()`), starts it, pipes
   stdout/stderr back as events, and runs the readiness probe;
-- composes each child's environment (process env → federation-parent
-  dotenv → file-level dotenv → service `dotenv` → `env {}`);
+- composes each child's environment (sysenv-filtered host → toolchain
+  env → federation-parent dotenv → file-level dotenv → service
+  `dotenv` → `env {}` / phase env);
 - on **reconfigure**: stops only the services whose code/manifest
   changed (`stopServices`) and leaves the rest running;
 - on stop/SIGTERM: SIGTERM → grace → SIGKILL every child, then unlinks
