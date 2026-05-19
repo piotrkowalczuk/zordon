@@ -39,6 +39,12 @@ jobs:
           curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xz
           echo /usr/local/go/bin >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
+      - name: Trust workspace
+        # The container runs as root but the checkout is owned by a
+        # different uid, so git reports "dubious ownership" (exit 128).
+        # That breaks `go build`'s VCS stamping ("error obtaining VCS
+        # status"). Mark the tree safe before any go build/test.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Run Tests
         run: make test
       - name: Run E2E Test

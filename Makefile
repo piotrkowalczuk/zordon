@@ -8,7 +8,13 @@ build:
 	go build -o bin/alpha ./cmd/alpha/
 	go build -o bin/tommy ./cmd/tommy/
 
-test:
+# The harness resolves the zordon/alpha/tommy binaries it drives from
+# $ZORDON_BIN, $PATH and $ZORDON_TOMMY_BIN — it never builds from
+# source. So build them first and point the suite at bin/.
+test: build
+	ZORDON_BIN="$(CURDIR)/bin/zordon" \
+	ZORDON_TOMMY_BIN="$(CURDIR)/bin/tommy" \
+	PATH="$(CURDIR)/bin:$$PATH" \
 	go test -cover -coverprofile=cover.out -count=2 -race ./...
 
 lint:
