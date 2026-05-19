@@ -9,7 +9,7 @@ import (
 )
 
 // Regression oracle for the federation project's `print`: it must
-// surface the per-worktree domain (prometheus.<fs::hash>.test) on the
+// surface the per-worktree domain (httpbin.<fs::hash>.test) on the
 // Caddy port pulled from the federation parent context. Pure Compile.
 func TestExampleFederationPrint(t *testing.T) {
 	b, err := os.ReadFile("../../examples/federation/project/Alphasfile")
@@ -36,12 +36,12 @@ func TestExampleFederationPrint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	s := svcByName(af, "prometheus")
+	s := svcByName(af, "httpbin")
 	if s == nil || s.Runtime == nil {
-		t.Fatal("prometheus not resolved")
+		t.Fatal("httpbin not resolved")
 	}
 	p := s.Runtime.Print
-	wantHost := "prometheus.feedface00001111.test"
+	wantHost := "httpbin.feedface00001111.test"
 	if !strings.Contains(p, "http://"+wantHost+":8080/") {
 		t.Errorf("print missing domain+hash+caddy port: %q", p)
 	}

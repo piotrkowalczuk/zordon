@@ -8,11 +8,19 @@ build:
 	go build -o bin/alpha ./cmd/alpha/
 	go build -o bin/tommy ./cmd/tommy/
 
+# Go toolchain version the conformance fixtures pin via mise. `make
+# test` is the canonical "run the suite" entrypoint, so it always
+# pins (the golden Go services need go 1.26); override with
+# `ZORDON_TEST_GO_VERSION=1.27 make test`. Running bare `go test`
+# without it keeps the deliberate no-toolchain (ambient Go) behavior.
+ZORDON_TEST_GO_VERSION ?= 1.26.2
+
 # The harness drives prebuilt zordon/alpha/tommy (it never builds
 # them); resolve via $ZORDON_BIN, $PATH, $ZORDON_TOMMY_BIN -> bin/.
 test: build
 	ZORDON_BIN="$(CURDIR)/bin/zordon" \
 	ZORDON_TOMMY_BIN="$(CURDIR)/bin/tommy" \
+	ZORDON_TEST_GO_VERSION="$(ZORDON_TEST_GO_VERSION)" \
 	PATH="$(CURDIR)/bin:$$PATH" \
 	go test -cover -coverprofile=cover.out -count=2 -race ./...
 
