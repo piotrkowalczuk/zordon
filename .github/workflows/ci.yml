@@ -19,18 +19,60 @@ jobs:
           - fedora:latest
           - archlinux:latest
         example:
+          # No *_macos examples here — they need pfctl/resolver and
+          # only run on macOS (via `make e2e`'s *_macos gate locally).
           - simple
-          - federation
           - worktree
     container:
       image: ${{ matrix.distro }}
+      # tini as pid 1 to reap zombies; GitHub's bare `tail` pid 1
+      # doesn't, so a killed alpha/tommy lingers and kill(-pgid,0)
+      # reads it as still alive (the orphan test's liveness check).
+      options: --init
+    env:
+      CGO_ENABLED: "1"
+      GO_VERSION: "1.25.6"
     steps:
       - name: Install dependencies
         run: |
-          if [ -x "$(command -v apt-get)" ]; then apt-get update && apt-get install -y git golang-go sudo make; fi
-          if [ -x "$(command -v dnf)" ]; then dnf install -y git golang sudo make; fi
-          if [ -x "$(command -v pacman)" ]; then pacman -Syu --noconfirm git go sudo make; fi
+          # Distro Go packages are far older than the go.mod toolchain
+          # (go 1.25.6 + `tool` directive), so install the official Go
+          # tarball. gcc -> `go test -race` (cgo); procps -> the e2e
+          # port_of helper greps `ps`.
+          if [ -x "$(command -v apt-get)" ]; then apt-get update && apt-get install -y git gcc sudo make curl ca-certificates procps; fi
+          if [ -x "$(command -v dnf)" ]; then dnf install -y git gcc sudo make curl procps-ng; fi
+          if [ -x "$(command -v pacman)" ]; then pacman -Syu --noconfirm git gcc sudo make curl procps-ng; fi
+          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xz
+          echo /usr/local/go/bin >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
+      - name: Cache Go module + build cache
+        # Containers run as root, so Go's defaults are /root/go/pkg/mod
+        # and /root/.cache/go-build. This is shared by zordon's own
+        # `go test`, the e2e `make build`, AND the from-source upstream
+        # services (caddy, coredns, go-httpbin). restore-keys lets a
+        # cache-miss job still warm-start from the newest prior cache
+        # instead of recompiling everything from zero.
+        uses: actions/cache@v4
+        with:
+          path: |
+            /root/go/pkg/mod
+            /root/.cache/go-build
+          key: ${{ matrix.distro }}-go-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            ${{ matrix.distro }}-go-
+      - name: Trust workspace
+        # git "dubious ownership" (container root vs checkout uid) else
+        # breaks go build's VCS stamping.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Pre-place mise
+        # EnsureMise no-ops when <ZORDON_HOME>/bin/mise exists; the
+        # suite's ZORDON_HOME is <repo>/.zordon. Beats `cargo install`
+        # mise on every distro.
+        run: |
+          mkdir -p .zordon/bin
+          curl -fsSL https://mise.jdx.dev/mise-latest-linux-x64 -o .zordon/bin/mise
+          chmod +x .zordon/bin/mise
+          .zordon/bin/mise --version
       - name: Run Tests
         run: make test
       - name: Run E2E Test

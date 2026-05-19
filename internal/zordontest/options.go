@@ -17,6 +17,9 @@ type config struct {
 	// already-laid-out tree (e.g. an in-repo example/) — the harness
 	// still cleans up `.zordon/` state subdirs at end of test.
 	root string
+	// expectLeftovers opts the project out of the strict
+	// AssertNoLeftovers cleanup check. See WithExpectedLeftovers.
+	expectLeftovers bool
 }
 
 // WithIsolatedHome forces the project to use the given path as its
@@ -41,6 +44,20 @@ func WithIsolatedHome(path string) Option {
 // Alphasfile and source files are untouched.
 func WithExistingRoot(path string) Option {
 	return func(c *config) { c.root = path }
+}
+
+// WithExpectedLeftovers declares that this test, by its very nature,
+// leaves registry/state behind that no graceful path will clean — so
+// the harness should Nuke() the project's state at cleanup instead of
+// failing AssertNoLeftovers.
+//
+// This is NOT a way to silence a flaky leftover. Use it only when the
+// scenario provably precludes cleanup, e.g. the test SIGKILLs the
+// supervisor (alpha) so its registry-deregister code never runs; in
+// production that row is reaped by the next `zordon start`, which a
+// single-shot test doesn't perform. Every other test stays strict.
+func WithExpectedLeftovers() Option {
+	return func(c *config) { c.expectLeftovers = true }
 }
 
 // resolveConfig folds the option chain into a config. Each option

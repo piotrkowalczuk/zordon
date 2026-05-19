@@ -87,6 +87,21 @@ func (p *Project) AssertNoLeftovers(t *testing.T) {
 	}
 }
 
+// Nuke force-reaps everything this project registered: SIGTERM/SIGKILL
+// any still-living pgid for its fs_hash, then drops the rows — exactly
+// what the next `zordon start` would do in production. Unlike
+// AssertNoLeftovers it makes no assertion; it is the cleanup path for
+// tests that provably preclude graceful teardown (see
+// WithExpectedLeftovers). Best-effort and safe on an already-clean
+// registry. Exposed so a test can also nuke mid-flow if needed.
+func (p *Project) Nuke() {
+	fs := p.fsHash()
+	if fs == "" {
+		return
+	}
+	_ = registry.ReapByFsHash(p.home, fs, 2*time.Second, nil)
+}
+
 // fsHash resolves this project's identity the same way alpha does:
 // from the invocation dir + Alphasfile bytes. Returns "" when no
 // Alphasfile is present (test never wrote one), which is a signal

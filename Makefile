@@ -8,8 +8,21 @@ build:
 	go build -o bin/alpha ./cmd/alpha/
 	go build -o bin/tommy ./cmd/tommy/
 
-test:
-	go test -cover -coverprofile=cover.out -count=2 -race ./...
+# The harness drives prebuilt zordon/alpha/tommy (it never builds
+# them); resolve via $ZORDON_BIN, $PATH, $ZORDON_TOMMY_BIN -> bin/.
+# Each fixture pins its OWN toolchain in its Alphasfile (that's what
+# zordon manages), so the suite needs no version plumbing here.
+#
+# -p 1 -parallel 1: the conformance suite spawns real alpha/tommy
+# against the SHARED <repo>/.zordon (one registry) on FIXED ports, so
+# no two test binaries — and no two tests — may run concurrently or
+# they collide. Correctness over speed (the Go build/mod cache absorbs
+# most of the cost).
+test: build
+	ZORDON_BIN="$(CURDIR)/bin/zordon" \
+	ZORDON_TOMMY_BIN="$(CURDIR)/bin/tommy" \
+	PATH="$(CURDIR)/bin:$$PATH" \
+	go test -cover -coverprofile=cover.out -count=2 -race -p 1 -parallel 1 ./...
 
 lint:
 	go tool staticcheck ./...
@@ -49,6 +62,11 @@ clean:
 # broken claim is a hard failure.
 e2e: build
 	@for dir in $(EXAMPLES); do \
+		base=$$(basename $$dir); \
+		case $$base in \
+			*_macos) [ "$$(uname -s)" = Darwin ] || { echo "==> $$dir (SKIP: macOS-only)"; continue; } ;; \
+			*_linux) [ "$$(uname -s)" = Linux ]  || { echo "==> $$dir (SKIP: Linux-only)"; continue; } ;; \
+		esac; \
 		t="$$dir/test.sh"; \
 		[ -f "$$t" ] || { echo "no test.sh in $$dir, skipping"; continue; }; \
 		echo "==> $$dir"; \

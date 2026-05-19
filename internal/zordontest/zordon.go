@@ -13,10 +13,10 @@ import (
 // Chain `.WithEnv`/`.WithTimeout` to configure, terminate with
 // `.Run(t)` to execute.
 type ZordonCmd struct {
-	p       *Project
-	args    []string
+	p        *Project
+	args     []string
 	extraEnv map[string]string
-	timeout time.Duration
+	timeout  time.Duration
 }
 
 // Zordon returns a builder for the given subcommand (start / stop /

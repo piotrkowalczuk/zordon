@@ -9,17 +9,17 @@ import (
 )
 
 // Regression oracle for the federation project's `print`: it must
-// surface the per-worktree domain (prometheus.<fs::hash>.test) on the
+// surface the per-worktree domain (httpbin.<fs::hash>.test) on the
 // Caddy port pulled from the federation parent context. Pure Compile.
 func TestExampleFederationPrint(t *testing.T) {
-	b, err := os.ReadFile("../../examples/federation/project/Alphasfile")
+	b, err := os.ReadFile("../../examples/federation_macos/project/Alphasfile")
 	if err != nil {
 		t.Fatal(err)
 	}
 	iv := &invocation.Invocation{
 		FsHash: "feedface00001111", TmpDir: "/tmp/zordon-feedface00001111",
 		Worktree: invocation.MainWorktree,
-		StateDir: "/repo/examples/federation/project/.zordon/worktrees/main",
+		StateDir: "/repo/examples/federation_macos/project/.zordon/worktrees/main",
 	}
 	// Federation parent: caddy resolved with its vars (http + config_dir),
 	// the project reads service.go.caddy.vars.* through the flat namespace.
@@ -32,16 +32,16 @@ func TestExampleFederationPrint(t *testing.T) {
 		Package: &Package{Toolchain: ToolchainGo, Git: "github.com/caddyserver/caddy"},
 	}})
 
-	af, err := Compile("/repo/examples/federation/project/Alphasfile", b, iv, parent)
+	af, err := Compile("/repo/examples/federation_macos/project/Alphasfile", b, iv, parent)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	s := svcByName(af, "prometheus")
+	s := svcByName(af, "httpbin")
 	if s == nil || s.Runtime == nil {
-		t.Fatal("prometheus not resolved")
+		t.Fatal("httpbin not resolved")
 	}
 	p := s.Runtime.Print
-	wantHost := "prometheus.feedface00001111.test"
+	wantHost := "httpbin.feedface00001111.test"
 	if !strings.Contains(p, "http://"+wantHost+":8080/") {
 		t.Errorf("print missing domain+hash+caddy port: %q", p)
 	}

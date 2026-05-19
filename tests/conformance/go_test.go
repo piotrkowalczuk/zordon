@@ -712,8 +712,10 @@ service "go" "isolated-check" {
 // (running tooling against a freshly built artifact before exposing it).
 //
 // Asserted via the test:: log order:
-//   "after-build" fires from a provision gated on first.build.success
-//   "after-runtime" fires from a provision gated on first.runtime.ready
+//
+//	"after-build" fires from a provision gated on first.build.success
+//	"after-runtime" fires from a provision gated on first.runtime.ready
+//
 // Build precedes runtime structurally (you can't be running before
 // you're built), so the log MUST contain after-build then after-runtime.
 func TestGoService_buildBarrierFiresBeforeRuntime(t *testing.T) {
@@ -798,6 +800,78 @@ service "go" "second" {
 	if idxBuild >= idxRuntime {
 		t.Errorf("build.success fired at or after runtime.ready (idx %d vs %d) — barriers may have collapsed: %v",
 			idxBuild, idxRuntime, got)
+	}
+}
+
+// TestGoService_buildFailureBlocksRuntime is the load-bearing negative
+// proof of the build barrier: when a service's `build { cmd }` exits
+// non-zero, the runtime command MUST NOT be executed. The build phase
+// is a hard gate, not advisory — a failed build can't produce the
+// artifact the runtime would exec, so starting it anyway is exactly the
+// "exit 127, no such file" foot-gun this barrier exists to prevent.
+//
+// Construction:
+//   - build cmd is a forced failure: `sh -c 'exit 7'` (deterministic
+//     non-zero code, no toolchain/network involved — it CANNOT flake
+//     into success). No `toolchain` block, so the gate under test is
+//     reached without a mise/go provisioning detour that could fail
+//     first and make "runtime didn't run" vacuously true.
+//   - the runtime cmd is a test::log snippet. If — and only if — the
+//     barrier were broken and alpha started the runtime regardless, the
+//     marker would land in the test log.
+//
+// Assertions: zordon start fails (failfast on the build error); the
+// forced failure actually came from our build cmd (its stderr marker is
+// in alpha's log, so we're proving the BUILD gate, not some unrelated
+// failure); and the runtime marker NEVER appears.
+func TestGoService_buildFailureBlocksRuntime(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	const port = 27673
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+
+service "go" "svc1" {
+  src = "./src/svc1"
+  exe = "."
+
+  vars = { port = %d }
+
+  build {
+    cmd = ["sh", "-c", "echo zordon-forced-build-failure 1>&2; exit 7"]
+  }
+
+  runtime {
+    cmd = ["sh", "-c", %s]
+  }
+}
+`, port, "test::log(\"RUNTIME_STARTED_MUST_NOT_HAPPEN\")"))
+
+	// Failfast tears the bringup down on the build failure: non-zero
+	// exit is the expected, correct outcome.
+	res := p.Zordon("start",
+		"--timeout", "5m",
+		"--alpha-log", p.AlphaLogPath(),
+	).WithTimeout(6 * time.Minute).Run(t)
+	if res.ExitCode == 0 {
+		t.Fatalf("zordon start: exit 0 but expected failure (forced build error must failfast)")
+	}
+
+	for _, ln := range p.TestLog() {
+		if ln == "RUNTIME_STARTED_MUST_NOT_HAPPEN" {
+			t.Fatalf("runtime cmd executed despite the build failing — build barrier did not gate runtime")
+		}
+	}
+
+	// Prove the failure was the BUILD (our forced cmd), not something
+	// upstream — otherwise "runtime didn't run" would be vacuously true.
+	alphaLog, err := os.ReadFile(p.AlphaLogPath())
+	if err != nil {
+		t.Fatalf("read alpha log %s: %v", p.AlphaLogPath(), err)
+	}
+	if !strings.Contains(string(alphaLog), "zordon-forced-build-failure") {
+		t.Errorf("alpha log lacks the forced build-failure marker — the build cmd may not have run; got:\n%s", alphaLog)
 	}
 }
 

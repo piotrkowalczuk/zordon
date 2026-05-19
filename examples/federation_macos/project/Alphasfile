@@ -1,0 +1,46 @@
+// Federated leaf: a small upstream Go web app (go-httpbin) fetched via
+// git=, built with zordon's default build (binary lands in fs::bin),
+// and exposed on a composed domain through the parent's Caddy.
+//
+// Why go-httpbin and not something heavier (it replaced Prometheus):
+// the example only needs a real third-party Go project with an HTTP
+// GUI to prove federation + reverse proxy + composed domain. go-httpbin
+// is a single tiny module (go 1.22) that builds in seconds, so every
+// CI matrix job can build it from source without a timeout — and its
+// go.mod needs no newer Go than CI ships, so GOTOOLCHAIN=auto never
+// triggers a redundant toolchain download.
+service "go" "httpbin" {
+  git = "github.com/mccutchen/go-httpbin"
+  tag = "v2.22.1"
+  exe = "./cmd/go-httpbin"
+
+  vars = {
+    port    = net::pickport()
+    address = "httpbin.${fs::hash()}.test"
+  }
+
+  file "caddy_vhost" {
+    path = "${service.go.caddy.vars.config_dir}/httpbin.caddy"
+    body = <<-EOT
+      http://${self.vars.address}:${service.go.caddy.vars.http} {
+      	reverse_proxy 127.0.0.1:${self.vars.port}
+      }
+    EOT
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/go-httpbin", "-host", "127.0.0.1", "-port", "${self.vars.port}"]
+  }
+
+  print = "http://${self.vars.address}:${service.go.caddy.vars.http}/  (via Caddy, worktree ${fs::hash()})"
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    timeout           = "1s"
+    failure_threshold = 50
+  }
+}
