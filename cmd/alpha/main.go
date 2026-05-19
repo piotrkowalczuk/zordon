@@ -180,6 +180,53 @@ func killGroup(pid int, sig syscall.Signal) error {
 	return syscall.Kill(-pid, sig)
 }
 
+// closeParentW closes the tommy parent-death pipe write end alpha holds
+// for this service, once. Idempotent and nil-safe so every service exit
+// path can call it without bookkeeping. Closing it is fd hygiene, not
+// the death signal — the signal is alpha's own death closing it for us.
+func closeParentW(sc *serviceCtx) {
+	if sc != nil && sc.parentW != nil {
+		_ = sc.parentW.Close()
+		sc.parentW = nil
+	}
+}
+
+// resolveTommyBin locates the tommy wrapper alpha interposes in front of
+// every service. tommy is security-relevant — it is exec'd ahead of
+// EVERY service — so resolution is deliberately NOT $PATH-based: a
+// writable dir earlier on $PATH could otherwise substitute a malicious
+// "tommy" into every spawn. Only two trusted sources, in order:
+//
+//  1. $ZORDON_TOMMY_BIN — an explicit operator/test override. Setting
+//     alpha's environment is the same trust level as launching alpha,
+//     so this is NOT an attacker-reachable redirection (it is not a
+//     directory swap like $PATH); it exists so tests can pin a freshly
+//     built binary and operators can relocate it deliberately.
+//  2. a "tommy" sibling of alpha's OWN executable — the secure default.
+//     That directory can't be substituted without write access next to
+//     the alpha binary itself, and anyone with that can already replace
+//     alpha, so nothing is gained. The make build (bin/alpha +
+//     bin/tommy) and `go install ./cmd/...` (shared GOBIN) both satisfy
+//     it with zero configuration.
+//
+// No $PATH fallback by design: tommy is exec'd ahead of EVERY service,
+// so a writable dir earlier on $PATH must never be able to substitute a
+// malicious "tommy" into every spawn. Returns "" when neither resolves;
+// the caller logs loudly and falls back to spawning the service
+// unwrapped (degraded — orphan guarantee lost — but bringup proceeds).
+func resolveTommyBin() string {
+	if v := os.Getenv("ZORDON_TOMMY_BIN"); v != "" {
+		return v
+	}
+	if exe, err := os.Executable(); err == nil {
+		cand := filepath.Join(filepath.Dir(exe), "tommy")
+		if info, err := os.Stat(cand); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return cand
+		}
+	}
+	return ""
+}
+
 func main() {
 	rootFlags := ff.NewFlagSet("alpha")
 	rootCmd := &ff.Command{
@@ -223,6 +270,7 @@ type alphaState struct {
 	fsHash         string   // filesystem-location identity (== inv.FsHash)
 	cfgHash        string   // manifest identity (Alphasfile+parent ctx); drives drift detection
 	zordonHome     string   // ~/.zordon — host-wide registry root (empty ⇒ registry disabled)
+	tommyBin       string   // path to the tommy wrapper interposed before every service (empty ⇒ spawn unwrapped)
 	parentDotenv   []string // file-level dotenv paths inherited from federation parents
 	agentMode      bool     // configured via `zordon --agent`: apply agent{} env overlay
 	config         *alphasfile.Alphasfile
@@ -551,6 +599,14 @@ type serviceCtx struct {
 	name      string
 	toolchain string
 	cmd       *exec.Cmd
+	// parentW is the write end of the tommy parent-death pipe. alpha
+	// holds it open for the whole service lifetime and never writes to
+	// it: tommy blocks reading the matching read end, so the kernel
+	// closing this fd when alpha dies (SIGKILL/OOM included) is what
+	// tells tommy to reap the service. Closed explicitly on clean exit
+	// so the fd doesn't leak across restarts. nil when tommy was
+	// unavailable and the service runs unwrapped.
+	parentW   *os.File
 	stopCh    chan struct{}
 	stopOnce  sync.Once
 	done      chan struct{}
@@ -1163,10 +1219,18 @@ func runAlpha(_ context.Context, sockPath, logPath, zordonHome string, stabiliza
 	defer ln.Close()
 	log.Info("alpha", "listening on %s", sockPath)
 
+	tommyBin := resolveTommyBin()
+	if tommyBin == "" {
+		log.Error("alpha", "tommy wrapper not found ($ZORDON_TOMMY_BIN / alpha sibling / $PATH) — services run UNWRAPPED; an alpha SIGKILL/OOM will orphan them")
+	} else {
+		log.Info("alpha", "tommy wrapper: %s", tommyBin)
+	}
+
 	state := &alphaState{
 		startedAt:  time.Now(),
 		fsHash:     fsHash,
 		zordonHome: zordonHome,
+		tommyBin:   tommyBin,
 		shutdownCh: make(chan struct{}),
 	}
 	cfg := bringupConfig{stabilization: stabilization, shutdownGrace: shutdownGrace}
@@ -1661,14 +1725,51 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 		return
 	}
 
+	// Interpose tommy in front of the resolved service binary. tommy
+	// execs the real binary and, if alpha dies without a chance to
+	// clean up (SIGKILL / OOM), reaps it so it never orphans. tommy
+	// shares the alpha-assigned process group with the service (it does
+	// NOT make a new one), so the registry row, killGroup, and status
+	// pid below all stay correct against cmd.Process.Pid exactly as
+	// before — tommy is transparent to alpha's supervision. When tommy
+	// is unavailable we already logged at startup; run unwrapped (the
+	// pre-tommy behavior) rather than fail bringup.
+	if state.tommyBin != "" {
+		pr, pw, perr := os.Pipe()
+		if perr != nil {
+			log.Error("alpha", "tommy pipe %s: %v", name, perr)
+			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "tommy pipe: " + perr.Error()})
+			sc.lifecycle.Reach("failed")
+			return
+		}
+		wrapped := exec.Command(state.tommyBin, append([]string{
+			"--shutdown-grace", cfg.shutdownGrace.String(),
+			"--parent-fd", "3", "--", cmd.Path,
+		}, cmd.Args[1:]...)...)
+		wrapped.Dir = cmd.Dir
+		// tommy is env-transparent: it inherits this env and passes it
+		// to the service verbatim. TOMMY_PARENT_FD points at the pipe
+		// read end (ExtraFiles ⇒ fd 3, since stdio took 0..2).
+		wrapped.Env = append(append([]string(nil), cmd.Env...), "TOMMY_PARENT_FD=3")
+		wrapped.ExtraFiles = []*os.File{pr}
+		wrapped.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		sc.parentW = pw
+		cmd = wrapped
+		// alpha keeps only the write end (pw, on sc) open; tommy dups
+		// its own read end at Start, so drop ours at function exit.
+		defer pr.Close()
+	}
+
 	stdout, stderr, ttyCleanup, err := attachStdio(cmd, *svc.Runtime.Log.TTY)
 	if err != nil {
+		closeParentW(sc)
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
 		sc.lifecycle.Reach("failed")
 		return
 	}
 	if err := cmd.Start(); err != nil {
 		ttyCleanup()
+		closeParentW(sc)
 		log.Error("alpha", "start %s: %v", name, err)
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
 		sc.lifecycle.Reach("failed")
@@ -1764,6 +1865,10 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 				log.Error("alpha", "registry remove %s: %v", name, err)
 			}
 		}
+		// Release the tommy parent-death pipe. By this point the
+		// service has exited and tommy with it, so this is just fd
+		// hygiene across restarts — not the death signal.
+		closeParentW(sc)
 	}()
 	if selfExit {
 		if sc.exitErr != nil {
