@@ -49,11 +49,11 @@ import (
 // cmd + HTTP readiness probe. Catches regressions where any of those
 // four pieces breaks the happy path.
 func TestGoService_srcDefaultBuild_httpReadiness(t *testing.T) {
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27654
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 service "go" "svc1" {
   src = "./src/svc1"
@@ -86,11 +86,11 @@ service "go" "svc1" {
 // defaultBuild and worth its own regression so a break there doesn't
 // hide behind the default-path's test passing.
 func TestGoService_srcExplicitBuildCmd(t *testing.T) {
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27655
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 service "go" "svc1" {
   src = "./src/svc1"
@@ -131,11 +131,11 @@ service "go" "svc1" {
 // the service IS up; the test's claim is that zordon didn't time
 // out waiting for a probe that wasn't defined.
 func TestGoService_noReadinessUsesStabilization(t *testing.T) {
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27656
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 service "go" "svc1" {
   src = "./src/svc1"
@@ -161,11 +161,11 @@ service "go" "svc1" {
 // golden echo service mirrors os.Environ() in its JSON response, so
 // we read it back and look for the key we set.
 func TestGoService_envBlockReachesRuntime(t *testing.T) {
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27660
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 service "go" "svc1" {
   src = "./src/svc1"
@@ -204,11 +204,11 @@ service "go" "svc1" {
 // overlays on top. The service must see B. Without this regression a
 // silent swap of merge order would let stale base values leak through.
 func TestGoService_runtimeEnvOverridesBaseEnv(t *testing.T) {
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27661
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 service "go" "svc1" {
   src = "./src/svc1"
@@ -254,11 +254,11 @@ service "go" "svc1" {
 // The fixture's echo includes argv in its JSON output, so we can
 // confirm the resolved value reached the binary as a literal flag.
 func TestGoService_varsInterpolationInCmd(t *testing.T) {
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27662
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 service "go" "svc1" {
   src = "./src/svc1"
@@ -307,13 +307,13 @@ service "go" "svc1" {
 // Using vars + interpolation in the body proves the file body goes
 // through the same evaluator as cmd/argv.
 func TestGoService_fileBlockMaterialized(t *testing.T) {
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27663
 	// Pin the generated file to a stable relative path so we can
 	// read it back from the test.
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 service "go" "svc1" {
   src = "./src/svc1"
@@ -369,13 +369,13 @@ service "go" "svc1" {
 // in one test because they're the two halves of the same contract
 // — splitting wouldn't add signal.
 func TestGoService_sysenvWhitelistStripsHostVar(t *testing.T) {
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/svc1")
 	t.Setenv("HOST_VAR_ALLOWED", "yes-allowed")
 	t.Setenv("HOST_VAR_DENIED", "should-be-stripped")
 
 	const port = 27664
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR", "HOST_VAR_ALLOWED"]
 service "go" "svc1" {
   src = "./src/svc1"
@@ -418,11 +418,11 @@ service "go" "svc1" {
 // provision chains: drop test::log into provision cmds and assert
 // on the resulting log lines.
 func TestGoService_provisionChainOrdering(t *testing.T) {
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27665
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 service "go" "svc1" {
   src = "./src/svc1"
@@ -472,11 +472,11 @@ service "go" "svc1" {
 // chain semantics are pinned both for success propagation AND
 // failure propagation.
 func TestGoService_provisionFailureSkipsDependent(t *testing.T) {
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27666
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 service "go" "svc1" {
   src = "./src/svc1"
@@ -547,14 +547,14 @@ func TestGoService_modcacheSharedByDefaultIsolatedOnOverride(t *testing.T) {
 		// $HOME/go/pkg/mod/ is Go's default GOPATH/pkg/mod.
 		sharedZipRel = "go/pkg/mod/cache/download/rsc.io/quote/@v/v1.5.2.zip"
 	)
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/svc1")
 	p.CopyTree("golden/go/echo", "src/svc2")
 	p.CopyTree("golden/go/echo", "src/svc3")
 
 	isolatedModCache := filepath.Join(p.Dir(), "isolated-modcache")
 
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 service "go" "fetcher" {
   src = "./src/svc1"
@@ -653,12 +653,12 @@ service "go" "isolated-check" {
 // Build precedes runtime structurally (you can't be running before
 // you're built), so the log MUST contain after-build then after-runtime.
 func TestGoService_buildBarrierFiresBeforeRuntime(t *testing.T) {
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/first")
 	p.CopyTree("golden/go/echo", "src/second")
 
 	const portFirst, portSecond = 27670, 27671
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 service "go" "first" {
   src = "./src/first"
@@ -815,11 +815,11 @@ service "go" "svc1" {
 // Equality is the assertion; the values are both absolute paths
 // resolved by alpha at bringup, so they round-trip exactly.
 func TestGoService_provisionCwdMatchesServiceSrcDir(t *testing.T) {
-	p := zordontest.NewProject(t)
+	p := zordontest.NewProject(t, zordontest.WithToolchain())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27672
-	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 service "go" "svc1" {
   src = "./src/svc1"

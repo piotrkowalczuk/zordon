@@ -20,6 +20,10 @@ type config struct {
 	// expectLeftovers opts the project out of the strict
 	// AssertNoLeftovers cleanup check. See WithExpectedLeftovers.
 	expectLeftovers bool
+	// injectGoToolchain prepends a Go toolchain block (version from
+	// the -test.toolchain.go.version flag) to any Alphasfile this
+	// project writes. See WithToolchain.
+	injectGoToolchain bool
 }
 
 // WithIsolatedHome forces the project to use the given path as its
@@ -58,6 +62,17 @@ func WithExistingRoot(path string) Option {
 // single-shot test doesn't perform. Every other test stays strict.
 func WithExpectedLeftovers() Option {
 	return func(c *config) { c.expectLeftovers = true }
+}
+
+// WithToolchain makes the project prepend a Go toolchain block to
+// every Alphasfile it writes, pinning the version resolved from
+// -test.toolchain.go.version (default $ZORDON_TEST_GO_VERSION, then a
+// constant). Fixtures stay plain HCL — no hand-written toolchain block,
+// no string concatenation — and the pinned mise Go is driven from one
+// flag. Tests that must run WITHOUT a toolchain (e.g. a forced
+// build-failure that shouldn't wait on mise) simply omit this option.
+func WithToolchain() Option {
+	return func(c *config) { c.injectGoToolchain = true }
 }
 
 // resolveConfig folds the option chain into a config. Each option
