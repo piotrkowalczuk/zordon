@@ -12,3 +12,7 @@ bin
 *.out
 alpha.log
 /app
+# stray `go build ./cmd/<x>` binaries (the Makefile builds into bin/)
+/zordon
+/alpha
+/tommy
