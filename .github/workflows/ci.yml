@@ -36,10 +36,11 @@ jobs:
         run: |
           # Distro Go packages are far older than the go.mod toolchain
           # (go 1.25.6 + `tool` directive), so install the official Go
-          # tarball. gcc is still needed for `go test -race` (cgo).
-          if [ -x "$(command -v apt-get)" ]; then apt-get update && apt-get install -y git gcc sudo make curl ca-certificates; fi
-          if [ -x "$(command -v dnf)" ]; then dnf install -y git gcc sudo make curl; fi
-          if [ -x "$(command -v pacman)" ]; then pacman -Syu --noconfirm git gcc sudo make curl; fi
+          # tarball. gcc -> `go test -race` (cgo); procps -> the e2e
+          # port_of helper greps `ps`.
+          if [ -x "$(command -v apt-get)" ]; then apt-get update && apt-get install -y git gcc sudo make curl ca-certificates procps; fi
+          if [ -x "$(command -v dnf)" ]; then dnf install -y git gcc sudo make curl procps-ng; fi
+          if [ -x "$(command -v pacman)" ]; then pacman -Syu --noconfirm git gcc sudo make curl procps-ng; fi
           curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xz
           echo /usr/local/go/bin >> "$GITHUB_PATH"
       - uses: actions/checkout@v4

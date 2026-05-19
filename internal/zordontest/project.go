@@ -188,12 +188,18 @@ func (p *Project) MkdirAll(relPath string) *Project {
 //  2. AssertNoLeftovers — verifies nothing from this run is still
 //     registered or holding a socket. On a hit it ALSO reaps so
 //     the next test starts clean (better than letting state cascade).
+//     WithExpectedLeftovers swaps this for a silent Nuke(): the test
+//     provably precludes cleanup, so a leftover is expected, not a bug.
 //  3. For WithExistingRoot only: remove `<root>/.zordon/` — the
 //     per-run state alpha materialized inside the example tree.
 //     tmpdir-rooted projects get this for free via t.TempDir.
 func (p *Project) cleanup() {
 	_ = p.zordonStopBestEffort()
-	p.AssertNoLeftovers(p.t)
+	if p.cfg.expectLeftovers {
+		p.Nuke()
+	} else {
+		p.AssertNoLeftovers(p.t)
+	}
 	if p.cfg.root != "" {
 		// Only when the user opted into WithExistingRoot — otherwise
 		// the root IS t.TempDir() and Go cleans it itself.
