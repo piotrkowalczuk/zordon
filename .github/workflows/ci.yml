@@ -24,6 +24,10 @@ jobs:
           - worktree
     container:
       image: ${{ matrix.distro }}
+      # tini as pid 1 to reap zombies; GitHub's bare `tail` pid 1
+      # doesn't, so a killed alpha/tommy lingers and kill(-pgid,0)
+      # reads it as still alive (the orphan test's liveness check).
+      options: --init
     env:
       CGO_ENABLED: "1"
       GO_VERSION: "1.25.6"
@@ -40,17 +44,13 @@ jobs:
           echo /usr/local/go/bin >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
       - name: Trust workspace
-        # The container runs as root but the checkout is owned by a
-        # different uid, so git reports "dubious ownership" (exit 128).
-        # That breaks `go build`'s VCS stamping ("error obtaining VCS
-        # status"). Mark the tree safe before any go build/test.
+        # git "dubious ownership" (container root vs checkout uid) else
+        # breaks go build's VCS stamping.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Pre-place mise
-        # zordon's EnsureMise bootstraps mise via `cargo install` unless
-        # a binary already exists at <ZORDON_HOME>/bin/mise. The test
-        # suite's ZORDON_HOME is <repo>/.zordon, so drop the official
-        # static mise there: a no-op bootstrap beats compiling mise from
-        # source on every distro in the matrix.
+        # EnsureMise no-ops when <ZORDON_HOME>/bin/mise exists; the
+        # suite's ZORDON_HOME is <repo>/.zordon. Beats `cargo install`
+        # mise on every distro.
         run: |
           mkdir -p .zordon/bin
           curl -fsSL https://mise.jdx.dev/mise-latest-linux-x64 -o .zordon/bin/mise

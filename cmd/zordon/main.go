@@ -20,7 +20,9 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/registry"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
+	"github.com/piotrkowalczuk/zordon/internal/zordonhome"
 )
 
 func main() {
@@ -392,7 +394,16 @@ func runStop(ctx context.Context, log *zlog.Logger) error {
 	resp, err := control.Roundtrip(ctx, leaf.inv.SocketPath(), &protocol.Request{Op: protocol.OpShutdown})
 	if err != nil {
 		if control.IsNotRunning(err) {
+			// A SIGKILL/OOM'd alpha runs no cleanup, so its registry
+			// rows (and any group tommy hasn't finished reaping) would
+			// otherwise survive until the next `zordon start`. `stop`
+			// means "ensure stopped", so reap them now.
 			log.Info("zordon", "alpha is not running")
+			if home := zordonhome.Resolve(""); home != "" {
+				if err := registry.ReapByFsHash(home, leaf.inv.FsHash, 2*time.Second, nil); err != nil {
+					log.Info("zordon", "registry reap (fs_hash=%s): %v", leaf.inv.FsHash, err)
+				}
+			}
 			return nil
 		}
 		return err
