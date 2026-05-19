@@ -1,0 +1,89 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+# kafka exposes a single latent provision (`after = never`): it never
+# runs on its own. Each consumer invokes it for itself with its own
+# TOPIC. The shared topics file path is resolved at kafka's eval time,
+# so every invoker appends to the same file.
+service "go" "kafka" {
+  src = "../.."
+  exe = "./examples/invoke/src/kafka"
+
+  vars = {
+    port   = net::pickport()
+    topics = "${fs::tmp()}/topics.txt"
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/kafka", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    provision "create-topic" {
+      after = never
+      cmd   = "echo \"$TOPIC\" >> ${self.vars.topics}"
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "app" {
+  src = "../.."
+  exe = "./examples/invoke/src/app"
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    # cmd is a reference to kafka's latent provision, not a shell
+    # string. It runs that snippet with app's own env, under app's
+    # own barrier. Empty `after` would start it immediately; we gate
+    # it on app being up.
+    provision "topic" {
+      after = [self.runtime.ready]
+      cmd   = service.go.kafka.runtime.provision.create-topic
+      env   = { TOPIC = "app-events" }
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "billing" {
+  src = "../.."
+  exe = "./examples/invoke/src/billing"
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/billing", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    provision "topic" {
+      after = [self.runtime.ready]
+      cmd   = service.go.kafka.runtime.provision.create-topic
+      env   = { TOPIC = "billing-events" }
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

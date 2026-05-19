@@ -731,11 +731,13 @@ func (pc *provisionCtx) TerminalFailure() *barrier.Barrier {
 
 // runProvision is the per-provision goroutine: own barrier lifecycle,
 // waits on EXPLICIT `after` refs (no implicit parent.ready dep — the
-// user is responsible for declaring `after = [self.ready, ...]` if the
-// snippet needs the service operational), runs check (skip cmd if
-// check=0), runs cmd, runs verify (best effort). Reach success/failure
-// terminal, close done. Failure under failfast on a non-detached
-// provision triggers global shutdown.
+// user is responsible for declaring `after = [self.runtime.ready, ...]`
+// if the snippet needs the service operational; `after = never` makes
+// it latent — not auto-run here at all), runs check (skip cmd if
+// check=0), runs cmd, runs verify (best effort). With a CmdRef the
+// check/cmd/verify snippets come from the referenced template instead.
+// Reach success/failure terminal, close done. Failure under failfast on
+// a non-detached provision triggers global shutdown.
 func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace time.Duration, stream *safeEncoder, log *zlog.Logger, failfast bool) {
 	defer close(pc.done)
 	// Same reasoning as bringupAndSupervise: keep the entry in
@@ -744,6 +746,29 @@ func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace
 	// returned. Map cleanup is the next configure's or shutdown's job.
 
 	pc.lifecycle.Reach("scheduled")
+
+	// Snippets to run. By default the provision's own; with a CmdRef
+	// they come from the referenced template provision — resolved at
+	// the *provider's* eval time — while env, cwd and the barrier stay
+	// this (invoking) provision's. That's what lets one service expose
+	// an action many peers run for themselves. Any provision can be a
+	// template: `after = never` is not required, it only means the
+	// template doesn't ALSO auto-run for its own service.
+	checkSnippet, cmdSnippet, verifySnippet := pc.step.Check, pc.step.Cmd, pc.step.Verify
+	if pc.step.CmdRef != "" {
+		state.mu.RLock()
+		tpl := state.provisions[pc.step.CmdRef]
+		state.mu.RUnlock()
+		if tpl == nil {
+			log.Error("alpha", "provision[%s]: cmd references unknown provision %q", pc.id, pc.step.CmdRef)
+			pc.lifecycle.Reach("failure")
+			if failfast && !pc.step.Detached {
+				state.requestShutdown()
+			}
+			return
+		}
+		checkSnippet, cmdSnippet, verifySnippet = tpl.step.Check, tpl.step.Cmd, tpl.step.Verify
+	}
 
 	for _, ref := range pc.step.After {
 		bt, err := state.resolveBarrier(ref)
@@ -822,15 +847,15 @@ func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace
 	// already part of the log line's service column and the provision
 	// name is in the messages alpha emits. A second
 	// "provision:<name>:<phase>" wrapping was just visual noise.
-	if strings.TrimSpace(pc.step.Check) != "" {
-		if err := runShell(pc, state, grace, pc.step.Check, env, cwd, parent.name, "check", stream, log); err == nil {
+	if strings.TrimSpace(checkSnippet) != "" {
+		if err := runShell(pc, state, grace, checkSnippet, env, cwd, parent.name, "check", stream, log); err == nil {
 			log.Info("alpha", "provision[%s]: check passed, skipping cmd", pc.id)
 			pc.lifecycle.Reach("success")
 			return
 		}
 	}
 
-	if err := runShell(pc, state, grace, pc.step.Cmd, env, cwd, parent.name, "cmd", stream, log); err != nil {
+	if err := runShell(pc, state, grace, cmdSnippet, env, cwd, parent.name, "cmd", stream, log); err != nil {
 		log.Error("alpha", "provision[%s]: cmd failed: %v", pc.id, err)
 		pc.lifecycle.Reach("failure")
 		if failfast && !pc.step.Detached {
@@ -839,8 +864,8 @@ func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace
 		return
 	}
 
-	if strings.TrimSpace(pc.step.Verify) != "" {
-		if err := runShell(pc, state, grace, pc.step.Verify, env, cwd, parent.name, "verify", stream, log); err != nil {
+	if strings.TrimSpace(verifySnippet) != "" {
+		if err := runShell(pc, state, grace, verifySnippet, env, cwd, parent.name, "verify", stream, log); err != nil {
 			log.Error("alpha", "provision[%s]: verify failed (best-effort, not fatal): %v", pc.id, err)
 		}
 	}
@@ -1453,7 +1478,14 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		parent := serviceCtxs[svc.Name()]
 		for _, step := range svc.Runtime.Provision {
 			pc := newProvisionCtx("service."+svc.Toolchain+"."+svc.Name(), step)
+			// Latent provisions (`after = never`) are registered so they
+			// resolve as barriers and can be used as CmdRef templates by
+			// other services, but no goroutine runs them at bringup —
+			// they fire only when a peer invokes them for itself.
 			state.addProvision(pc)
+			if step.Latent {
+				continue
+			}
 			provs = append(provs, provEntry{pc: pc, parent: parent, detached: step.Detached})
 		}
 	}

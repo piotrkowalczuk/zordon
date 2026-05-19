@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -937,6 +938,201 @@ service "go" "svc1" {
 	wantDir := p.Get("service.go.svc1.dir")
 	if gotCwd != wantDir {
 		t.Errorf("provision cwd = %q; want service src dir %q", gotCwd, wantDir)
+	}
+}
+
+// TestGoService_latentProvisionInvokedByPeers pins the exposed-action
+// model: a provider declares ONE latent provision (`after = never`) — it
+// must never auto-run — and two unrelated services each invoke it for
+// themselves by pointing their own provision's `cmd` at it, supplying
+// their own TOPIC via env. The provider's snippet appends $TOPIC to a
+// shared file whose path is resolved at the PROVIDER's eval time, so all
+// invokers write the same file.
+//
+// Assertions, all from the resulting file:
+//   - it exists (both invocations ran),
+//   - it contains exactly the two consumer topics (independent runs,
+//     each with its own env),
+//   - exactly two lines — a third/empty line would mean the latent
+//     provision auto-ran with the provider's (empty TOPIC) env.
+func TestGoService_latentProvisionInvokedByPeers(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/kafka")
+	p.CopyTree("golden/go/echo", "src/app")
+	p.CopyTree("golden/go/echo", "src/billing")
+
+	const portK, portA, portB = 27690, 27691, 27692
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "kafka" {
+  src = "./src/kafka"
+  exe = "."
+  vars = {
+    port   = %d
+    topics = "${fs::tmp()}/topics.txt"
+  }
+  runtime {
+    cmd = ["${fs::bin()}/kafka", "-addr", "127.0.0.1:${self.vars.port}"]
+    provision "create-topic" {
+      after = never
+      cmd   = "echo \"$TOPIC\" >> ${self.vars.topics}"
+    }
+  }
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "app" {
+  src = "./src/app"
+  exe = "."
+  vars = { port = %d }
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+    provision "topic" {
+      cmd = service.go.kafka.runtime.provision.create-topic
+      env = { TOPIC = "app-events" }
+    }
+  }
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "billing" {
+  src = "./src/billing"
+  exe = "."
+  vars = { port = %d }
+  runtime {
+    cmd = ["${fs::bin()}/billing", "-addr", "127.0.0.1:${self.vars.port}"]
+    provision "topic" {
+      cmd = service.go.kafka.runtime.provision.create-topic
+      env = { TOPIC = "billing-events" }
+    }
+  }
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, portK, portA, portB))
+
+	mustStart(t, p)
+
+	topicsPath := p.Get("service.go.kafka.vars.topics")
+	data, err := readFile(t, topicsPath)
+	if err != nil {
+		t.Fatalf("read topics file %s: %v (invocations did not run?)", topicsPath, err)
+	}
+	lines := strings.Fields(strings.TrimSpace(data))
+	sort.Strings(lines)
+	want := []string{"app-events", "billing-events"}
+	if len(lines) != 2 || lines[0] != want[0] || lines[1] != want[1] {
+		t.Errorf("topics = %v; want %v (a 3rd/empty entry = latent create-topic auto-ran)", lines, want)
+	}
+}
+
+// TestGoService_nonLatentProvisionIsAlsoInvokable proves `after = never`
+// is NOT a prerequisite for being a template: a perfectly ordinary
+// provision both auto-runs for its own service AND can be invoked by a
+// peer with different env.
+//
+// The provider's `seed` appends ${WHO:-provider} to a shared file. With
+// no env it runs once for the provider → "provider". The consumer
+// invokes the same provision with WHO=consumer → "consumer". The file
+// must contain exactly those two — one auto-run, one invocation.
+func TestGoService_nonLatentProvisionIsAlsoInvokable(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/prov")
+	p.CopyTree("golden/go/echo", "src/cons")
+
+	const portP, portC = 27695, 27696
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "prov" {
+  src = "./src/prov"
+  exe = "."
+  vars = {
+    port = %d
+    f    = "${fs::tmp()}/seeded.txt"
+  }
+  runtime {
+    cmd = ["${fs::bin()}/prov", "-addr", "127.0.0.1:${self.vars.port}"]
+    provision "seed" {
+      cmd = "echo \"$${WHO:-provider}\" >> ${self.vars.f}"
+    }
+  }
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "cons" {
+  src = "./src/cons"
+  exe = "."
+  vars = { port = %d }
+  runtime {
+    cmd = ["${fs::bin()}/cons", "-addr", "127.0.0.1:${self.vars.port}"]
+    provision "seed-mine" {
+      after = [service.go.prov.runtime.provision.seed.success]
+      cmd   = service.go.prov.runtime.provision.seed
+      env   = { WHO = "consumer" }
+    }
+  }
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, portP, portC))
+
+	mustStart(t, p)
+
+	fPath := p.Get("service.go.prov.vars.f")
+	data, err := readFile(t, fPath)
+	if err != nil {
+		t.Fatalf("read seeded file %s: %v", fPath, err)
+	}
+	lines := strings.Fields(strings.TrimSpace(data))
+	sort.Strings(lines)
+	want := []string{"consumer", "provider"}
+	if len(lines) != 2 || lines[0] != want[0] || lines[1] != want[1] {
+		t.Errorf("seeded = %v; want %v (provider auto-run + consumer invocation)", lines, want)
 	}
 }
 
