@@ -24,12 +24,14 @@ jobs:
           - worktree
     container:
       image: ${{ matrix.distro }}
+    env:
+      CGO_ENABLED: "1"
     steps:
       - name: Install dependencies
         run: |
-          if [ -x "$(command -v apt-get)" ]; then apt-get update && apt-get install -y git golang-go sudo make; fi
-          if [ -x "$(command -v dnf)" ]; then dnf install -y git golang sudo make; fi
-          if [ -x "$(command -v pacman)" ]; then pacman -Syu --noconfirm git go sudo make; fi
+          if [ -x "$(command -v apt-get)" ]; then apt-get update && apt-get install -y git golang-go gcc sudo make; fi
+          if [ -x "$(command -v dnf)" ]; then dnf install -y git golang gcc sudo make; fi
+          if [ -x "$(command -v pacman)" ]; then pacman -Syu --noconfirm git go gcc sudo make; fi
       - uses: actions/checkout@v4
       - name: Run Tests
         run: make test
