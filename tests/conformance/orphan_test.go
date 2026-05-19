@@ -64,14 +64,8 @@ func TestOrphan_AlphaDeath_NoSurvivingService(t *testing.T) {
 			// cleanup instead of failing AssertNoLeftovers.
 			p := zordontest.NewProject(t, zordontest.WithExpectedLeftovers())
 			p.CopyTree("golden/go/echo", "src/svc1")
-			p.WriteFile("Alphasfile", fmt.Sprintf(`
+			p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "svc1" {
   src = "./src/svc1"
   exe = "."

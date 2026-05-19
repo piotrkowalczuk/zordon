@@ -44,6 +44,21 @@ jobs:
           curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xz
           echo /usr/local/go/bin >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
+      - name: Cache Go module + build cache
+        # Containers run as root, so Go's defaults are /root/go/pkg/mod
+        # and /root/.cache/go-build. This is shared by zordon's own
+        # `go test`, the e2e `make build`, AND the from-source upstream
+        # services (caddy, coredns, go-httpbin). restore-keys lets a
+        # cache-miss job still warm-start from the newest prior cache
+        # instead of recompiling everything from zero.
+        uses: actions/cache@v4
+        with:
+          path: |
+            /root/go/pkg/mod
+            /root/.cache/go-build
+          key: ${{ matrix.distro }}-go-${{ hashFiles('go.sum', 'examples/federation/project/Alphasfile') }}
+          restore-keys: |
+            ${{ matrix.distro }}-go-
       - name: Trust workspace
         # git "dubious ownership" (container root vs checkout uid) else
         # breaks go build's VCS stamping.

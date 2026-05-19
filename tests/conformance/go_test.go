@@ -53,14 +53,8 @@ func TestGoService_srcDefaultBuild_httpReadiness(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27654
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "svc1" {
   src = "./src/svc1"
   exe = "."
@@ -96,14 +90,8 @@ func TestGoService_srcExplicitBuildCmd(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27655
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "svc1" {
   src = "./src/svc1"
 
@@ -147,14 +135,8 @@ func TestGoService_noReadinessUsesStabilization(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27656
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "svc1" {
   src = "./src/svc1"
   exe = "."
@@ -183,14 +165,8 @@ func TestGoService_envBlockReachesRuntime(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27660
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "svc1" {
   src = "./src/svc1"
   exe = "."
@@ -232,14 +208,8 @@ func TestGoService_runtimeEnvOverridesBaseEnv(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27661
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "svc1" {
   src = "./src/svc1"
   exe = "."
@@ -288,14 +258,8 @@ func TestGoService_varsInterpolationInCmd(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27662
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "svc1" {
   src = "./src/svc1"
   exe = "."
@@ -349,14 +313,8 @@ func TestGoService_fileBlockMaterialized(t *testing.T) {
 	const port = 27663
 	// Pin the generated file to a stable relative path so we can
 	// read it back from the test.
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "svc1" {
   src = "./src/svc1"
   exe = "."
@@ -417,14 +375,8 @@ func TestGoService_sysenvWhitelistStripsHostVar(t *testing.T) {
 	t.Setenv("HOST_VAR_DENIED", "should-be-stripped")
 
 	const port = 27664
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR", "HOST_VAR_ALLOWED"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "svc1" {
   src = "./src/svc1"
   exe = "."
@@ -470,14 +422,8 @@ func TestGoService_provisionChainOrdering(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27665
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "svc1" {
   src = "./src/svc1"
   exe = "."
@@ -530,14 +476,8 @@ func TestGoService_provisionFailureSkipsDependent(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27666
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "svc1" {
   src = "./src/svc1"
   exe = "."
@@ -614,14 +554,8 @@ func TestGoService_modcacheSharedByDefaultIsolatedOnOverride(t *testing.T) {
 
 	isolatedModCache := filepath.Join(p.Dir(), "isolated-modcache")
 
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "fetcher" {
   src = "./src/svc1"
   exe = "."
@@ -712,8 +646,10 @@ service "go" "isolated-check" {
 // (running tooling against a freshly built artifact before exposing it).
 //
 // Asserted via the test:: log order:
-//   "after-build" fires from a provision gated on first.build.success
-//   "after-runtime" fires from a provision gated on first.runtime.ready
+//
+//	"after-build" fires from a provision gated on first.build.success
+//	"after-runtime" fires from a provision gated on first.runtime.ready
+//
 // Build precedes runtime structurally (you can't be running before
 // you're built), so the log MUST contain after-build then after-runtime.
 func TestGoService_buildBarrierFiresBeforeRuntime(t *testing.T) {
@@ -722,14 +658,8 @@ func TestGoService_buildBarrierFiresBeforeRuntime(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/second")
 
 	const portFirst, portSecond = 27670, 27671
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "first" {
   src = "./src/first"
   exe = "."
@@ -889,14 +819,8 @@ func TestGoService_provisionCwdMatchesServiceSrcDir(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/svc1")
 
 	const port = 27672
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", zordontest.GoToolchainHCL()+fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  go {
-    version = "1.26.2"
-  }
-}
-
 service "go" "svc1" {
   src = "./src/svc1"
   exe = "."
