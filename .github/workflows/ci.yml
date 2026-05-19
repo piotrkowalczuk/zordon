@@ -19,8 +19,9 @@ jobs:
           - fedora:latest
           - archlinux:latest
         example:
+          # No *_macos examples here — they need pfctl/resolver and
+          # only run on macOS (via `make e2e`'s *_macos gate locally).
           - simple
-          - federation
           - worktree
     container:
       image: ${{ matrix.distro }}
@@ -56,7 +57,7 @@ jobs:
           path: |
             /root/go/pkg/mod
             /root/.cache/go-build
-          key: ${{ matrix.distro }}-go-${{ hashFiles('go.sum', 'examples/federation/project/Alphasfile') }}
+          key: ${{ matrix.distro }}-go-${{ hashFiles('go.sum') }}
           restore-keys: |
             ${{ matrix.distro }}-go-
       - name: Trust workspace

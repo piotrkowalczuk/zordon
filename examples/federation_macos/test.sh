@@ -4,13 +4,10 @@
 # `zordon status` surfaces that composed URL in its print line.
 cd "$(dirname "$0")"
 source ../_lib.sh
-# The parent's sudo hooks are macOS-only: caddy/http80 rewrites
-# /etc/pf.conf via pfctl, and coredns/resolver writes
-# /etc/resolver/test so the OS resolves the composed *.test domain.
-# Linux has neither mechanism, so the claim (reachable on
-# httpbin.<hash>.test) can't be proven there — a platform
-# prerequisite, not a broken claim ⇒ SKIP.
-[ "$(uname -s)" = Darwin ] || skip "federation needs macOS pf/resolver integration; not available on $(uname -s)"
+# macOS-only (see dir name + `make e2e` *_macos gate): the parent's
+# sudo hooks need pfctl + /etc/resolver, absent on Linux. Defensive
+# guard for direct invocation.
+[ "$(uname -s)" = Darwin ] || skip "federation_macos: needs macOS pf/resolver ($(uname -s))"
 need curl
 need_net
 need_sudo

@@ -62,6 +62,11 @@ clean:
 # broken claim is a hard failure.
 e2e: build
 	@for dir in $(EXAMPLES); do \
+		base=$$(basename $$dir); \
+		case $$base in \
+			*_macos) [ "$$(uname -s)" = Darwin ] || { echo "==> $$dir (SKIP: macOS-only)"; continue; } ;; \
+			*_linux) [ "$$(uname -s)" = Linux ]  || { echo "==> $$dir (SKIP: Linux-only)"; continue; } ;; \
+		esac; \
 		t="$$dir/test.sh"; \
 		[ -f "$$t" ] || { echo "no test.sh in $$dir, skipping"; continue; }; \
 		echo "==> $$dir"; \
