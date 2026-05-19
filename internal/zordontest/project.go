@@ -164,7 +164,7 @@ func (p *Project) WriteFile(relPath, content string) *Project {
 	// fixtures stay plain HCL. HCL block order is irrelevant, so a
 	// straight prefix is safe.
 	if p.cfg.injectGoToolchain && filepath.Base(relPath) == "Alphasfile" {
-		content = goToolchainHCL() + content
+		content = goToolchainHCL(p.cfg.goToolchain) + content
 	}
 	full := filepath.Join(p.root, relPath)
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {

@@ -1,5 +1,7 @@
 package zordontest
 
+import "github.com/piotrkowalczuk/zordon/internal/alphasfile"
+
 // Option configures a Project at construction time. Functional-options
 // pattern keeps NewProject's signature stable as we add knobs (agent
 // mode, isolated cache, federation depth, etc.) without breaking
@@ -22,8 +24,11 @@ type config struct {
 	expectLeftovers bool
 	// injectGoToolchain prepends a Go toolchain block (version from
 	// the -test.toolchain.go.version flag) to any Alphasfile this
-	// project writes. See WithToolchain.
+	// project writes. goToolchain carries the block's inner contents
+	// (tools/env); its Version is ignored — the flag always wins.
+	// See WithToolchain.
 	injectGoToolchain bool
+	goToolchain       alphasfile.ToolchainConfig
 }
 
 // WithIsolatedHome forces the project to use the given path as its
@@ -65,14 +70,24 @@ func WithExpectedLeftovers() Option {
 }
 
 // WithToolchain makes the project prepend a Go toolchain block to
-// every Alphasfile it writes, pinning the version resolved from
-// -test.toolchain.go.version (default $ZORDON_TEST_GO_VERSION, then a
-// constant). Fixtures stay plain HCL — no hand-written toolchain block,
-// no string concatenation — and the pinned mise Go is driven from one
-// flag. Tests that must run WITHOUT a toolchain (e.g. a forced
-// build-failure that shouldn't wait on mise) simply omit this option.
-func WithToolchain() Option {
-	return func(c *config) { c.injectGoToolchain = true }
+// every Alphasfile it writes. The version is ALWAYS the one resolved
+// from -test.toolchain.go.version (default $ZORDON_TEST_GO_VERSION,
+// then a constant) — the optional alphasfile.ToolchainConfig only sets
+// what's INSIDE the block (Tools/Env); its Version field is ignored.
+//
+// WithToolchain() with no arg still injects the block (flag version,
+// no tools). Fixtures stay plain HCL — the block is serialized from a
+// typed value via gohcl and deserialized by zordon's own decoder, a
+// real round-trip rather than a hand-built string. Tests that must run
+// WITHOUT a toolchain (e.g. a forced build-failure that shouldn't wait
+// on mise) simply omit this option.
+func WithToolchain(tc ...alphasfile.ToolchainConfig) Option {
+	return func(c *config) {
+		c.injectGoToolchain = true
+		if len(tc) > 0 {
+			c.goToolchain = tc[0]
+		}
+	}
 }
 
 // resolveConfig folds the option chain into a config. Each option
