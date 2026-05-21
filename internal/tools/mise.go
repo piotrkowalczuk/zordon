@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -91,6 +92,18 @@ func lockFile(path string) (release func(), err error) {
 	return func() { _ = f.Close() }, nil
 }
 
+// miseToolName maps the zordon-side language label to mise's tool
+// name. Mostly identity; "nodejs" → "node" because mise installs node
+// under installs/node/<ver> and `mise env --json node@<ver>` is the
+// canonical spec. (Mise accepts "nodejs@<ver>" as an alias, but the
+// on-disk path is "node", which the walk-up cache lookup must match.)
+func miseToolName(lang string) string {
+	if lang == "nodejs" {
+		return "node"
+	}
+	return lang
+}
+
 // ResolveDataDir walks up from `from`, picking the nearest ancestor
 // that already has `installs/<tool>/<version>` under its
 // `.zordon/toolchain/`. That dir becomes MISE_DATA_DIR — installed
@@ -113,6 +126,7 @@ func lockFile(path string) (release func(), err error) {
 // and what tests want as "<testCache>/toolchain"; we don't synthesize
 // the path so the caller controls the convention.
 func ResolveDataDir(from, defaultDataDir, tool, version string) string {
+	tool = miseToolName(tool)
 	bound := filepath.Dir(defaultDataDir)
 	dir := from
 	for {
@@ -132,15 +146,41 @@ func ResolveDataDir(from, defaultDataDir, tool, version string) string {
 }
 
 // isolatedEnv returns the env-var slice that pins mise to a zordon-
-// owned location regardless of user's home mise installation.
-func isolatedEnv(dataDir string) []string {
+// owned location regardless of user's home mise installation. The
+// mise binary's dir is also prepended to PATH so subprocesses that
+// reach back to call `mise` resolve to the zordon-owned binary.
+//
+// The recursive-mise case is real: when mise installs node, it
+// replaces node's `npm` script with a wrapper that runs `mise reshim`
+// post-install. Without mise on PATH, that hook fails with exit 127
+// ("mise: command not found"). Whether the same wrapping happens for
+// other toolchains (ruby's gem, python's pip) is mise-internal and
+// version-dependent, so this is unconditional rather than gated per
+// language — the PATH addition is harmless when nothing in the
+// subprocess tree ever invokes mise.
+//
+// alpha's host PATH may not have ~/.zordon/bin on it (zordon installs
+// mise into its own bin dir, not a system location), which is why we
+// inject it here rather than relying on the parent environment.
+func isolatedEnv(dataDir, miseBin string) []string {
 	cfgRoot := filepath.Dir(dataDir) // e.g. ~/.zordon
-	return append(os.Environ(),
+	env := append(os.Environ(),
 		"MISE_DATA_DIR="+dataDir,
 		"MISE_CONFIG_DIR="+filepath.Join(cfgRoot, "mise-config"),
 		"MISE_STATE_DIR="+filepath.Join(cfgRoot, "mise-state"),
 		"MISE_CACHE_DIR="+filepath.Join(cfgRoot, "mise-cache"),
 	)
+	if miseBin == "" {
+		return env
+	}
+	miseDir := filepath.Dir(miseBin)
+	for i, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			env[i] = "PATH=" + miseDir + string(os.PathListSeparator) + kv[len("PATH="):]
+			return env
+		}
+	}
+	return append(env, "PATH="+miseDir)
 }
 
 // MiseEnv runs `mise env --json <tool>@<version>` with the resolved
@@ -158,9 +198,9 @@ func isolatedEnv(dataDir string) []string {
 // must hold the per-(tool, version) lock from Acquire — auto-install
 // races otherwise.
 func MiseEnv(binPath, dataDir, tool, version string, logOut io.Writer) (map[string]string, error) {
-	spec := tool + "@" + version
+	spec := miseToolName(tool) + "@" + version
 	cmd := exec.Command(binPath, "env", "--json", spec)
-	cmd.Env = isolatedEnv(dataDir)
+	cmd.Env = isolatedEnv(dataDir, binPath)
 	cmd.Stderr = logOut
 	out, err := cmd.Output()
 	if err != nil {
@@ -189,12 +229,13 @@ func EnsureTools(binPath, dataDir, toolchain, version string, items map[string]s
 	if len(items) == 0 {
 		return nil
 	}
+	env := isolatedEnv(dataDir, binPath)
 	for name, ver := range items {
 		cmd, err := toolInstallCmd(binPath, toolchain, version, name, ver)
 		if err != nil {
 			return err
 		}
-		cmd.Env = isolatedEnv(dataDir)
+		cmd.Env = env
 		cmd.Stdout = logOut
 		cmd.Stderr = logOut
 		if err := cmd.Run(); err != nil {
@@ -208,7 +249,7 @@ func EnsureTools(binPath, dataDir, toolchain, version string, items map[string]s
 // tool install. The actual install verb is per-toolchain because each
 // language has its own package-manager idiom.
 func toolInstallCmd(binPath, toolchain, version, name, ver string) (*exec.Cmd, error) {
-	spec := toolchain + "@" + version
+	spec := miseToolName(toolchain) + "@" + version
 	var argv []string
 	switch toolchain {
 	case "ruby":
@@ -222,6 +263,16 @@ func toolInstallCmd(binPath, toolchain, version, name, ver string) (*exec.Cmd, e
 		// Go's "tools" aren't gems-like, but `go install pkg@ver`
 		// drops a binary in GOBIN — useful for dlv, golangci-lint, etc.
 		argv = []string{"go", "install", name + "@" + ver}
+	case "nodejs":
+		// npm's default global prefix resolves from where `node` lives,
+		// which under `mise exec` is the per-version install dir
+		// (installs/node/<ver>) — so installed globals stay isolated
+		// per pinned node, mirroring gem/cargo's per-version tool world.
+		// --no-fund/--no-audit silences npm's nag banners (the runtime
+		// env's NPM_CONFIG_FUND/AUDIT in postMiseNode covers the same
+		// at service-spawn time; here we still need the flag because
+		// that env isn't applied at tool-install).
+		argv = []string{"npm", "install", "-g", "--no-fund", "--no-audit", name + "@" + ver}
 	default:
 		return nil, fmt.Errorf("toolchain %q: no tool installer wired", toolchain)
 	}

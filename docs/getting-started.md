@@ -40,4 +40,4 @@ zordon start --timeout 60s  max wait for alpha to come up & finish bringup
 
 - [Concepts](concepts.md) — the handful of ideas the rest builds on
 - [Alphasfile](alphasfile.md) — every field, with examples
-- [Services](services/go.md) — per-toolchain build/run: Go, Rust, Ruby
+- [Services](services/go.md) — per-toolchain build/run: Go, Rust, Ruby, Node.js
