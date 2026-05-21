@@ -113,6 +113,74 @@ type Service struct {
 	Toolchain string         `json:"toolchain"`
 	Runtime   *RuntimeConfig `json:"runtime"`
 	Package   *Package       `json:"package,omitempty"`
+	// Debugger declares this service should run under a language-native
+	// debugger and (optionally) expose a debug MCP feature to agents.
+	// See DebuggerConfig. The wire-stable shape carries the resolved
+	// config; alpha consumes both pieces (build flags + runtime wrap).
+	Debugger *DebuggerConfig `json:"debugger,omitempty"`
+	// Agent groups everything an agent (vs. a human) needs to discover
+	// about this service. Today only `Agent.MCP` is populated; future
+	// fields land alongside as the agent surface grows. The JSON
+	// nesting mirrors the planned HCL shape — `agent { mcp { feature
+	// "name" { … } } }` — so `zordon get service.X.agent.mcp.debug.*`
+	// reads the same way a user would write the block by hand.
+	Agent *ServiceAgent `json:"agent,omitempty"`
+}
+
+// ServiceAgent is the agent-facing slice of a Service: capabilities
+// declared for an LLM/automation caller (vs. fields the user reads
+// for their own bringup). Currently just MCP features; the type
+// exists so the catalog projection has a stable home as more agent-
+// specific surfaces (resources, prompts) accrue.
+type ServiceAgent struct {
+	// MCP is keyed by feature name (`debug`, future user-declared
+	// names) so `service.X.agent.mcp.<feature>.<field>` lookups work
+	// without positional indexing. Empty/nil when no MCP feature is
+	// exposed (e.g. `debugger { enabled = true; mcp = false }`).
+	MCP map[string]*AgentMCPFeature `json:"mcp,omitempty"`
+}
+
+// DebuggerConfig is the resolved view of a `debugger { ... }` block.
+// Currently only meaningful for service "go" (other toolchains rejected
+// at eval time). All fields are post-default — alpha consumes them
+// without re-deriving anything.
+type DebuggerConfig struct {
+	Enabled       bool `json:"enabled"`
+	// Port is the TCP port dlv listens on (headless DAP). Defaults to
+	// a kernel-picked free port — multiple debuggers in one stack get
+	// distinct ports automatically. Discover the resolved value with
+	// `zordon get service.<tc>.<svc>.debugger.port`. Set `port = …`
+	// explicitly only when a stable, predictable port matters (e.g.
+	// a launch.json that should survive across `zordon start` runs).
+	Port int `json:"port"`
+	// WaitForClient: when true, dlv halts the inferior at entry and
+	// waits for a debugger client to attach before running. Default
+	// false (i.e. `--continue`) so readiness probes can pass.
+	WaitForClient bool `json:"wait_for_client,omitempty"`
+	// Log: pass `--log` to dlv for self-diagnosis. Default false.
+	Log bool `json:"log,omitempty"`
+	// MCP: emit the synthetic `agent.mcp.feature "debug"` for this
+	// service. Default true; set false to keep dlv running but hide it
+	// from the agent (e.g. CI post-mortem). Mirrored into AgentMCP at
+	// eval time; alpha only sees the AgentMCP slice.
+	MCP bool `json:"mcp,omitempty"`
+	// WrapRuntime: when true (default), zordon synthesizes the runtime
+	// command as `dlv exec ... -- <built-binary> <flags>` and rejects
+	// any explicit `runtime.cmd`. When false, the user owns the
+	// invocation (e.g. their own entrypoint.sh that calls dlv) and
+	// only the MCP feature + tool installation come from the macro.
+	WrapRuntime bool `json:"wrap_runtime,omitempty"`
+}
+
+// AgentMCPFeature is one entry in the per-service catalog of MCP
+// capabilities exposed to agents. Today it is populated only by the
+// `debugger { enabled = true }` macro (Name="debug", Bridge="dap").
+// The generic user-facing `agent.mcp.feature` block will populate the
+// same shape; alpha's future MCP server consumes these uniformly.
+type AgentMCPFeature struct {
+	Name    string `json:"name"`
+	Bridge  string `json:"bridge"`
+	Address string `json:"address,omitempty"`
 }
 
 // ServiceMeta is the static, eval-free view of a service: identity plus its
@@ -538,9 +606,10 @@ type serviceBlock struct {
 	// run step (its `cmd` is the service argv — there is no top-level
 	// `cmd`); `agent` is an env overlay applied in `--agent` mode (it
 	// has no `cmd`).
-	Build   *buildBlock   `hcl:"build,block"`
-	Runtime *runtimeBlock `hcl:"runtime,block"`
-	Agent   *agentBlock   `hcl:"agent,block"`
+	Build    *buildBlock    `hcl:"build,block"`
+	Runtime  *runtimeBlock  `hcl:"runtime,block"`
+	Agent    *agentBlock    `hcl:"agent,block"`
+	Debugger *debuggerBlock `hcl:"debugger,block"`
 
 	Worktree  *worktreeBlock `hcl:"worktree,block"`
 	Sudo      []*sudoBlock   `hcl:"sudo,block"`
@@ -599,6 +668,26 @@ type provisionBlock struct {
 // It has no `cmd` — it never starts anything, only adjusts env.
 type agentBlock struct {
 	Env hcl.Expression `hcl:"env,optional"`
+}
+
+// debuggerBlock declares that a service runs under a language-native
+// debugger (currently only dlv, on service "go"). It is a macro: at
+// eval time it injects toolchain.tools entries (dlv + mcp-dap-server),
+// flips a flag alpha reads to add `-gcflags=all=-N -l` to the build,
+// and synthesizes a `dlv exec --headless ... --` wrapper around the
+// runtime argv. See DebuggerConfig for the resolved shape consumed by
+// alpha.
+//
+// Most fields are optional booleans/strings with sensible defaults;
+// `enabled` is the only knob 95% of users touch. Port is an HCL
+// expression so it can interpolate (typically through os::env).
+type debuggerBlock struct {
+	Enabled       bool           `hcl:"enabled,optional"`
+	Port          hcl.Expression `hcl:"port,optional"`
+	WaitForClient *bool          `hcl:"wait_for_client,optional"`
+	Log           *bool          `hcl:"log,optional"`
+	MCP           *bool          `hcl:"mcp,optional"`
+	WrapRuntime   *bool          `hcl:"wrap_runtime,optional"`
 }
 
 type worktreeBlock struct {

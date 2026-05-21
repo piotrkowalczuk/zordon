@@ -2220,6 +2220,41 @@ func phaseEnv(svc *alphasfile.Service, phase zos.EnvironmentVariables, agent boo
 	return svc.Runtime.Env.Join(phase, ag)
 }
 
+// debuggerWrap returns argv unchanged unless the service opts into
+// `debugger { enabled = true; wrap_runtime = true }`, in which case it
+// prefixes argv with dlv's headless-DAP invocation. The result is
+// `dlv exec --headless --listen=127.0.0.1:<port> --api-version=2
+// --accept-multiclient [--continue] [--log] -- <argv...>`, so dlv runs
+// the service, listens for an IDE / mcp-dap-server, and the inferior
+// either runs immediately (default — readiness can probe HTTP) or
+// halts at entry (`wait_for_client = true`).
+//
+// wrap_runtime=false leaves argv alone: the user opted to put dlv
+// somewhere inside their own command (e.g. an entrypoint.sh), so we
+// don't second-guess them. Either way the build flags + tool install
+// + MCP feature still come from the macro.
+func debuggerWrap(svc *alphasfile.Service, argv []string) []string {
+	d := svc.Debugger
+	if d == nil || !d.Enabled || !d.WrapRuntime {
+		return argv
+	}
+	wrap := []string{
+		"dlv", "exec",
+		"--headless",
+		fmt.Sprintf("--listen=127.0.0.1:%d", d.Port),
+		"--api-version=2",
+		"--accept-multiclient",
+	}
+	if !d.WaitForClient {
+		wrap = append(wrap, "--continue")
+	}
+	if d.Log {
+		wrap = append(wrap, "--log")
+	}
+	wrap = append(wrap, "--")
+	return append(wrap, argv...)
+}
+
 func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent bool, sysenv []string, toolchain map[string]string) (*exec.Cmd, error) {
 	name := svc.Name()
 	if name == "" {
@@ -2240,9 +2275,11 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent
 		// cargo-install) into the out-of-tree bin dir; run it from there.
 		// cwd = source checkout (when there is one) so relative config
 		// paths resolve.
-		cmd = exec.Command(filepath.Join(binDir, name), svc.Flags()...)
+		argv := debuggerWrap(svc, append([]string{filepath.Join(binDir, name)}, svc.Flags()...))
+		cmd = exec.Command(argv[0], argv[1:]...)
 	default:
-		cmd = exec.Command(name, svc.Flags()...)
+		argv := debuggerWrap(svc, append([]string{name}, svc.Flags()...))
+		cmd = exec.Command(argv[0], argv[1:]...)
 	}
 	if checkout != "" {
 		cmd.Dir = checkout
@@ -2303,7 +2340,17 @@ func defaultBuild(svc *alphasfile.Service, name, binDir string) string {
 		if svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
 			pkg = svc.Package.Exe
 		}
-		return fmt.Sprintf("go build -o %q %s", out, pkg)
+		// debugger { enabled = true } needs unoptimized, non-inlined code
+		// or dlv breakpoints land on the wrong lines (or "could not find
+		// file" for fully inlined frames). The `all=` prefix applies the
+		// flags to every package in the build, not just main. The build
+		// runs through /bin/sh -c, so the embedded space in -gcflags's
+		// value MUST be quoted to stay one argv element.
+		gcflags := ""
+		if svc.Debugger != nil && svc.Debugger.Enabled {
+			gcflags = `-gcflags='all=-N -l' `
+		}
+		return fmt.Sprintf("go build %s-o %q %s", gcflags, out, pkg)
 	case alphasfile.ToolchainRust:
 		// Worktree rust: `cargo install --path` from the checkout into
 		// <stateDir>/bin (== binDir). Stable CARGO_TARGET_DIR keeps
