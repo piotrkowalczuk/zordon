@@ -1959,6 +1959,7 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 	// boot for this same fs_hash can reap us if we die uncleanly.
 	// Best-effort: a registry write error doesn't fail the service —
 	// it just means orphan cleanup won't catch THIS service later.
+	registered := false
 	if state.zordonHome != "" && state.fsHash != "" {
 		port := 0
 		if p := readinessOf(svc); p != nil && p.HTTP != nil {
@@ -1972,8 +1973,28 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 		})
 		if err != nil {
 			log.Error("alpha", "registry register %s: %v", name, err)
+		} else {
+			registered = true
 		}
 	}
+	// Drop the registry row + tommy pipe on EVERY return path below —
+	// clean stop, external stop, self-exit, readiness fail, AND
+	// exit-before-ready. The earlier shape only deferred this inside
+	// the post-ready branch, so a service that died during bringup
+	// leaked its registry row until the next alpha boot's reaper —
+	// which is exactly what TestLifecycle_failureSummaryShowsCulprit
+	// catches via AssertNoLeftovers.
+	defer func() {
+		if registered {
+			if err := registry.Remove(state.zordonHome, state.fsHash, name); err != nil {
+				log.Error("alpha", "registry remove %s: %v", name, err)
+			}
+		}
+		// Release the tommy parent-death pipe. By this point the
+		// service has exited and tommy with it, so this is just fd
+		// hygiene across restarts — not the death signal.
+		closeParentW(sc)
+	}()
 
 	go streamLines(name, "stdout", stdout, stream, log)
 	go streamLines(name, "stderr", stderr, stream, log)
@@ -2049,20 +2070,6 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 	case <-state.shutdownCh:
 		stopReason = state.shutdownReason
 	}
-	// Drop our registry row on every exit path — clean stop OR external
-	// stop OR self-exit. The next alpha boot finds an empty registry
-	// for this fs_hash and skips the reap entirely.
-	defer func() {
-		if state.zordonHome != "" && state.fsHash != "" {
-			if err := registry.Remove(state.zordonHome, state.fsHash, name); err != nil {
-				log.Error("alpha", "registry remove %s: %v", name, err)
-			}
-		}
-		// Release the tommy parent-death pipe. By this point the
-		// service has exited and tommy with it, so this is just fd
-		// hygiene across restarts — not the death signal.
-		closeParentW(sc)
-	}()
 	if selfExit {
 		if sc.exitErr != nil {
 			log.Error("alpha", "%s exited: %v", name, sc.exitErr)
