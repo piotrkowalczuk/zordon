@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +89,18 @@ service "rust" "echo" {
 // build for an explicit `build { cmd = [...] }`. This exercises the
 // svc.BuildCmd() branch in prepare() — distinct from defaultBuild's
 // code path, so a break there can't hide behind the canonical test.
+//
+// Doubles as the happy-path pin for alpha's relookupPath: the cmd's
+// first argv is the BARE name `cargo`. cargo is not on alpha's PATH
+// (no rust on the CI runner, and even locally ~/.cargo/bin isn't in
+// the sysenv whitelist), so exec.Command's initial LookPath fails
+// and stores "exec: cargo: executable file not found" in cmd.Err.
+// relookupPath must (1) point cmd.Path at the mise-pinned cargo it
+// finds on the toolchain's PATH and (2) clear cmd.Err so Start()
+// actually exec's the binary. Reaching `ready` proves both halves;
+// TestRustService_explicitBuildCmdSurfacesCommandError is the
+// negative twin that proves the cleared err didn't just mask the
+// real one.
 //
 // The cmd reproduces what defaultBuild does (cargo install --path
 // into <stateDir>/bin): cargo's --root X installs into X/bin, and
@@ -338,6 +351,78 @@ service "rust" "echo" {
 	want := []string{"p1", "p2"}
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("provision order = %v; want %v", got, want)
+	}
+}
+
+// TestRustService_explicitBuildCmdSurfacesCommandError is the negative
+// twin of TestRustService_srcExplicitBuildCmd and pins the second half
+// of relookupPath's contract: after re-resolving a bare build-cmd name
+// against the toolchain PATH, the cached LookPath error
+// (exec.Command set cmd.Err the first time, against alpha's own PATH)
+// MUST be cleared. If it isn't, exec.Cmd.Start() returns the stale
+// "executable file not found" forever — the actual command never runs
+// and the user debugs the wrong error. That's exactly how this whole
+// bug class hid for a release: the happy-path test (srcExplicitBuildCmd)
+// caught the missing relookupPath, but a follow-on regression on
+// cmd.Err clearing would only be visible when the cmd itself fails.
+//
+// Construction: `cargo --zordon-bogus-flag` exec's a REAL cargo (so
+// relookupPath worked) but cargo exits non-zero with its own argv
+// parse error on stderr. That message must reach alpha's log; the
+// stale "executable file not found" string must NOT. Runtime is a
+// test::log marker the build gate must keep from running.
+func TestRustService_explicitBuildCmdSurfacesCommandError(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/rust/echo", "src/echo")
+
+	const port = 27706
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  rust {
+    version = "%s"
+  }
+}
+
+service "rust" "echo" {
+  src = "./src/echo"
+
+  build {
+    cmd = ["cargo", "--zordon-bogus-flag"]
+  }
+
+  vars = { port = %d }
+
+  runtime {
+    cmd = ["sh", "-c", %s]
+  }
+}
+`, rustVersion, port, "test::log(\"RUNTIME_STARTED_MUST_NOT_HAPPEN\")"))
+
+	res := p.Zordon("start",
+		"--timeout", "5m",
+		"--alpha-log", p.AlphaLogPath(),
+	).WithTimeout(6 * time.Minute).Run(t)
+	if res.ExitCode == 0 {
+		t.Fatalf("zordon start: exit 0 but expected failure (bogus cargo flag must failfast)")
+	}
+
+	for _, ln := range p.TestLog() {
+		if ln == "RUNTIME_STARTED_MUST_NOT_HAPPEN" {
+			t.Fatalf("runtime cmd executed despite build failing — build barrier broken")
+		}
+	}
+
+	alphaLog, err := os.ReadFile(p.AlphaLogPath())
+	if err != nil {
+		t.Fatalf("read alpha log %s: %v", p.AlphaLogPath(), err)
+	}
+	logStr := string(alphaLog)
+	if strings.Contains(logStr, "executable file not found") {
+		t.Errorf("alpha log mentions \"executable file not found\" — relookupPath did not clear exec.Command's cached LookPath error;\nlog:\n%s", logStr)
+	}
+	if !strings.Contains(logStr, "--zordon-bogus-flag") {
+		t.Errorf("alpha log lacks cargo's own error mentioning --zordon-bogus-flag — cargo's real stderr was not surfaced;\nlog:\n%s", logStr)
 	}
 }
 
