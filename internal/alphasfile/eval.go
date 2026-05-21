@@ -185,6 +185,23 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 		r.toolchainCty[lang] = cty.ObjectVal(buildBarrierAttrs("toolchain."+lang, ToolchainBarrierStates))
 	}
 
+	// Pre-pass: for each service, validate identity, compute dir, build
+	// the static slice of `self` (name/toolchain/dir + runtime/build
+	// barrier-attr objects), and publish it to r.serviceByTC. This makes
+	// barrier traversals like service.go.db.runtime.ready always
+	// resolvable, regardless of evaluation order — they're constants
+	// derived from labels, not expressions.
+	states, err := r.prepareServices(root.Services)
+	if err != nil {
+		return nil, err
+	}
+
+	// Producer DAG over per-field (vars/arguments/env/file.<name>) nodes,
+	// spanning ALL services. Cross-service references through any single
+	// producer create a single edge between those two producer nodes —
+	// not a whole-service edge. A.env→B.vars and B.env→A.vars are
+	// independent and resolve cleanly; only a literal A.vars→B.vars
+	// while B.vars→A.vars is a cycle, and that's a real bug.
 	g, err := newGraph(root.Services, parentKnown)
 	if err != nil {
 		return nil, err
@@ -194,8 +211,23 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 		return nil, err
 	}
 	for _, n := range order {
-		if err := r.evalService(n.service); err != nil {
-			return nil, fmt.Errorf("%s: %w", n.id, err)
+		st := states[n.svcID]
+		if err := r.evalProducerNode(n, st); err != nil {
+			return nil, fmt.Errorf("%s.%s: %w", n.svcID, producerLabel(n), err)
+		}
+	}
+
+	// Sinks per service: runtime.cmd, build.cmd, build/runtime/agent env,
+	// dotenv, print, sudo, provisions, readiness, wire-stable Service
+	// finalization. Cross-service references in sinks reach into other
+	// services' fully-evaluated producers via r.serviceByTC; intra-
+	// service sinks read the populated st.self. Sink-to-sink references
+	// across services aren't supported (sinks aren't published back to
+	// self/serviceByTC), so sink order doesn't matter.
+	for _, sb := range root.Services {
+		sid := serviceID(sb.Toolchain, sb.Name)
+		if err := r.finishService(states[sid]); err != nil {
+			return nil, fmt.Errorf("%s: %w", sid, err)
 		}
 	}
 	// File-level dotenv: top-level, no `self`; may use fs::/cfg:: funcs.
@@ -228,174 +260,214 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 	}, nil
 }
 
-func (r *resolver) evalService(sb *serviceBlock) error {
-	// A local service with the same name as a federation-parent service
-	// COMPLETELY overrides it: the child definition replaces the parent's
-	// in this level's namespace (and runs in this level's alpha). Two
-	// local blocks with the same name in one file is still a real mistake.
-	if origin := r.taken[sb.Toolchain+"/"+sb.Name]; origin == "local" {
-		return fmt.Errorf("duplicate service %s.%s in this Alphasfile", sb.Toolchain, sb.Name)
-	}
-	r.taken[sb.Toolchain+"/"+sb.Name] = "local"
+// svcState is the per-service evaluation scratch space. Built once
+// per service in prepareServices, mutated by per-producer eval, and
+// consumed by finishService when assembling the wire-stable Service.
+type svcState struct {
+	sb          *serviceBlock
+	id          string // "service.<tc>.<name>"
+	dir         string
+	self        map[string]cty.Value // grows: name/toolchain/dir/runtime/build → +vars/+env/+args/+file
+	files       []*File
+	fileVals    map[string]cty.Value
+	vars        map[string]any
+	args        map[string]any
+	envMap      map[string]any
+	curCheckout string // value fs::src() returns while this service's expressions evaluate
+}
 
-	// dir = where this service's code lives for this invocation.
-	//
-	//   src-only in the "main" worktree → the src dir itself, used IN
-	//     PLACE (your live working tree; zordon never copies or git-
-	//     worktrees it, so uncommitted edits just work — the edit→start
-	//     loop). "main" is only a mental label; in practice it means
-	//     "use src directly".
-	//   anything else (named worktree, or a git primary) → a per-
-	//     invocation checkout alpha materializes via git worktree add.
-	//
-	// Pure: no filesystem touch here.
-	dir := ""
-	switch {
-	case sb.Src != "" && sb.Git == "" && r.inv.Worktree == invocation.MainWorktree:
-		dir = r.resolveDir(sb.Src)
-	case sb.Git != "" || sb.Src != "":
-		dir = r.inv.CheckoutPath(sb.Name)
-	}
-	r.curCheckout = dir // what fs::src() returns while this service evals
-
-	// self_base — known from labels + primary, before any eval.
-	//
-	// Status barriers and provisions hang off `self.runtime.*` so the
-	// reference path mirrors the HCL block nesting: a user staring at
-	// `runtime { provision "x" { ... } }` can guess the canonical path
-	// `self.runtime.provision.x.<status>` without consulting docs. The
-	// rule: traversal shape ≡ schema shape. Resolved scalars/maps that
-	// belong to the service entity itself (name, toolchain, dir, vars,
-	// arguments, file) stay at self.* because that's where they live
-	// in HCL too.
-	serviceID := "service." + sb.Toolchain + "." + sb.Name
-	self := map[string]cty.Value{
-		"name":      cty.StringVal(sb.Name),
-		"toolchain": cty.StringVal(sb.Toolchain),
-		"dir":       cty.StringVal(dir),
-	}
-	runtimeAttrs := buildBarrierAttrs(serviceID+".runtime", ServiceBarrierStates)
-	if sb.Runtime != nil && len(sb.Runtime.Provision) > 0 {
-		provObjs := make(map[string]cty.Value, len(sb.Runtime.Provision))
-		for _, pb := range sb.Runtime.Provision {
-			provID := serviceID + ".runtime.provision." + pb.Name
-			provObjs[pb.Name] = cty.ObjectVal(buildBarrierAttrs(provID, ProvisionBarrierStates))
+// prepareServices initializes one svcState per service: validates
+// identity, computes dir, builds the static slice of `self` (name,
+// toolchain, dir, runtime/build barrier-attr objects), and publishes
+// that partial cty value to r.serviceByTC so cross-service barrier
+// traversals are resolvable before any expression runs. Producer
+// values (vars/arguments/env/file) are written in later; the partial
+// is re-projected to r.serviceByTC after each per-producer eval.
+func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcState, error) {
+	out := make(map[string]*svcState, len(services))
+	for _, sb := range services {
+		// A local service with the same name as a federation-parent service
+		// COMPLETELY overrides it: the child definition replaces the
+		// parent's in this level's namespace (and runs in this level's
+		// alpha). Two local blocks with the same name in one file is still
+		// a real mistake.
+		if origin := r.taken[sb.Toolchain+"/"+sb.Name]; origin == "local" {
+			return nil, fmt.Errorf("duplicate service %s.%s in this Alphasfile", sb.Toolchain, sb.Name)
 		}
-		runtimeAttrs["provision"] = cty.ObjectVal(provObjs)
-	}
-	self["runtime"] = cty.ObjectVal(runtimeAttrs)
-	// `self.build.<state>` mirrors the build block. Always exposed (even
-	// when no explicit build cmd) — the lifecycle still fires success
-	// the moment prepare finishes, so cross-service `after = [...
-	// .build.success]` resolves uniformly.
-	self["build"] = cty.ObjectVal(buildBarrierAttrs(serviceID+".build", BuildBarrierStates))
+		r.taken[sb.Toolchain+"/"+sb.Name] = "local"
 
-	// Producers (vars, each file, arguments) are evaluated in dependency
-	// order, not a fixed sequence: edges come from self.<x> traversals in
-	// each expression, so `arguments` referencing self.file.cfg.path and a
-	// file body referencing self.vars.port both just work — whichever way
-	// you write it. A genuine mutual reference is a clear cycle error.
-	var (
-		varsVal  map[string]any
-		args     map[string]any
-		envMap   map[string]any
-		files    []*File
-		fileVals = map[string]cty.Value{}
-	)
-	type producer struct {
-		id    string
-		exprs []hcl.Expression
-		run   func() error
-	}
-	prods := []*producer{
-		{id: "vars", exprs: []hcl.Expression{sb.Vars}, run: func() error {
-			v, err := r.evalMap(sb.Vars, self, "vars")
-			if err != nil {
-				return err
+		// dir = where this service's code lives for this invocation.
+		//
+		//   src-only in the "main" worktree → the src dir itself, used
+		//     IN PLACE (your live working tree; zordon never copies or
+		//     git-worktrees it, so uncommitted edits just work — the
+		//     edit→start loop). "main" is only a mental label; in
+		//     practice it means "use src directly".
+		//   anything else (named worktree, or a git primary) → a per-
+		//     invocation checkout alpha materializes via git worktree
+		//     add.
+		//
+		// Pure: no filesystem touch here.
+		dir := ""
+		switch {
+		case sb.Src != "" && sb.Git == "" && r.inv.Worktree == invocation.MainWorktree:
+			dir = r.resolveDir(sb.Src)
+		case sb.Git != "" || sb.Src != "":
+			dir = r.inv.CheckoutPath(sb.Name)
+		}
+
+		// self_base — known from labels + primary, before any eval.
+		//
+		// Status barriers and provisions hang off `self.runtime.*` so
+		// the reference path mirrors the HCL block nesting: a user
+		// staring at `runtime { provision "x" { ... } }` can guess the
+		// canonical path `self.runtime.provision.x.<status>` without
+		// consulting docs. The rule: traversal shape ≡ schema shape.
+		// Resolved scalars/maps that belong to the service entity
+		// itself (name, toolchain, dir, vars, arguments, file) stay at
+		// self.* because that's where they live in HCL too.
+		sid := serviceID(sb.Toolchain, sb.Name)
+		self := map[string]cty.Value{
+			"name":      cty.StringVal(sb.Name),
+			"toolchain": cty.StringVal(sb.Toolchain),
+			"dir":       cty.StringVal(dir),
+		}
+		runtimeAttrs := buildBarrierAttrs(sid+".runtime", ServiceBarrierStates)
+		if sb.Runtime != nil && len(sb.Runtime.Provision) > 0 {
+			provObjs := make(map[string]cty.Value, len(sb.Runtime.Provision))
+			for _, pb := range sb.Runtime.Provision {
+				provID := sid + ".runtime.provision." + pb.Name
+				provObjs[pb.Name] = cty.ObjectVal(buildBarrierAttrs(provID, ProvisionBarrierStates))
 			}
-			varsVal = v
-			self["vars"] = mapValToCty(v)
-			return nil
-		}},
-	}
-	for _, fb := range sb.Files {
-		fb := fb
-		prods = append(prods, &producer{
-			id:    "file." + fb.Name,
-			exprs: []hcl.Expression{fb.Path, fb.Body},
-			run: func() error {
-				path, body, err := evalFileExpr(fb, r.ctxWith(self))
-				if err != nil {
-					return err
-				}
-				files = append(files, &File{Name: fb.Name, Path: path, Body: body})
-				fileVals[fb.Name] = cty.ObjectVal(map[string]cty.Value{
-					"name": cty.StringVal(fb.Name),
-					"path": cty.StringVal(path),
-					"body": cty.StringVal(body),
-				})
-				self["file"] = cty.ObjectVal(fileVals)
-				return nil
-			},
-		})
-	}
-	prods = append(prods, &producer{id: "arguments", exprs: []hcl.Expression{sb.Arguments}, run: func() error {
-		a, err := r.evalMap(sb.Arguments, self, "arguments")
-		if err != nil {
-			return err
+			runtimeAttrs["provision"] = cty.ObjectVal(provObjs)
 		}
-		args = a
-		self["arguments"] = mapValToCty(a)
-		return nil
-	}})
-	prods = append(prods, &producer{id: "env", exprs: []hcl.Expression{sb.Env}, run: func() error {
-		e, err := r.evalMap(sb.Env, self, "env")
-		if err != nil {
-			return err
-		}
-		envMap = e
-		self["env"] = mapValToCty(e)
-		return nil
-	}})
-
-	byID := make(map[string]*producer, len(prods))
-	declOrder := make([]string, 0, len(prods))
-	for _, p := range prods {
-		byID[p.id] = p
-		declOrder = append(declOrder, p.id)
-	}
-	deps := map[string]map[string]struct{}{}
-	for _, p := range prods {
-		deps[p.id] = map[string]struct{}{}
-		for _, e := range p.exprs {
-			if e == nil {
-				continue
-			}
-			for _, t := range e.Variables() {
-				if dep, ok := selfProducerID(t); ok && dep != p.id {
-					if _, real := byID[dep]; real {
-						deps[p.id][dep] = struct{}{}
-					}
-				}
-			}
-		}
-	}
-	order, err := topoProducers(declOrder, deps)
-	if err != nil {
-		return fmt.Errorf("service %q: %w", sb.Name, err)
-	}
-	for _, id := range order {
-		if err := byID[id].run(); err != nil {
-			return err
-		}
-	}
-	if _, ok := self["file"]; !ok {
+		self["runtime"] = cty.ObjectVal(runtimeAttrs)
+		// `self.build.<state>` mirrors the build block. Always exposed
+		// (even when no explicit build cmd) — the lifecycle still fires
+		// success the moment prepare finishes, so cross-service
+		// `after = [...build.success]` resolves uniformly.
+		self["build"] = cty.ObjectVal(buildBarrierAttrs(sid+".build", BuildBarrierStates))
+		// Empty defaults for not-yet-evaluated producers so a service
+		// referencing another service with no vars/file block still gets
+		// a resolvable (empty) value rather than a missing-attr error.
+		self["vars"] = cty.EmptyObjectVal
+		self["arguments"] = cty.EmptyObjectVal
+		self["env"] = cty.EmptyObjectVal
 		self["file"] = cty.EmptyObjectVal
+
+		st := &svcState{
+			sb:          sb,
+			id:          sid,
+			dir:         dir,
+			self:        self,
+			fileVals:    map[string]cty.Value{},
+			curCheckout: dir,
+		}
+		out[sid] = st
+		r.publishSelf(st)
 	}
+	return out, nil
+}
+
+// publishSelf re-projects st.self into r.serviceByTC so cross-service
+// traversals see the latest partial. Called after each per-producer
+// eval (and once from prepareServices for the static slice).
+func (r *resolver) publishSelf(st *svcState) {
+	if r.serviceByTC[st.sb.Toolchain] == nil {
+		r.serviceByTC[st.sb.Toolchain] = map[string]cty.Value{}
+	}
+	r.serviceByTC[st.sb.Toolchain][st.sb.Name] = cty.ObjectVal(st.self)
+}
+
+// evalProducerNode runs one node from the cross-service DAG: a single
+// service's vars, arguments, env, or one file. Updates st.self in
+// place and re-publishes to r.serviceByTC so downstream nodes see the
+// new value.
+func (r *resolver) evalProducerNode(n *node, st *svcState) error {
+	r.curCheckout = st.curCheckout
+	switch n.kind {
+	case kindVars:
+		if st.sb.Vars == nil {
+			return nil
+		}
+		v, err := r.evalMap(st.sb.Vars, st.self, "vars")
+		if err != nil {
+			return err
+		}
+		st.vars = v
+		st.self["vars"] = mapValToCty(v)
+	case kindArguments:
+		if st.sb.Arguments == nil {
+			return nil
+		}
+		a, err := r.evalMap(st.sb.Arguments, st.self, "arguments")
+		if err != nil {
+			return err
+		}
+		st.args = a
+		st.self["arguments"] = mapValToCty(a)
+	case kindEnv:
+		if st.sb.Env == nil {
+			return nil
+		}
+		e, err := r.evalMap(st.sb.Env, st.self, "env")
+		if err != nil {
+			return err
+		}
+		st.envMap = e
+		st.self["env"] = mapValToCty(e)
+	case kindFile:
+		var fb *fileBlock
+		for _, x := range st.sb.Files {
+			if x.Name == n.name {
+				fb = x
+				break
+			}
+		}
+		if fb == nil {
+			return fmt.Errorf("file %q: block lost between parse and eval", n.name)
+		}
+		path, body, err := evalFileExpr(fb, r.ctxWith(st.self))
+		if err != nil {
+			return err
+		}
+		st.files = append(st.files, &File{Name: fb.Name, Path: path, Body: body})
+		st.fileVals[fb.Name] = cty.ObjectVal(map[string]cty.Value{
+			"name": cty.StringVal(fb.Name),
+			"path": cty.StringVal(path),
+			"body": cty.StringVal(body),
+		})
+		st.self["file"] = cty.ObjectVal(st.fileVals)
+	}
+	r.publishSelf(st)
+	return nil
+}
+
+// producerLabel returns the user-facing field name of a producer node
+// for error messages (e.g., "vars" or "file.config").
+func producerLabel(n *node) string {
+	if n.kind == kindFile {
+		return "file." + n.name
+	}
+	return n.kind.String()
+}
+
+// finishService evaluates a service's sinks (runtime.cmd, build.cmd,
+// build/runtime/agent env, dotenv, print, sudo, provisions, readiness)
+// against the fully-populated st.self and assembles the wire-stable
+// Service. Cross-service references reach producers via r.serviceByTC,
+// which by now holds every service's complete evaluated form.
+func (r *resolver) finishService(st *svcState) error {
+	sb := st.sb
+	self := st.self
+	r.curCheckout = st.curCheckout
 
 	// Sinks: consume the fully-populated self; order among them is
 	// irrelevant since nothing reads them back.
-	var command []string
+	var (
+		command []string
+		err     error
+	)
 	if sb.Runtime != nil && sb.Runtime.Cmd != nil {
 		command, err = r.evalStrList(sb.Runtime.Cmd, self, "runtime.cmd")
 		if err != nil {
@@ -487,7 +559,7 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 			}
 			var cmd string
 			if isRef {
-				if cmdRef == serviceID+".runtime.provision."+pb.Name {
+				if cmdRef == st.id+".runtime.provision."+pb.Name {
 					return fmt.Errorf("%s.cmd: provision cannot reference itself", label)
 				}
 			} else {
@@ -573,9 +645,9 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		Color:          sb.Color,
 		DoubleDash:     sb.DoubleDash,
 		SpaceSeparated: sb.SpaceSeparated,
-		Vars:           varsVal,
-		Arguments:      args,
-		Env:            toStringMap(envMap),
+		Vars:           st.vars,
+		Arguments:      st.args,
+		Env:            toStringMap(st.envMap),
 		BuildEnv:       buildEnv,
 		RunEnv:         runEnv,
 		AgentEnv:       agentEnv,
@@ -584,8 +656,8 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		After:          runtimeAfter,
 		Sudo:           sudo,
 		Provision:      provisions,
-		Files:          files,
-		Dir:            dir,
+		Files:          st.files,
+		Dir:            st.dir,
 		BinDir:         r.inv.BinDir(),
 		Print:          printLine,
 	}
@@ -686,12 +758,6 @@ func (r *resolver) evalService(sb *serviceBlock) error {
 		},
 	}
 	r.resolvedServices = append(r.resolvedServices, svc)
-
-	// Expose the fully-evaluated service to downstream blocks.
-	if r.serviceByTC[sb.Toolchain] == nil {
-		r.serviceByTC[sb.Toolchain] = map[string]cty.Value{}
-	}
-	r.serviceByTC[sb.Toolchain][sb.Name] = cty.ObjectVal(self)
 	return nil
 }
 
@@ -721,76 +787,6 @@ func (r *resolver) evalMap(expr hcl.Expression, self map[string]cty.Value, field
 	return out, nil
 }
 
-// selfProducerID maps a `self.<x>...` traversal to the intra-service
-// producer node it depends on: self.vars → "vars", self.arguments →
-// "arguments", self.file.<n> → "file.<n>". self.{name,toolchain,dir} and
-// non-self roots are not producers.
-func selfProducerID(t hcl.Traversal) (string, bool) {
-	if len(t) < 2 {
-		return "", false
-	}
-	root, ok := t[0].(hcl.TraverseRoot)
-	if !ok || root.Name != "self" {
-		return "", false
-	}
-	a1, ok := t[1].(hcl.TraverseAttr)
-	if !ok {
-		return "", false
-	}
-	switch a1.Name {
-	case "vars":
-		return "vars", true
-	case "arguments":
-		return "arguments", true
-	case "file":
-		if len(t) >= 3 {
-			if a2, ok := t[2].(hcl.TraverseAttr); ok {
-				return "file." + a2.Name, true
-			}
-		}
-		return "file", true // whole self.file ⇒ depends on all files
-	}
-	return "", false
-}
-
-// topoProducers orders producer ids so every node comes after its deps.
-// declOrder (the source declaration order) breaks ties → stable and
-// deterministic. A cycle is a clear error naming the entangled nodes.
-func topoProducers(declOrder []string, deps map[string]map[string]struct{}) ([]string, error) {
-	indeg := make(map[string]int, len(declOrder))
-	for _, id := range declOrder {
-		indeg[id] = len(deps[id])
-	}
-	done := map[string]bool{}
-	out := make([]string, 0, len(declOrder))
-	for len(out) < len(declOrder) {
-		progressed := false
-		for _, id := range declOrder { // declaration order = stable tiebreak
-			if done[id] || indeg[id] != 0 {
-				continue
-			}
-			out = append(out, id)
-			done[id] = true
-			progressed = true
-			for _, other := range declOrder {
-				if _, ok := deps[other][id]; ok {
-					indeg[other]--
-				}
-			}
-		}
-		if !progressed {
-			var stuck []string
-			for _, id := range declOrder {
-				if !done[id] {
-					stuck = append(stuck, id)
-				}
-			}
-			return nil, fmt.Errorf("cyclic references among %s — these depend on each other",
-				strings.Join(stuck, ", "))
-		}
-	}
-	return out, nil
-}
 
 func evalFileExpr(fb *fileBlock, ctx *hcl.EvalContext) (string, string, error) {
 	pathVal, diags := fb.Path.Value(ctx)
@@ -993,10 +989,11 @@ func (r *resolver) functions() map[string]function.Function {
 	}
 	return map[string]function.Function{
 		// fs:: namespace — per-invocation filesystem coordinates and identity.
-		"fs::tmp":  str(func() string { return r.inv.TmpDir }),   // generated files
-		"fs::src":  str(func() string { return r.curCheckout }),  // this service's checkout
-		"fs::bin":  str(func() string { return r.inv.BinDir() }), // build outputs (outside src)
-		"fs::hash": r.fsHashFunc(),                               // instance identity (location)
+		"fs::tmp":   str(func() string { return r.inv.TmpDir }),    // generated files
+		"fs::src":   str(func() string { return r.curCheckout }),   // this service's checkout
+		"fs::bin":   str(func() string { return r.inv.BinDir() }),  // build outputs (outside src)
+		"fs::state": str(func() string { return r.inv.StateDir }), // per-worktree state root (.zordon/worktrees/<wt>)
+		"fs::hash":  r.fsHashFunc(),                                // instance identity (location)
 		// cfg:: namespace — manifest identity (Alphasfile bytes + parent ctx).
 		"cfg::hash": r.cfgHashFunc(),
 		// src:: namespace — current service's source code identity.

@@ -284,8 +284,15 @@ type alphaState struct {
 	// Each service supervisor selects on it; the runAlpha main goroutine
 	// selects on it; everything composes via channels. requestShutdown()
 	// is the only writer.
-	shutdownCh   chan struct{}
-	shutdownOnce sync.Once
+	//
+	// shutdownReason carries the human-readable cause of the close
+	// (e.g. "failfast: api exited before ready", "SIGTERM received"). It
+	// is set INSIDE shutdownOnce, BEFORE the close, so any goroutine that
+	// observes the channel close sees the reason via channel-close
+	// release semantics — no mutex needed for the read.
+	shutdownCh     chan struct{}
+	shutdownOnce   sync.Once
+	shutdownReason string
 
 	// handlerDones: each accepted-conn goroutine appends a fresh
 	// chan struct{} on entry and closes it on exit. drainedCh waits for
@@ -419,8 +426,16 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 	return nil, fmt.Errorf("bad barrier entity ID %q (expected toolchain.<lang> | service.<tc>.<n>.{build,runtime[.provision.<p>]})", entityID)
 }
 
-func (s *alphaState) requestShutdown() {
-	s.shutdownOnce.Do(func() { close(s.shutdownCh) })
+// requestShutdown closes shutdownCh once and records why. The reason is
+// surfaced in the SIGTERM log line of every supervisor that picks up
+// the shutdown — so an operator skimming alpha.log can immediately
+// tell whether the shutdown was a signal, an OpShutdown control op, or
+// a specific failfast trigger.
+func (s *alphaState) requestShutdown(reason string) {
+	s.shutdownOnce.Do(func() {
+		s.shutdownReason = reason
+		close(s.shutdownCh)
+	})
 }
 
 func (s *alphaState) registerHandler() chan struct{} {
@@ -606,10 +621,14 @@ type serviceCtx struct {
 	// tells tommy to reap the service. Closed explicitly on clean exit
 	// so the fd doesn't leak across restarts. nil when tommy was
 	// unavailable and the service runs unwrapped.
-	parentW   *os.File
-	stopCh    chan struct{}
-	stopOnce  sync.Once
-	done      chan struct{}
+	parentW *os.File
+	// stopCh / stopReason — see requestStop. stopReason is set inside
+	// stopOnce BEFORE close, so any goroutine that observes the
+	// channel close also sees the reason (channel-close release sync).
+	stopCh     chan struct{}
+	stopOnce   sync.Once
+	stopReason string
+	done       chan struct{}
 
 	lifecycle *lifecycle.Instance
 	// doneBar is the synthetic "outcome decided" barrier (Any(ready,
@@ -673,8 +692,16 @@ func (sc *serviceCtx) BuildTerminalFailure() *barrier.Barrier {
 	return sc.build.Barrier(alphasfile.BuildTerminalFailure)
 }
 
-func (sc *serviceCtx) requestStop() {
-	sc.stopOnce.Do(func() { close(sc.stopCh) })
+// requestStop closes this service's stopCh once and records why.
+// Reasons surface in the SIGTERM log line emitted by the supervisor —
+// e.g. "alpha shutdown: <shutdownReason>" (whole-alpha teardown) or
+// "reconfigure: replaced by new manifest" (this service's spec changed
+// and a fresh ctx is taking over).
+func (sc *serviceCtx) requestStop(reason string) {
+	sc.stopOnce.Do(func() {
+		sc.stopReason = reason
+		close(sc.stopCh)
+	})
 }
 
 // provisionCtx is one bringup action — same channel/lifecycle shape as
@@ -690,9 +717,10 @@ type provisionCtx struct {
 	serviceID string // parent service identity
 	step      *alphasfile.ProvisionStep
 
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	done     chan struct{}
+	stopCh     chan struct{}
+	stopOnce   sync.Once
+	stopReason string
+	done       chan struct{}
 
 	lifecycle *lifecycle.Instance
 	doneBar   *barrier.Barrier // Any(success, failure)
@@ -714,8 +742,13 @@ func newProvisionCtx(serviceID string, step *alphasfile.ProvisionStep) *provisio
 	return pc
 }
 
-func (pc *provisionCtx) requestStop() {
-	pc.stopOnce.Do(func() { close(pc.stopCh) })
+// requestStop closes this provision's stopCh once and records why.
+// Same shape and reasoning as serviceCtx.requestStop.
+func (pc *provisionCtx) requestStop(reason string) {
+	pc.stopOnce.Do(func() {
+		pc.stopReason = reason
+		close(pc.stopCh)
+	})
 }
 
 func (pc *provisionCtx) Barrier(s lifecycle.State) *barrier.Barrier {
@@ -763,7 +796,7 @@ func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace
 			log.Error("alpha", "provision[%s]: cmd references unknown provision %q", pc.id, pc.step.CmdRef)
 			pc.lifecycle.Reach("failure")
 			if failfast && !pc.step.Detached {
-				state.requestShutdown()
+				state.requestShutdown(fmt.Sprintf("failfast: provision %s references unknown provision %q", pc.id, pc.step.CmdRef))
 			}
 			return
 		}
@@ -832,7 +865,7 @@ func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace
 		log.Error("alpha", "provision[%s]: toolchain: %v", pc.id, err)
 		pc.lifecycle.Reach("failure")
 		if failfast && !pc.step.Detached {
-			state.requestShutdown()
+			state.requestShutdown(fmt.Sprintf("failfast: provision %s toolchain env: %v", pc.id, err))
 		}
 		return
 	}
@@ -859,7 +892,7 @@ func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace
 		log.Error("alpha", "provision[%s]: cmd failed: %v", pc.id, err)
 		pc.lifecycle.Reach("failure")
 		if failfast && !pc.step.Detached {
-			state.requestShutdown()
+			state.requestShutdown(fmt.Sprintf("failfast: provision %s cmd failed: %v", pc.id, err))
 		}
 		return
 	}
@@ -926,15 +959,19 @@ func runShell(pc *provisionCtx, state *alphaState, grace time.Duration, snippet 
 		close(cmdDone)
 	}()
 
+	var stopReason string
 	select {
 	case <-cmdDone:
 		streamWg.Wait()
 		return cmdErr
 	case <-pc.stopCh:
+		stopReason = pc.stopReason
 	case <-state.shutdownCh:
+		stopReason = state.shutdownReason
 	}
 	// External cancel — SIGTERM the group (service plus any forked
 	// children), grace, then SIGKILL the group.
+	log.Info("alpha", "SIGTERM provision[%s] %s pgid=%d (reason: %s)", pc.id, label, cmd.Process.Pid, stopReason)
 	_ = killGroup(cmd.Process.Pid, syscall.SIGTERM)
 	select {
 	case <-cmdDone:
@@ -1070,11 +1107,19 @@ func (s *alphaState) shutdownAll(log *zlog.Logger) {
 	s.files = nil
 	s.mu.Unlock()
 
+	// Forward the alpha-wide reason verbatim — supervisors log it as
+	// the SIGTERM cause. Empty when shutdownCh fires before any
+	// requestShutdown() (shouldn't happen in normal flow, but the
+	// fallback string keeps the log readable).
+	reason := s.shutdownReason
+	if reason == "" {
+		reason = "alpha shutdown"
+	}
 	for _, sc := range services {
-		sc.requestStop()
+		sc.requestStop(reason)
 	}
 	for _, pc := range provisions {
-		pc.requestStop()
+		pc.requestStop(reason)
 	}
 	for _, sc := range services {
 		<-sc.done
@@ -1125,10 +1170,10 @@ func (s *alphaState) stopServices(names map[string]bool) {
 	s.mu.Unlock()
 
 	for _, sc := range pickedSvcs {
-		sc.requestStop()
+		sc.requestStop("reconfigure: service replaced by new manifest")
 	}
 	for _, pc := range pickedProvs {
-		pc.requestStop()
+		pc.requestStop("reconfigure: parent service replaced by new manifest")
 	}
 	for _, sc := range pickedSvcs {
 		<-sc.done
@@ -1276,7 +1321,7 @@ func runAlpha(_ context.Context, sockPath, logPath, zordonHome string, stabiliza
 	select {
 	case sig := <-sigCh:
 		log.Info("alpha", "received %s, shutting down children", sig)
-		state.requestShutdown()
+		state.requestShutdown(fmt.Sprintf("signal: %s received by alpha", sig))
 	case <-state.shutdownCh:
 		log.Info("alpha", "shutdown requested via control socket")
 	}
@@ -1364,7 +1409,7 @@ func handleConn(conn net.Conn, state *alphaState, cfg bringupConfig, log *zlog.L
 		_ = enc.Write(&protocol.Response{OK: true, State: state.snapshot()})
 	case protocol.OpShutdown:
 		log.Info("alpha", "shutdown op received")
-		state.requestShutdown()
+		state.requestShutdown("control socket: shutdown op received")
 		_ = enc.Write(&protocol.Response{OK: true})
 	default:
 		_ = enc.Write(&protocol.Response{Error: fmt.Sprintf("unknown op: %q", req.Op)})
@@ -1513,8 +1558,9 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	for name, sc := range serviceCtxs {
 		if !sc.lifecycle.Reached("ready") {
 			if failfast {
-				stream.Send(&protocol.Event{Kind: protocol.EventError, Error: fmt.Sprintf("failfast: %s failed during bringup", name)})
-				state.requestShutdown()
+				reason := fmt.Sprintf("failfast: %s failed during bringup", name)
+				stream.Send(&protocol.Event{Kind: protocol.EventError, Error: reason})
+				state.requestShutdown(reason)
 				return
 			}
 		}
@@ -1537,8 +1583,9 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 			continue
 		}
 		if !p.pc.lifecycle.Reached("success") && failfast {
-			stream.Send(&protocol.Event{Kind: protocol.EventError, Error: fmt.Sprintf("failfast: provision %s failed", p.pc.id)})
-			state.requestShutdown()
+			reason := fmt.Sprintf("failfast: provision %s failed", p.pc.id)
+			stream.Send(&protocol.Event{Kind: protocol.EventError, Error: reason})
+			state.requestShutdown(reason)
 			return
 		}
 	}
@@ -1605,11 +1652,19 @@ func bringupAndSupervise(svc *alphasfile.Service, sc *serviceCtx, state *alphaSt
 			sc.lifecycle.Reach("failed")
 			sc.build.Reach("failure")
 			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "dep: " + err.Error()})
+			if failfast {
+				state.requestShutdown(fmt.Sprintf("failfast: service %s unresolvable dep %s: %v", name, ref, err))
+			}
 			return
 		}
 		select {
 		case <-bt.target.Wait():
 		case <-bt.fail.Wait():
+			// Dep already failed. The first failure in the bringup chain
+			// is the one that triggers shutdown; subsequent dep-failure
+			// returns are just the chain unwinding, so don't double-fire
+			// requestShutdown here (it's idempotent, but the log noise
+			// would mislead).
 			log.Error("alpha", "service[%s]: dep %s reached terminal failure", name, ref)
 			sc.lifecycle.Reach("failed")
 			sc.build.Reach("failure")
@@ -1633,37 +1688,56 @@ func bringupAndSupervise(svc *alphasfile.Service, sc *serviceCtx, state *alphaSt
 	agent := state.agentMode
 	state.mu.RUnlock()
 
-	// 2. Prepare (worktree materialize + build). Serialize per-primary
-	//    so parallel bringups of services sharing a repo don't race on
-	//    `git clone --bare`. Around the prepare call, drive the build
-	//    lifecycle: running → success/failure. Cross-service waiters on
+	// 2. Prepare. Two stages with different concurrency profiles:
+	//
+	//    a. Worktree materialization (git clone --bare + git worktree
+	//       add): serialized per-primary via state.primaryLockFor so
+	//       monorepo siblings don't race on the same bare clone path.
+	//       Cheap when the bare already exists — just a `git fetch`.
+	//    b. Build: parallel across all services. Each writes to its own
+	//       dest dir / bin dir, so there's nothing to serialize. The
+	//       lock is RELEASED before this step kicks off, which means a
+	//       monorepo with five services builds five in parallel rather
+	//       than queueing behind whichever sibling got the lock first.
+	//
+	//    Around both stages, drive the build lifecycle:
+	//    running → success/failure. Cross-service waiters on
 	//    `service.X.build@success` block here.
 	sc.build.Reach("running")
-	primaryKey := primaryKeyOf(svc)
-	var repoDir string
-	if primaryKey != "" {
+	prepareFail := func(err error) {
+		log.Error("alpha", "prepare %s: %v", name, err)
+		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
+		sc.build.Reach("failure")
+		sc.lifecycle.Reach("failed")
+		// Failfast: a failed prepare means this service will never reach
+		// ready. Trigger the alpha-wide shutdown immediately so peers
+		// still in their own dep-wait or post-prepare gate bail out
+		// instead of marching on to runtime spawn. Without this, peers
+		// would only notice at the outer bringup loop's final reckoning
+		// (after every doneBar has fired) — i.e., far too late.
+		if failfast {
+			state.requestShutdown(fmt.Sprintf("failfast: service %s prepare failed: %v", name, err))
+		}
+	}
+	var (
+		repoDir string
+		err     error
+	)
+	if primaryKey := primaryKeyOf(svc); primaryKey != "" {
 		mu := state.primaryLockFor(primaryKey)
 		mu.Lock()
-		d, err := prepare(svc, name, agent, state, stream, log)
+		repoDir, err = prepareWorktree(svc, name, stream, log)
 		mu.Unlock()
-		if err != nil {
-			log.Error("alpha", "prepare %s: %v", name, err)
-			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
-			sc.build.Reach("failure")
-			sc.lifecycle.Reach("failed")
-			return
-		}
-		repoDir = d
 	} else {
-		d, err := prepare(svc, name, agent, state, stream, log)
-		if err != nil {
-			log.Error("alpha", "prepare %s: %v", name, err)
-			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
-			sc.build.Reach("failure")
-			sc.lifecycle.Reach("failed")
-			return
-		}
-		repoDir = d
+		repoDir, err = prepareWorktree(svc, name, stream, log)
+	}
+	if err != nil {
+		prepareFail(err)
+		return
+	}
+	if err := prepareBuild(svc, name, repoDir, agent, state, stream, log); err != nil {
+		prepareFail(err)
+		return
 	}
 	sc.build.Reach("success")
 
@@ -1852,6 +1926,7 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 		if err != nil {
 			state.setReadiness(name, "failed")
 			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "readiness: " + err.Error()})
+			log.Info("alpha", "SIGTERM %s pgid=%d (reason: readiness probe failed: %v)", name, cmd.Process.Pid, err)
 			_ = killGroup(cmd.Process.Pid, syscall.SIGTERM)
 			select {
 			case sc.exitErr = <-waitErr:
@@ -1860,6 +1935,9 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 				sc.exitErr = <-waitErr
 			}
 			sc.lifecycle.Reach("failed")
+			if failfast {
+				state.requestShutdown(fmt.Sprintf("failfast: service %s readiness probe failed: %v", name, err))
+			}
 			return
 		}
 		sc.lifecycle.Reach("ready")
@@ -1877,16 +1955,31 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 		}
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: msg})
 		sc.lifecycle.Reach("failed")
+		if failfast {
+			state.requestShutdown(fmt.Sprintf("failfast: service %s exited before ready: %s", name, msg))
+		}
 		return
 	}
 
-	// Post-ready: wait for self-exit or external stop.
-	var selfExit bool
+	// Post-ready: wait for self-exit or external stop. stopReason
+	// captures WHICH external stop fired so the SIGTERM log line
+	// below can tell the operator "alpha killed this because X" —
+	// e.g. "control socket: shutdown op received" vs "failfast: db
+	// exited before ready" vs "reconfigure: replaced by new manifest".
+	// Reading the reason after the channel close is safe: the writer
+	// sets it inside sync.Once.Do BEFORE close, so channel-close
+	// release semantics make the value visible to the reader.
+	var (
+		selfExit   bool
+		stopReason string
+	)
 	select {
 	case sc.exitErr = <-waitErr:
 		selfExit = true
 	case <-sc.stopCh:
+		stopReason = sc.stopReason
 	case <-state.shutdownCh:
+		stopReason = state.shutdownReason
 	}
 	// Drop our registry row on every exit path — clean stop OR external
 	// stop OR self-exit. The next alpha boot finds an empty registry
@@ -1910,13 +2003,22 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 		}
 		sc.lifecycle.Reach("stopped")
 		if failfast {
-			log.Info("alpha", "failfast: %s exited after ready, requesting alpha shutdown", name)
-			state.requestShutdown()
+			reason := fmt.Sprintf("failfast: service %s exited after ready", name)
+			if sc.exitErr != nil {
+				reason = fmt.Sprintf("%s: %v", reason, sc.exitErr)
+			}
+			log.Info("alpha", "%s, requesting alpha shutdown", reason)
+			state.requestShutdown(reason)
 		}
 		return
 	}
-	// External stop.
-	log.Info("alpha", "SIGTERM %s pgid=%d", name, cmd.Process.Pid)
+	// External stop. The reason was captured from whichever channel
+	// fired (sc.stopCh ⇒ this service was singled out, state.shutdownCh
+	// ⇒ alpha-wide shutdown). Surface it in the SIGTERM line so a
+	// `tail -f alpha.log` immediately shows the cause instead of just
+	// "SIGTERM api pgid=N" with no context — the question users asked
+	// most often when debugging unexpected shutdowns.
+	log.Info("alpha", "SIGTERM %s pgid=%d (reason: %s)", name, cmd.Process.Pid, stopReason)
 	_ = killGroup(cmd.Process.Pid, syscall.SIGTERM)
 	select {
 	case sc.exitErr = <-waitErr:
@@ -2153,42 +2255,31 @@ func defaultBuild(svc *alphasfile.Service, name, binDir string) string {
 	return ""
 }
 
-// prepare materializes a per-invocation git worktree for the service and
-// runs its build step in that checkout. Worktree-able = has a git or dir
-// primary; crate/prebuilt services skip this and run from $PATH. Output is
-// streamed back to zordon under stream="prepare".
+// prepareWorktree materializes the per-invocation checkout (or just
+// resolves the live src dir for InPlace / returns "" for use-only) and
+// returns the dir the subsequent build step should run in. Split out
+// from the build step so the per-primary lock — which exists to keep
+// concurrent `git clone --bare` / `git worktree add` on the same
+// primary serial — only covers the git operations. Builds in distinct
+// dest dirs are independent and run in parallel even when their
+// services share a primary (a monorepo).
 //
-// Returns the checkout dir (empty for non-worktree services) so the caller
-// can set exec.Cmd.Dir.
-// prepare produces the service's binary into the out-of-tree bin dir and
-// returns the directory to use as the run cwd:
-//   - git/src: materialize a per-invocation worktree, build in it, cwd =
-//     checkout.
-//   - crate:   `cargo install <crate>` (no checkout), cwd = "".
-// Every service must be one of these (the resolver rejects sourceless
-// services); there is no prebuilt-$PATH path.
-func prepare(svc *alphasfile.Service, name string, agent bool, state *alphaState, stream *safeEncoder, log *zlog.Logger) (string, error) {
+// Returns the checkout dir (empty for use-only services). Worktreeable
+// = has a git or dir primary; crate/prebuilt services return "" here
+// and let the subsequent build step (`cargo install <crate>` /
+// `go install ...`) materialize the binary into bin dir.
+func prepareWorktree(svc *alphasfile.Service, name string, stream *safeEncoder, log *zlog.Logger) (string, error) {
 	if svc.Package == nil || !svc.Buildable() {
 		return "", nil
 	}
 	runner := newPrepareRunner(name, stream, log)
 	ctx := context.Background()
 
-	binDir := ""
-	if svc.Runtime != nil {
-		binDir = svc.Runtime.BinDir
-	}
-	if binDir != "" {
-		if err := os.MkdirAll(binDir, 0o755); err != nil {
-			return "", fmt.Errorf("mkdir bin dir: %w", err)
-		}
-	}
-
-	dest := "" // run cwd; "" for crate (no checkout)
 	switch {
 	case svc.Package.InPlace:
 		// src-only in the "main" worktree: use the live src tree as-is —
 		// no git worktree add, no HEAD reset. Uncommitted edits just work.
+		dest := ""
 		if svc.Runtime != nil {
 			dest = svc.Runtime.Dir
 		}
@@ -2196,7 +2287,9 @@ func prepare(svc *alphasfile.Service, name string, agent bool, state *alphaState
 			return "", fmt.Errorf("in-place service %q has no resolved src dir", name)
 		}
 		log.Info("alpha", "prepare %s: in place %s (no worktree)", name, dest)
+		return dest, nil
 	case svc.Worktreeable():
+		dest := ""
 		if svc.Runtime != nil {
 			dest = svc.Runtime.Dir
 		}
@@ -2228,8 +2321,33 @@ func prepare(svc *alphasfile.Service, name string, agent bool, state *alphaState
 		if err := p.AddWorktree(ctx, dest, branch, runner); err != nil {
 			return "", fmt.Errorf("git worktree: %w", err)
 		}
+		return dest, nil
 	default:
 		log.Info("alpha", "prepare %s: use-only %s (install)", name, svc.Package.Install)
+		return "", nil
+	}
+}
+
+// prepareBuild runs the service's build step in dest (the worktree from
+// prepareWorktree, or "" for use-only `cargo install` / `go install`).
+// Safe to run concurrently across services: each writes to its own
+// dest and bin dir; the per-primary lock is released BEFORE this step,
+// so monorepo siblings build in parallel.
+func prepareBuild(svc *alphasfile.Service, name, dest string, agent bool, state *alphaState, stream *safeEncoder, log *zlog.Logger) error {
+	if svc.Package == nil || !svc.Buildable() {
+		return nil
+	}
+	runner := newPrepareRunner(name, stream, log)
+	ctx := context.Background()
+
+	binDir := ""
+	if svc.Runtime != nil {
+		binDir = svc.Runtime.BinDir
+	}
+	if binDir != "" {
+		if err := os.MkdirAll(binDir, 0o755); err != nil {
+			return fmt.Errorf("mkdir bin dir: %w", err)
+		}
 	}
 
 	// Explicit `build { cmd = [...] }` is exec'd as argv (no shell). With
@@ -2243,45 +2361,46 @@ func prepare(svc *alphasfile.Service, name string, agent bool, state *alphaState
 		log.Info("alpha", "prepare %s: build (%s)", name, def)
 		c = exec.Command("/bin/sh", "-c", def)
 	}
-	if c != nil {
-		c.Dir = dest // "" ⇒ alpha's cwd; fine for `cargo install <crate>`
-		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		var be map[string]string
-		if svc.Runtime != nil {
-			be = phaseEnv(svc, svc.Runtime.BuildEnv, agent)
-		}
-		state.mu.RLock()
-		var sysenv []string
-		if state.config != nil {
-			sysenv = state.config.SysEnv
-		}
-		state.mu.RUnlock()
-		// Toolchain envs sit BELOW build.env — they're the initial
-		// language environment (mise PATH/GOROOT/GOTOOLCHAIN etc.), the
-		// build's explicit env overlays on top. Sharing this pin with
-		// the runtime is what keeps build artifacts (vendor dirs,
-		// generated code) ABI-compatible with the runtime that
-		// consumes them.
-		tcEnv, err := toolchainEnv(svc.Toolchain, state, log)
-		if err != nil {
-			return "", fmt.Errorf("build toolchain: %w", err)
-		}
-		// ALWAYS set Env (even empty) — nil would inherit alpha's full env
-		// and undo the closed-world whitelist.
-		c.Env = serviceEnv(nil, be, sysenv, tcEnv)
-		// exec.Command resolved c.Path against alpha's os.Environ()
-		// BEFORE we set c.Env. If the user passed a bare name (`go`,
-		// `cargo`, etc.) it now points at whatever is on alpha's PATH
-		// (typically the system install), not the mise-pinned binary
-		// we just put on c.Env's PATH. Re-resolve now that env is final.
-		if err := relookupPath(c); err != nil {
-			return "", fmt.Errorf("build: %w", err)
-		}
-		if err := runner(ctx, c); err != nil {
-			return "", fmt.Errorf("build: %w", err)
-		}
+	if c == nil {
+		return nil
 	}
-	return dest, nil
+	c.Dir = dest // "" ⇒ alpha's cwd; fine for `cargo install <crate>`
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var be map[string]string
+	if svc.Runtime != nil {
+		be = phaseEnv(svc, svc.Runtime.BuildEnv, agent)
+	}
+	state.mu.RLock()
+	var sysenv []string
+	if state.config != nil {
+		sysenv = state.config.SysEnv
+	}
+	state.mu.RUnlock()
+	// Toolchain envs sit BELOW build.env — they're the initial
+	// language environment (mise PATH/GOROOT/GOTOOLCHAIN etc.), the
+	// build's explicit env overlays on top. Sharing this pin with
+	// the runtime is what keeps build artifacts (vendor dirs,
+	// generated code) ABI-compatible with the runtime that
+	// consumes them.
+	tcEnv, err := toolchainEnv(svc.Toolchain, state, log)
+	if err != nil {
+		return fmt.Errorf("build toolchain: %w", err)
+	}
+	// ALWAYS set Env (even empty) — nil would inherit alpha's full env
+	// and undo the closed-world whitelist.
+	c.Env = serviceEnv(nil, be, sysenv, tcEnv)
+	// exec.Command resolved c.Path against alpha's os.Environ()
+	// BEFORE we set c.Env. If the user passed a bare name (`go`,
+	// `cargo`, etc.) it now points at whatever is on alpha's PATH
+	// (typically the system install), not the mise-pinned binary
+	// we just put on c.Env's PATH. Re-resolve now that env is final.
+	if err := relookupPath(c); err != nil {
+		return fmt.Errorf("build: %w", err)
+	}
+	if err := runner(ctx, c); err != nil {
+		return fmt.Errorf("build: %w", err)
+	}
+	return nil
 }
 
 // newPrepareRunner builds a source.Runner that pipes exec.Cmd output through

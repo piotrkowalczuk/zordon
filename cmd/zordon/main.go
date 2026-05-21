@@ -48,8 +48,12 @@ func main() {
 	startAlphaBin := startFlags.StringLong("alpha", "alpha", "alpha binary (name on $PATH or absolute path)")
 	startAlphaLog := startFlags.StringLong("alpha-log", "/tmp/alpha.log", "log file for alpha")
 	startTimeout := startFlags.DurationLong("timeout", 30*time.Second, "max wait for alpha to become ready")
-	startFailfast := startFlags.BoolLong("failfast", "abort bringup and shut down alpha on first service failure")
-	*startFailfast = true // default to true
+	// Failfast defaults to true (the safe stance for local dev: surface
+	// the first failure rather than letting other services flap behind
+	// it). BoolLongDefault, unlike BoolLong + post-registration pointer
+	// mutation, also makes `--help` print "(default: true)" so users
+	// know they need `--failfast=false` to opt out.
+	startFailfast := startFlags.BoolLongDefault("failfast", true, "abort bringup and shut down alpha on first service failure")
 	startCmd := &ff.Command{
 		Name:      "start",
 		Usage:     "zordon start [FLAGS]",

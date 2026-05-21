@@ -88,6 +88,28 @@ service "go" "api" {
 	}
 }
 
+// fs::state() returns the per-worktree state root
+// (`<repo>/.zordon/worktrees/<wt>`) — a stable location services can
+// drop persistent caches into (Bootsnap, Vite, sccache) that survive
+// across `zordon start` but are scoped per worktree. fs::tmp is
+// invocation-scoped (volatile), fs::bin is for built binaries; state
+// is the right home for "regenerated on demand, but expensive enough
+// to keep across runs".
+func TestResolveFsState(t *testing.T) {
+	src := `
+service "go" "api" {
+  git  = "github.com/acme/api"
+  vars = { cache_dir = "${fs::state()}/cache/bootsnap" }
+}
+`
+	af := compile(t, src, nil)
+	api := svcByName(af, "api")
+	want := "/proj/.zordon/worktrees/main/cache/bootsnap"
+	if got := api.Runtime.Vars["cache_dir"]; got != want {
+		t.Errorf("fs::state() interpolation = %q, want %q", got, want)
+	}
+}
+
 func TestResolveCrossServiceRefAndDir(t *testing.T) {
 	src := `
 service "go" "db" {
@@ -254,6 +276,58 @@ service "go" "tooling" {
 	want := "/tmp/test-resolve-src/tools"
 	if got != want {
 		t.Errorf("src resolved to %q; want %q (relative to Alphasfile dir, not CWD)", got, want)
+	}
+}
+
+// Two services that cross-reference each other's vars from inside env
+// must NOT trigger a cycle: A.env→B.vars and B.env→A.vars are
+// independent edges between four nodes (A.vars, A.env, B.vars,
+// B.env), not a cycle between A and B. Before the per-producer DAG,
+// the service-level graph collapsed all of a service's expressions
+// into one node and falsely flagged this as cyclic.
+func TestResolveCrossServiceEnvVarsNoFalseCycle(t *testing.T) {
+	src := `
+service "go" "a" {
+  git  = "github.com/acme/a"
+  vars = { port = 5000 }
+  env  = { B_PORT = "${service.go.b.vars.port}" }
+}
+service "go" "b" {
+  git  = "github.com/acme/b"
+  vars = { port = 6000 }
+  env  = { A_PORT = "${service.go.a.vars.port}" }
+}
+`
+	af := compile(t, src, nil)
+	a, b := svcByName(af, "a"), svcByName(af, "b")
+	if a == nil || b == nil {
+		t.Fatal("a/b not resolved")
+	}
+	if got := a.Runtime.Env["B_PORT"]; got != "6000" {
+		t.Errorf("a.env.B_PORT = %q, want 6000 (interpolated from b.vars.port)", got)
+	}
+	if got := b.Runtime.Env["A_PORT"]; got != "5000" {
+		t.Errorf("b.env.A_PORT = %q, want 5000 (interpolated from a.vars.port)", got)
+	}
+}
+
+// A genuine cycle on the same producer kind (A.vars depends on B.vars
+// AND vice-versa) must still be reported — the per-producer DAG
+// shouldn't silently accept impossible-to-resolve definitions.
+func TestResolveCrossServiceVarsCycleStillCaught(t *testing.T) {
+	src := `
+service "go" "a" {
+  git  = "github.com/acme/a"
+  vars = { x = service.go.b.vars.x }
+}
+service "go" "b" {
+  git  = "github.com/acme/b"
+  vars = { x = service.go.a.vars.x }
+}
+`
+	_, err := Compile("t", []byte(src), testInv(), nil)
+	if err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("want cycle error for vars↔vars mutual ref, got %v", err)
 	}
 }
 
