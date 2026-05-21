@@ -133,6 +133,17 @@ func openFromEnv(envVar string) (*os.File, error) {
 	// which both confuses semantics ("who is your parent?") and risks
 	// fd leaks across long chains.
 	syscall.CloseOnExec(fd)
+	// Mark the fd O_NONBLOCK BEFORE os.NewFile so Go's runtime adopts
+	// it via the netpoller. Without this, Read() goes through a raw
+	// blocking syscall.Read; the kernel doesn't wake that read when
+	// another goroutine closes the fd, so Stop() (which closes the fd
+	// then waits for the read goroutine) hangs forever. With the fd
+	// poller-registered, os.File.Close interrupts the pending Read
+	// with ErrClosed — the event-driven shutdown Stop relies on. No
+	// behavior change on the death path: EOF still arrives the same way.
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		return nil, fmt.Errorf("parentwatch: SetNonblock fd %d (%s): %w", fd, envVar, err)
+	}
 	f := os.NewFile(uintptr(fd), "parentwatch:"+envVar)
 	if f == nil {
 		return nil, fmt.Errorf("parentwatch: fd %d (%s) not open", fd, envVar)
