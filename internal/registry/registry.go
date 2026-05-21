@@ -224,19 +224,19 @@ func openLocked(zordonHome string) (string, func(), error) {
 	if zordonHome == "" {
 		return "", nil, errors.New("registry: empty zordon home")
 	}
-	if err := os.MkdirAll(zordonHome, 0o755); err != nil {
+	if err := os.MkdirAll(zordonHome, 0o750); err != nil {
 		return "", nil, fmt.Errorf("registry: mkdir %s: %w", zordonHome, err)
 	}
 	lockPath := filepath.Join(zordonHome, "registry.lock")
-	lf, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o644)
+	lf, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return "", nil, fmt.Errorf("registry: open lock: %w", err)
 	}
 	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
-		lf.Close()
+		_ = lf.Close()
 		return "", nil, fmt.Errorf("registry: flock: %w", err)
 	}
-	return filepath.Join(zordonHome, "registry.json"), func() { lf.Close() }, nil
+	return filepath.Join(zordonHome, "registry.json"), func() { _ = lf.Close() }, nil
 }
 
 func readEntries(path string) ([]Entry, error) {
@@ -273,11 +273,11 @@ func writeEntries(path string, entries []Entry) error {
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath) // no-op if rename succeeded
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("registry: write: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("registry: sync: %w", err)
 	}
 	if err := tmp.Close(); err != nil {

@@ -7,6 +7,28 @@ on:
     branches: [ master ]
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    env:
+      GO_VERSION: "1.26.3"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Go
+        run: |
+          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xz
+          echo /usr/local/go/bin >> "$GITHUB_PATH"
+      - name: Cache Go module + build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: lint-go-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            lint-go-
+      - name: Run lint
+        run: make lint
+
   test-examples:
     runs-on: ubuntu-latest
     strategy:
@@ -31,7 +53,7 @@ jobs:
       options: --init
     env:
       CGO_ENABLED: "1"
-      GO_VERSION: "1.25.6"
+      GO_VERSION: "1.26.3"
     steps:
       - name: Install dependencies
         run: |

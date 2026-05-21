@@ -1206,7 +1206,7 @@ func materializeFiles(files []*alphasfile.File, state *alphaState, log *zlog.Log
 			return fmt.Errorf("file %q has empty path", f.Name)
 		}
 		dir := filepath.Dir(f.Path)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
 		tmp, err := os.CreateTemp(dir, ".zordon-"+filepath.Base(f.Path)+".*")
@@ -1214,16 +1214,16 @@ func materializeFiles(files []*alphasfile.File, state *alphaState, log *zlog.Log
 			return fmt.Errorf("temp file in %s: %w", dir, err)
 		}
 		if _, err := tmp.WriteString(f.Body); err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
 			return fmt.Errorf("write %s: %w", f.Path, err)
 		}
 		if err := tmp.Close(); err != nil {
-			os.Remove(tmp.Name())
+			_ = os.Remove(tmp.Name())
 			return fmt.Errorf("close %s: %w", tmp.Name(), err)
 		}
 		if err := os.Rename(tmp.Name(), f.Path); err != nil {
-			os.Remove(tmp.Name())
+			_ = os.Remove(tmp.Name())
 			return fmt.Errorf("rename %s -> %s: %w", tmp.Name(), f.Path, err)
 		}
 		state.addFile(f.Path)
@@ -1298,7 +1298,7 @@ func runAlpha(_ context.Context, sockPath, logPath, zordonHome string, stabiliza
 		return fmt.Errorf("parentwatch: %w", err)
 	}
 
-	logF, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logF, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
 	}
@@ -2451,7 +2451,7 @@ func prepareBuild(svc *alphasfile.Service, name, dest string, agent bool, state 
 		binDir = svc.Runtime.BinDir
 	}
 	if binDir != "" {
-		if err := os.MkdirAll(binDir, 0o755); err != nil {
+		if err := os.MkdirAll(binDir, 0o750); err != nil {
 			return fmt.Errorf("mkdir bin dir: %w", err)
 		}
 	}

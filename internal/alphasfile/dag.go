@@ -120,19 +120,14 @@ func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph
 				continue
 			}
 			for _, trav := range expr.Variables() {
-				depSvc, depID, ok := producerNodeFromTrav(trav, n.svcID)
+				_, depID, ok := producerNodeFromTrav(trav, n.svcID)
 				if !ok {
 					continue
 				}
 				if _, local := g.byID[depID]; !local {
-					if _, parent := parentKnown[depSvc]; parent {
-						continue // parent already fully resolved
-					}
-					// Reference to a non-existent producer (e.g., a service
-					// that doesn't declare vars). Leave it — the eval-time
-					// traversal will produce a precise HCL diagnostic with
-					// the right source range; here we'd only know "missing
-					// dep" without context.
+					// Either a parent-resolved service (no intra-graph edge
+					// needed) or a missing producer (eval-time HCL diagnostic
+					// will report it precisely). Either way, skip.
 					continue
 				}
 				if depID == n.id {

@@ -171,7 +171,7 @@ func (p Primary) Ensure(ctx context.Context, run Runner) error {
 			}
 		}
 		if _, err := os.Stat(bare); os.IsNotExist(err) {
-			if err := os.MkdirAll(filepath.Dir(bare), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(bare), 0o750); err != nil {
 				return fmt.Errorf("mkdir bare parent: %w", err)
 			}
 			if err := run(ctx, exec.CommandContext(ctx, "git", "clone",
@@ -235,7 +235,7 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 	if _, err := os.Stat(filepath.Join(dest, ".git")); err == nil {
 		return nil // existing worktree — reuse
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
 		return fmt.Errorf("mkdir worktree parent: %w", err)
 	}
 	gitDir := p.primaryPath()
