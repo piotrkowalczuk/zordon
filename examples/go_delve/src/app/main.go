@@ -16,12 +16,6 @@ func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "go-delve-example ok")
 	})
-
-	// /hit is the interesting endpoint to break on from a delve client:
-	//   (dlv) break main.handle
-	// Each call mutates `hits` and branches on its parity, so a single
-	// breakpoint demonstrates `print hits`, `next`, and conditional
-	// flow without needing more than one source file.
 	http.HandleFunc("/hit", handle(&hits))
 
 	fmt.Printf("up %s\n", *addr)

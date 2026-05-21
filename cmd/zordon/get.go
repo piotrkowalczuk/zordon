@@ -99,10 +99,6 @@ func buildTree(levels []*level) map[string]any {
 			node["file"] = byName(node, "files")
 			node["provision"] = byName(node, "provision")
 			node["toolchain"] = s.Toolchain
-			// Service-level (non-Runtime) fields surface alongside the
-			// runtime ones so `zordon get service.X.debugger.port` works
-			// the same way `service.X.vars.foo` does. Same JSON-tag
-			// roundtrip pattern as for Runtime above.
 			if s.Debugger != nil {
 				if b, err := json.Marshal(s.Debugger); err == nil {
 					var dbg map[string]any
@@ -111,9 +107,6 @@ func buildTree(levels []*level) map[string]any {
 					}
 				}
 			}
-			// Agent block mirrors the planned HCL nesting so user-side
-			// paths look the same as a hand-written agent { mcp { … } }
-			// block would: service.X.agent.mcp.<feature>.<field>.
 			if s.Agent != nil {
 				if b, err := json.Marshal(s.Agent); err == nil {
 					var ag map[string]any

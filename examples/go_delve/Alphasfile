@@ -1,27 +1,19 @@
-# Run a Go service under a headless delve server so an IDE / `dlv
-# connect` can attach for live debugging without restarting the stack.
-# Everything dlv-specific is collapsed into the `debugger {}` block at
-# the bottom of `service "go" "app"` — zordon's macro expands it into
-# build flags (-gcflags=all=-N -l), runtime wrapping (dlv exec ... --),
-# toolchain tool installs (dlv + mcp-dap-server), and a synthetic MCP
-# `debug` feature for agents.
+# debugger {} on a Go service: zordon installs dlv + mcp-dap-server,
+# adds -gcflags='all=-N -l' to the build, wraps runtime in
+# `dlv exec --headless --listen=… --`, and exposes the DAP address
+# under service.X.agent.mcp.debug.
+#
+# Attach (CLI): `dlv connect 127.0.0.1:$(zordon get service.go.app.debugger.port)`
+# Attach (GoLand/VS Code): "Go Remote" / Go Attach, host 127.0.0.1,
+# port = `zordon get service.go.app.debugger.port`.
 
 sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 toolchain {
   go {
-    # mcp-dap-server's HEAD currently requires Go ≥ 1.26.1 (its go.mod
-    # bumps when delve adopts new Go features), so the macro's
-    # @latest install fails on older toolchain pins. If you need a
-    # specific Go version below that floor, pin mcp-dap-server to an
-    # older tag explicitly under `tools` below.
+    # mcp-dap-server HEAD currently requires Go ≥ 1.26.1; pin an older
+    # mcp-dap-server tag under `tools` below if you need an older Go.
     version = "1.26.2"
-    # `tools` is intentionally empty: the debugger macro auto-injects
-    # github.com/go-delve/delve/cmd/dlv@latest and
-    # github.com/go-delve/mcp-dap-server@latest into this toolchain's
-    # tool world. Explicit pins here win — write
-    #   tools = { "github.com/go-delve/delve/cmd/dlv" = "v1.25.2" }
-    # if you need a specific dlv tag (e.g. to dodge a regression).
   }
 }
 
@@ -31,25 +23,16 @@ service "go" "app" {
 
   vars = { port = net::pickport() }
 
-  # Service flags: rendered as `-addr=127.0.0.1:<port>` and appended to
-  # the inferior's argv (after dlv's `--`). No `runtime { cmd = … }` —
-  # the debugger macro synthesizes that, and an explicit cmd is
-  # rejected at validation time (use this `arguments` map instead).
+  # No `runtime { cmd = … }` — debugger.wrap_runtime synthesizes it.
+  # An explicit cmd is rejected at validation time.
   arguments = {
     addr = "127.0.0.1:${self.vars.port}"
   }
 
   debugger {
     enabled = true
-    # `port` is omitted on purpose. The macro defaults to a kernel-
-    # picked free port (same mechanism as `net::pickport()`), so any
-    # number of debug-enabled services in this stack get distinct
-    # ports automatically. Discover the live value after `zordon
-    # start` with:
-    #   zordon get service.go.app.debugger.port
-    # Pin a literal here (e.g. `port = 2345`) only if your IDE config
-    # needs to hardcode the port — accept that two services pinned to
-    # the same literal will collide at dlv bind time.
+    # `port` omitted → kernel-picked free port. Pin a literal only if
+    # your IDE config hardcodes a specific number.
   }
 
   readiness {
@@ -61,15 +44,3 @@ service "go" "app" {
     failure_threshold = 50
   }
 }
-
-# Once the service is ready (`zordon status` shows it green), attach:
-#
-#   debug_port=$(zordon get service.go.app.debugger.port)
-#   dlv connect 127.0.0.1:$debug_port     # CLI
-#   (dlv) break main.handle
-#   (dlv) continue
-#   curl http://127.0.0.1:$(zordon get service.go.app.vars.port)/hit
-#
-# VS Code:  launch.json -> type "go", request "attach", mode "remote",
-# host 127.0.0.1, port = (output of `zordon get service.go.app.debugger.port`).
-# GoLand:   "Go Remote" run config, same host:port.

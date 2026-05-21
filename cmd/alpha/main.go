@@ -2220,19 +2220,6 @@ func phaseEnv(svc *alphasfile.Service, phase zos.EnvironmentVariables, agent boo
 	return svc.Runtime.Env.Join(phase, ag)
 }
 
-// debuggerWrap returns argv unchanged unless the service opts into
-// `debugger { enabled = true; wrap_runtime = true }`, in which case it
-// prefixes argv with dlv's headless-DAP invocation. The result is
-// `dlv exec --headless --listen=127.0.0.1:<port> --api-version=2
-// --accept-multiclient [--continue] [--log] -- <argv...>`, so dlv runs
-// the service, listens for an IDE / mcp-dap-server, and the inferior
-// either runs immediately (default — readiness can probe HTTP) or
-// halts at entry (`wait_for_client = true`).
-//
-// wrap_runtime=false leaves argv alone: the user opted to put dlv
-// somewhere inside their own command (e.g. an entrypoint.sh), so we
-// don't second-guess them. Either way the build flags + tool install
-// + MCP feature still come from the macro.
 func debuggerWrap(svc *alphasfile.Service, argv []string) []string {
 	d := svc.Debugger
 	if d == nil || !d.Enabled || !d.WrapRuntime {
@@ -2340,12 +2327,9 @@ func defaultBuild(svc *alphasfile.Service, name, binDir string) string {
 		if svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
 			pkg = svc.Package.Exe
 		}
-		// debugger { enabled = true } needs unoptimized, non-inlined code
-		// or dlv breakpoints land on the wrong lines (or "could not find
-		// file" for fully inlined frames). The `all=` prefix applies the
-		// flags to every package in the build, not just main. The build
-		// runs through /bin/sh -c, so the embedded space in -gcflags's
-		// value MUST be quoted to stay one argv element.
+		// dlv breakpoints land on wrong lines (or "could not find file" for
+		// inlined frames) without -N -l. Quoted because the build runs
+		// through /bin/sh -c and the value has an embedded space.
 		gcflags := ""
 		if svc.Debugger != nil && svc.Debugger.Enabled {
 			gcflags = `-gcflags='all=-N -l' `
