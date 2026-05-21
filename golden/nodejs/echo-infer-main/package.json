@@ -1,0 +1,7 @@
+{
+  "name": "echo",
+  "private": true,
+  "version": "0.0.0",
+  "main": "app.js",
+  "bin": "./decoy-bin.js"
+}

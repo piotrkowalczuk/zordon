@@ -1,0 +1,10 @@
+{
+  "name": "echo",
+  "private": true,
+  "version": "0.0.0",
+  "main": "app.js",
+  "packageManager": "bun@1.1.42",
+  "scripts": {
+    "start": "node app.js"
+  }
+}

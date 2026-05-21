@@ -683,9 +683,9 @@ func (r *resolver) finishService(st *svcState) error {
 	}
 
 	switch sb.Toolchain {
-	case ToolchainGo, ToolchainRust, ToolchainRuby:
+	case ToolchainGo, ToolchainRust, ToolchainRuby, ToolchainNode:
 	default:
-		return fmt.Errorf("unknown toolchain %q (want go|rust|ruby)", sb.Toolchain)
+		return fmt.Errorf("unknown toolchain %q (want go|rust|ruby|nodejs)", sb.Toolchain)
 	}
 	// Use-only: the install coordinate is read from the field that
 	// matches the toolchain (`package` for go, `cargo` for rust).

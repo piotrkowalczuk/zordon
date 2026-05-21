@@ -1,0 +1,44 @@
+# Closed-world env: services see ONLY these host vars. Mirrors the
+# ruby example; same closed-world discipline applies to nodejs because
+# Corepack reads HOME for its cache and npm needs PATH/HOME.
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  # mise installs node under ~/.zordon/toolchain/installs/node/<version>
+  # (the on-disk name is `node` even though the zordon-side label is
+  # `nodejs`). After install, zordon refreshes Corepack — bundled
+  # corepack inside older node versions ships a stale keyring and pnpm
+  # downloads would fail with "Cannot find matching keyid" — and runs
+  # `corepack enable`, putting pnpm/yarn shims on PATH for services.
+  nodejs {
+    version = "22.11.0"
+  }
+}
+
+service "nodejs" "app" {
+  src = "../.."
+  exe = "examples/nodejs/src/app"
+
+  vars = { port = net::pickport() }
+
+  # PORT through env is the Node convention; the Alphasfile injects
+  # the picked port, app.js reads process.env.PORT. Using env keeps
+  # the inferred `npm start` argv-clean (no `--` separator needed).
+  env = { PORT = "${self.vars.port}" }
+
+  # No runtime { cmd } block on purpose — zordon infers from
+  # package.json. Precedence: scripts.start → main → bin. This project
+  # has scripts.start, so the running command is `npm start` (no
+  # lockfile committed → `npm` is the auto-detected default; pm
+  # detection in flight would honor `packageManager` field or any
+  # committed lockfile).
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

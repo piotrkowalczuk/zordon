@@ -10,13 +10,13 @@ package tools
 //   4. toolchain.<lang>.env  — user override (power-user path, no safety net)
 //
 // Layer 3 exists for ONE narrow purpose per language: to make sure
-// mise's pin actually takes effect at the language-runtime level.
-// Mise pins which VERSION of go/ruby/rust is on PATH; PostMiseEnv
-// pins how the language's own auto-switch / re-execution machinery
-// behaves so the pinned version isn't silently swapped by the
-// language's own logic. For Go that means GOTOOLCHAIN=local; other
-// languages may have analogous knobs (e.g. RUSTUP_TOOLCHAIN, none
-// yet for Ruby).
+// mise's pin actually takes effect at the language-runtime level and
+// to silence interactive prompts that would deadlock under alpha's
+// piped stdin. Mise pins which VERSION of node/go/ruby/rust is on
+// PATH; PostMiseEnv pins how the language's own machinery behaves so
+// the pinned version isn't silently swapped by an auto-switch (Go's
+// GOTOOLCHAIN, Node's Corepack download prompt) and so per-PM
+// banners (npm fund/audit) don't litter the log.
 //
 // Each language's adjustments live in this file in a tiny per-lang
 // function so the language-specific knowledge stays together — and
@@ -25,6 +25,8 @@ func PostMiseEnv(lang string, env map[string]string) {
 	switch lang {
 	case "go":
 		postMiseGo(env)
+	case "nodejs":
+		postMiseNode(env)
 	}
 }
 
@@ -43,5 +45,31 @@ func PostMiseEnv(lang string, env map[string]string) {
 func postMiseGo(env map[string]string) {
 	if env["GOTOOLCHAIN"] == "" {
 		env["GOTOOLCHAIN"] = "local"
+	}
+}
+
+// postMiseNode silences npm's per-install banners and Corepack's
+// download prompt. The PATH side of the pin is already handled by
+// `mise env --json node@<ver>` (node bin dir) and EnsureNodeCorepack
+// (pnpm/yarn shim dir on top). Knobs:
+//
+//   - NPM_CONFIG_FUND=false / NPM_CONFIG_AUDIT=false: drop npm's
+//     "consider funding ..." / vulnerability-count banner on every
+//     install. Pure log hygiene — install behavior unchanged.
+//   - COREPACK_ENABLE_DOWNLOAD_PROMPT=0: Corepack defaults to printing
+//     "About to download X, [Y/n]?" the first time it provisions a PM
+//     — fine interactively, deadlocks under alpha's piped stdin.
+//
+// `if not set` semantics so a power-user's toolchain.nodejs.env can
+// still override.
+func postMiseNode(env map[string]string) {
+	if env["NPM_CONFIG_FUND"] == "" {
+		env["NPM_CONFIG_FUND"] = "false"
+	}
+	if env["NPM_CONFIG_AUDIT"] == "" {
+		env["NPM_CONFIG_AUDIT"] = "false"
+	}
+	if env["COREPACK_ENABLE_DOWNLOAD_PROMPT"] == "" {
+		env["COREPACK_ENABLE_DOWNLOAD_PROMPT"] = "0"
 	}
 }

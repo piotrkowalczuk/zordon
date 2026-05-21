@@ -1,0 +1,10 @@
+{
+  "name": "echo",
+  "private": true,
+  "version": "0.0.0",
+  "main": "app.js",
+  "packageManager": "yarn@1.22.22",
+  "scripts": {
+    "start": "node app.js"
+  }
+}

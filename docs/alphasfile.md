@@ -2,7 +2,8 @@
 
 The `Alphasfile` is a single HCL2 document. Each service is a two-label
 block: `service "<toolchain>" "<name>" { ... }`. Toolchain is `go`,
-`rust`, or `ruby` — they differ in how the binary is built and run.
+`rust`, `ruby`, or `nodejs` — they differ in how the binary is built
+and run.
 
 ```hcl
 service "go" "nats-server" {
