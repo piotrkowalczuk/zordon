@@ -2,7 +2,6 @@ package alphasfile
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/zclconf/go-cty/cty"
@@ -17,44 +16,47 @@ import (
 // All test:: functions return SHELL SNIPPETS (string-valued cty),
 // suitable to drop into a provision's cmd field, a build cmd, or
 // any other slot whose effect is "run this in /bin/sh -c". The
-// snippet writes to $ZORDON_TEST_LOG when set; the harness keeps
+// snippet writes to TestConfig.LogPath when set; the harness keeps
 // the path stable across all zordon invocations within one Project
 // and reads back via Project.TestLog().
 //
-// Gating: every function checks $ZORDON_TEST_HARNESS=1 at HCL eval
-// time. Without the env var set on the zordon process, calling a
-// test:: function fails with a clear "only available in test mode"
-// error — so a real-world Alphasfile that drops test::log() into
-// production gets a config-load failure, not a silent surprise.
+// Gating: every function checks TestConfig.Harness at HCL eval time.
+// In production builds Harness=false, so calling a test:: function
+// fails with a clear "only available in test mode" error — a real-
+// world Alphasfile that drops test::log() into production gets a
+// config-load failure, not a silent surprise.
 
-const (
-	envHarness = "ZORDON_TEST_HARNESS"
-	envTestLog = "ZORDON_TEST_LOG"
-)
+// TestConfig configures the test:: HCL functions. cmd/zordon and
+// cmd/alpha build it from --test-harness / --test-log flags (auto-
+// mapped from ZORDON_TEST_HARNESS / ZORDON_TEST_LOG by ff). Zero
+// value disables every test:: call — production-safe by default.
+type TestConfig struct {
+	Harness bool
+	LogPath string
+}
 
 // testLogFunc returns `test::log(tag)` — emits the tag (plus newline)
-// to $ZORDON_TEST_LOG when the snippet runs. The path is BAKED IN at
-// HCL eval time from zordon's process env, so spawned services don't
-// need ZORDON_TEST_LOG on their sysenv whitelist.
+// to cfg.LogPath when the snippet runs. The path is BAKED IN at HCL
+// eval time, so spawned services don't need it on their sysenv
+// whitelist.
 //
-// When $ZORDON_TEST_LOG is unset (harness mode but no log path),
-// the snippet is a no-op (`true`) so check-style provisions don't
+// When cfg.LogPath is empty (harness mode but no log path), the
+// snippet is a no-op (`true`) so check-style provisions don't
 // short-circuit on it.
-func testLogFunc() function.Function {
+func testLogFunc(cfg TestConfig) function.Function {
 	return function.New(&function.Spec{
 		Params: []function.Parameter{{Name: "tag", Type: cty.String}},
 		Type:   function.StaticReturnType(cty.String),
 		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
-			if err := requireHarness("test::log"); err != nil {
+			if err := requireHarness(cfg, "test::log"); err != nil {
 				return cty.NilVal, err
 			}
 			tag := args[0].AsString()
-			logPath := os.Getenv(envTestLog)
-			if logPath == "" {
+			if cfg.LogPath == "" {
 				return cty.StringVal("true"), nil
 			}
 			snippet := fmt.Sprintf("printf '%%s\\n' %s >> %s",
-				shellQuote(tag), shellQuote(logPath))
+				shellQuote(tag), shellQuote(cfg.LogPath))
 			return cty.StringVal(snippet), nil
 		},
 	})
@@ -65,12 +67,12 @@ func testLogFunc() function.Function {
 // EXPECTS to be unreachable (e.g., a job downstream of a failing
 // dep): if it runs anyway, the alpha log captures the reason and
 // the test catches an unexpected non-zero exit.
-func testFailFunc() function.Function {
+func testFailFunc(cfg TestConfig) function.Function {
 	return function.New(&function.Spec{
 		Params: []function.Parameter{{Name: "reason", Type: cty.String}},
 		Type:   function.StaticReturnType(cty.String),
 		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
-			if err := requireHarness("test::fail"); err != nil {
+			if err := requireHarness(cfg, "test::fail"); err != nil {
 				return cty.NilVal, err
 			}
 			snippet := fmt.Sprintf("printf '%%s\\n' %s >&2; exit 1",
@@ -80,11 +82,11 @@ func testFailFunc() function.Function {
 	})
 }
 
-func requireHarness(name string) error {
-	if os.Getenv(envHarness) != "1" {
-		return fmt.Errorf("%s() is only available when zordon runs with %s=1 "+
+func requireHarness(cfg TestConfig, name string) error {
+	if !cfg.Harness {
+		return fmt.Errorf("%s() is only available when zordon runs with --test-harness "+
 			"(the conformance harness sets this; a production Alphasfile must not call it)",
-			name, envHarness)
+			name)
 	}
 	return nil
 }

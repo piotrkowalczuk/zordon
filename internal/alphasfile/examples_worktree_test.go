@@ -22,7 +22,7 @@ func TestExampleWorktreeMonorepo(t *testing.T) {
 			FsHash: "abc0000011112222", TmpDir: "/tmp/zordon-abc0000011112222",
 			Worktree: wt, StateDir: stateDir,
 		}
-		af, err := Compile("/repo/examples/worktree/Alphasfile", b, iv, nil)
+		af, err := Compile("/repo/examples/worktree/Alphasfile", b, iv, nil, TestConfig{})
 		if err != nil {
 			t.Fatalf("compile (%s): %v", wt, err)
 		}

@@ -35,7 +35,7 @@ func TestExampleInvokeResolves(t *testing.T) {
 		Worktree: invocation.MainWorktree,
 		StateDir: "/repo/examples/invoke/.zordon/worktrees/main",
 	}
-	af, err := Compile("/repo/examples/invoke/Alphasfile", b, iv, nil)
+	af, err := Compile("/repo/examples/invoke/Alphasfile", b, iv, nil, TestConfig{})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

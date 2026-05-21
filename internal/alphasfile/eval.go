@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -16,6 +15,8 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/lifecycle"
+	"github.com/piotrkowalczuk/zordon/internal/zenv"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 // buildBarrierAttrs returns one cty.StringVal per state, each holding
@@ -116,10 +117,14 @@ type resolver struct {
 	// checkout dir of the service currently being evaluated (fs::src()).
 	curCheckout string
 
+	// testCfg carries the conformance-harness gating + log path the
+	// test:: HCL functions need; zero value disables them.
+	testCfg TestConfig
+
 	resolvedServices []*Service
 }
 
-func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *ParentContext) (*Alphasfile, error) {
+func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *ParentContext, testCfg TestConfig) (*Alphasfile, error) {
 	var seed map[string]map[string]cty.Value
 	if parent != nil {
 		seed = parent.byTC
@@ -139,6 +144,7 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 		inv:         inv,
 		serviceByTC: seed,
 		taken:       map[string]string{},
+		testCfg:     testCfg,
 	}
 
 	parentKnown := map[string]struct{}{}
@@ -1148,8 +1154,8 @@ func (r *resolver) functions() map[string]function.Function {
 		// $ZORDON_TEST_HARNESS=1 (set by the harness on every spawn);
 		// in production they error out so users can't accidentally
 		// build them into a real Alphasfile.
-		"test::log":  testLogFunc(),
-		"test::fail": testFailFunc(),
+		"test::log":  testLogFunc(r.testCfg),
+		"test::fail": testFailFunc(r.testCfg),
 	}
 }
 
@@ -1164,7 +1170,7 @@ func osEnvFunc() function.Function {
 		Type: function.StaticReturnType(cty.String),
 		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
 			name := args[0].AsString()
-			if v, ok := os.LookupEnv(name); ok {
+			if v, ok := zenv.Lookup(name); ok {
 				return cty.StringVal(v), nil
 			}
 			if len(args) > 1 {
@@ -1234,7 +1240,7 @@ func (r *resolver) srcHashFunc() function.Function {
 			if dir == "" {
 				return cty.NilVal, errors.New("src::hash(): no source primary for this service (use-only or no checkout)")
 			}
-			if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+			if _, err := zfs.Stat(filepath.Join(dir, ".git")); err != nil {
 				return cty.NilVal, fmt.Errorf("src::hash(): %s is not a git working tree (run zordon start once to materialize)", dir)
 			}
 			cmd := exec.Command("git", "-C", dir, "rev-parse", "--short=16", "HEAD")

@@ -159,7 +159,7 @@ service "go" "x" {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := Compile("t", []byte(c.src), testInv(), nil)
+			_, err := Compile("t", []byte(c.src), testInv(), nil, TestConfig{})
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("want error containing %q, got %v", c.want, err)
 			}

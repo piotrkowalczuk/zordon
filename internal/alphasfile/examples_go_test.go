@@ -20,7 +20,7 @@ func TestExampleGoResolves(t *testing.T) {
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
 		StateDir: "/repo/examples/go/.zordon/worktrees/main",
 	}
-	af, err := Compile("/repo/examples/go/Alphasfile", b, iv, nil)
+	af, err := Compile("/repo/examples/go/Alphasfile", b, iv, nil, TestConfig{})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

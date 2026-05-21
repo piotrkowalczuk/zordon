@@ -32,7 +32,7 @@ func TestExampleFederationPrint(t *testing.T) {
 		Package: &Package{Toolchain: ToolchainGo, Git: "github.com/caddyserver/caddy"},
 	}})
 
-	af, err := Compile("/repo/examples/federation_macos/project/Alphasfile", b, iv, parent)
+	af, err := Compile("/repo/examples/federation_macos/project/Alphasfile", b, iv, parent, TestConfig{})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

@@ -1,0 +1,367 @@
+// Package zfs is the project's filesystem-safety chokepoint. It is
+// not a re-export of "os"; it is a small set of use-case-named
+// operations that bake in the right permissions, atomicity, and
+// "what to do on absence" semantics so callers can't get them wrong.
+//
+// The rules zfs enforces (per AGENTS.md):
+//
+//   - Private state directories are always 0o750 (owner rwx, group
+//     r-x, world none). zordon's state on disk — lock files, sockets,
+//     registry, per-invocation tmp — never leaks readable to other
+//     users on a shared host.
+//   - Sensitive files (locks, logs, atomically-written state) are
+//     always 0o600.
+//   - Writes that must survive a crash mid-flight go via temp+rename
+//     in the same directory, never an in-place truncate.
+//
+// What zfs is NOT: a re-implementation of "os". Use-case coverage is
+// deliberate. Operations that have no convention angle (Stat,
+// ReadFile) live here too, but only as thin chokepoints so business
+// logic can drop its `import "os"` line — they're a small minority of
+// the surface.
+package zfs
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+)
+
+// File is a type alias so callers can hold a *zfs.File without
+// importing "os". Methods come from *os.File.
+type File = os.File
+
+// dirPerm is the standard private-state directory mode used across
+// zordon (lock dirs, state dirs, tmp dirs, registry parent, ...).
+// Centralized so a future audit only has to touch this constant.
+const dirPerm os.FileMode = 0o750
+
+// filePerm is the standard sensitive-file mode (locks, logs, atomic
+// writes). Owner-only.
+const filePerm os.FileMode = 0o600
+
+// PathListSeparator is the platform's PATH-style separator (':' on
+// Unix, ';' on Windows). Exposed here so PATH-mangling code doesn't
+// need `import "os"` for this one rune.
+const PathListSeparator = os.PathListSeparator
+
+// FileDescriptor is an inherited-fd flag type. It implements flag.Value
+// so cmd/ binaries register it through ff once and get both `--ready-fd`
+// CLI and `ZORDON_READY_FD` env binding for free — no scattered
+// os.Getenv calls, no parsing logic at the call site.
+//
+// Semantics: 0 means "no fd inherited" (the documented "disabled"
+// value); 1 and 2 are stdin/stdout, rejected because using them as
+// extra parent-supervision fds collides with stdio; 3+ are valid (the
+// first slot Go's exec.Cmd.ExtraFiles uses). Negative values are
+// rejected.
+type FileDescriptor int
+
+// String renders the fd as a decimal — required by flag.Value so
+// `--help` can print the default.
+func (f *FileDescriptor) String() string {
+	if f == nil {
+		return "0"
+	}
+	return strconv.Itoa(int(*f))
+}
+
+// Set parses a string value (from CLI or env) and validates it.
+func (f *FileDescriptor) Set(s string) error {
+	if s == "" {
+		*f = 0
+		return nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return fmt.Errorf("zfs: bad file descriptor %q: %w", s, err)
+	}
+	if n < 0 {
+		return fmt.Errorf("zfs: file descriptor must be >= 0 (0=disabled, 3+=inherited), got %d", n)
+	}
+	if n == 1 || n == 2 {
+		return fmt.Errorf("zfs: file descriptor %d collides with stdio; first inherited slot is 3", n)
+	}
+	*f = FileDescriptor(n)
+	return nil
+}
+
+// Int returns the fd as an int for passing to syscall-shaped APIs.
+func (f FileDescriptor) Int() int { return int(f) }
+
+// IsSet reports whether a real fd was provided (non-zero).
+func (f FileDescriptor) IsSet() bool { return f > 0 }
+
+// DirName is a directory path. Implements flag.Value so cmd/ binaries
+// register it once and get both `--home` CLI and ZORDON_HOME env
+// binding through ff with no ad-hoc os.Getenv at the call site.
+//
+// Validation is intentionally minimal: an empty value is allowed and
+// means "use the documented default at the consumer". Whitespace is
+// trimmed. Path-existence and absoluteness checks are deferred to the
+// consumer because the semantics differ per flag (some accept "" as
+// "auto", others require a writable dir, etc.) — keeping that here
+// would force one policy on everyone.
+type DirName string
+
+func (d *DirName) String() string {
+	if d == nil {
+		return ""
+	}
+	return string(*d)
+}
+
+func (d *DirName) Set(s string) error {
+	*d = DirName(strings.TrimSpace(s))
+	return nil
+}
+
+// String returns the path as a Go string for filepath.Join etc.
+func (d DirName) Path() string { return string(d) }
+
+// IsSet reports whether the user provided a non-empty value.
+func (d DirName) IsSet() bool { return d != "" }
+
+// EnsureDir makes path (and any missing parents) exist with the
+// zordon-standard private mode (0o750). Use for: state dirs, lock
+// dirs, registry parent, tmp dirs that hold sensitive files. The
+// owner has rwx; the group has r-x; world has nothing.
+//
+// For directories that must be readable by other users on the host
+// (per-invocation worktree checkouts, log dirs scrape-able by an
+// admin), use EnsureSharedDir.
+func EnsureDir(path string) error {
+	if err := os.MkdirAll(path, dirPerm); err != nil {
+		return fmt.Errorf("zfs: ensure dir %s: %w", path, err)
+	}
+	return nil
+}
+
+// sharedDirPerm is the world-readable directory mode (0o755).
+// Reserved for dirs that legitimately need to be visible to other
+// users on a shared host — worktree source checkouts (so `ls`-by-
+// teammate works), $TMPDIR/zordon-* (other users can see the dir
+// exists; the unix socket inside is still 0o600).
+const sharedDirPerm os.FileMode = 0o755
+
+// EnsureSharedDir makes path exist with 0o755 (world-readable).
+// Use sparingly — the default and safer choice is EnsureDir. The
+// legitimate use cases in zordon today are git worktree dirs and
+// the per-invocation $TMPDIR/zordon-<hash> dir.
+func EnsureSharedDir(path string) error {
+	if err := os.MkdirAll(path, sharedDirPerm); err != nil {
+		return fmt.Errorf("zfs: ensure shared dir %s: %w", path, err)
+	}
+	return nil
+}
+
+// AcquireLock takes a process-wide exclusive flock on
+// <stateDir>/<name>.lock. The state dir is created if missing
+// (EnsureDir semantics). The returned release function drops the
+// lock and closes the FD; callers `defer release()`.
+//
+// This is the only way to take a file lock in zordon — control,
+// registry, and tools all funnel through here so the lock file mode,
+// open flags, and unlock-on-release behaviour stay uniform.
+func AcquireLock(stateDir, name string) (release func(), err error) {
+	if err := EnsureDir(stateDir); err != nil {
+		return nil, err
+	}
+	lockPath := filepath.Join(stateDir, name+".lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, filePerm)
+	if err != nil {
+		return nil, fmt.Errorf("zfs: open lock %s: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("zfs: flock %s: %w", lockPath, err)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
+}
+
+// AtomicWrite replaces path's contents with data via temp+sync+rename
+// in the same directory. A crash mid-write can never leave a half-
+// truncated file at path — only the previous good state, or the new
+// good state. The parent directory must already exist (callers
+// typically pair this with EnsureDir on the parent). Mode is 0o600.
+func AtomicWrite(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("zfs: tempfile in %s: %w", dir, err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op if rename succeeded
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("zfs: write %s: %w", tmpPath, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("zfs: sync %s: %w", tmpPath, err)
+	}
+	if err := tmp.Chmod(filePerm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("zfs: chmod %s: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("zfs: close %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("zfs: rename %s -> %s: %w", tmpPath, path, err)
+	}
+	return nil
+}
+
+// OpenAppendLog opens path in append-create mode with 0o600. Used
+// for long-lived log files (alpha.log, level logs) where multiple
+// writes from the same process are concatenated. Caller closes.
+func OpenAppendLog(path string) (*File, error) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, filePerm)
+	if err != nil {
+		return nil, fmt.Errorf("zfs: open append log %s: %w", path, err)
+	}
+	return f, nil
+}
+
+// RemoveIfPresent deletes a single file or empty dir at path. A
+// missing path is success (no-op), not an error — most callers want
+// "make sure this is gone" semantics on socket/tmp/marker cleanup.
+// Use RemoveTree for recursive removal.
+func RemoveIfPresent(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("zfs: remove %s: %w", path, err)
+	}
+	return nil
+}
+
+// RemoveTree deletes path and everything under it. Missing path is
+// success (mirrors os.RemoveAll). For wiping per-invocation state
+// dirs, stale bare clones, dead worktrees.
+func RemoveTree(path string) error {
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("zfs: remove tree %s: %w", path, err)
+	}
+	return nil
+}
+
+// Exists reports whether path exists (file or dir). Errors other
+// than ErrNotExist are treated as "exists from the caller's point
+// of view" — surfacing them via bool would lose information; if a
+// caller needs to distinguish "missing" from "permission denied",
+// they should call Stat directly.
+func Exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil || !errors.Is(err, os.ErrNotExist)
+}
+
+// Missing is the inverse of Exists. Useful for readability:
+// `if zfs.Missing(p) { ... }` reads better than `if !zfs.Exists(p)`.
+func Missing(path string) bool {
+	_, err := os.Stat(path)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// IsExecutableFile reports whether path names a regular file (not a
+// directory) with at least one execute bit set (owner, group, or
+// other). Used by binary-resolution code that walks PATH or probes
+// well-known install dirs for an existing tommy/mise/etc. False on
+// any error (missing, permission denied) — callers continue the
+// search instead of aborting.
+func IsExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir() && info.Mode()&0o111 != 0
+}
+
+// IsMissingErr reports whether err signals "no such file or
+// directory" (or a wrapped equivalent). Use this instead of importing
+// "os" for errors.Is(err, os.ErrNotExist) — same predicate, no
+// `import "os"` in business logic.
+func IsMissingErr(err error) bool {
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// Stat is a thin chokepoint for stat(2). No convention to enforce;
+// exposed so business logic doesn't import "os" just for one call.
+// FileInfo is os.FileInfo (interface from io/fs).
+func Stat(path string) (os.FileInfo, error) { return os.Stat(path) }
+
+// Read is a thin chokepoint for reading a whole file into memory.
+// Same reason as Stat: avoid `import "os"` in business logic. Use
+// for small config/manifest files; for large files stream via Open.
+func Read(path string) ([]byte, error) { return os.ReadFile(path) }
+
+// Open opens path for reading. Caller closes. Thin chokepoint.
+func Open(path string) (*File, error) { return os.Open(path) }
+
+// ReadDir returns the directory entries of name. Thin chokepoint;
+// no convention to enforce. Use for listing worktrees, level logs.
+func ReadDir(name string) ([]os.DirEntry, error) { return os.ReadDir(name) }
+
+// Getwd returns the current working dir. Thin chokepoint so cmd/
+// can drop `import "os"` for this one call.
+func Getwd() (string, error) { return os.Getwd() }
+
+// SystemTempDir returns the OS-wide temp dir ($TMPDIR or /tmp). This
+// is NOT the per-invocation tmp dir — that lives at
+// <SystemTempDir>/zordon-<fsHash>/ and is computed at the call site.
+// Exposed here so callers don't need `import "os"` for one call.
+func SystemTempDir() string { return os.TempDir() }
+
+// ZordonHome resolves the directory holding zordon's host-wide state
+// (shared mise install, toolchain cache, port registry, bare-clone
+// mirrors). Resolution order: explicit override wins; otherwise
+// <UserHomeDir>/.zordon. Empty result only when UserHomeDir itself
+// fails — callers degrade gracefully (no registry, no shared cache)
+// rather than panicking.
+//
+// This is the ONLY function that resolves the home path. Per-binary
+// `main()` calls it once at startup with the flag value; everything
+// downstream takes the resolved string as a parameter. zordon's env-
+// var bridge (ZORDON_HOME) is handled by the flag library (ff env-
+// prefix), not by this function — keeps env reads out of business
+// logic.
+func ZordonHome(override string) string {
+	if override != "" {
+		return override
+	}
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(h, ".zordon")
+}
+
+// Copy streams src into dst with 0o600. Used for moving build
+// artifacts into invocation bin dirs without going through `cp` and
+// without inheriting an in-tree mode.
+func Copy(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("zfs: open src %s: %w", src, err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, filePerm)
+	if err != nil {
+		return fmt.Errorf("zfs: open dst %s: %w", dst, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("zfs: copy %s -> %s: %w", src, dst, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("zfs: close %s: %w", dst, err)
+	}
+	return nil
+}

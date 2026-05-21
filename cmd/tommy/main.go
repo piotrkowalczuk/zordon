@@ -67,18 +67,26 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 func main() {
 	grace := flag.Duration("shutdown-grace", 2*time.Second,
 		"time the service gets after SIGTERM before SIGKILL (mirrors alpha's --shutdown-grace)")
-	parentFD := flag.Int("parent-fd", -1,
-		"inherited read-end fd of a pipe the spawner holds open; EOF means the spawner died (defaults to $TOMMY_PARENT_FD)")
+	var parentFD zfs.FileDescriptor
+	flag.Var(&parentFD, "parent-fd",
+		"inherited read-end fd of a pipe the spawner holds open; EOF means the spawner died (0 ⇒ no pipe, getppid poll only)")
+	// stdlib flag has no env-var binding, but the canonical source for
+	// this fd IS an env var (alpha sets TOMMY_PARENT_FD when spawning
+	// tommy because tommy's argv slot is owned by the user's service).
+	// We honor it as a fallback ONLY when --parent-fd wasn't passed.
+	if v := os.Getenv("TOMMY_PARENT_FD"); v != "" {
+		_ = parentFD.Set(v) // best-effort: bad value falls through to argv flag
+	}
 	flag.Parse()
 
 	argv := flag.Args()
@@ -87,18 +95,10 @@ func main() {
 		os.Exit(2)
 	}
 
-	if *parentFD < 0 {
-		if v := os.Getenv("TOMMY_PARENT_FD"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
-				*parentFD = n
-			}
-		}
-	}
-
-	os.Exit(run(argv, *grace, *parentFD))
+	os.Exit(run(argv, *grace, parentFD))
 }
 
-func run(argv []string, grace time.Duration, parentFD int) int {
+func run(argv []string, grace time.Duration, parentFD zfs.FileDescriptor) int {
 	// Drain SIGPIPE so a write to the (reader-gone) log pipe after the
 	// spawner dies can't kill tommy before it reaps the service.
 	parentwatch.IgnoreSIGPIPE()
@@ -113,13 +113,9 @@ func run(argv []string, grace time.Duration, parentFD int) int {
 	// Arm parent-death watch BEFORE we spawn the service. We use the
 	// belt-and-braces variant (pipe-EOF + getppid poll) because tommy
 	// has no notion of "detaching" — its whole life is bounded by the
-	// spawner's. Re-export the fd via TOMMY_PARENT_FD so parentwatch's
-	// generic env-driven path can pick it up (the flag survives for
-	// back-compat / explicit overrides).
-	if parentFD >= 0 {
-		_ = os.Setenv("TOMMY_PARENT_FD", strconv.Itoa(parentFD))
-	}
-	parentGone, err := parentwatch.WatchForever("TOMMY_PARENT_FD",
+	// spawner's. fd <= 0 disables the pipe leg but keeps the getppid
+	// reparent poll (alpha may still vanish via setsid/init takeover).
+	parentGone, err := parentwatch.WatchForever(parentFD,
 		parentwatch.WithErrorLog(func(err error) {
 			fmt.Fprintf(os.Stderr, "tommy: parent fd read: %v\n", err)
 		}))

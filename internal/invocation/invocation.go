@@ -13,11 +13,66 @@ package invocation
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
+	"fmt"
 	"path/filepath"
+
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 const MainWorktree = "main"
+
+// WorktreeName is the identifier of a worktree — "main" for the
+// implicit project-root worktree, or a user-chosen label for a side
+// checkout under <root>/.zordon/worktrees/<name>. Implements
+// flag.Value so cmd/alpha and cmd/zordon register it directly as a
+// flag (auto-mapped to ZORDON_WORKTREE).
+//
+// Validation: empty value normalizes to MainWorktree (so callers can
+// always use the value as a non-empty path component); otherwise
+// allows letters, digits, '-', '_'. Anything else is rejected because
+// the name flows into git branch refs and filesystem paths where '/'
+// or shell metacharacters would surprise users.
+type WorktreeName string
+
+func (w *WorktreeName) String() string {
+	if w == nil {
+		return MainWorktree
+	}
+	if *w == "" {
+		return MainWorktree
+	}
+	return string(*w)
+}
+
+func (w *WorktreeName) Set(s string) error {
+	if s == "" {
+		*w = MainWorktree
+		return nil
+	}
+	for _, r := range s {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_'
+		if !ok {
+			return fmt.Errorf("invocation: worktree name %q: only [A-Za-z0-9_-] allowed", s)
+		}
+	}
+	*w = WorktreeName(s)
+	return nil
+}
+
+// Name returns the worktree label as a plain string (== MainWorktree
+// for the zero value), suitable for path joining and branch refs.
+func (w WorktreeName) Name() string {
+	if w == "" {
+		return MainWorktree
+	}
+	return string(w)
+}
+
+// IsMain reports whether this is the implicit project-root worktree.
+func (w WorktreeName) IsMain() bool {
+	return w == "" || w == MainWorktree
+}
 
 // Invocation carries two orthogonal identities:
 //
@@ -127,7 +182,7 @@ func build(dir, root, wt string, afBytes, parentCtx []byte) (*Invocation, error)
 	stateDir := filepath.Join(root, ".zordon", "worktrees", wt)
 	fsh := shortSum([]byte(dir))
 	cfgh := shortSum(afBytes, parentCtx)
-	tmp := filepath.Join(os.TempDir(), "zordon-"+fsh)
+	tmp := filepath.Join(zfs.SystemTempDir(), "zordon-"+fsh)
 	return &Invocation{
 		Dir:      dir,
 		Worktree: wt,

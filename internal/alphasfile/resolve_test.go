@@ -22,7 +22,7 @@ func testInv() *invocation.Invocation {
 
 func compile(t *testing.T, src string, parent *ParentContext) *Alphasfile {
 	t.Helper()
-	af, err := Compile("test.hcl", []byte(src), testInv(), parent)
+	af, err := Compile("test.hcl", []byte(src), testInv(), parent, TestConfig{})
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -157,7 +157,7 @@ service "rust" "x" {
   src   = "../.."
   cargo = "tansu"
 }
-`), testInv(), nil)
+`), testInv(), nil, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), "use-only") {
 		t.Fatalf("want use-only/src exclusivity error, got %v", err)
 	}
@@ -185,7 +185,7 @@ func TestResolveNameCollision(t *testing.T) {
 	_, err := Compile("t", []byte(`
 service "go" "dup" { git = "github.com/a/b" }
 service "go" "dup" { git = "github.com/a/c" }
-`), testInv(), nil)
+`), testInv(), nil, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), "duplicate service") {
 		t.Fatalf("want duplicate error, got %v", err)
 	}
@@ -245,7 +245,7 @@ func TestResolveToolchainFieldMismatch(t *testing.T) {
 service "go" "x" {
   cargo = "tansu"
 }
-`), testInv(), nil)
+`), testInv(), nil, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), "rust use-only") {
 		t.Fatalf("want toolchain/field mismatch error, got %v", err)
 	}
@@ -268,7 +268,7 @@ service "go" "tooling" {
 }
 `
 	afPath := "/tmp/test-resolve-src/proj/Alphasfile"
-	af, err := Compile(afPath, []byte(src), testInv(), nil)
+	af, err := Compile(afPath, []byte(src), testInv(), nil, TestConfig{})
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -325,7 +325,7 @@ service "go" "b" {
   vars = { x = service.go.a.vars.x }
 }
 `
-	_, err := Compile("t", []byte(src), testInv(), nil)
+	_, err := Compile("t", []byte(src), testInv(), nil, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("want cycle error for vars↔vars mutual ref, got %v", err)
 	}

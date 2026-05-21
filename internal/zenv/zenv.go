@@ -1,15 +1,29 @@
-// Package zos wraps OS-level inputs that zordon composes into a child
-// process's environment. Right now it's just EnvironmentVariables and
-// helpers to build a layered env for service spawns; future host-
-// specific knobs (paths, signals, descriptors) belong here too so the
-// rest of the codebase doesn't import os/exec/syscall directly.
-package zos
+// Package zenv is the project's chokepoint for reading the process
+// environment (host env vars, $HOME, .env files). Like zfs, it is
+// not a re-export of "os" — it is a small set of use-case-named
+// operations: allow-list a slice of host env into a typed map, merge
+// overlays, parse dotenv files.
+//
+// Why a dedicated package: alpha spawns child services with a
+// curated env (zordon defaults → host allow-list → toolchain →
+// dotenv → user). Building that pipeline in one place keeps the
+// precedence rules and the "what leaks from the developer's shell"
+// boundary in a single auditable file.
+//
+// Single-key getters (Get, Lookup) exist so business logic can drop
+// `import "os"` without losing access to one-off reads. Per
+// AGENTS.md, deep-in-business-logic env reads should stay rare; load
+// configuration at startup and pass it down via typed structs.
+package zenv
 
 import (
 	"bufio"
+	"fmt"
 	"maps"
 	"os"
 	"strings"
+
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 // EnvironmentVariables is a flat name→value env map. The Join /
@@ -17,7 +31,7 @@ import (
 // overlays applied in increasing-precedence order (later wins on key
 // collision). That lets callers build a spawn env as:
 //
-//	zos.NewEnvironmentVariablesFromHost(allow).
+//	zenv.FromHost(allow).
 //	    Join(toolchain).
 //	    JoinFile(dotenvPaths...).
 //	    Join(serviceEnv, phaseEnv).
@@ -63,7 +77,7 @@ func (e EnvironmentVariables) JoinFile(paths ...string) EnvironmentVariables {
 	out := make(EnvironmentVariables, len(e))
 	maps.Copy(out, e)
 	for _, p := range paths {
-		f, err := os.Open(p)
+		f, err := zfs.Open(p)
 		if err != nil {
 			continue
 		}
@@ -101,15 +115,15 @@ func (e EnvironmentVariables) Slice() []string {
 	return out
 }
 
-// NewEnvironmentVariablesFromHost reads the alpha process environment
-// and keeps only entries whose keys are in `allow`. Empty or nil allow
-// → empty result (closed-world default).
+// FromHost reads the alpha process environment and keeps only entries
+// whose keys are in `allow`. Empty or nil allow → empty result
+// (closed-world default).
 //
 // This is the chokepoint that stops the user's interactive shell —
 // mise shims, RUBYLIB, GEM_HOME, BUNDLE_*, PYTHONPATH, CARGO_HOME, etc.
 // — from leaking into spawned services. The Alphasfile's `sysenv`
 // block is the only way to punch through.
-func NewEnvironmentVariablesFromHost(allow []string) EnvironmentVariables {
+func FromHost(allow []string) EnvironmentVariables {
 	if len(allow) == 0 {
 		return EnvironmentVariables{}
 	}
@@ -128,4 +142,30 @@ func NewEnvironmentVariablesFromHost(allow []string) EnvironmentVariables {
 		}
 	}
 	return out
+}
+
+// Environ returns the full host environment as KEY=VAL slice in
+// exec.Cmd.Env shape. Use this when a child process needs to inherit
+// the parent's env wholesale (typically with a few overrides
+// appended). For curated, allow-listed env, use FromHost — that is
+// the right tool for spawning user services.
+func Environ() []string { return os.Environ() }
+
+// Lookup is the single-key host-env reader exposed for HCL's
+// os::env() function — the DSL contract that lets users opt in to
+// reading host env vars at config eval time. Outside of that one
+// user-facing surface, prefer typed flags bound to env vars via ff
+// (the 12-factor pattern) over ad-hoc Lookup calls.
+func Lookup(key string) (string, bool) { return os.LookupEnv(key) }
+
+// UserHomeDir returns the current user's home dir (via $HOME on
+// Unix). Errors when neither $HOME nor a passwd lookup yields a
+// path — callers typically degrade gracefully (e.g. fall back to
+// ".zordon" relative to cwd) rather than aborting.
+func UserHomeDir() (string, error) {
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("zenv: user home dir: %w", err)
+	}
+	return h, nil
 }
