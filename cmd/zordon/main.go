@@ -22,6 +22,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/ring"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
 
@@ -54,11 +55,16 @@ func main() {
 	rootFlags := ff.NewFlagSet("zordon")
 	verbose := rootFlags.Bool('v', "verbose", "verbose logging")
 	agent := rootFlags.BoolLong("agent", "machine-friendly output: '<ms-since-start> <src> <LEVEL> <msg>'")
+	var home, testLog zfs.DirName
+	rootFlags.Value(0, "home", &home, "directory holding zordon's host-wide state (env: ZORDON_HOME; defaults to ~/.zordon)")
+	testHarness := rootFlags.BoolLong("test-harness", "enable test:: HCL functions (env: ZORDON_TEST_HARNESS; conformance harness use only)")
+	rootFlags.Value(0, "test-log", &testLog, "path test::log() writes to (env: ZORDON_TEST_LOG; only used when --test-harness)")
 	rootCmd := &ff.Command{
 		Name:  "zordon",
 		Usage: "zordon [FLAGS] <SUBCOMMAND>",
 		Flags: rootFlags,
 	}
+	_ = home // resolved later through zfs.ZordonHome() when needed
 
 	// start
 	startFlags := ff.NewFlagSet("start").SetParent(rootFlags)
@@ -77,7 +83,9 @@ func main() {
 		ShortHelp: "ensure alpha is running and push the Alphasfile config",
 		Flags:     startFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runStart(ctx, zlog.New(os.Stderr, *agent), *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent)
+			return runStart(ctx, zlog.New(os.Stderr, *agent), *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent,
+				zfs.ZordonHome(home.Path()),
+				alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
 		},
 	}
 
@@ -89,7 +97,7 @@ func main() {
 		ShortHelp: "query the running alpha for its state",
 		Flags:     statusFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runStatus(ctx, zlog.New(os.Stderr, *agent))
+			return runStatus(ctx, zlog.New(os.Stderr, *agent), zfs.ZordonHome(home.Path()), alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
 		},
 	}
 
@@ -101,7 +109,7 @@ func main() {
 		ShortHelp: "ask the running alpha to shut down",
 		Flags:     stopFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runStop(ctx, zlog.New(os.Stderr, *agent))
+			return runStop(ctx, zlog.New(os.Stderr, *agent), zfs.ZordonHome(home.Path()), alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
 		},
 	}
 
@@ -113,7 +121,7 @@ func main() {
 		ShortHelp: "run the idempotent privileged hooks for the whole federation chain",
 		Flags:     sudoFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runSudo(ctx, zlog.New(os.Stderr, *agent))
+			return runSudo(ctx, zlog.New(os.Stderr, *agent), zfs.ZordonHome(home.Path()), alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
 		},
 	}
 
@@ -125,7 +133,7 @@ func main() {
 		ShortHelp: "manage parallel worktrees (isolated state/ports over the same Alphasfile)",
 		Flags:     wtFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runWorktree(ctx, zlog.New(os.Stderr, *agent), args)
+			return runWorktree(ctx, zlog.New(os.Stderr, *agent), args, zfs.ZordonHome(home.Path()))
 		},
 	}
 
@@ -137,13 +145,14 @@ func main() {
 		ShortHelp: "print a resolved value (dotted path or Go template) e.g. service.go.prometheus.vars.address",
 		Flags:     getFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runGet(ctx, args)
+			return runGet(ctx, args, zfs.ZordonHome(home.Path()), alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
 		},
 	}
 
 	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wtCmd, getCmd)
 
-	err := rootCmd.ParseAndRun(context.Background(), os.Args[1:])
+	err := rootCmd.ParseAndRun(context.Background(), os.Args[1:],
+		ff.WithEnvVarPrefix("ZORDON"))
 	switch {
 	case errors.Is(err, ff.ErrHelp), errors.Is(err, ff.ErrNoExec):
 		fmt.Fprintln(os.Stderr, ffhelp.Command(rootCmd))
@@ -156,13 +165,13 @@ func main() {
 
 // walkUp climbs from cwd toward / looking for an Alphasfile.
 func walkUp() (string, error) {
-	dir, err := os.Getwd()
+	dir, err := zfs.Getwd()
 	if err != nil {
 		return "", err
 	}
 	for {
 		candidate := filepath.Join(dir, "Alphasfile")
-		if _, err := os.Stat(candidate); err == nil {
+		if zfs.Exists(candidate) {
 			return candidate, nil
 		}
 		parent := filepath.Dir(dir)
@@ -455,11 +464,11 @@ func readHandshake(r *os.File, readyCh chan<- struct{}, errCh chan<- error, logf
 	errCh <- errors.New("alpha closed handshake without READY")
 }
 
-func runStatus(ctx context.Context, log *zlog.Logger) error {
+func runStatus(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg alphasfile.TestConfig) error {
 	_ = log // status output is structured stdout, not log-style
 
 	// Status reports the whole federation chain, not just the invocation.
-	levels, err := resolveChain(ctx)
+	levels, err := resolveChain(ctx, zordonHome, testCfg)
 	if err != nil {
 		return err
 	}
@@ -523,11 +532,11 @@ func runStatus(ctx context.Context, log *zlog.Logger) error {
 	return nil
 }
 
-func runStop(ctx context.Context, log *zlog.Logger) error {
+func runStop(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg alphasfile.TestConfig) error {
 	// Stop only the invocation (leaf); parents are shared infra. We still
 	// need the chain walk to derive the leaf's socket (its hash depends on
 	// the resolved parent context).
-	levels, err := resolveChain(ctx)
+	levels, err := resolveChain(ctx, zordonHome, testCfg)
 	if err != nil {
 		return err
 	}

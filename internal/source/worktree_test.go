@@ -32,7 +32,7 @@ func TestMonorepoPerServiceBranches(t *testing.T) {
 	git(t, repo, "-c", "user.email=a@b", "-c", "user.name=z", "commit", "-q",
 		"--allow-empty", "-m", "init")
 
-	p, err := NewPrimary("", repo, "", nil)
+	p, err := NewPrimary("", "", repo, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

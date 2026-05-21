@@ -27,11 +27,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
+
+	"github.com/piotrkowalczuk/zordon/internal/zenv"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 // EnsureMise returns the path to the zordon-owned mise binary at
@@ -43,7 +44,7 @@ import (
 // progress on a slow first run.
 func EnsureMise(zordonHome string, logOut io.Writer) (string, error) {
 	bin := filepath.Join(zordonHome, "bin", "mise")
-	if _, err := os.Stat(bin); err == nil {
+	if zfs.Exists(bin) {
 		return bin, nil
 	}
 	if _, err := exec.LookPath("cargo"); err != nil {
@@ -51,18 +52,18 @@ func EnsureMise(zordonHome string, logOut io.Writer) (string, error) {
 			"install cargo so zordon can `cargo install` it to %s, "+
 			"or pre-place a mise binary there yourself", bin)
 	}
-	if err := os.MkdirAll(filepath.Join(zordonHome, "bin"), 0o750); err != nil {
-		return "", fmt.Errorf("mkdir %s/bin: %w", zordonHome, err)
+	if err := zfs.EnsureDir(filepath.Join(zordonHome, "bin")); err != nil {
+		return "", err
 	}
 	// Serialize cargo install so two alphas starting at the same time
 	// don't try to write the same binary. Re-check existence under the
 	// lock — the other waiter just did it for us.
-	release, err := lockFile(filepath.Join(zordonHome, "locks", "mise.lock"))
+	release, err := zfs.AcquireLock(filepath.Join(zordonHome, "locks"), "mise")
 	if err != nil {
 		return "", err
 	}
 	defer release()
-	if _, err := os.Stat(bin); err == nil {
+	if zfs.Exists(bin) {
 		return bin, nil
 	}
 	cmd := exec.Command("cargo", "install", "--root", zordonHome, "--locked", "mise")
@@ -72,24 +73,6 @@ func EnsureMise(zordonHome string, logOut io.Writer) (string, error) {
 		return "", fmt.Errorf("cargo install mise: %w", err)
 	}
 	return bin, nil
-}
-
-// lockFile is the shared LOCK_EX primitive used by EnsureMise and
-// Acquire. The lock is held for the lifetime of the returned closure;
-// callers `defer release()`.
-func lockFile(path string) (release func(), err error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
-	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open lock %s: %w", path, err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("flock %s: %w", path, err)
-	}
-	return func() { _ = f.Close() }, nil
 }
 
 // miseToolName maps the zordon-side language label to mise's tool
@@ -131,7 +114,7 @@ func ResolveDataDir(from, defaultDataDir, tool, version string) string {
 	dir := from
 	for {
 		candidate := filepath.Join(dir, ".zordon", "toolchain")
-		if _, err := os.Stat(filepath.Join(candidate, "installs", tool, version)); err == nil {
+		if zfs.Exists(filepath.Join(candidate, "installs", tool, version)) {
 			return candidate
 		}
 		if dir == bound {
@@ -164,7 +147,7 @@ func ResolveDataDir(from, defaultDataDir, tool, version string) string {
 // inject it here rather than relying on the parent environment.
 func isolatedEnv(dataDir, miseBin string) []string {
 	cfgRoot := filepath.Dir(dataDir) // e.g. ~/.zordon
-	env := append(os.Environ(),
+	env := append(zenv.Environ(),
 		"MISE_DATA_DIR="+dataDir,
 		"MISE_CONFIG_DIR="+filepath.Join(cfgRoot, "mise-config"),
 		"MISE_STATE_DIR="+filepath.Join(cfgRoot, "mise-state"),
@@ -176,7 +159,7 @@ func isolatedEnv(dataDir, miseBin string) []string {
 	miseDir := filepath.Dir(miseBin)
 	for i, kv := range env {
 		if strings.HasPrefix(kv, "PATH=") {
-			env[i] = "PATH=" + miseDir + string(os.PathListSeparator) + kv[len("PATH="):]
+			env[i] = "PATH=" + miseDir + string(zfs.PathListSeparator) + kv[len("PATH="):]
 			return env
 		}
 	}
@@ -291,5 +274,5 @@ func toolInstallCmd(binPath, toolchain, version, name, ver string) (*exec.Cmd, e
 // Acquire so the same locked critical section covers both installing
 // tools and reading env (which itself may auto-install the version).
 func Acquire(dataDir, tool, version string) (release func(), err error) {
-	return lockFile(filepath.Join(dataDir, "locks", tool+"-"+version+".lock"))
+	return zfs.AcquireLock(filepath.Join(dataDir, "locks"), tool+"-"+version)
 }

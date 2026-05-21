@@ -53,11 +53,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 // Pipe returns a fresh pipe pair suitable for parent-death detection.
@@ -110,29 +111,26 @@ func newConfig(opts []Option) *config {
 	return c
 }
 
-// openFromEnv reads envVar, validates the fd, marks it close-on-exec,
-// and wraps it in an *os.File. envVar unset ⇒ (nil, nil) so callers can
-// treat "unsupervised" as a graceful no-op.
-func openFromEnv(envVar string) (*os.File, error) {
-	raw := os.Getenv(envVar)
-	if raw == "" {
+// openInheritedFD validates fd, marks it close-on-exec, switches it to
+// non-blocking I/O, and wraps it in an *os.File. fd <= 0 ⇒ (nil, nil)
+// so callers can treat "unsupervised" as a graceful no-op. The caller
+// resolves fd at startup (from a flag or its env-mapped equivalent) —
+// parentwatch never reads the environment itself.
+func openInheritedFD(fd zfs.FileDescriptor) (*os.File, error) {
+	if fd <= 0 {
 		return nil, nil
-	}
-	fd, err := strconv.Atoi(raw)
-	if err != nil {
-		return nil, fmt.Errorf("parentwatch: bad %s=%q: %w", envVar, raw, err)
 	}
 	// fd 0/1/2 are stdio; the parent uses ExtraFiles which starts at 3.
 	// Anything lower means something went wrong on the spawn side and
 	// we would otherwise hijack a stdio stream via os.NewFile.
 	if fd < 3 {
-		return nil, fmt.Errorf("parentwatch: %s=%d below first ExtraFiles slot", envVar, fd)
+		return nil, fmt.Errorf("parentwatch: fd=%d below first ExtraFiles slot", fd)
 	}
 	// CloseOnExec drops the fd from any process this child itself
 	// exec()s. Without it the parent's pipe leaks into grandchildren —
 	// which both confuses semantics ("who is your parent?") and risks
 	// fd leaks across long chains.
-	syscall.CloseOnExec(fd)
+	syscall.CloseOnExec(int(fd))
 	// Mark the fd O_NONBLOCK BEFORE os.NewFile so Go's runtime adopts
 	// it via the netpoller. Without this, Read() goes through a raw
 	// blocking syscall.Read; the kernel doesn't wake that read when
@@ -141,12 +139,12 @@ func openFromEnv(envVar string) (*os.File, error) {
 	// poller-registered, os.File.Close interrupts the pending Read
 	// with ErrClosed — the event-driven shutdown Stop relies on. No
 	// behavior change on the death path: EOF still arrives the same way.
-	if err := syscall.SetNonblock(fd, true); err != nil {
-		return nil, fmt.Errorf("parentwatch: SetNonblock fd %d (%s): %w", fd, envVar, err)
+	if err := syscall.SetNonblock(int(fd), true); err != nil {
+		return nil, fmt.Errorf("parentwatch: SetNonblock fd %d: %w", fd, err)
 	}
-	f := os.NewFile(uintptr(fd), "parentwatch:"+envVar)
+	f := os.NewFile(uintptr(fd), fmt.Sprintf("parentwatch:fd%d", fd))
 	if f == nil {
-		return nil, fmt.Errorf("parentwatch: fd %d (%s) not open", fd, envVar)
+		return nil, fmt.Errorf("parentwatch: fd %d not open", fd)
 	}
 	return f, nil
 }
@@ -176,11 +174,13 @@ type Watcher struct {
 	once    sync.Once
 }
 
-// Watch arms a pipe-EOF watcher against the fd announced in envVar.
-// envVar unset ⇒ returns (nil, nil), meaning "no parent supervises us";
-// the consumer should handle a nil *Watcher as "skip the watch".
-func Watch(envVar string, opts ...Option) (*Watcher, error) {
-	f, err := openFromEnv(envVar)
+// Watch arms a pipe-EOF watcher against fd. fd <= 0 ⇒ returns (nil,
+// nil), meaning "no parent supervises us"; the consumer should handle
+// a nil *Watcher as "skip the watch". Callers obtain fd from a typed
+// flag (auto-mapped to e.g. ZORDON_PARENT_FD); this package no longer
+// reads the environment itself.
+func Watch(fd zfs.FileDescriptor, opts ...Option) (*Watcher, error) {
+	f, err := openInheritedFD(fd)
 	if err != nil {
 		return nil, err
 	}
@@ -263,10 +263,11 @@ func (w *Watcher) run() {
 // envVar may be unset; in that case only the getppid() poll is armed.
 // origPPID is captured AT CALL TIME — call WatchForever early so the
 // snapshot reflects the spawner, not whatever the child re-parents to
-// later.
-func WatchForever(envVar string, opts ...Option) (<-chan struct{}, error) {
+// later. Like Watch, fd <= 0 means "no pipe", but the getppid reparent
+// detector is always armed.
+func WatchForever(fd zfs.FileDescriptor, opts ...Option) (<-chan struct{}, error) {
 	cfg := newConfig(opts)
-	f, err := openFromEnv(envVar)
+	f, err := openInheritedFD(fd)
 	if err != nil {
 		return nil, err
 	}

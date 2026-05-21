@@ -3,9 +3,10 @@ package tools
 import (
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 // EnsureNodeCorepack installs a fresh Corepack into a per-(node-version)
@@ -31,18 +32,16 @@ func EnsureNodeCorepack(binPath, dataDir, version string, env map[string]string,
 	corepackBin := filepath.Join(refreshRoot, "bin", "corepack")
 
 	pnpmShim := filepath.Join(shimDir, "pnpm")
-	if _, err := os.Stat(corepackBin); err == nil {
-		if _, err := os.Stat(pnpmShim); err == nil {
-			injectNodeCorepackPATH(env, shimDir, filepath.Dir(corepackBin))
-			return nil
-		}
+	if zfs.Exists(corepackBin) && zfs.Exists(pnpmShim) {
+		injectNodeCorepackPATH(env, shimDir, filepath.Dir(corepackBin))
+		return nil
 	}
 
-	if err := os.MkdirAll(refreshRoot, 0o750); err != nil {
-		return fmt.Errorf("mkdir %s: %w", refreshRoot, err)
+	if err := zfs.EnsureDir(refreshRoot); err != nil {
+		return err
 	}
-	if err := os.MkdirAll(shimDir, 0o750); err != nil {
-		return fmt.Errorf("mkdir %s: %w", shimDir, err)
+	if err := zfs.EnsureDir(shimDir); err != nil {
+		return err
 	}
 
 	spec := "node@" + version
@@ -83,9 +82,9 @@ func EnsureNodeCorepack(binPath, dataDir, version string, env map[string]string,
 // bin dir to env["PATH"] so services see the zordon-managed shims and
 // corepack ahead of whatever node ships bundled.
 func injectNodeCorepackPATH(env map[string]string, shimDir, corepackBinDir string) {
-	prefix := shimDir + string(os.PathListSeparator) + corepackBinDir
+	prefix := shimDir + string(zfs.PathListSeparator) + corepackBinDir
 	if cur := env["PATH"]; cur != "" {
-		env["PATH"] = prefix + string(os.PathListSeparator) + cur
+		env["PATH"] = prefix + string(zfs.PathListSeparator) + cur
 	} else {
 		env["PATH"] = prefix
 	}

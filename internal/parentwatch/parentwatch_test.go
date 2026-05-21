@@ -4,29 +4,23 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"strconv"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
-// makeChildFd installs a pipe pair on a fresh exec.Cmd and pretends to
-// be the child: read end goes into ExtraFiles, env var is set, and we
-// recover the fd number the child would see (3+offset). Returns the
-// fd-number string the child should read out of envVar plus the
-// write-end the test (acting as parent) controls.
-func attachAndExportFd(t *testing.T, envVar string) (childFD int, write *os.File) {
+// inheritPipeFd installs a pipe, dupes the read end to a fresh fd in
+// THIS process (pretending to be the spawned child), and returns the
+// fd plus the write end the test (acting as parent) controls.
+func inheritPipeFd(t *testing.T) (childFD zfs.FileDescriptor, write *os.File) {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
 	}
-	// Adopt the read end into THIS process at the fd Attach would have
-	// announced: we dup it to a known descriptor and pass that number
-	// through the env, so Watch can find it. We can't use Attach
-	// directly because that wires the fd into a child process via
-	// exec; here we ARE the child.
 	dup, err := syscall.Dup(int(r.Fd()))
 	if err != nil {
 		_ = r.Close()
@@ -34,11 +28,10 @@ func attachAndExportFd(t *testing.T, envVar string) (childFD int, write *os.File
 		t.Fatalf("dup: %v", err)
 	}
 	_ = r.Close()
-	t.Setenv(envVar, strconv.Itoa(dup))
 	t.Cleanup(func() {
 		_ = w.Close()
 	})
-	return dup, w
+	return zfs.FileDescriptor(dup), w
 }
 
 func TestAttachAssignsSequentialFds(t *testing.T) {
@@ -76,14 +69,13 @@ func TestAttachAssignsSequentialFds(t *testing.T) {
 	}
 }
 
-func TestWatchUnsetEnvReturnsNil(t *testing.T) {
-	os.Unsetenv("TEST_PARENT_FD")
-	w, err := Watch("TEST_PARENT_FD")
+func TestWatchZeroFdReturnsNil(t *testing.T) {
+	w, err := Watch(0)
 	if err != nil {
 		t.Fatalf("Watch: %v", err)
 	}
 	if w != nil {
-		t.Fatalf("Watch returned non-nil for unset env")
+		t.Fatalf("Watch returned non-nil for fd=0")
 	}
 	// Selecting on a nil channel must block — we just verify Died()
 	// returns nil so consumers can use the obvious "no watch ⇒ never
@@ -94,25 +86,20 @@ func TestWatchUnsetEnvReturnsNil(t *testing.T) {
 	w.Stop() // must not panic
 }
 
-func TestWatchBadEnv(t *testing.T) {
-	t.Setenv("BAD_FD", "not-a-number")
-	if _, err := Watch("BAD_FD"); err == nil {
-		t.Fatalf("expected error on non-numeric env")
-	}
-	t.Setenv("BAD_FD", "2")
-	if _, err := Watch("BAD_FD"); err == nil {
+func TestWatchBadFd(t *testing.T) {
+	if _, err := Watch(zfs.FileDescriptor(2)); err == nil {
 		t.Fatalf("expected error on fd<3")
 	}
 }
 
 func TestWatchFiresOnEOF(t *testing.T) {
-	_, write := attachAndExportFd(t, "P_FD")
-	w, err := Watch("P_FD")
+	fd, write := inheritPipeFd(t)
+	w, err := Watch(fd)
 	if err != nil {
 		t.Fatalf("Watch: %v", err)
 	}
 	if w == nil {
-		t.Fatalf("Watch returned nil despite env set")
+		t.Fatalf("Watch returned nil despite fd>0")
 	}
 
 	select {
@@ -133,8 +120,8 @@ func TestWatchFiresOnEOF(t *testing.T) {
 }
 
 func TestWatchStopWinsRace(t *testing.T) {
-	_, write := attachAndExportFd(t, "Q_FD")
-	w, err := Watch("Q_FD")
+	fd, write := inheritPipeFd(t)
+	w, err := Watch(fd)
 	if err != nil {
 		t.Fatalf("Watch: %v", err)
 	}
@@ -152,8 +139,8 @@ func TestWatchStopWinsRace(t *testing.T) {
 }
 
 func TestWatchStopIdempotent(t *testing.T) {
-	_, _ = attachAndExportFd(t, "R_FD")
-	w, err := Watch("R_FD")
+	fd, _ := inheritPipeFd(t)
+	w, err := Watch(fd)
 	if err != nil {
 		t.Fatalf("Watch: %v", err)
 	}
@@ -166,10 +153,10 @@ func TestWatchErrorLogReceivesNonEOF(t *testing.T) {
 	// We force a non-EOF error by closing the fd from underneath the
 	// goroutine's Read. The simplest hammer: install a watcher then
 	// Close() the file in a way Stop() didn't authorize.
-	childFD, write := attachAndExportFd(t, "S_FD")
+	fd, write := inheritPipeFd(t)
 
 	var logged atomic.Int32
-	w, err := Watch("S_FD", WithErrorLog(func(err error) {
+	w, err := Watch(fd, WithErrorLog(func(err error) {
 		if err != nil {
 			logged.Add(1)
 		}
@@ -188,12 +175,11 @@ func TestWatchErrorLogReceivesNonEOF(t *testing.T) {
 	if logged.Load() != 0 {
 		t.Fatalf("error log fired on clean EOF (count=%d)", logged.Load())
 	}
-	_ = childFD
 }
 
 func TestWatchForeverFiresOnEOF(t *testing.T) {
-	_, write := attachAndExportFd(t, "T_FD")
-	gone, err := WatchForever("T_FD", WithPollInterval(time.Hour))
+	fd, write := inheritPipeFd(t)
+	gone, err := WatchForever(fd, WithPollInterval(time.Hour))
 	if err != nil {
 		t.Fatalf("WatchForever: %v", err)
 	}
@@ -205,12 +191,11 @@ func TestWatchForeverFiresOnEOF(t *testing.T) {
 	}
 }
 
-func TestWatchForeverNoEnvUsesPollOnly(t *testing.T) {
-	os.Unsetenv("U_FD")
+func TestWatchForeverZeroFdUsesPollOnly(t *testing.T) {
 	// Poll fast; original ppid is whatever ran us. Without a real
 	// parent change we just verify WatchForever doesn't error out and
 	// doesn't fire immediately.
-	gone, err := WatchForever("U_FD", WithPollInterval(10*time.Millisecond))
+	gone, err := WatchForever(0, WithPollInterval(10*time.Millisecond))
 	if err != nil {
 		t.Fatalf("WatchForever: %v", err)
 	}
@@ -221,18 +206,17 @@ func TestWatchForeverNoEnvUsesPollOnly(t *testing.T) {
 	}
 }
 
-func TestWatchForeverBadEnv(t *testing.T) {
-	t.Setenv("V_FD", "garbage")
-	if _, err := WatchForever("V_FD"); err == nil {
-		t.Fatalf("expected error on bad env")
+func TestWatchForeverBadFd(t *testing.T) {
+	if _, err := WatchForever(zfs.FileDescriptor(2)); err == nil {
+		t.Fatalf("expected error on fd<3")
 	}
 }
 
 // Sanity: the EOF-fired Died() should be observable from many
 // readers — closed channel semantics — without any extra coordination.
 func TestDiedIsBroadcastable(t *testing.T) {
-	_, write := attachAndExportFd(t, "W_FD")
-	w, err := Watch("W_FD")
+	fd, write := inheritPipeFd(t)
+	w, err := Watch(fd)
 	if err != nil {
 		t.Fatalf("Watch: %v", err)
 	}
@@ -266,8 +250,8 @@ func TestNilWatcherMethods(t *testing.T) {
 // Defensive: an EOF that fires before any goroutine has selected on
 // Died() should still latch — closing channels is sticky.
 func TestEOFLatchesBeforeSelect(t *testing.T) {
-	_, write := attachAndExportFd(t, "X_FD")
-	w, err := Watch("X_FD")
+	fd, write := inheritPipeFd(t)
+	w, err := Watch(fd)
 	if err != nil {
 		t.Fatalf("Watch: %v", err)
 	}
@@ -285,9 +269,9 @@ func TestEOFLatchesBeforeSelect(t *testing.T) {
 // underlying file from outside Stop) should be reported via errorLog
 // AND fire Died.
 func TestNonEOFReadError(t *testing.T) {
-	_, _ = attachAndExportFd(t, "Y_FD")
+	fd, _ := inheritPipeFd(t)
 	var lastErr atomic.Value
-	w, err := Watch("Y_FD", WithErrorLog(func(err error) { lastErr.Store(err) }))
+	w, err := Watch(fd, WithErrorLog(func(err error) { lastErr.Store(err) }))
 	if err != nil {
 		t.Fatalf("Watch: %v", err)
 	}

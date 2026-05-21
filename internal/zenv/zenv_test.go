@@ -1,4 +1,4 @@
-package zos
+package zenv
 
 import (
 	"os"
@@ -75,23 +75,32 @@ func TestEnvironmentVariables_Slice_keyValueShape(t *testing.T) {
 	}
 }
 
-func TestNewEnvironmentVariablesFromHost_emptyAllowDropsEverything(t *testing.T) {
-	t.Setenv("ZOSTEST_LEAK", "yes")
-	got := NewEnvironmentVariablesFromHost(nil)
+func TestFromHost_emptyAllowDropsEverything(t *testing.T) {
+	t.Setenv("ZENVTEST_LEAK", "yes")
+	got := FromHost(nil)
 	if len(got) != 0 {
 		t.Errorf("nil allow should drop everything: %v", got)
 	}
 }
 
-func TestNewEnvironmentVariablesFromHost_whitelistKeepsOnlyListed(t *testing.T) {
-	t.Setenv("ZOSTEST_KEEP", "yes")
-	t.Setenv("ZOSTEST_DROP", "leak")
-	got := NewEnvironmentVariablesFromHost([]string{"ZOSTEST_KEEP"})
-	if got["ZOSTEST_KEEP"] != "yes" {
+func TestFromHost_whitelistKeepsOnlyListed(t *testing.T) {
+	t.Setenv("ZENVTEST_KEEP", "yes")
+	t.Setenv("ZENVTEST_DROP", "leak")
+	got := FromHost([]string{"ZENVTEST_KEEP"})
+	if got["ZENVTEST_KEEP"] != "yes" {
 		t.Errorf("whitelisted var dropped: %v", got)
 	}
-	if _, ok := got["ZOSTEST_DROP"]; ok {
+	if _, ok := got["ZENVTEST_DROP"]; ok {
 		t.Errorf("non-whitelisted var leaked: %v", got)
 	}
 }
 
+func TestLookup(t *testing.T) {
+	t.Setenv("ZENVTEST_SET", "value")
+	if v, ok := Lookup("ZENVTEST_SET"); !ok || v != "value" {
+		t.Errorf("Lookup wrong: ok=%v v=%q", ok, v)
+	}
+	if _, ok := Lookup("ZENVTEST_UNSET_XYZ"); ok {
+		t.Errorf("Lookup on unset key should be ok=false")
+	}
+}

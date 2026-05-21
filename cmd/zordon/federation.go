@@ -16,8 +16,8 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
-	"github.com/piotrkowalczuk/zordon/internal/zordonhome"
 )
 
 // discoverChain returns every Alphasfile from the leaf up to (and
@@ -41,7 +41,7 @@ import (
 // naturally climbs to <X>/Alphasfile and adopts it as the leaf —
 // the worktree shares the project's file; only its Invocation
 // (state dir, hash) differs.
-func discoverChain() (chain []string, invocationFile string, err error) {
+func discoverChain(zordonHome string) (chain []string, invocationFile string, err error) {
 	invocationFile, err = walkUp()
 	if err != nil {
 		return nil, "", err
@@ -51,20 +51,20 @@ func discoverChain() (chain []string, invocationFile string, err error) {
 		return nil, "", err
 	}
 
-	// Bound = parent of ZORDON_HOME. Walk-up stops AT this dir
+	// Bound = parent of zordon home. Walk-up stops AT this dir
 	// (inclusive — we still scan the bound itself for an Alphasfile).
-	// Empty bound means no override available, so don't enforce
+	// Empty zordonHome means no override available, so don't enforce
 	// a stop here — let parent==dir filesystem-root catch handle it.
 	var bound string
-	if zh := zordonhome.Resolve(""); zh != "" {
-		bound = filepath.Dir(zh)
+	if zordonHome != "" {
+		bound = filepath.Dir(zordonHome)
 	}
 
 	var found []string
 	dir := filepath.Dir(invocationFile)
 	for {
 		cand := filepath.Join(dir, "Alphasfile")
-		if st, e := os.Stat(cand); e == nil && !st.IsDir() {
+		if st, e := zfs.Stat(cand); e == nil && !st.IsDir() {
 			found = append(found, cand)
 		}
 		if bound != "" && dir == bound {
@@ -81,9 +81,9 @@ func discoverChain() (chain []string, invocationFile string, err error) {
 	}
 	chain = found
 
-	if zh := zordonhome.Resolve(""); zh != "" {
-		global := filepath.Join(zh, "Alphasfile")
-		if st, e := os.Stat(global); e == nil && !st.IsDir() && !slices.Contains(chain, global) {
+	if zordonHome != "" {
+		global := filepath.Join(zordonHome, "Alphasfile")
+		if st, e := zfs.Stat(global); e == nil && !st.IsDir() && !slices.Contains(chain, global) {
 			chain = append([]string{global}, chain...)
 		}
 	}
@@ -105,12 +105,12 @@ type level struct {
 // The leaf's Invocation is derived from CWD (so a run from a worktree dir
 // gets that worktree's identity); parents are always "main", rooted at
 // their own directory.
-func resolveChain(ctx context.Context) ([]*level, error) {
-	chain, invFile, err := discoverChain()
+func resolveChain(ctx context.Context, zordonHome string, testCfg alphasfile.TestConfig) ([]*level, error) {
+	chain, invFile, err := discoverChain(zordonHome)
 	if err != nil {
 		return nil, err
 	}
-	cwd, err := os.Getwd()
+	cwd, err := zfs.Getwd()
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +121,7 @@ func resolveChain(ctx context.Context) ([]*level, error) {
 	out := make([]*level, 0, len(chain))
 	for _, afPath := range chain {
 		isInv := afPath == invFile
-		raw, err := os.ReadFile(afPath)
+		raw, err := zfs.Read(afPath)
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", afPath, err)
 		}
@@ -147,7 +147,7 @@ func resolveChain(ctx context.Context) ([]*level, error) {
 			st = resp.State
 		} else {
 			// Alpha not running; fallback to static evaluation.
-			if af, err := alphasfile.Open(afPath, inv, pctx); err == nil {
+			if af, err := alphasfile.Open(afPath, inv, pctx, testCfg); err == nil {
 				st = &protocol.StateInfo{
 					Services:  append([]*alphasfile.Service(nil), af.All()...),
 					Toolchain: af.Toolchain,
@@ -188,14 +188,14 @@ func appendUniqueStrings(dst, extra []string) []string {
 	return dst
 }
 
-func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent bool) error {
+func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent bool, zordonHome string, testCfg alphasfile.TestConfig) error {
 	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
 
-	chain, invFile, err := discoverChain()
+	chain, invFile, err := discoverChain(zordonHome)
 	if err != nil {
 		return err
 	}
-	cwd, err := os.Getwd()
+	cwd, err := zfs.Getwd()
 	if err != nil {
 		return err
 	}
@@ -228,7 +228,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		isInvocation := afPath == invFile
 		parentDotenv := append([]string{}, dotenvChain...)
 
-		raw, err := os.ReadFile(afPath)
+		raw, err := zfs.Read(afPath)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", afPath, err)
 		}
@@ -289,7 +289,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			}
 		}
 
-		af, err := alphasfile.Open(afPath, inv, parentCtx)
+		af, err := alphasfile.Open(afPath, inv, parentCtx, testCfg)
 		if err != nil {
 			return fmt.Errorf("%s: %w", afPath, err)
 		}
@@ -298,12 +298,12 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		if isInvocation && alphaLog != "" {
 			levelLog = alphaLog
 		}
-		if err := os.MkdirAll(filepath.Dir(levelLog), 0o755); err != nil {
+		if err := zfs.EnsureSharedDir(filepath.Dir(levelLog)); err != nil {
 			return fmt.Errorf("mkdir state dir: %w", err)
 		}
 		// The socket lives in inv.TmpDir ($TMPDIR/zordon-<FsHash>); alpha
 		// can't bind into a missing directory.
-		if err := os.MkdirAll(inv.TmpDir, 0o755); err != nil {
+		if err := zfs.EnsureSharedDir(inv.TmpDir); err != nil {
 			return fmt.Errorf("mkdir tmp dir: %w", err)
 		}
 
@@ -338,8 +338,8 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 // runSudo applies the idempotent privileged hooks for every running level
 // in the chain (steps pulled from each alpha's live state so snippets carry
 // the ports services actually bound to).
-func runSudo(ctx context.Context, log *zlog.Logger) error {
-	levels, err := resolveChain(ctx)
+func runSudo(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg alphasfile.TestConfig) error {
+	levels, err := resolveChain(ctx, zordonHome, testCfg)
 	if err != nil {
 		return err
 	}

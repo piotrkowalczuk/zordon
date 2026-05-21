@@ -10,7 +10,6 @@ package alphasfile
 import (
 	"fmt"
 	"math/big"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -22,7 +21,8 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/probe"
-	"github.com/piotrkowalczuk/zordon/internal/zos"
+	"github.com/piotrkowalczuk/zordon/internal/zenv"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 const (
@@ -57,15 +57,15 @@ type RuntimeConfig struct {
 	SpaceSeparated bool           `json:"space_separated,omitempty"`
 	Vars           map[string]any    `json:"vars,omitempty"`
 	Arguments      map[string]any    `json:"arguments,omitempty"`
-	Env            zos.EnvironmentVariables `json:"env,omitempty"`    // explicit env (overrides dotenv)
+	Env            zenv.EnvironmentVariables `json:"env,omitempty"`    // explicit env (overrides dotenv)
 	// Phase-scoped env. BuildEnv is injected only while zordon builds the
 	// service (go build / cargo install / bundle); RunEnv only into the
 	// running process; AgentEnv is an override layer applied on top (for
 	// build and run) when alpha was configured with --agent — lets an AI
 	// caller e.g. turn down log verbosity without touching the Alphasfile.
-	BuildEnv zos.EnvironmentVariables `json:"build_env,omitempty"`
-	RunEnv   zos.EnvironmentVariables `json:"run_env,omitempty"`
-	AgentEnv zos.EnvironmentVariables `json:"agent_env,omitempty"`
+	BuildEnv zenv.EnvironmentVariables `json:"build_env,omitempty"`
+	RunEnv   zenv.EnvironmentVariables `json:"run_env,omitempty"`
+	AgentEnv zenv.EnvironmentVariables `json:"agent_env,omitempty"`
 	Dotenv   []string          `json:"dotenv,omitempty"` // paths to .env files loaded before Env (in order)
 	Command        []string          `json:"command,omitempty"`
 	// After holds runtime-level barrier refs. alpha's per-service
@@ -181,7 +181,7 @@ func (m *ServiceMeta) Worktreeable() bool {
 // (vars / arguments / files / readiness / sudo are ignored). Pure, needs no
 // Invocation — the entry point for `zordon worktree`.
 func ParseServices(path string) ([]*ServiceMeta, error) {
-	b, err := os.ReadFile(path)
+	b, err := zfs.Read(path)
 	if err != nil {
 		return nil, fmt.Errorf("alphasfile read: %w", err)
 	}
@@ -225,7 +225,7 @@ func resolveSrcDir(base, dir string) string {
 		return ""
 	}
 	if strings.HasPrefix(dir, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
+		if home, err := zenv.UserHomeDir(); err == nil {
 			return filepath.Join(home, dir[2:])
 		}
 	}
@@ -387,7 +387,7 @@ type ProvisionStep struct {
 	Check  string            `json:"check,omitempty"`
 	Cmd    string            `json:"cmd"`
 	Verify string            `json:"verify,omitempty"`
-	Env    zos.EnvironmentVariables `json:"env,omitempty"`
+	Env    zenv.EnvironmentVariables `json:"env,omitempty"`
 	// After holds the resolved barrier refs ("service.go.db@ready",
 	// "service.go.api.runtime.provision.create-tables@success", ...).
 	// alpha parses these at bringup and selects on (target, terminal-
@@ -464,7 +464,7 @@ type ToolchainConfig struct {
 	// All run through `mise exec <lang>@<version> -- ...` so they
 	// land in the right version's tool world.
 	Tools map[string]string        `json:"tools,omitempty"`
-	Env   zos.EnvironmentVariables `json:"env,omitempty"`
+	Env   zenv.EnvironmentVariables `json:"env,omitempty"`
 }
 
 func (af *Alphasfile) All() []*Service { return af.Services }
@@ -694,18 +694,22 @@ type fileBlock struct {
 // invocation identity (hash, tmp dir, per-service checkout paths); parent
 // pre-seeds the flat service namespace with values resolved by Alphasfiles
 // higher in a federation chain (nil for a standalone file).
-func Open(path string, inv *invocation.Invocation, parent *ParentContext) (*Alphasfile, error) {
-	b, err := os.ReadFile(path)
+func Open(path string, inv *invocation.Invocation, parent *ParentContext, testCfg TestConfig) (*Alphasfile, error) {
+	b, err := zfs.Read(path)
 	if err != nil {
 		return nil, fmt.Errorf("alphasfile read: %w", err)
 	}
-	return Compile(path, b, inv, parent)
+	return Compile(path, b, inv, parent, testCfg)
 }
 
 // Compile is Open without filesystem I/O: it resolves the given Alphasfile
 // source bytes. Pure (no process spawn, no clone) — the unit-test entry
 // point for the whole resolution pipeline. name is only used in diagnostics.
-func Compile(name string, src []byte, inv *invocation.Invocation, parent *ParentContext) (*Alphasfile, error) {
+//
+// testCfg gates the test:: HCL functions; the zero value (production
+// default) leaves them erroring out so a non-harness Alphasfile that
+// uses test::log() fails fast.
+func Compile(name string, src []byte, inv *invocation.Invocation, parent *ParentContext, testCfg TestConfig) (*Alphasfile, error) {
 	parser := hclparse.NewParser()
 	file, diags := parser.ParseHCL(src, name)
 	if diags.HasErrors() {
@@ -715,7 +719,7 @@ func Compile(name string, src []byte, inv *invocation.Invocation, parent *Parent
 	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
 		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
 	}
-	return resolve(name, &root, inv, parent)
+	return resolve(name, &root, inv, parent, testCfg)
 }
 
 // ParentContext carries what a federation child needs from its parents:

@@ -13,12 +13,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/piotrkowalczuk/zordon/internal/zordonhome"
+	"github.com/piotrkowalczuk/zordon/internal/zenv"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 type Kind string
@@ -40,26 +40,22 @@ type Primary struct {
 	Ref string
 	// Worktree contains sparse checkout configuration.
 	Worktree *Worktree
+	// zordonHome is the host-wide state root resolved at startup. Used
+	// to compute bare-clone paths (<zordonHome>/src/<repo>.git) without
+	// reading the env in business logic.
+	zordonHome string
 }
 
 type Worktree struct {
 	Sparse []string
 }
 
-// Home returns the on-disk root for zordon-managed source — bare
-// git mirrors live under <Home()>/src/<repo>.git. Honors
-// $ZORDON_HOME so the test harness can redirect; falls back to
-// <UserHomeDir>/.zordon in production.
-func Home() string {
-	if h := zordonhome.Resolve(""); h != "" {
-		return h
-	}
-	return ".zordon"
-}
-
 // NewPrimary builds a Primary from a service's git/dir/ref fields. git and
 // dir are mutually exclusive; both empty ⇒ KindNone (not worktree-able).
-func NewPrimary(git, dir, ref string, worktree *Worktree) (Primary, error) {
+// zordonHome is the resolved host-wide state root (caller's --home /
+// ZORDON_HOME, defaulted to ~/.zordon at startup) used for bare-clone
+// paths; pass "" only when no git primary is involved.
+func NewPrimary(zordonHome, git, dir, ref string, worktree *Worktree) (Primary, error) {
 	switch {
 	case git != "" && dir != "":
 		return Primary{}, errors.New("service declares both git and dir; pick one primary")
@@ -68,15 +64,15 @@ func NewPrimary(git, dir, ref string, worktree *Worktree) (Primary, error) {
 		if err != nil {
 			return Primary{}, err
 		}
-		return Primary{Kind: KindGit, Repo: repo, Ref: ref, Worktree: worktree}, nil
+		return Primary{Kind: KindGit, Repo: repo, Ref: ref, Worktree: worktree, zordonHome: zordonHome}, nil
 	case dir != "":
 		abs, err := expandAbs(dir)
 		if err != nil {
 			return Primary{}, err
 		}
-		return Primary{Kind: KindDir, Repo: abs, Ref: ref, Worktree: worktree}, nil
+		return Primary{Kind: KindDir, Repo: abs, Ref: ref, Worktree: worktree, zordonHome: zordonHome}, nil
 	default:
-		return Primary{Kind: KindNone, Ref: ref, Worktree: worktree}, nil
+		return Primary{Kind: KindNone, Ref: ref, Worktree: worktree, zordonHome: zordonHome}, nil
 	}
 }
 
@@ -101,7 +97,7 @@ func normalizeGit(git string) (string, error) {
 
 func expandAbs(dir string) (string, error) {
 	if strings.HasPrefix(dir, "~") {
-		home, err := os.UserHomeDir()
+		home, err := zenv.UserHomeDir()
 		if err != nil {
 			return "", err
 		}
@@ -113,8 +109,16 @@ func expandAbs(dir string) (string, error) {
 func (p Primary) cloneURL() string { return "https://" + p.Repo + ".git" }
 
 // BarePath is where the zordon-owned bare primary lives (KindGit only).
+// The base dir is resolved at primary construction (see NewPrimary).
+// Falls back to ".zordon" if zordonHome wasn't supplied — keeps the
+// previous degraded-mode behavior for tests that construct a Primary
+// without a real home.
 func (p Primary) BarePath() string {
-	return filepath.Join(Home(), "src", p.Repo) + ".git"
+	base := p.zordonHome
+	if base == "" {
+		base = ".zordon"
+	}
+	return filepath.Join(base, "src", p.Repo) + ".git"
 }
 
 // primaryPath is the git dir we run `git worktree` against.
@@ -162,16 +166,16 @@ func (p Primary) Ensure(ctx context.Context, run Runner) error {
 		// because --filter only applies to repos that are already partial
 		// clones. Faster and simpler: wipe and re-clone as a partial clone
 		// (metadata-only, blobs lazy on first checkout).
-		if _, err := os.Stat(bare); err == nil {
+		if zfs.Exists(bare) {
 			if out, _ := exec.CommandContext(ctx, "git", "-C", bare,
 				"rev-parse", "--is-shallow-repository").Output(); strings.TrimSpace(string(out)) == "true" {
-				if err := os.RemoveAll(bare); err != nil {
+				if err := zfs.RemoveTree(bare); err != nil {
 					return fmt.Errorf("remove stale shallow bare %s: %w", bare, err)
 				}
 			}
 		}
-		if _, err := os.Stat(bare); os.IsNotExist(err) {
-			if err := os.MkdirAll(filepath.Dir(bare), 0o750); err != nil {
+		if _, err := zfs.Stat(bare); zfs.IsMissingErr(err) {
+			if err := zfs.EnsureDir(filepath.Dir(bare)); err != nil {
 				return fmt.Errorf("mkdir bare parent: %w", err)
 			}
 			if err := run(ctx, exec.CommandContext(ctx, "git", "clone",
@@ -232,10 +236,10 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 	if run == nil {
 		return errors.New("source.AddWorktree: nil runner")
 	}
-	if _, err := os.Stat(filepath.Join(dest, ".git")); err == nil {
+	if zfs.Exists(filepath.Join(dest, ".git")) {
 		return nil // existing worktree — reuse
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
+	if err := zfs.EnsureDir(filepath.Dir(dest)); err != nil {
 		return fmt.Errorf("mkdir worktree parent: %w", err)
 	}
 	gitDir := p.primaryPath()
@@ -300,5 +304,5 @@ func (p Primary) RemoveWorktree(ctx context.Context, dest string, run Runner) er
 	if gd := p.primaryPath(); gd != "" {
 		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gd, "worktree", "remove", "--force", dest))
 	}
-	return os.RemoveAll(dest)
+	return zfs.RemoveTree(dest)
 }

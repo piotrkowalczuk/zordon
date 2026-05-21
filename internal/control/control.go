@@ -8,12 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 // Socket/state paths are now derived per-invocation by internal/invocation
@@ -28,22 +27,7 @@ import (
 // Federation acquires locks strictly top-down (root → invocation), a
 // consistent global order, so concurrent zordon invocations can't deadlock.
 func Lock(stateDir string) (func(), error) {
-	if err := os.MkdirAll(stateDir, 0o750); err != nil {
-		return nil, fmt.Errorf("mkdir state dir: %w", err)
-	}
-	lockPath := filepath.Join(stateDir, "start.lock")
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open lock %s: %w", lockPath, err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("flock %s: %w", lockPath, err)
-	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
-	}, nil
+	return zfs.AcquireLock(stateDir, "start")
 }
 
 // Listen binds a unix socket at path with 0600 permissions.
@@ -63,9 +47,10 @@ func Listen(path string) (net.Listener, error) {
 
 // unlinkStale removes a socket file if and only if no one is listening on it.
 func unlinkStale(path string) error {
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+	if zfs.Missing(path) {
 		return nil
-	} else if err != nil {
+	}
+	if _, err := zfs.Stat(path); err != nil {
 		return fmt.Errorf("stat %s: %w", path, err)
 	}
 	c, err := net.DialTimeout("unix", path, 200*time.Millisecond)
@@ -73,10 +58,10 @@ func unlinkStale(path string) error {
 		_ = c.Close()
 		return fmt.Errorf("%s is already in use by another alpha", path)
 	}
-	return os.Remove(path)
+	return zfs.RemoveIfPresent(path)
 }
 
-// Dial tries to connect with a short timeout. Returns os.ErrNotExist or
+// Dial tries to connect with a short timeout. Returns ErrNotExist or
 // connection-refused-class errors verbatim so the caller can decide to spawn.
 func Dial(path string, timeout time.Duration) (net.Conn, error) {
 	if timeout <= 0 {
@@ -90,7 +75,7 @@ func IsNotRunning(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, os.ErrNotExist) {
+	if zfs.IsMissingErr(err) {
 		return true
 	}
 	var opErr *net.OpError

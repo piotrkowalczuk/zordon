@@ -31,10 +31,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 // Entry is one row in the registry. The (FsHash, Service) pair is the
@@ -224,25 +225,17 @@ func openLocked(zordonHome string) (string, func(), error) {
 	if zordonHome == "" {
 		return "", nil, errors.New("registry: empty zordon home")
 	}
-	if err := os.MkdirAll(zordonHome, 0o750); err != nil {
-		return "", nil, fmt.Errorf("registry: mkdir %s: %w", zordonHome, err)
-	}
-	lockPath := filepath.Join(zordonHome, "registry.lock")
-	lf, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	release, err := zfs.AcquireLock(zordonHome, "registry")
 	if err != nil {
-		return "", nil, fmt.Errorf("registry: open lock: %w", err)
+		return "", nil, fmt.Errorf("registry: %w", err)
 	}
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
-		_ = lf.Close()
-		return "", nil, fmt.Errorf("registry: flock: %w", err)
-	}
-	return filepath.Join(zordonHome, "registry.json"), func() { _ = lf.Close() }, nil
+	return filepath.Join(zordonHome, "registry.json"), release, nil
 }
 
 func readEntries(path string) ([]Entry, error) {
-	data, err := os.ReadFile(path)
+	data, err := zfs.Read(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if zfs.IsMissingErr(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("registry: read: %w", err)
@@ -257,34 +250,16 @@ func readEntries(path string) ([]Entry, error) {
 	return entries, nil
 }
 
-// writeEntries serializes via temp+rename so an os.WriteFile crash
-// mid-flight can never leave a half-truncated registry. Sync to
-// disk before rename for the same reason.
+// writeEntries serializes via zfs.AtomicWrite (temp+sync+rename in the
+// same dir) so a crash mid-flight can never leave a half-truncated
+// registry — only the previous good state or the new good state.
 func writeEntries(path string, entries []Entry) error {
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
 		return fmt.Errorf("registry: marshal: %w", err)
 	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "registry.json.tmp.*")
-	if err != nil {
-		return fmt.Errorf("registry: tempfile: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath) // no-op if rename succeeded
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("registry: write: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("registry: sync: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("registry: close: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("registry: rename: %w", err)
+	if err := zfs.AtomicWrite(path, data); err != nil {
+		return fmt.Errorf("registry: %w", err)
 	}
 	return nil
 }

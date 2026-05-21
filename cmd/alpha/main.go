@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,16 +24,17 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/barrier"
 	"github.com/piotrkowalczuk/zordon/internal/control"
+	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/lifecycle"
 	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/registry"
 	"github.com/piotrkowalczuk/zordon/internal/source"
-	"github.com/piotrkowalczuk/zordon/internal/zordonhome"
 	"github.com/piotrkowalczuk/zordon/internal/tools"
+	"github.com/piotrkowalczuk/zordon/internal/zenv"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
-	"github.com/piotrkowalczuk/zordon/internal/zos"
 )
 
 // toolchainEnv blocks until the materialized toolchain entity for the
@@ -113,7 +113,7 @@ func fsHashFromSocket(sockPath string) string {
 }
 
 // relookupPath re-resolves cmd.Path against cmd.Env's PATH instead
-// of whatever os.Environ()'s PATH was when exec.Command first called
+// of whatever PATH was when exec.Command first called
 // LookPath. Needed when:
 //
 //  1. exec.Command(name, ...) was constructed with a bare program
@@ -160,7 +160,7 @@ func relookupPath(cmd *exec.Cmd) error {
 			continue
 		}
 		candidate := filepath.Join(dir, name)
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+		if zfs.IsExecutableFile(candidate) {
 			cmd.Path = candidate
 			// exec.Command cached a LookPath error against alpha's PATH;
 			// Start() returns it even after we fix Path. Clear it now that
@@ -220,17 +220,35 @@ func closeParentW(sc *serviceCtx) {
 // malicious "tommy" into every spawn. Returns "" when neither resolves;
 // the caller logs loudly and falls back to spawning the service
 // unwrapped (degraded — orphan guarantee lost — but bringup proceeds).
-func resolveTommyBin() string {
-	if v := os.Getenv("ZORDON_TOMMY_BIN"); v != "" {
-		return v
+func resolveTommyBin(override string) string {
+	if override != "" {
+		return override
 	}
 	if exe, err := os.Executable(); err == nil {
 		cand := filepath.Join(filepath.Dir(exe), "tommy")
-		if info, err := os.Stat(cand); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+		if zfs.IsExecutableFile(cand) {
 			return cand
 		}
 	}
 	return ""
+}
+
+// runConfig is the single typed config carried by `alpha run`. Every
+// value is populated at flag-parse time from a CLI flag, an env var
+// (auto-mapped via ff.WithEnvVarPrefix("ZORDON") — `--ready-fd` reads
+// `ZORDON_READY_FD`, etc.), or the documented default. After main()
+// nothing in the codebase reads the environment again — values flow
+// down by parameter.
+type runConfig struct {
+	SockPath      string
+	LogFile       string
+	Stabilization time.Duration
+	ShutdownGrace time.Duration
+	Home          zfs.DirName             // resolved zordon home (--home → ZORDON_HOME; "" ⇒ ~/.zordon)
+	TommyBin      zfs.DirName             // tommy wrapper override (--tommy-bin → ZORDON_TOMMY_BIN)
+	Worktree      invocation.WorktreeName // which worktree this alpha runs for (--worktree → ZORDON_WORKTREE)
+	ReadyFD       zfs.FileDescriptor // parent handshake fd (--ready-fd → ZORDON_READY_FD; 0 ⇒ no handshake)
+	ParentFD      zfs.FileDescriptor // parent-death pipe fd (--parent-fd → ZORDON_PARENT_FD; 0 ⇒ standalone)
 }
 
 func main() {
@@ -246,19 +264,37 @@ func main() {
 	sockPath := runFlags.StringLong("socket", "", "control socket path (required; usually injected by zordon)")
 	stabilization := runFlags.DurationLong("stabilization", 1*time.Second, "how long a service must stay alive after spawn to be considered ready")
 	shutdownGrace := runFlags.DurationLong("shutdown-grace", 2*time.Second, "time given to children to exit on SIGTERM before SIGKILL")
-	zordonHome := runFlags.StringLong("zordon-home", "", "directory holding shared mise install and toolchain cache (overrides $ZORDON_HOME; defaults to ~/.zordon)")
+	var home, tommyBin zfs.DirName
+	var worktree invocation.WorktreeName
+	runFlags.Value(0, "home", &home, "directory holding shared mise install and toolchain cache (env: ZORDON_HOME; defaults to ~/.zordon)")
+	runFlags.Value(0, "tommy-bin", &tommyBin, "tommy wrapper binary path (env: ZORDON_TOMMY_BIN; defaults to alpha-sibling lookup)")
+	runFlags.Value(0, "worktree", &worktree, "worktree name this alpha runs for (env: ZORDON_WORKTREE)")
+	var readyFD, parentFD zfs.FileDescriptor
+	runFlags.Value(0, "ready-fd", &readyFD, "fd to signal READY=1 on once listening (env: ZORDON_READY_FD; 0 ⇒ no handshake)")
+	runFlags.Value(0, "parent-fd", &parentFD, "inherited read-end fd of the parent-death pipe (env: ZORDON_PARENT_FD; 0 ⇒ standalone)")
 	runCmd := &ff.Command{
 		Name:      "run",
 		Usage:     "alpha run --socket <path> [--log-file <path>]",
-		ShortHelp: "run the alpha supervisor; signals readiness on $ZORDON_READY_FD if set",
+		ShortHelp: "run the alpha supervisor; signals readiness on --ready-fd if set",
 		Flags:     runFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runAlpha(ctx, *sockPath, *logFile, zordonhome.Resolve(*zordonHome), *stabilization, *shutdownGrace)
+			return runAlpha(ctx, runConfig{
+				SockPath:      *sockPath,
+				LogFile:       *logFile,
+				Stabilization: *stabilization,
+				ShutdownGrace: *shutdownGrace,
+				Home:          zfs.DirName(zfs.ZordonHome(home.Path())),
+				TommyBin:      tommyBin,
+				Worktree:      worktree,
+				ReadyFD:       readyFD,
+				ParentFD:      parentFD,
+			})
 		},
 	}
 	rootCmd.Subcommands = append(rootCmd.Subcommands, runCmd)
 
-	err := rootCmd.ParseAndRun(context.Background(), os.Args[1:])
+	err := rootCmd.ParseAndRun(context.Background(), os.Args[1:],
+		ff.WithEnvVarPrefix("ZORDON"))
 	switch {
 	case errors.Is(err, ff.ErrHelp), errors.Is(err, ff.ErrNoExec):
 		fmt.Fprintln(os.Stderr, ffhelp.Command(rootCmd))
@@ -269,6 +305,7 @@ func main() {
 	}
 }
 
+
 type alphaState struct {
 	mu             sync.RWMutex
 	startedAt      time.Time
@@ -277,6 +314,7 @@ type alphaState struct {
 	cfgHash        string   // manifest identity (Alphasfile+parent ctx); drives drift detection
 	zordonHome     string   // ~/.zordon — host-wide registry root (empty ⇒ registry disabled)
 	tommyBin       string   // path to the tommy wrapper interposed before every service (empty ⇒ spawn unwrapped)
+	worktree       string   // worktree name this alpha runs for (== invocation.MainWorktree by default)
 	parentDotenv   []string // file-level dotenv paths inherited from federation parents
 	agentMode      bool     // configured via `zordon --agent`: apply agent{} env overlay
 	config         *alphasfile.Alphasfile
@@ -499,10 +537,10 @@ type toolchainCtx struct {
 	// env is the result of `mise env --json <lang>@<version>`, set
 	// before Reach("ready"). Read only after waiting on the ready
 	// barrier — the write happens-before that close.
-	env zos.EnvironmentVariables
+	env zenv.EnvironmentVariables
 	// userEnv is the Alphasfile-declared overlay (`toolchain { <lang>
 	// { env = {...} } }`). Set at allocation; never mutated.
-	userEnv zos.EnvironmentVariables
+	userEnv zenv.EnvironmentVariables
 	// tools is the name→version map of language-native tools to
 	// install into this pinned interpreter (bundler@2.5.3, dlv@..., etc).
 	tools     map[string]string
@@ -510,7 +548,7 @@ type toolchainCtx struct {
 	doneBar   *barrier.Barrier // Any(ready, failed)
 }
 
-func newToolchainCtx(lang, version string, toolsMap map[string]string, userEnv zos.EnvironmentVariables) *toolchainCtx {
+func newToolchainCtx(lang, version string, toolsMap map[string]string, userEnv zenv.EnvironmentVariables) *toolchainCtx {
 	tc := &toolchainCtx{
 		lang:      lang,
 		version:   version,
@@ -902,7 +940,7 @@ func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace
 	if parentSvc != nil {
 		parentEnv = phaseEnv(parentSvc, parentSvc.Runtime.RunEnv, agentMode)
 	}
-	env := zos.NewEnvironmentVariablesFromHost(sysenv).Join(tcEnv, parentEnv, pc.step.Env).Slice()
+	env := zenv.FromHost(sysenv).Join(tcEnv, parentEnv, pc.step.Env).Slice()
 	cwd := provisionCwd(parentSvc, alphasfileDir)
 
 	// Stream labels are just the phase — the canonical entity ID is
@@ -1158,7 +1196,7 @@ func (s *alphaState) shutdownAll(log *zlog.Logger) {
 	}
 
 	for _, p := range files {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		if err := zfs.RemoveIfPresent(p); err != nil {
 			log.Error("alpha", "unlink %s: %v", p, err)
 		} else {
 			log.Info("alpha", "removed file %s", p)
@@ -1221,25 +1259,11 @@ func materializeFiles(files []*alphasfile.File, state *alphaState, log *zlog.Log
 			return fmt.Errorf("file %q has empty path", f.Name)
 		}
 		dir := filepath.Dir(f.Path)
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return fmt.Errorf("mkdir %s: %w", dir, err)
+		if err := zfs.EnsureDir(dir); err != nil {
+			return err
 		}
-		tmp, err := os.CreateTemp(dir, ".zordon-"+filepath.Base(f.Path)+".*")
-		if err != nil {
-			return fmt.Errorf("temp file in %s: %w", dir, err)
-		}
-		if _, err := tmp.WriteString(f.Body); err != nil {
-			_ = tmp.Close()
-			_ = os.Remove(tmp.Name())
-			return fmt.Errorf("write %s: %w", f.Path, err)
-		}
-		if err := tmp.Close(); err != nil {
-			_ = os.Remove(tmp.Name())
-			return fmt.Errorf("close %s: %w", tmp.Name(), err)
-		}
-		if err := os.Rename(tmp.Name(), f.Path); err != nil {
-			_ = os.Remove(tmp.Name())
-			return fmt.Errorf("rename %s -> %s: %w", tmp.Name(), f.Path, err)
+		if err := zfs.AtomicWrite(f.Path, []byte(f.Body)); err != nil {
+			return err
 		}
 		state.addFile(f.Path)
 		log.Info("alpha", "wrote file %s (%d bytes)", f.Path, len(f.Body))
@@ -1284,10 +1308,15 @@ type bringupConfig struct {
 	shutdownGrace time.Duration
 }
 
-func runAlpha(_ context.Context, sockPath, logPath, zordonHome string, stabilization, shutdownGrace time.Duration) error {
-	if sockPath == "" {
+func runAlpha(_ context.Context, rc runConfig) error {
+	if rc.SockPath == "" {
 		return errors.New("--socket is required")
 	}
+	sockPath := rc.SockPath
+	logPath := rc.LogFile
+	zordonHome := rc.Home.Path()
+	stabilization := rc.Stabilization
+	shutdownGrace := rc.ShutdownGrace
 
 	// Drain SIGPIPE before anything else writes to stderr. Once zordon
 	// (our spawner) dies, the stderr it inherited to us has no reader;
@@ -1305,7 +1334,7 @@ func runAlpha(_ context.Context, sockPath, logPath, zordonHome string, stabiliza
 	//
 	// The reaction goroutine cannot run yet — alphaState isn't built —
 	// so we just capture the watcher and wire it in below.
-	parentW, err := parentwatch.Watch("ZORDON_PARENT_FD",
+	parentW, err := parentwatch.Watch(rc.ParentFD,
 		parentwatch.WithErrorLog(func(err error) {
 			fmt.Fprintf(os.Stderr, "alpha: parentwatch: %v\n", err)
 		}))
@@ -1313,7 +1342,7 @@ func runAlpha(_ context.Context, sockPath, logPath, zordonHome string, stabiliza
 		return fmt.Errorf("parentwatch: %w", err)
 	}
 
-	logF, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	logF, err := zfs.OpenAppendLog(logPath)
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
 	}
@@ -1342,9 +1371,9 @@ func runAlpha(_ context.Context, sockPath, logPath, zordonHome string, stabiliza
 	defer ln.Close()
 	log.Info("alpha", "listening on %s", sockPath)
 
-	tommyBin := resolveTommyBin()
+	tommyBin := resolveTommyBin(rc.TommyBin.Path())
 	if tommyBin == "" {
-		log.Error("alpha", "tommy wrapper not found ($ZORDON_TOMMY_BIN / alpha sibling / $PATH) — services run UNWRAPPED; an alpha SIGKILL/OOM will orphan them")
+		log.Error("alpha", "tommy wrapper not found (--tommy-bin / alpha sibling / $PATH) — services run UNWRAPPED; an alpha SIGKILL/OOM will orphan them")
 	} else {
 		log.Info("alpha", "tommy wrapper: %s", tommyBin)
 	}
@@ -1354,6 +1383,7 @@ func runAlpha(_ context.Context, sockPath, logPath, zordonHome string, stabiliza
 		fsHash:     fsHash,
 		zordonHome: zordonHome,
 		tommyBin:   tommyBin,
+		worktree:   rc.Worktree.Name(),
 		shutdownCh: make(chan struct{}),
 	}
 	cfg := bringupConfig{stabilization: stabilization, shutdownGrace: shutdownGrace}
@@ -1382,7 +1412,7 @@ func runAlpha(_ context.Context, sockPath, logPath, zordonHome string, stabiliza
 		}
 	}()
 
-	if err := signalReady(); err != nil {
+	if err := signalReady(rc.ReadyFD.Int()); err != nil {
 		log.Error("alpha", "ready signal: %v", err)
 	}
 
@@ -1422,21 +1452,19 @@ func runAlpha(_ context.Context, sockPath, logPath, zordonHome string, stabiliza
 	return nil
 }
 
-func signalReady() error {
-	raw := os.Getenv("ZORDON_READY_FD")
-	if raw == "" {
+func signalReady(fd int) error {
+	if fd == 0 {
 		return nil
 	}
-	fd, err := strconv.Atoi(raw)
-	if err != nil || fd < 3 {
-		return fmt.Errorf("bad ZORDON_READY_FD=%q", raw)
+	if fd < 3 {
+		return fmt.Errorf("bad --ready-fd=%d (below first ExtraFiles slot)", fd)
 	}
 	f := os.NewFile(uintptr(fd), "zordon-ready")
 	if f == nil {
 		return fmt.Errorf("fd %d not open", fd)
 	}
 	defer f.Close()
-	_, err = fmt.Fprintln(f, "READY=1")
+	_, err := fmt.Fprintln(f, "READY=1")
 	return err
 }
 
@@ -1809,10 +1837,10 @@ func bringupAndSupervise(svc *alphasfile.Service, sc *serviceCtx, state *alphaSt
 	if primaryKey := primaryKeyOf(svc); primaryKey != "" {
 		mu := state.primaryLockFor(primaryKey)
 		mu.Lock()
-		repoDir, err = prepareWorktree(svc, name, stream, log)
+		repoDir, err = prepareWorktree(svc, name, state.worktree, state.zordonHome, stream, log)
 		mu.Unlock()
 	} else {
-		repoDir, err = prepareWorktree(svc, name, stream, log)
+		repoDir, err = prepareWorktree(svc, name, state.worktree, state.zordonHome, stream, log)
 	}
 	if err != nil {
 		prepareFail(err)
@@ -2210,10 +2238,10 @@ func streamLines(name, kind string, r io.Reader, stream *safeEncoder, log *zlog.
 //
 //   NewEnvironmentVariablesFromHost(allow) → toolchain → dotenv files → env
 //
-// Thin wrapper over zos.EnvironmentVariables.Join / .JoinFile so the
+// Thin wrapper over zenv.EnvironmentVariables.Join / .JoinFile so the
 // spawn sites don't have to spell out the chain four times.
 func serviceEnv(envFiles []string, env map[string]string, allow []string, toolchain map[string]string) []string {
-	return zos.NewEnvironmentVariablesFromHost(allow).
+	return zenv.FromHost(allow).
 		Join(toolchain).
 		JoinFile(envFiles...).
 		Join(env).
@@ -2224,11 +2252,11 @@ func serviceEnv(envFiles []string, env map[string]string, allow []string, toolch
 // `env {}` base, then the phase overlay (build/runtime), then the
 // `agent {}` overlay when alpha runs in --agent mode (each later layer
 // overrides earlier keys).
-func phaseEnv(svc *alphasfile.Service, phase zos.EnvironmentVariables, agent bool) zos.EnvironmentVariables {
+func phaseEnv(svc *alphasfile.Service, phase zenv.EnvironmentVariables, agent bool) zenv.EnvironmentVariables {
 	if svc.Runtime == nil {
 		return nil
 	}
-	var ag zos.EnvironmentVariables
+	var ag zenv.EnvironmentVariables
 	if agent {
 		ag = svc.Runtime.AgentEnv
 	}
@@ -2449,7 +2477,7 @@ func detectNodePM(root string) nodePM {
 // PM name (everything before '@'); the version part is handled by
 // Corepack at runtime via the shim, not by zordon.
 func readPackageManagerField(packageJSON string) string {
-	b, err := os.ReadFile(packageJSON)
+	b, err := zfs.Read(packageJSON)
 	if err != nil {
 		return ""
 	}
@@ -2509,7 +2537,7 @@ func nodeInstallCmd(pm nodePM, root string) string {
 }
 
 func exists(path string) bool {
-	_, err := os.Stat(path)
+	_, err := zfs.Stat(path)
 	return err == nil
 }
 
@@ -2524,7 +2552,7 @@ func exists(path string) bool {
 // explicit cmd than guess wrongly (e.g. picking `index.js` because it
 // happens to exist).
 func inferNodeRunCmd(root string) ([]string, error) {
-	b, err := os.ReadFile(filepath.Join(root, "package.json"))
+	b, err := zfs.Read(filepath.Join(root, "package.json"))
 	if err != nil {
 		return nil, fmt.Errorf("read package.json (%s): %w — declare runtime { cmd = [...] }", root, err)
 	}
@@ -2572,7 +2600,7 @@ func inferNodeRunCmd(root string) ([]string, error) {
 // = has a git or dir primary; crate/prebuilt services return "" here
 // and let the subsequent build step (`cargo install <crate>` /
 // `go install ...`) materialize the binary into bin dir.
-func prepareWorktree(svc *alphasfile.Service, name string, stream *safeEncoder, log *zlog.Logger) (string, error) {
+func prepareWorktree(svc *alphasfile.Service, name, wtName, zordonHome string, stream *safeEncoder, log *zlog.Logger) (string, error) {
 	if svc.Package == nil || !svc.Buildable() {
 		return "", nil
 	}
@@ -2604,7 +2632,7 @@ func prepareWorktree(svc *alphasfile.Service, name string, stream *safeEncoder, 
 		if svc.Package.Worktree != nil {
 			worktree = &source.Worktree{Sparse: svc.Package.Worktree.Sparse}
 		}
-		p, err := source.NewPrimary(svc.Package.Git, svc.Package.Src, svc.Ref(), worktree)
+		p, err := source.NewPrimary(zordonHome, svc.Package.Git, svc.Package.Src, svc.Ref(), worktree)
 		if err != nil {
 			return "", err
 		}
@@ -2612,15 +2640,11 @@ func prepareWorktree(svc *alphasfile.Service, name string, stream *safeEncoder, 
 		if err := p.Ensure(ctx, runner); err != nil {
 			return "", fmt.Errorf("ensure primary: %w", err)
 		}
-		wt := os.Getenv("ZORDON_WORKTREE")
-		if wt == "" {
-			wt = "main"
-		}
 		// Branch is per (worktree, service): a monorepo where several
 		// services share one primary repo would otherwise all want
 		// `zordon/<wt>` and the 2nd `git worktree add` would fail with
 		// "branch already checked out". Slashes are valid in ref names.
-		branch := "zordon/" + wt + "/" + name
+		branch := "zordon/" + wtName + "/" + name
 		log.Info("alpha", "prepare %s: worktree -> %s (branch %s)", name, dest, branch)
 		if err := p.AddWorktree(ctx, dest, branch, runner); err != nil {
 			return "", fmt.Errorf("git worktree: %w", err)
@@ -2649,7 +2673,7 @@ func prepareBuild(svc *alphasfile.Service, name, dest string, agent bool, state 
 		binDir = svc.Runtime.BinDir
 	}
 	if binDir != "" {
-		if err := os.MkdirAll(binDir, 0o750); err != nil {
+		if err := zfs.EnsureDir(binDir); err != nil {
 			return fmt.Errorf("mkdir bin dir: %w", err)
 		}
 	}

@@ -21,7 +21,7 @@ func TestExampleEnvResolves(t *testing.T) {
 		Worktree: invocation.MainWorktree,
 		StateDir: "/repo/examples/env/.zordon/worktrees/main",
 	}
-	af, err := Compile("/repo/examples/env/Alphasfile", b, iv, nil)
+	af, err := Compile("/repo/examples/env/Alphasfile", b, iv, nil, TestConfig{})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

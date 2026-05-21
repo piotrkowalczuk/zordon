@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,11 +23,11 @@ import (
 //
 // (anything containing "{{" is treated as a template). Scalars print
 // raw; maps/slices print as compact JSON so the output is scriptable.
-func runGet(ctx context.Context, args []string) error {
+func runGet(ctx context.Context, args []string, zordonHome string, testCfg alphasfile.TestConfig) error {
 	if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
 		return errors.New("usage: zordon get <expr>  (e.g. service.go.prometheus.vars.address)")
 	}
-	levels, err := resolveChain(ctx)
+	levels, err := resolveChain(ctx, zordonHome, testCfg)
 	if err != nil {
 		return err
 	}

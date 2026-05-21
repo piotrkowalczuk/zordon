@@ -8,10 +8,8 @@ import (
 )
 
 func TestTestLogFunc_returnsAppendSnippetWhenHarnessSet(t *testing.T) {
-	t.Setenv("ZORDON_TEST_HARNESS", "1")
-	t.Setenv("ZORDON_TEST_LOG", "/tmp/observed.log")
-
-	got, err := testLogFunc().Call([]cty.Value{cty.StringVal("p1-ran")})
+	cfg := TestConfig{Harness: true, LogPath: "/tmp/observed.log"}
+	got, err := testLogFunc(cfg).Call([]cty.Value{cty.StringVal("p1-ran")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,15 +25,13 @@ func TestTestLogFunc_returnsAppendSnippetWhenHarnessSet(t *testing.T) {
 	}
 }
 
-// REGRESSION: without ZORDON_TEST_LOG the snippet must be a shell no-op
+// REGRESSION: without a log path the snippet must be a shell no-op
 // — not unset, not the literal env-var expansion. Provisions that
 // chain on `check && cmd` would break if test::log returned `:` (empty
 // command) since some shells treat that specially with `&&`.
 func TestTestLogFunc_noopSnippetWhenLogUnset(t *testing.T) {
-	t.Setenv("ZORDON_TEST_HARNESS", "1")
-	t.Setenv("ZORDON_TEST_LOG", "")
-
-	got, err := testLogFunc().Call([]cty.Value{cty.StringVal("p1-ran")})
+	cfg := TestConfig{Harness: true}
+	got, err := testLogFunc(cfg).Call([]cty.Value{cty.StringVal("p1-ran")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,14 +45,13 @@ func TestTestLogFunc_noopSnippetWhenLogUnset(t *testing.T) {
 // how production Alphasfiles that accidentally use test::log get
 // caught at config load.
 func TestTestLogFunc_errorsOutsideHarness(t *testing.T) {
-	t.Setenv("ZORDON_TEST_HARNESS", "")
-
-	_, err := testLogFunc().Call([]cty.Value{cty.StringVal("p1-ran")})
+	cfg := TestConfig{} // Harness defaults to false
+	_, err := testLogFunc(cfg).Call([]cty.Value{cty.StringVal("p1-ran")})
 	if err == nil {
 		t.Fatal("test::log() outside harness should error; got nil")
 	}
-	if !strings.Contains(err.Error(), "ZORDON_TEST_HARNESS") {
-		t.Errorf("error should mention the env var; got %q", err)
+	if !strings.Contains(err.Error(), "--test-harness") {
+		t.Errorf("error should mention the flag; got %q", err)
 	}
 }
 
@@ -66,10 +61,8 @@ func TestTestLogFunc_errorsOutsideHarness(t *testing.T) {
 // provision with cmd = test::log("can't do that") would produce
 // invalid shell.
 func TestTestLogFunc_quotesEmbeddedSingleQuotes(t *testing.T) {
-	t.Setenv("ZORDON_TEST_HARNESS", "1")
-	t.Setenv("ZORDON_TEST_LOG", "/tmp/x")
-
-	got, err := testLogFunc().Call([]cty.Value{cty.StringVal("can't")})
+	cfg := TestConfig{Harness: true, LogPath: "/tmp/x"}
+	got, err := testLogFunc(cfg).Call([]cty.Value{cty.StringVal("can't")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,9 +74,8 @@ func TestTestLogFunc_quotesEmbeddedSingleQuotes(t *testing.T) {
 }
 
 func TestTestFailFunc_returnsExitSnippetWhenHarnessSet(t *testing.T) {
-	t.Setenv("ZORDON_TEST_HARNESS", "1")
-
-	got, err := testFailFunc().Call([]cty.Value{cty.StringVal("unreachable")})
+	cfg := TestConfig{Harness: true}
+	got, err := testFailFunc(cfg).Call([]cty.Value{cty.StringVal("unreachable")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,9 +92,8 @@ func TestTestFailFunc_returnsExitSnippetWhenHarnessSet(t *testing.T) {
 }
 
 func TestTestFailFunc_errorsOutsideHarness(t *testing.T) {
-	t.Setenv("ZORDON_TEST_HARNESS", "")
-
-	_, err := testFailFunc().Call([]cty.Value{cty.StringVal("x")})
+	cfg := TestConfig{}
+	_, err := testFailFunc(cfg).Call([]cty.Value{cty.StringVal("x")})
 	if err == nil {
 		t.Fatal("test::fail() outside harness should error; got nil")
 	}
@@ -113,12 +104,12 @@ func TestTestFailFunc_errorsOutsideHarness(t *testing.T) {
 // obvious test name.
 func TestShellQuote_wrapsAndEscapes(t *testing.T) {
 	cases := map[string]string{
-		"plain":     `'plain'`,
-		"with sp":   `'with sp'`,
-		`it's`:      `'it'\''s'`,
-		"$HOME":     `'$HOME'`,
-		"`cmd`":     "'`cmd`'",
-		"a\nb":      "'a\nb'", // newlines pass through; inside '...' they're literal
+		"plain":   `'plain'`,
+		"with sp": `'with sp'`,
+		`it's`:    `'it'\''s'`,
+		"$HOME":   `'$HOME'`,
+		"`cmd`":   "'`cmd`'",
+		"a\nb":    "'a\nb'", // newlines pass through; inside '...' they're literal
 	}
 	for in, want := range cases {
 		if got := shellQuote(in); got != want {
