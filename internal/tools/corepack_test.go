@@ -5,9 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/piotrkowalczuk/zordon/internal/zordontest"
 )
 
 type corepackCell struct {
@@ -29,15 +30,15 @@ type corepackCell struct {
 // for that Node version. npm is excluded because it ships bundled
 // with node and never goes through corepack.
 //
-// ZORDON_HOME resolution mirrors conformance: `<repo>/.zordon` so the
-// shared cache amortizes across the suite AND CI's pre-placed mise
-// (.github/workflows/ci.yml puts the binary at `<repo>/.zordon/bin/mise`,
-// not `$HOME/.zordon`) is found without bootstrapping cargo.
+// Uses the same ZORDON_HOME as conformance (zordontest.DefaultHome →
+// `<repo>/.zordon`). That dir is what CI pre-places mise into and what
+// the conformance suite already shares for its warm cache, so this
+// test reuses both without needing to bootstrap mise via cargo.
 func TestCorepackMatrix(t *testing.T) {
 	nodeVersions := []string{"18.20.5", "20.18.1", "22.11.0"}
 	pms := []string{"pnpm", "yarn"}
 
-	zordonHome := filepath.Join(corepackTestRepoRoot(t), ".zordon")
+	zordonHome := zordontest.DefaultHome(t)
 	dataDir := filepath.Join(zordonHome, "toolchain")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -160,28 +161,6 @@ func truncate(s string, n int) string {
 		return s[:n] + "…"
 	}
 	return s
-}
-
-// corepackTestRepoRoot walks up from this source file to find the
-// directory containing go.mod — the repo root. Mirrors the same
-// resolution zordontest uses for ZORDON_HOME (DefaultHome).
-func corepackTestRepoRoot(t *testing.T) string {
-	t.Helper()
-	_, here, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	dir := filepath.Dir(here)
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatalf("no go.mod found above %s", here)
-		}
-		dir = parent
-	}
 }
 
 func renderTable(rows []corepackCell) string {
