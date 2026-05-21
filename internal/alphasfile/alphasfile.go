@@ -29,6 +29,11 @@ const (
 	ToolchainGo   = "go"
 	ToolchainRust = "rust"
 	ToolchainRuby = "ruby"
+	// ToolchainNode is "nodejs" — same label for the service block and
+	// the toolchain sub-block (1:1). The mise tool name is "node", which
+	// the install path uses directly; this constant is the zordon-side
+	// identifier (block label + service label).
+	ToolchainNode = "nodejs"
 )
 
 // --- wire-stable types (JSON over the control socket) ---------------------
@@ -307,10 +312,12 @@ func (s *Service) BuildCmd() []string {
 // readiness defaults, etc.).
 type toolchainDefaults struct {
 	// TTY: hand the child a PTY for stdout so it line-buffers naturally.
-	//   - go:   false (os.Stdout writes through to write(2))
-	//   - rust: false (println! uses LineWriter, flushes on '\n')
-	//   - ruby: true  (STDOUT.sync defaults to false on pipes — startup
-	//                  logs would stay buffered until process exit)
+	//   - go:     false (os.Stdout writes through to write(2))
+	//   - rust:   false (println! uses LineWriter, flushes on '\n')
+	//   - ruby:   true  (STDOUT.sync defaults to false on pipes — startup
+	//                    logs would stay buffered until process exit)
+	//   - nodejs: true  (process.stdout switches to block-buffered when
+	//                    piped; same startup-log-buffering pitfall as Ruby)
 	TTY bool
 }
 
@@ -318,6 +325,7 @@ var toolchainDefaultsFor = map[string]toolchainDefaults{
 	ToolchainGo:   {TTY: false},
 	ToolchainRust: {TTY: false},
 	ToolchainRuby: {TTY: true},
+	ToolchainNode: {TTY: true},
 }
 
 // Flags renders RuntimeConfig.Arguments into argv flags. Format follows
@@ -487,9 +495,10 @@ type rootBlock struct {
 // labeled block) means `toolchain { go { ... } nodejs { ... } }`
 // catches typos at decode time, not at runtime in alpha.
 type toolchainBlock struct {
-	Go   *langToolchainBlock `hcl:"go,block"`
-	Rust *langToolchainBlock `hcl:"rust,block"`
-	Ruby *langToolchainBlock `hcl:"ruby,block"`
+	Go     *langToolchainBlock `hcl:"go,block"`
+	Rust   *langToolchainBlock `hcl:"rust,block"`
+	Ruby   *langToolchainBlock `hcl:"ruby,block"`
+	Nodejs *langToolchainBlock `hcl:"nodejs,block"`
 }
 
 type langToolchainBlock struct {
@@ -510,6 +519,9 @@ func (t *toolchainBlock) byLabel() map[string]*langToolchainBlock {
 	}
 	if t.Ruby != nil {
 		out[ToolchainRuby] = t.Ruby
+	}
+	if t.Nodejs != nil {
+		out[ToolchainNode] = t.Nodejs
 	}
 	return out
 }

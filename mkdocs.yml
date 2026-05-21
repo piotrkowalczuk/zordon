@@ -37,6 +37,7 @@ nav:
       - Go: services/go.md
       - Rust: services/rust.md
       - Ruby: services/ruby.md
+      - Node.js: services/nodejs.md
   - Worktrees: worktrees.md
   - Federation: federation.md
 

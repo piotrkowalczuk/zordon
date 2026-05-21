@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -592,6 +593,20 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
 		return
 	}
 	tools.PostMiseEnv(tc.lang, env)
+
+	// nodejs only: refresh Corepack (bundled corepack in older node
+	// distributions has a stale keyring → pnpm install fails). After
+	// this, env carries shim-dir + refreshed-corepack-bin on PATH, so
+	// pnpm/yarn invocations through `<pm> install` find the managed
+	// shims rather than node's own bundled corepack.
+	if tc.lang == alphasfile.ToolchainNode {
+		if err := tools.EnsureNodeCorepack(bin, dataDir, tc.version, env, logWriter(log, "corepack")); err != nil {
+			log.Error("alpha", "toolchain %s: corepack: %v", tc.lang, err)
+			tc.lifecycle.Reach("failed")
+			return
+		}
+	}
+
 	tc.env = env
 	tc.lifecycle.Reach("ready")
 	log.Info("alpha", "toolchain %s@%s: ready", tc.lang, tc.version)
@@ -2257,6 +2272,21 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent
 		// Explicit argv (subcommand-driven binaries / built artifacts).
 		argv := svc.Runtime.Command
 		cmd = exec.Command(argv[0], argv[1:]...)
+	case svc.Toolchain == alphasfile.ToolchainNode:
+		// Node has no single-binary build artifact; with no explicit
+		// runtime cmd, inference reads package.json (scripts.start →
+		// main → bin) so the common case "just run my package.json"
+		// needs zero config. checkout is the worktree dir; the project
+		// root sits at checkout+exe.
+		root := checkout
+		if svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
+			root = filepath.Join(checkout, svc.Package.Exe)
+		}
+		argv, err := inferNodeRunCmd(root)
+		if err != nil {
+			return nil, fmt.Errorf("service %q: %w", name, err)
+		}
+		cmd = exec.Command(argv[0], append(argv[1:], svc.Flags()...)...)
 	case binDir != "" && svc.Buildable():
 		// Every service is built by zordon (git/src checkout or crate
 		// cargo-install) into the out-of-tree bin dir; run it from there.
@@ -2270,6 +2300,14 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent
 	}
 	if checkout != "" {
 		cmd.Dir = checkout
+		// nodejs: cwd is the package.json directory (checkout + exe
+		// offset), not the worktree root. npm / pnpm / yarn pick up
+		// package.json by walking up, but if cwd is *below* it via a
+		// monorepo offset they'd find the wrong one; setting cwd here
+		// is the unambiguous version.
+		if svc.Toolchain == alphasfile.ToolchainNode && svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
+			cmd.Dir = filepath.Join(checkout, svc.Package.Exe)
+		}
 	}
 	var runEnv map[string]string
 	if svc.Runtime != nil {
@@ -2288,7 +2326,11 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent
 // (the main package within the repo, default ".") so a repo whose main
 // lives in cmd/foo needs no explicit build string. Output goes to the
 // out-of-tree bin dir so a `dir` primary's worktree stays clean.
-func defaultBuild(svc *alphasfile.Service, name, binDir string) string {
+//
+// dest is the checkout directory; nodejs reads package.json + lockfiles
+// from there to pick the right package-manager invocation. Other
+// toolchains ignore it.
+func defaultBuild(svc *alphasfile.Service, name, binDir, dest string) string {
 	out := filepath.Join(binDir, name)
 	root := filepath.Dir(binDir) // binDir = <stateDir>/bin
 	projectRoot := filepath.Dir(filepath.Dir(filepath.Dir(root)))
@@ -2357,8 +2399,164 @@ func defaultBuild(svc *alphasfile.Service, name, binDir string) string {
 		// per-checkout .bundle/config first (so `bundle exec` at runtime
 		// finds the gems too) and then install.
 		return "bundle config set --local path vendor/bundle && bundle install"
+	case alphasfile.ToolchainNode:
+		// PM detection reads the project root (checkout + exe offset).
+		// All four PMs install into ./node_modules in the project; we
+		// never copy the artifact out (Node has no single binary).
+		root := dest
+		if svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
+			root = filepath.Join(dest, svc.Package.Exe)
+		}
+		pm := detectNodePM(root)
+		return nodeInstallCmd(pm, root)
 	}
 	return ""
+}
+
+// nodePM is the result of PM detection — both the binary to invoke and
+// whether a lockfile exists (which decides between `install` and the
+// reproducible-mode flag).
+type nodePM struct {
+	bin         string // npm | pnpm | yarn | bun
+	hasLockfile bool
+}
+
+// detectNodePM picks the package manager for a Node project root, in
+// the order: bun.lock(b) → pnpm-lock.yaml → yarn.lock → package-lock.json
+// → package.json#packageManager → npm fallback. The lockfile signal also
+// flips the build into reproducible mode (`npm ci`, `--frozen-lockfile`).
+func detectNodePM(root string) nodePM {
+	if exists(filepath.Join(root, "bun.lockb")) || exists(filepath.Join(root, "bun.lock")) {
+		return nodePM{bin: "bun", hasLockfile: true}
+	}
+	if exists(filepath.Join(root, "pnpm-lock.yaml")) {
+		return nodePM{bin: "pnpm", hasLockfile: true}
+	}
+	if exists(filepath.Join(root, "yarn.lock")) {
+		return nodePM{bin: "yarn", hasLockfile: true}
+	}
+	if exists(filepath.Join(root, "package-lock.json")) {
+		return nodePM{bin: "npm", hasLockfile: true}
+	}
+	if pm := readPackageManagerField(filepath.Join(root, "package.json")); pm != "" {
+		return nodePM{bin: pm}
+	}
+	return nodePM{bin: "npm"}
+}
+
+// readPackageManagerField parses package.json#packageManager (the
+// Corepack-style pin, e.g. "pnpm@9.12.0+sha512:..."). Returns just the
+// PM name (everything before '@'); the version part is handled by
+// Corepack at runtime via the shim, not by zordon.
+func readPackageManagerField(packageJSON string) string {
+	b, err := os.ReadFile(packageJSON)
+	if err != nil {
+		return ""
+	}
+	var pj struct {
+		PackageManager string `json:"packageManager"`
+	}
+	if err := json.Unmarshal(b, &pj); err != nil {
+		return ""
+	}
+	pm := strings.TrimSpace(pj.PackageManager)
+	if at := strings.IndexByte(pm, '@'); at > 0 {
+		pm = pm[:at]
+	}
+	switch pm {
+	case "npm", "pnpm", "yarn", "bun":
+		return pm
+	}
+	return ""
+}
+
+// nodeInstallCmd builds the install shell line for the resolved PM.
+// Reproducible mode (--frozen-lockfile / npm ci) when a lockfile is
+// present — the common case for any committed project; first-time
+// scaffold without a lockfile gets a plain install that creates one.
+func nodeInstallCmd(pm nodePM, root string) string {
+	cd := ""
+	if root != "" {
+		cd = fmt.Sprintf("cd %q && ", root)
+	}
+	switch pm.bin {
+	case "npm":
+		if pm.hasLockfile {
+			return cd + "npm ci"
+		}
+		return cd + "npm install"
+	case "pnpm":
+		if pm.hasLockfile {
+			return cd + "pnpm install --frozen-lockfile"
+		}
+		return cd + "pnpm install"
+	case "yarn":
+		// `--immutable` is yarn 2+; `--frozen-lockfile` is v1. yarn
+		// accepts the wrong flag with a warning rather than a failure
+		// on the version that doesn't own it, so pass both via shell
+		// fallback: try immutable first (modern projects), then v1.
+		if pm.hasLockfile {
+			return cd + "yarn install --immutable 2>/dev/null || yarn install --frozen-lockfile"
+		}
+		return cd + "yarn install"
+	case "bun":
+		if pm.hasLockfile {
+			return cd + "bun install --frozen-lockfile"
+		}
+		return cd + "bun install"
+	}
+	return cd + "npm install"
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// inferNodeRunCmd builds the runtime argv for a Node service that has
+// no `runtime { cmd = [...] }`. Precedence — first hit wins:
+//
+//  1. package.json#scripts.start  →  <pm> start  (PM auto-detected)
+//  2. package.json#main           →  node <main>
+//  3. package.json#bin (string or single-entry map)  →  node <bin>
+//
+// Anything else is a hard error — we'd rather make the user write an
+// explicit cmd than guess wrongly (e.g. picking `index.js` because it
+// happens to exist).
+func inferNodeRunCmd(root string) ([]string, error) {
+	b, err := os.ReadFile(filepath.Join(root, "package.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read package.json (%s): %w — declare runtime { cmd = [...] }", root, err)
+	}
+	var pj struct {
+		Scripts map[string]string `json:"scripts"`
+		Main    string            `json:"main"`
+		Bin     json.RawMessage   `json:"bin"`
+	}
+	if err := json.Unmarshal(b, &pj); err != nil {
+		return nil, fmt.Errorf("parse package.json: %w", err)
+	}
+	if start := strings.TrimSpace(pj.Scripts["start"]); start != "" {
+		pm := detectNodePM(root).bin
+		return []string{pm, "start"}, nil
+	}
+	if m := strings.TrimSpace(pj.Main); m != "" {
+		return []string{"node", m}, nil
+	}
+	if len(pj.Bin) > 0 {
+		// `bin` may be a string ("./cli.js") or an object ({"foo": "./cli.js"}).
+		var s string
+		if err := json.Unmarshal(pj.Bin, &s); err == nil && strings.TrimSpace(s) != "" {
+			return []string{"node", s}, nil
+		}
+		var m map[string]string
+		if err := json.Unmarshal(pj.Bin, &m); err == nil && len(m) == 1 {
+			for _, v := range m {
+				return []string{"node", v}, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("package.json has no scripts.start, main, or single-entry bin — declare runtime { cmd = [...] }")
 }
 
 // prepareWorktree materializes the per-invocation checkout (or just
@@ -2463,7 +2661,7 @@ func prepareBuild(svc *alphasfile.Service, name, dest string, agent bool, state 
 	if bc := svc.BuildCmd(); len(bc) > 0 {
 		log.Info("alpha", "prepare %s: build (%v)", name, bc)
 		c = exec.Command(bc[0], bc[1:]...)
-	} else if def := strings.TrimSpace(defaultBuild(svc, name, binDir)); def != "" {
+	} else if def := strings.TrimSpace(defaultBuild(svc, name, binDir, dest)); def != "" {
 		log.Info("alpha", "prepare %s: build (%s)", name, def)
 		c = exec.Command("/bin/sh", "-c", def)
 	}
