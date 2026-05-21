@@ -19,6 +19,7 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/control"
+	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
@@ -221,16 +222,39 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 	}
 }
 
+// pinnedFiles holds *os.File handles that must live for the rest of
+// the zordon process. Without this, the runtime's *os.File finalizer
+// would Close any fd whose only reference is a local variable that
+// went out of scope — which would prematurely close parent-watch pipe
+// write ends and trip a false-positive death signal on the alpha side.
+var pinnedFiles []*os.File
+
+func keepAlive(f *os.File) { pinnedFiles = append(pinnedFiles, f) }
+
 func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose bool, log *zlog.Logger, extraEnv map[string]string) error {
 	logf := func(format string, a ...any) { log.Info("zordon", format, a...) }
 	readyR, readyW, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("pipe: %w", err)
 	}
+	// Second pipe: parent-death watch. alpha holds the read end and
+	// blocks on it until it has signalled READY. If zordon (this
+	// process) dies BEFORE alpha reaches READY — SIGKILL/OOM included —
+	// the kernel closes parentW automatically, alpha sees EOF and runs
+	// graceful shutdown. After alpha signals READY it Stop()s the watch
+	// and detaches: zordon is free to exit on its own, which closes
+	// parentW; the now-dropped watch ignores it.
+	parentR, parentW, err := parentwatch.Pipe()
+	if err != nil {
+		readyR.Close()
+		readyW.Close()
+		return fmt.Errorf("parent pipe: %w", err)
+	}
 
 	cmd := exec.Command(alphaBin, "run", "--socket", sock, "--log-file", alphaLog)
 	cmd.ExtraFiles = []*os.File{readyW}
 	cmd.Env = append(os.Environ(), "ZORDON_READY_FD="+strconv.Itoa(2+len(cmd.ExtraFiles)))
+	parentwatch.Attach(cmd, parentR, "ZORDON_PARENT_FD")
 	for k, v := range extraEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -239,10 +263,27 @@ func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose 
 	if err := cmd.Start(); err != nil {
 		readyR.Close()
 		readyW.Close()
+		parentR.Close()
+		parentW.Close()
 		return fmt.Errorf("start alpha: %w", err)
 	}
 	logf("spawned alpha pid=%d log=%s", cmd.Process.Pid, alphaLog)
 	readyW.Close()
+	// alpha dup'd its own copy of parentR at Start; drop ours so only
+	// alpha holds a read end (kernel-closed when alpha exits — not
+	// that anything observes that side).
+	parentR.Close()
+	// parentW is intentionally NOT closed here. We let zordon's normal
+	// process exit close it; that final close is exactly the EOF alpha
+	// is watching for during its pre-READY window. Once alpha calls
+	// Stop after READY, the close has no observable effect.
+	//
+	// Pin parentW so Go's GC doesn't run *os.File's finalizer (which
+	// would Close the fd) just because we have no further references
+	// to it in this function. spawnAlpha may run multiple times in a
+	// federation chain — every parent-watch pipe is pinned for the
+	// rest of zordon's life.
+	keepAlive(parentW)
 
 	readyCh := make(chan struct{})
 	errCh := make(chan error, 1)

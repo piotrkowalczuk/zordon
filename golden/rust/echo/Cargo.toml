@@ -1,0 +1,16 @@
+[package]
+name = "echo"
+version = "0.1.0"
+edition = "2021"
+# Pin the lockfile format so `cargo install --locked` is reproducible
+# across the (mise-pinned) toolchain the conformance suite installs.
+
+[[bin]]
+name = "echo"
+path = "src/main.rs"
+
+[features]
+# Off by default. When `features = ["greeting"]` is passed through to
+# `cargo install`, main.rs cfg-compiles a "greeting":"on" field into the
+# echo JSON — that's how the features-reach-build test observes it.
+greeting = []

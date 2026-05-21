@@ -25,6 +25,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/barrier"
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/lifecycle"
+	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/registry"
@@ -293,6 +294,15 @@ type alphaState struct {
 	shutdownCh     chan struct{}
 	shutdownOnce   sync.Once
 	shutdownReason string
+
+	// parentW watches the pipe zordon holds open for us; closed when
+	// zordon dies (kernel-closed write end ⇒ EOF on our read end).
+	// Stopped after the first configure round-trip finishes, because
+	// that is the point at which zordon is allowed to detach cleanly:
+	// EventDone has been emitted, zordon will exit (closing the pipe)
+	// without that close meaning death. Nil when alpha was launched
+	// outside zordon (no ZORDON_PARENT_FD).
+	parentW *parentwatch.Watcher
 
 	// handlerDones: each accepted-conn goroutine appends a fresh
 	// chan struct{} on entry and closes it on exit. drainedCh waits for
@@ -1260,6 +1270,30 @@ func runAlpha(_ context.Context, sockPath, logPath, zordonHome string, stabiliza
 		return errors.New("--socket is required")
 	}
 
+	// Drain SIGPIPE before anything else writes to stderr. Once zordon
+	// (our spawner) dies, the stderr it inherited to us has no reader;
+	// Go's default is to kill us on EPIPE — which would happen BEFORE
+	// the parent-death watcher gets a chance to drive a graceful
+	// shutdown. parentwatch.IgnoreSIGPIPE turns those writes into
+	// harmless EPIPE errors.
+	parentwatch.IgnoreSIGPIPE()
+
+	// Arm the parent-death watch BEFORE we open any file: an early
+	// OpenFile could otherwise be assigned the very fd zordon passed
+	// to us, and parentwatch would then attach to the wrong file.
+	// Watch claims the fd via os.NewFile (and marks it close-on-exec)
+	// right here, so any subsequent open gets a higher number.
+	//
+	// The reaction goroutine cannot run yet — alphaState isn't built —
+	// so we just capture the watcher and wire it in below.
+	parentW, err := parentwatch.Watch("ZORDON_PARENT_FD",
+		parentwatch.WithErrorLog(func(err error) {
+			fmt.Fprintf(os.Stderr, "alpha: parentwatch: %v\n", err)
+		}))
+	if err != nil {
+		return fmt.Errorf("parentwatch: %w", err)
+	}
+
 	logF, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
@@ -1304,6 +1338,30 @@ func runAlpha(_ context.Context, sockPath, logPath, zordonHome string, stabiliza
 		shutdownCh: make(chan struct{}),
 	}
 	cfg := bringupConfig{stabilization: stabilization, shutdownGrace: shutdownGrace}
+
+	// Park the watcher on state so handleConfigure can drop it after
+	// the configure round-trip completes. We deliberately KEEP the
+	// watch armed across the listener-up + bringup window: signalReady
+	// only means "alpha is listening", not "zordon may detach". zordon
+	// blocks in pushConfigure until EventDone (or EventError), so if
+	// it dies anywhere in that window we want graceful shutdown here.
+	state.parentW = parentW
+
+	// Wire parent-death into the shutdown channel. Two cases:
+	//   - parentW is nil ⇒ no ZORDON_PARENT_FD in env (alpha launched
+	//     standalone). Died() returns nil; the goroutine only exits via
+	//     shutdownCh.
+	//   - parentW.Died() fires before Stop is called ⇒ zordon died
+	//     during bringup; trigger the same shutdown path as a SIGTERM
+	//     or control-socket OpShutdown.
+	go func() {
+		select {
+		case <-parentW.Died():
+			log.Error("alpha", "zordon parent died during bringup; shutting down")
+			state.requestShutdown("parent (zordon) died during bringup")
+		case <-state.shutdownCh:
+		}
+	}()
 
 	if err := signalReady(); err != nil {
 		log.Error("alpha", "ready signal: %v", err)
@@ -1465,6 +1523,12 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 
 	stream := newSafeEncoder(enc)
 	defer stream.Close()
+	// One configure round-trip is the contract with zordon: once we
+	// have emitted EventDone (or EventError), zordon will detach and
+	// exit, closing its end of the parent-watch pipe. Dropping the
+	// watch here turns that kernel-closed write end from "false-
+	// positive death" into a harmless no-op.
+	defer state.parentW.Stop()
 
 	if err := materializeFiles(files, state, log); err != nil {
 		log.Error("alpha", "materialize files: %v", err)
@@ -1841,7 +1905,7 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 	// is unavailable we already logged at startup; run unwrapped (the
 	// pre-tommy behavior) rather than fail bringup.
 	if state.tommyBin != "" {
-		pr, pw, perr := os.Pipe()
+		pr, pw, perr := parentwatch.Pipe()
 		if perr != nil {
 			log.Error("alpha", "tommy pipe %s: %v", name, perr)
 			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "tommy pipe: " + perr.Error()})
@@ -1850,14 +1914,14 @@ func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *al
 		}
 		wrapped := exec.Command(state.tommyBin, append([]string{
 			"--shutdown-grace", cfg.shutdownGrace.String(),
-			"--parent-fd", "3", "--", cmd.Path,
+			"--", cmd.Path,
 		}, cmd.Args[1:]...)...)
 		wrapped.Dir = cmd.Dir
 		// tommy is env-transparent: it inherits this env and passes it
-		// to the service verbatim. TOMMY_PARENT_FD points at the pipe
-		// read end (ExtraFiles ⇒ fd 3, since stdio took 0..2).
-		wrapped.Env = append(append([]string(nil), cmd.Env...), "TOMMY_PARENT_FD=3")
-		wrapped.ExtraFiles = []*os.File{pr}
+		// to the service verbatim. parentwatch.Attach sets up
+		// ExtraFiles + TOMMY_PARENT_FD env in lock-step.
+		wrapped.Env = append([]string(nil), cmd.Env...)
+		parentwatch.Attach(wrapped, pr, "TOMMY_PARENT_FD")
 		wrapped.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		sc.parentW = pw
 		cmd = wrapped

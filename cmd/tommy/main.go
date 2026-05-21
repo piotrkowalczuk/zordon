@@ -64,14 +64,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strconv"
-	"sync"
 	"syscall"
 	"time"
+
+	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
 )
 
 func main() {
@@ -101,7 +101,7 @@ func main() {
 func run(argv []string, grace time.Duration, parentFD int) int {
 	// Drain SIGPIPE so a write to the (reader-gone) log pipe after the
 	// spawner dies can't kill tommy before it reaps the service.
-	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
+	parentwatch.IgnoreSIGPIPE()
 
 	// CATCH the terminal signals (see package comment): keeps the
 	// service's own signal behavior intact via exec() reset to SIG_DFL,
@@ -110,15 +110,22 @@ func run(argv []string, grace time.Duration, parentFD int) int {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT)
 
-	// Keep the parent-death fd to OURSELVES. alpha passes it via
-	// exec.ExtraFiles, which deliberately clears O_CLOEXEC so tommy
-	// inherits it — but tommy then exec()s the service, which would
-	// inherit it too (an unintended fd leak into the user's process).
-	// Marking it close-on-exec drops it from the service while tommy
-	// keeps it for its whole life (tommy never exec()s itself; the
-	// flag only fires on the service's exec).
+	// Arm parent-death watch BEFORE we spawn the service. We use the
+	// belt-and-braces variant (pipe-EOF + getppid poll) because tommy
+	// has no notion of "detaching" — its whole life is bounded by the
+	// spawner's. Re-export the fd via TOMMY_PARENT_FD so parentwatch's
+	// generic env-driven path can pick it up (the flag survives for
+	// back-compat / explicit overrides).
 	if parentFD >= 0 {
-		syscall.CloseOnExec(parentFD)
+		os.Setenv("TOMMY_PARENT_FD", strconv.Itoa(parentFD))
+	}
+	parentGone, err := parentwatch.WatchForever("TOMMY_PARENT_FD",
+		parentwatch.WithErrorLog(func(err error) {
+			fmt.Fprintf(os.Stderr, "tommy: parent fd read: %v\n", err)
+		}))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tommy: parentwatch: %v\n", err)
+		return 2
 	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
@@ -147,14 +154,6 @@ func run(argv []string, grace time.Duration, parentFD int) int {
 
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
-
-	parentGone := make(chan struct{})
-	var once sync.Once
-	gone := func() { once.Do(func() { close(parentGone) }) }
-	if pf := os.NewFile(uintptr(parentFD), "tommy-parent"); parentFD >= 0 && pf != nil {
-		go watchParentPipe(pf, gone)
-	}
-	go watchParentReparent(os.Getppid(), gone)
 
 	select {
 	case err := <-waitCh:
@@ -190,42 +189,6 @@ func reap(pgid int, grace time.Duration, waitCh <-chan error) int {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		<-waitCh
 		return 137 // 128 + SIGKILL, the conventional shell code
-	}
-}
-
-// watchParentPipe blocks on the inherited read end. A blocking pipe Read
-// only returns when data arrives or every write end is closed; we hold
-// no write end, so the only wakeup is the spawner's last write end
-// closing — which the kernel does on ANY spawner death, SIGKILL/OOM
-// included. Stray data (a spawner misusing the fd) is ignored; only
-// EOF/error counts as death.
-func watchParentPipe(pf *os.File, gone func()) {
-	buf := make([]byte, 64)
-	for {
-		_, err := pf.Read(buf)
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				fmt.Fprintf(os.Stderr, "tommy: parent fd read: %v\n", err)
-			}
-			gone()
-			return
-		}
-	}
-}
-
-// watchParentReparent polls getppid(). When tommy's direct parent dies,
-// the kernel reparents tommy to launchd/init (pid 1), so a ppid that no
-// longer matches the one captured at startup means the spawner is gone.
-// 250ms keeps teardown prompt at negligible cost, and this needs no fd
-// plumbing — it is the safety net when the pipe fd was never passed.
-func watchParentReparent(origPPID int, gone func()) {
-	t := time.NewTicker(250 * time.Millisecond)
-	defer t.Stop()
-	for range t.C {
-		if os.Getppid() != origPPID {
-			gone()
-			return
-		}
 	}
 }
 

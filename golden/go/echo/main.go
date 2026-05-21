@@ -14,6 +14,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -22,7 +23,16 @@ func main() {
 	// interpolation reaches the binary. Unused by the echo logic itself;
 	// it shows up in os.Args (which the JSON response mirrors).
 	_ = flag.String("tag", "", "echoed back via os.Args (test hook)")
+	// Sleep before binding so HTTP readiness probes can't pass for the
+	// given duration — widens the bringup window for parent-death
+	// conformance tests that need a stable interval in which to kill
+	// the zordon spawner.
+	readyDelay := flag.Duration("ready-delay", 0, "sleep before HTTP listen (extends bringup window)")
 	flag.Parse()
+
+	if *readyDelay > 0 {
+		time.Sleep(*readyDelay)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

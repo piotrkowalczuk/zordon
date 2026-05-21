@@ -146,6 +146,144 @@ service "go" "svc1" {
 	}
 }
 
+// TestOrphan_registryReaperKillsOrphansOnNextStart proves the
+// safety-net that backs the parent-watch + tommy story: if SIGKILLed
+// alpha leaves a service group running (no cleanup, no deregister),
+// the NEXT `zordon start` for the same fs_hash must reap that PGID
+// before binding its own control socket. Without that, the orphan
+// would hold the test port and the new service would fail with
+// EADDRINUSE.
+//
+// We deliberately run alpha WITHOUT tommy so the wrapped-group
+// orphan-killer isn't in play. Otherwise tommy reaps the service
+// within ~250ms of alpha's death and round 2 has nothing to reap —
+// the test would silently exercise tommy, not the registry.
+//
+// Forcing no-tommy: copy alpha into a dir with no tommy sibling
+// (resolveTommyBin returns "" when neither $ZORDON_TOMMY_BIN nor a
+// sibling resolves), and stamp ZORDON_TOMMY_BIN="" into the env.
+func TestOrphan_registryReaperKillsOrphansOnNextStart(t *testing.T) {
+	noTommyAlpha := buildAlphaNoTommySibling(t)
+
+	p := zordontest.NewProject(t, zordontest.WithExpectedLeftovers())
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	const port = 27935
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src = "./src/svc1"
+  exe = "."
+
+  vars = { port = %d }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 100
+  }
+}
+`, port))
+
+	// Round 1: bringup. alpha is the no-tommy build, so the spawn is
+	// bare (alpha → service directly, Setpgid keeps the service in
+	// its own group). Empty ZORDON_TOMMY_BIN belt-and-braces; alpha
+	// already wouldn't find a sibling tommy in noTommyAlpha's dir.
+	r1 := p.Zordon("start",
+		"--alpha", noTommyAlpha,
+		"--timeout", "15m",
+		"--alpha-log", p.AlphaLogPath(),
+	).WithEnv("ZORDON_TOMMY_BIN", "").
+		WithTimeout(16 * time.Minute).Run(t)
+	if r1.ExitCode != 0 {
+		t.Fatalf("zordon start #1: exit %d\nstderr: %s", r1.ExitCode, r1.Stderr)
+	}
+	t.Cleanup(func() { dumpAlphaLog(t, p.AlphaLogPath()) })
+
+	alphaPID, groupPID := pidsFromAlphaLog(t, p.AlphaLogPath(), "svc1")
+	t.Logf("round1: alpha=%d group=%d :%d (no tommy)", alphaPID, groupPID, port)
+	if !portServing(port, 2*time.Second) {
+		t.Fatalf(":%d not serving after round1", port)
+	}
+
+	if err := syscall.Kill(alphaPID, syscall.SIGKILL); err != nil {
+		t.Fatalf("SIGKILL alpha pid %d: %v", alphaPID, err)
+	}
+	// Wait for alpha itself to be reaped (becomes a zombie until
+	// init/launchd collects it). 5s is generous.
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if !pidAlive(alphaPID) {
+			break
+		}
+	}
+	if pidAlive(alphaPID) {
+		t.Fatalf("alpha pid %d still alive after SIGKILL", alphaPID)
+	}
+	// CRITICAL precondition: the service group must survive alpha's
+	// death. If it doesn't, alpha-without-tommy isn't producing the
+	// orphan we want to test against — likely a code change in alpha's
+	// spawn path; revisit the no-tommy assumption.
+	if groupGone(groupPID) {
+		t.Fatalf("service group %d gone right after alpha SIGKILL — no orphan to reap, test premise broken", groupPID)
+	}
+	t.Logf("orphan confirmed: group %d still serving :%d with alpha %d gone", groupPID, port, alphaPID)
+
+	// Round 2: another `zordon start`. alpha's runAlpha calls
+	// registry.ReapByFsHash BEFORE control.Listen, so the orphan PGID
+	// must be killed before round-2 alpha even binds. The fact that
+	// this start succeeds (no EADDRINUSE, fresh service serving) is
+	// the assertion.
+	r2 := p.Zordon("start",
+		"--alpha", noTommyAlpha,
+		"--timeout", "15m",
+		"--alpha-log", p.AlphaLogPath(),
+	).WithEnv("ZORDON_TOMMY_BIN", "").
+		WithTimeout(16 * time.Minute).Run(t)
+	if r2.ExitCode != 0 {
+		t.Fatalf("zordon start #2 (post-orphan): exit %d\nstderr: %s — registry reaper likely failed to kill PGID %d",
+			r2.ExitCode, r2.Stderr, groupPID)
+	}
+
+	// Round 1's group must be gone now.
+	if !groupGone(groupPID) {
+		t.Fatalf("round1 service group %d still alive after round2 start — registry reaper did not fire", groupPID)
+	}
+	// And the round-2 service must be serving.
+	if !portServing(port, 2*time.Second) {
+		t.Fatalf(":%d not serving after round2 start", port)
+	}
+}
+
+// buildAlphaNoTommySibling compiles cmd/alpha into a fresh temp dir
+// where no `tommy` exists alongside it. alpha's resolveTommyBin then
+// returns "" and services spawn unwrapped — the production fallback
+// that the registry reaper is explicitly designed to backstop.
+func buildAlphaNoTommySibling(t *testing.T) string {
+	t.Helper()
+	root := moduleRoot(t)
+	dir := t.TempDir()
+	out := dir + "/alpha"
+	cmd := exec.Command("go", "build", "-o", out, "./cmd/alpha")
+	cmd.Dir = root
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build alpha: %v\n%s", err, b)
+	}
+	return out
+}
+
 // buildTommy compiles cmd/tommy into a temp path so the test pins it
 // via $ZORDON_TOMMY_BIN no matter how the rest of the suite is built.
 func buildTommy(t *testing.T) string {
