@@ -252,12 +252,52 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 	if len(sysEnv) == 0 {
 		sysEnv = nil
 	}
+	// Post-pass: services with `debugger.enabled = true` need dlv and
+	// mcp-dap-server in the matching toolchain's tool world. We add
+	// them after per-service eval so user-pinned versions (already in
+	// toolchain.tools) win over the macro's defaults.
+	if err := r.injectDebuggerTools(toolchain); err != nil {
+		return nil, err
+	}
 	return &Alphasfile{
 		Dotenv:    gdot,
 		Services:  r.resolvedServices,
 		Toolchain: toolchain,
 		SysEnv:    sysEnv,
 	}, nil
+}
+
+const (
+	debuggerToolDlv = "github.com/go-delve/delve/cmd/dlv"
+	debuggerToolMCP = "github.com/go-delve/mcp-dap-server"
+)
+
+func (r *resolver) injectDebuggerTools(toolchain map[string]*ToolchainConfig) error {
+	needs := false
+	for _, svc := range r.resolvedServices {
+		if svc.Debugger != nil && svc.Debugger.Enabled && svc.Toolchain == ToolchainGo {
+			needs = true
+			break
+		}
+	}
+	if !needs {
+		return nil
+	}
+	tc, ok := toolchain[ToolchainGo]
+	if !ok {
+		return fmt.Errorf("debugger { enabled = true } requires a `toolchain { go { version = … } }` block (so dlv + mcp-dap-server can be installed into the pinned Go's tool world)")
+	}
+	if tc.Tools == nil {
+		tc.Tools = map[string]string{}
+	}
+	// Explicit user pins win.
+	if _, pinned := tc.Tools[debuggerToolDlv]; !pinned {
+		tc.Tools[debuggerToolDlv] = "latest"
+	}
+	if _, pinned := tc.Tools[debuggerToolMCP]; !pinned {
+		tc.Tools[debuggerToolMCP] = "latest"
+	}
+	return nil
 }
 
 // svcState is the per-service evaluation scratch space. Built once
@@ -734,6 +774,17 @@ func (r *resolver) finishService(st *svcState) error {
 		worktree = &Worktree{Sparse: cleanSparse(sb.Worktree.Sparse)}
 	}
 
+	var dbg *DebuggerConfig
+	var agent *ServiceAgent
+	if sb.Debugger != nil && sb.Debugger.Enabled {
+		d, a, err := r.evalDebugger(sb, self, command)
+		if err != nil {
+			return err
+		}
+		dbg = d
+		agent = a
+	}
+
 	svc := &Service{
 		Toolchain: sb.Toolchain,
 		Runtime:   rt,
@@ -756,9 +807,99 @@ func (r *resolver) finishService(st *svcState) error {
 			// from src as-is (no git worktree add, no HEAD reset).
 			InPlace: sb.Src != "" && sb.Git == "" && r.inv.Worktree == invocation.MainWorktree,
 		},
+		Debugger: dbg,
+		Agent:    agent,
 	}
 	r.resolvedServices = append(r.resolvedServices, svc)
 	return nil
+}
+
+func (r *resolver) evalDebugger(sb *serviceBlock, self map[string]cty.Value, command []string) (*DebuggerConfig, *ServiceAgent, error) {
+	db := sb.Debugger
+	if sb.Toolchain != ToolchainGo {
+		return nil, nil, fmt.Errorf("service %q: debugger {} is currently only supported on service \"go\" (got %q)", sb.Name, sb.Toolchain)
+	}
+	mcp := true
+	if db.MCP != nil {
+		mcp = *db.MCP
+	}
+	wrap := true
+	if db.WrapRuntime != nil {
+		wrap = *db.WrapRuntime
+	}
+	waitForClient := false
+	if db.WaitForClient != nil {
+		waitForClient = *db.WaitForClient
+	}
+	logFlag := false
+	if db.Log != nil {
+		logFlag = *db.Log
+	}
+	if wrap && len(command) > 0 {
+		return nil, nil, fmt.Errorf("service %q: debugger.enabled = true wraps runtime itself (`dlv exec <binary> -- <args>`), which is incompatible with an explicit `runtime.cmd`. Use `arguments = {…}` for flags, or set `debugger.wrap_runtime = false` to keep your own cmd", sb.Name)
+	}
+	port, err := r.evalDebuggerPort(db.Port, self)
+	if err != nil {
+		return nil, nil, fmt.Errorf("service %q: debugger.port: %w", sb.Name, err)
+	}
+	cfg := &DebuggerConfig{
+		Enabled:       true,
+		Port:          port,
+		WaitForClient: waitForClient,
+		Log:           logFlag,
+		MCP:           mcp,
+		WrapRuntime:   wrap,
+	}
+	var agent *ServiceAgent
+	if mcp {
+		agent = &ServiceAgent{
+			MCP: map[string]*AgentMCPFeature{
+				"debug": {
+					Name:    "debug",
+					Bridge:  "dap",
+					Address: fmt.Sprintf("127.0.0.1:%d", port),
+				},
+			},
+		}
+	}
+	return cfg, agent, nil
+}
+
+// evalDebuggerPort resolves debugger.port to an int, accepting either a
+// numeric literal (`port = 2345`) or a string returned by an HCL helper
+// (`port = os::env("DLV_PORT", "2345")`). When the expression is nil,
+// it falls back to $DLV_PORT then 2345 — matching the default we'd
+// write inline if the macro didn't exist.
+func (r *resolver) evalDebuggerPort(expr hcl.Expression, self map[string]cty.Value) (int, error) {
+	if expr != nil {
+		val, diags := expr.Value(r.ctxWith(self))
+		if diags.HasErrors() {
+			return 0, fmt.Errorf("%s", diags.Error())
+		}
+		// `port,optional` gives a non-nil placeholder when omitted (null/dynamic).
+		if !val.IsNull() && val.Type() != cty.DynamicPseudoType {
+			switch val.Type() {
+			case cty.Number:
+				i64, _ := val.AsBigFloat().Int64()
+				return int(i64), nil
+			case cty.String:
+				return parsePort(val.AsString())
+			}
+			return 0, fmt.Errorf("must be a number or numeric string, got %s", val.Type().FriendlyName())
+		}
+	}
+	return pickFreePort()
+}
+
+func parsePort(s string) (int, error) {
+	n := 0
+	if _, err := fmt.Sscanf(strings.TrimSpace(s), "%d", &n); err != nil {
+		return 0, fmt.Errorf("not a valid port number: %q", s)
+	}
+	if n <= 0 || n > 65535 {
+		return 0, fmt.Errorf("port %d out of range [1, 65535]", n)
+	}
+	return n, nil
 }
 
 // evalMap evaluates an HCL expression that should yield a map/object and
@@ -1110,13 +1251,21 @@ func pickPortFunc() function.Function {
 	return function.New(&function.Spec{
 		Type: function.StaticReturnType(cty.Number),
 		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
-			l, err := net.Listen("tcp", "127.0.0.1:0")
+			port, err := pickFreePort()
 			if err != nil {
 				return cty.NilVal, fmt.Errorf("net::pickport: %w", err)
 			}
-			addr := l.Addr().(*net.TCPAddr)
-			_ = l.Close()
-			return cty.NumberIntVal(int64(addr.Port)), nil
+			return cty.NumberIntVal(int64(port)), nil
 		},
 	})
+}
+
+func pickFreePort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	addr := l.Addr().(*net.TCPAddr)
+	_ = l.Close()
+	return addr.Port, nil
 }

@@ -113,6 +113,31 @@ type Service struct {
 	Toolchain string         `json:"toolchain"`
 	Runtime   *RuntimeConfig `json:"runtime"`
 	Package   *Package       `json:"package,omitempty"`
+	Debugger *DebuggerConfig    `json:"debugger,omitempty"`
+	Agent    *ServiceAgent      `json:"agent,omitempty"`
+}
+
+type ServiceAgent struct {
+	// Keyed by feature name so `service.X.agent.mcp.<feature>.<field>`
+	// lookups don't need positional indexing.
+	MCP map[string]*AgentMCPFeature `json:"mcp,omitempty"`
+}
+
+type DebuggerConfig struct {
+	Enabled bool `json:"enabled"`
+	// Port: 0 from this struct means "picked by the eval pass" — alpha
+	// always sees a concrete number.
+	Port          int  `json:"port"`
+	WaitForClient bool `json:"wait_for_client,omitempty"`
+	Log           bool `json:"log,omitempty"`
+	MCP           bool `json:"mcp,omitempty"`
+	WrapRuntime   bool `json:"wrap_runtime,omitempty"`
+}
+
+type AgentMCPFeature struct {
+	Name    string `json:"name"`
+	Bridge  string `json:"bridge"`
+	Address string `json:"address,omitempty"`
 }
 
 // ServiceMeta is the static, eval-free view of a service: identity plus its
@@ -538,9 +563,10 @@ type serviceBlock struct {
 	// run step (its `cmd` is the service argv — there is no top-level
 	// `cmd`); `agent` is an env overlay applied in `--agent` mode (it
 	// has no `cmd`).
-	Build   *buildBlock   `hcl:"build,block"`
-	Runtime *runtimeBlock `hcl:"runtime,block"`
-	Agent   *agentBlock   `hcl:"agent,block"`
+	Build    *buildBlock    `hcl:"build,block"`
+	Runtime  *runtimeBlock  `hcl:"runtime,block"`
+	Agent    *agentBlock    `hcl:"agent,block"`
+	Debugger *debuggerBlock `hcl:"debugger,block"`
 
 	Worktree  *worktreeBlock `hcl:"worktree,block"`
 	Sudo      []*sudoBlock   `hcl:"sudo,block"`
@@ -599,6 +625,15 @@ type provisionBlock struct {
 // It has no `cmd` — it never starts anything, only adjusts env.
 type agentBlock struct {
 	Env hcl.Expression `hcl:"env,optional"`
+}
+
+type debuggerBlock struct {
+	Enabled       bool           `hcl:"enabled,optional"`
+	Port          hcl.Expression `hcl:"port,optional"`
+	WaitForClient *bool          `hcl:"wait_for_client,optional"`
+	Log           *bool          `hcl:"log,optional"`
+	MCP           *bool          `hcl:"mcp,optional"`
+	WrapRuntime   *bool          `hcl:"wrap_runtime,optional"`
 }
 
 type worktreeBlock struct {

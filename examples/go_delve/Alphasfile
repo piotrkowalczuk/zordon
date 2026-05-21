@@ -1,0 +1,46 @@
+# debugger {} on a Go service: zordon installs dlv + mcp-dap-server,
+# adds -gcflags='all=-N -l' to the build, wraps runtime in
+# `dlv exec --headless --listen=… --`, and exposes the DAP address
+# under service.X.agent.mcp.debug.
+#
+# Attach (CLI): `dlv connect 127.0.0.1:$(zordon get service.go.app.debugger.port)`
+# Attach (GoLand/VS Code): "Go Remote" / Go Attach, host 127.0.0.1,
+# port = `zordon get service.go.app.debugger.port`.
+
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  go {
+    # mcp-dap-server HEAD currently requires Go ≥ 1.26.1; pin an older
+    # mcp-dap-server tag under `tools` below if you need an older Go.
+    version = "1.26.2"
+  }
+}
+
+service "go" "app" {
+  src = "../.."
+  exe = "./examples/go_delve/src/app"
+
+  vars = { port = net::pickport() }
+
+  # No `runtime { cmd = … }` — debugger.wrap_runtime synthesizes it.
+  # An explicit cmd is rejected at validation time.
+  arguments = {
+    addr = "127.0.0.1:${self.vars.port}"
+  }
+
+  debugger {
+    enabled = true
+    # `port` omitted → kernel-picked free port. Pin a literal only if
+    # your IDE config hardcodes a specific number.
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
