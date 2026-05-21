@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,3 +138,99 @@ func parseSocketPath(t *testing.T, logPath string) string {
 
 // reAlphaListen matches alpha's listening line in the log.
 var reAlphaListen = regexp.MustCompile(`listening on (\S+)`)
+
+// TestLifecycle_failureSummaryShowsCulprit pins zordon's user-facing
+// diagnostic on bringup failure. The mechanism it exercises:
+//
+//  1. zordon trims each service's stdout/stderr into a ring buffer
+//     while streaming bringup logs;
+//  2. on EventServiceFail it records the culprit + error message;
+//  3. on bringup exit (EventDone with failures, EventError, or socket
+//     EOF) it emits a structured block on stderr — one section per
+//     failure, with the alpha-reported error and that service's last
+//     N lines.
+//
+// Why this test exists: every regression in the summary path is
+// silent. Stripping the ring, swapping the failure-list type, moving
+// the printer to the wrong branch — none of it would fail any other
+// test. The user just stops seeing why their bringup died, which is
+// exactly the regression we just fixed.
+//
+// The test runs a service whose runtime cmd prints distinctive marker
+// lines on both stdout and stderr, then exits non-zero. Asserts that
+// the marker lines AND the verdict ("error: exit status N") appear
+// inside the summary block (between the two horizontal-rule lines).
+func TestLifecycle_failureSummaryShowsCulprit(t *testing.T) {
+	// failfast=true closes alpha after the first failure, which
+	// produces the same "EOF on socket" path that real-world fast
+	// failures hit. Important to cover: bug-history shows that's the
+	// branch most likely to skip the summary.
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc")
+
+	const (
+		stdoutMarker = "PROOF-STDOUT-LINE-FROM-SVC"
+		stderrMarker = "PROOF-STDERR-LINE-FROM-SVC"
+	)
+
+	// Distinctive runtime cmd: ignores the built echo binary, just
+	// shells out to print our two markers and exit non-zero. The
+	// service still has to "exist" as a go service for the toolchain
+	// machinery; we just don't execute its binary.
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc" {
+  src = "./src/svc"
+  exe = "."
+
+  runtime {
+    cmd = ["sh", "-c", "echo %s\necho %s >&2\nsleep 0.1\nexit 9"]
+  }
+}
+`, stdoutMarker, stderrMarker))
+
+	res := p.Zordon("start",
+		"--alpha-log", p.AlphaLogPath(),
+		"--timeout", "120s",
+	).WithTimeout(125 * time.Second).Run(t)
+	if res.ExitCode == 0 {
+		t.Fatalf("zordon start unexpectedly succeeded; bringup-failure test premise broken")
+	}
+	combined := res.Stdout + res.Stderr
+
+	// The summary block opens and closes with a 60-dash horizontal
+	// rule. Anything between is the structured failure report.
+	const rule = "------------------------------------------------------------"
+	i := strings.Index(combined, rule)
+	if i < 0 {
+		t.Fatalf("no summary opening rule in zordon output\nstdout: %s\nstderr: %s",
+			res.Stdout, res.Stderr)
+	}
+	j := strings.Index(combined[i+len(rule):], rule)
+	if j < 0 {
+		t.Fatalf("no summary closing rule; output truncated mid-summary?\n%s", combined[i:])
+	}
+	block := combined[i : i+len(rule)+j+len(rule)]
+
+	// Mandatory facts inside the block.
+	mustContain := []string{
+		"Bringup failed: 1 service(s)",
+		"[svc] error: exit status 9",
+		"[svc] last", // "[svc] last N line(s):" — exact count varies on stabilization
+		stdoutMarker,
+		stderrMarker,
+		"[stdout] " + stdoutMarker,
+		"[stderr] " + stderrMarker,
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(block, want) {
+			t.Errorf("summary block missing %q\n----- block -----\n%s\n-----", want, block)
+		}
+	}
+}

@@ -21,8 +21,24 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/ring"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
+
+// summaryTailLines is how many of each failed service's most recent
+// log lines we keep for the post-failure summary block. 50 strikes a
+// balance: enough to capture a stack trace or a "couldn't bind" cause,
+// not so long that two failed services flood the terminal.
+const summaryTailLines = 50
+
+// failure is one row in the post-bringup summary: which service died
+// and what alpha said about why. Captured in arrival order so the
+// summary preserves cause→effect (first failure is usually the real
+// cause; later failures are typically fallout).
+type failure struct {
+	service string
+	err     string
+}
 
 func main() {
 	// Ignore SIGPIPE on stdout/stderr. Go's default for SIGPIPE on the
@@ -192,34 +208,124 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 	
 	log.Info("zordon", "config pushed (%d services, failfast=%v), streaming bringup logs", len(af.All()), failfast)
 
-	var failed []string
+	// Tail buffers per service: we capture every EventLog into a ring
+	// of summaryTailLines so that when bringup fails we can print a
+	// focused "what each failed service was saying last" block at the
+	// end — instead of forcing the user to scroll back through the
+	// stream and re-derive cause from sequence.
+	tails := map[string]*ring.Buffer{}
+	tailOf := func(svc string) *ring.Buffer {
+		b, ok := tails[svc]
+		if !ok {
+			b = ring.New(summaryTailLines)
+			tails[svc] = b
+		}
+		return b
+	}
+
+	var failures []failure
+
+	// finish prints the summary block (if any failures) and returns
+	// the appropriate error. Called from every exit path so the
+	// summary appears whether bringup ended on EventDone, EventError,
+	// or an unexpected stream close.
+	finish := func(streamErr error) error {
+		if len(failures) > 0 {
+			printFailureSummary(log, failures, tails)
+		}
+		switch {
+		case streamErr != nil:
+			return streamErr
+		case len(failures) > 0:
+			names := make([]string, len(failures))
+			for i, f := range failures {
+				names[i] = f.service
+			}
+			return fmt.Errorf("bringup finished with %d failure(s): %s", len(failures), strings.Join(names, ", "))
+		}
+		return nil
+	}
+
 	for {
 		var ev protocol.Event
 		if err := dec.Read(&ev); err != nil {
-			return fmt.Errorf("recv event: %w", err)
+			// Stream died without an explicit verdict (EOF or read
+			// error from alpha disappearing). Run the summary on
+			// whatever failures we've already recorded — the first
+			// service that died is almost always the real cause and
+			// the alpha-side error after that is noise.
+			return finish(fmt.Errorf("recv event: %w", err))
 		}
 		switch ev.Kind {
 		case protocol.EventLog:
 			log.Service(ev.Service, ev.Stream, ev.Line)
+			if ev.Service != "" {
+				tailOf(ev.Service).Push(formatTailLine(ev.Stream, ev.Line))
+			}
 		case protocol.EventServiceStart:
 			log.Info("alpha", "service start: %s", ev.Service)
 		case protocol.EventServiceReady:
 			log.Info("alpha", "service ready: %s", ev.Service)
 		case protocol.EventServiceFail:
 			log.Error("alpha", "service FAILED: %s: %s", ev.Service, ev.Error)
-			failed = append(failed, ev.Service)
+			failures = append(failures, failure{service: ev.Service, err: ev.Error})
 		case protocol.EventDone:
-			if len(failed) > 0 {
-				return fmt.Errorf("bringup finished with %d failure(s): %s", len(failed), strings.Join(failed, ", "))
+			if len(failures) > 0 {
+				return finish(nil)
 			}
 			log.Info("zordon", "alpha ready, detaching")
 			return nil
 		case protocol.EventError:
-			return fmt.Errorf("alpha: %s", ev.Error)
+			return finish(fmt.Errorf("alpha: %s", ev.Error))
 		default:
 			log.Info("zordon", "alpha sent unknown event kind=%q", ev.Kind)
 		}
 	}
+}
+
+// formatTailLine renders one EventLog payload for the summary tail.
+// We prefix with the stream label so a reader can tell stdout from
+// stderr at a glance — critical when the failure cause sat on stderr
+// while stdout was happily printing routine progress.
+func formatTailLine(stream, line string) string {
+	switch stream {
+	case "stdout", "stderr":
+		return "[" + stream + "] " + line
+	case "":
+		return line
+	default:
+		return "[" + stream + "] " + line
+	}
+}
+
+// printFailureSummary writes a structured block to the logger: one
+// section per failed service, each carrying the alpha-reported error
+// plus the tail of that service's own output. Order follows the
+// failure-arrival order — usually first-failure-is-cause, the rest
+// fallout.
+//
+// Goes through the standard zlog so test capture and the user's
+// terminal both see it on stderr alongside the rest of zordon's
+// chatter. No ANSI, no emoji — runs into CI / agent / piped contexts.
+func printFailureSummary(log *zlog.Logger, failures []failure, tails map[string]*ring.Buffer) {
+	bar := strings.Repeat("-", 60)
+	log.Error("zordon", "%s", bar)
+	log.Error("zordon", "Bringup failed: %d service(s)", len(failures))
+	for _, f := range failures {
+		log.Error("zordon", "")
+		log.Error("zordon", "  [%s] error: %s", f.service, f.err)
+		buf, ok := tails[f.service]
+		if !ok || buf.Len() == 0 {
+			log.Error("zordon", "  [%s] (no service output captured)", f.service)
+			continue
+		}
+		lines := buf.Dump()
+		log.Error("zordon", "  [%s] last %d line(s):", f.service, len(lines))
+		for _, ln := range lines {
+			log.Error("zordon", "      %s", ln)
+		}
+	}
+	log.Error("zordon", "%s", bar)
 }
 
 // pinnedFiles holds *os.File handles that must live for the rest of
