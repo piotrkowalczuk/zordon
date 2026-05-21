@@ -38,10 +38,10 @@ func EnsureNodeCorepack(binPath, dataDir, version string, env map[string]string,
 		}
 	}
 
-	if err := os.MkdirAll(refreshRoot, 0o755); err != nil {
+	if err := os.MkdirAll(refreshRoot, 0o750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", refreshRoot, err)
 	}
-	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+	if err := os.MkdirAll(shimDir, 0o750); err != nil {
 		return fmt.Errorf("mkdir %s: %w", shimDir, err)
 	}
 

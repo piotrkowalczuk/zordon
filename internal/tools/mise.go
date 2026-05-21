@@ -51,7 +51,7 @@ func EnsureMise(zordonHome string, logOut io.Writer) (string, error) {
 			"install cargo so zordon can `cargo install` it to %s, "+
 			"or pre-place a mise binary there yourself", bin)
 	}
-	if err := os.MkdirAll(filepath.Join(zordonHome, "bin"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(zordonHome, "bin"), 0o750); err != nil {
 		return "", fmt.Errorf("mkdir %s/bin: %w", zordonHome, err)
 	}
 	// Serialize cargo install so two alphas starting at the same time
@@ -78,18 +78,18 @@ func EnsureMise(zordonHome string, logOut io.Writer) (string, error) {
 // Acquire. The lock is held for the lifetime of the returned closure;
 // callers `defer release()`.
 func lockFile(path string) (release func(), err error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open lock %s: %w", path, err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("flock %s: %w", path, err)
 	}
-	return func() { f.Close() }, nil
+	return func() { _ = f.Close() }, nil
 }
 
 // miseToolName maps the zordon-side language label to mise's tool

@@ -28,7 +28,7 @@ import (
 // Federation acquires locks strictly top-down (root → invocation), a
 // consistent global order, so concurrent zordon invocations can't deadlock.
 func Lock(stateDir string) (func(), error) {
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
 		return nil, fmt.Errorf("mkdir state dir: %w", err)
 	}
 	lockPath := filepath.Join(stateDir, "start.lock")
@@ -37,7 +37,7 @@ func Lock(stateDir string) (func(), error) {
 		return nil, fmt.Errorf("open lock %s: %w", lockPath, err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("flock %s: %w", lockPath, err)
 	}
 	return func() {
@@ -70,7 +70,7 @@ func unlinkStale(path string) error {
 	}
 	c, err := net.DialTimeout("unix", path, 200*time.Millisecond)
 	if err == nil {
-		c.Close()
+		_ = c.Close()
 		return fmt.Errorf("%s is already in use by another alpha", path)
 	}
 	return os.Remove(path)
@@ -125,7 +125,7 @@ func WaitListening(ctx context.Context, path string) error {
 	for {
 		c, err := Dial(path, 100*time.Millisecond)
 		if err == nil {
-			c.Close()
+			_ = c.Close()
 			return nil
 		}
 		select {

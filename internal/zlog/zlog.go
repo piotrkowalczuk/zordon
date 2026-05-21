@@ -119,5 +119,5 @@ func colorFor(src string) string {
 	}
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(src))
-	return servicePalette[h.Sum32()%uint32(len(servicePalette))]
+	return servicePalette[int(h.Sum32()%uint32(len(servicePalette)))] // #nosec G115 -- palette len is a small const, fits uint32
 }

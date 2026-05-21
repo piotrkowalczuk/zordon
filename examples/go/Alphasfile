@@ -10,7 +10,7 @@ toolchain {
   # — user's home mise (~/.local/share/mise) stays untouched. First run
   # bootstraps the version (~30s); subsequent runs hit the cache.
   go {
-    version = "1.25.6"
+    version = "1.26.3"
     env = {
       # Demo: arbitrary env overlay for every `service "go"`.
       GOTRACEBACK = "all"

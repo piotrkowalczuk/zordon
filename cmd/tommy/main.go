@@ -117,7 +117,7 @@ func run(argv []string, grace time.Duration, parentFD int) int {
 	// generic env-driven path can pick it up (the flag survives for
 	// back-compat / explicit overrides).
 	if parentFD >= 0 {
-		os.Setenv("TOMMY_PARENT_FD", strconv.Itoa(parentFD))
+		_ = os.Setenv("TOMMY_PARENT_FD", strconv.Itoa(parentFD))
 	}
 	parentGone, err := parentwatch.WatchForever("TOMMY_PARENT_FD",
 		parentwatch.WithErrorLog(func(err error) {
