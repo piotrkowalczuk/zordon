@@ -161,6 +161,10 @@ func relookupPath(cmd *exec.Cmd) error {
 		candidate := filepath.Join(dir, name)
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
 			cmd.Path = candidate
+			// exec.Command cached a LookPath error against alpha's PATH;
+			// Start() returns it even after we fix Path. Clear it now that
+			// we've resolved against the overlay PATH.
+			cmd.Err = nil
 			return nil
 		}
 	}
