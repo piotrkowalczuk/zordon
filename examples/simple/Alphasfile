@@ -1,8 +1,10 @@
 sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 service "go" "nats-server" {
-  git = "github.com/nats-io/nats-server"
-  tag = "v2.14.0"
+  git {
+    url = "github.com/nats-io/nats-server"
+    tag = "v2.14.0"
+  }
 
   vars = {
     client = net::pickport()
@@ -18,8 +20,10 @@ service "go" "nats-server" {
 }
 
 service "rust" "tansu" {
-  cargo      = "tansu"
-  features   = ["dynostore"]
+  crate {
+    name     = "tansu"
+    features = ["dynostore"]
+  }
   doubleDash = true
 
   vars = {
@@ -33,9 +37,11 @@ service "rust" "tansu" {
 }
 
 service "go" "prometheus" {
-  git   = "github.com/prometheus/prometheus"
-  tag   = "v3.11.3"
-  exe   = "./cmd/prometheus"
+  git {
+    url = "github.com/prometheus/prometheus"
+    tag = "v3.11.3"
+  }
+  src { exe = "./cmd/prometheus" }
   doubleDash = true
 
   vars = {
@@ -71,7 +77,9 @@ service "go" "prometheus" {
 }
 
 service "ruby" "ruby-service" {
-  git = "github.com/niwasawa/ruby-sinatra-hello-world"
+  git {
+    url = "github.com/niwasawa/ruby-sinatra-hello-world"
+  }
 
   # No build {} — the toolchain default for ruby is
   # `bundle config set --local path vendor/bundle && bundle install`,

@@ -5,8 +5,10 @@ sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 # TOPIC. The shared topics file path is resolved at kafka's eval time,
 # so every invoker appends to the same file.
 service "go" "kafka" {
-  src = "../.."
-  exe = "./examples/invoke/src/kafka"
+  src {
+    path = "../.."
+    exe = "./examples/invoke/src/kafka"
+  }
 
   vars = {
     port   = net::pickport()
@@ -33,8 +35,10 @@ service "go" "kafka" {
 }
 
 service "go" "app" {
-  src = "../.."
-  exe = "./examples/invoke/src/app"
+  src {
+    path = "../.."
+    exe = "./examples/invoke/src/app"
+  }
 
   vars = { port = net::pickport() }
 
@@ -63,8 +67,10 @@ service "go" "app" {
 }
 
 service "go" "billing" {
-  src = "../.."
-  exe = "./examples/invoke/src/billing"
+  src {
+    path = "../.."
+    exe = "./examples/invoke/src/billing"
+  }
 
   vars = { port = net::pickport() }
 

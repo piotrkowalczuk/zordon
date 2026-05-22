@@ -1,8 +1,10 @@
 sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 service "go" "serviceA" {
-  src = "../.."
-  exe = "./examples/worktree/src/serviceA"
+  src {
+    path = "../.."
+    exe = "./examples/worktree/src/serviceA"
+  }
 
   vars = {
     port = net::pickport()
@@ -33,8 +35,10 @@ service "go" "serviceA" {
 }
 
 service "go" "serviceB" {
-  src = "../.."
-  exe = "./examples/worktree/src/serviceB"
+  src {
+    path = "../.."
+    exe = "./examples/worktree/src/serviceB"
+  }
 
   vars = {
     port = net::pickport()
@@ -65,8 +69,10 @@ service "go" "serviceB" {
 }
 
 service "go" "serviceC" {
-  src = "../.."
-  exe = "./examples/worktree/src/serviceC"
+  src {
+    path = "../.."
+    exe = "./examples/worktree/src/serviceC"
+  }
 
   vars = {
     port = net::pickport()

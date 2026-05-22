@@ -2,9 +2,11 @@
 
 ```hcl
 service "go" "prometheus" {
-  git = "github.com/prometheus/prometheus"
-  tag = "v3.11.3"
-  exe = "./cmd/prometheus"   # main package, relative to the repo root
+  git {
+    url = "github.com/prometheus/prometheus"
+    tag = "v3.11.3"
+  }
+  src { exe = "./cmd/prometheus" }   # main package, relative to the repo root
   doubleDash = true
   arguments = { "config.file" = "prometheus.yml" }
   readiness { http { path = "/-/ready" port = 9020 } }

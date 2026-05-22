@@ -11,7 +11,7 @@ import (
 func TestResolveLatentAndCmdRef(t *testing.T) {
 	af := compile(t, `
 service "go" "kafka" {
-  src = "../.."
+  src { path = "../.." }
   runtime {
     cmd = ["./kafka"]
     provision "create-topic" {
@@ -22,7 +22,7 @@ service "go" "kafka" {
 }
 
 service "go" "app" {
-  src = "../.."
+  src { path = "../.." }
   runtime {
     cmd = ["./app"]
     provision "topic" {
@@ -62,7 +62,7 @@ service "go" "app" {
 func TestResolveCmdRefToNonLatent(t *testing.T) {
 	af := compile(t, `
 service "go" "prov" {
-  src = "../.."
+  src { path = "../.." }
   runtime {
     cmd = ["./prov"]
     provision "seed" {
@@ -72,7 +72,7 @@ service "go" "prov" {
 }
 
 service "go" "cons" {
-  src = "../.."
+  src { path = "../.." }
   runtime {
     cmd = ["./cons"]
     provision "seed-mine" {
@@ -103,7 +103,7 @@ func TestResolveInvokeErrors(t *testing.T) {
 			name: "never_with_other_refs",
 			src: `
 service "go" "x" {
-  src = "../.."
+  src { path = "../.." }
   runtime {
     cmd = ["./x"]
     provision "a" { cmd = "true" }
@@ -119,7 +119,7 @@ service "go" "x" {
 			name: "check_with_cmd_ref",
 			src: `
 service "go" "k" {
-  src = "../.."
+  src { path = "../.." }
   runtime {
     cmd = ["./k"]
     provision "tpl" {
@@ -129,7 +129,7 @@ service "go" "k" {
   }
 }
 service "go" "c" {
-  src = "../.."
+  src { path = "../.." }
   runtime {
     cmd = ["./c"]
     provision "use" {
@@ -144,7 +144,7 @@ service "go" "c" {
 			name: "detached_latent",
 			src: `
 service "go" "x" {
-  src = "../.."
+  src { path = "../.." }
   runtime {
     cmd = ["./x"]
     provision "a" {

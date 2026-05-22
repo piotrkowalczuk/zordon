@@ -7,9 +7,11 @@ and run.
 
 ```hcl
 service "go" "nats-server" {
-  git = "github.com/nats-io/nats-server"   # zordon-owned bare clone
-  tag = "v2.14.0"
-  # exe defaults to "." (main package at repo root)
+  git {
+    url = "github.com/nats-io/nats-server"   # zordon-owned bare clone
+    tag = "v2.14.0"
+    # exe defaults to "." (main package at repo root)
+  }
 
   arguments = {
     p = 9010
@@ -18,13 +20,18 @@ service "go" "nats-server" {
 }
 
 service "rust" "tansu" {
-  exe = "tansu"   # no git/src ⇒ not worktree-able; expected on $PATH
+  crate {
+    name = "tansu"
+  }
+  features = ["server"]
 }
 
 service "go" "prometheus" {
-  git        = "github.com/prometheus/prometheus"
-  tag        = "v3.11.3"
-  exe        = "./cmd/prometheus"   # main package, relative to the repo root
+  git {
+    url = "github.com/prometheus/prometheus"
+    tag = "v3.11.3"
+  }
+  src { exe = "./cmd/prometheus" }   # main package, relative to the repo root
   doubleDash = true
 
   arguments = {
@@ -42,8 +49,10 @@ service "go" "prometheus" {
 }
 
 service "go" "my-app" {
-  src = "~/code/my-app"   # your own checkout; zordon never writes to the primary
-  exe = "."
+  src {
+    path = "~/code/my-app"   # your own checkout; zordon never writes to the primary
+    exe  = "."
+  }
 
   runtime {
     cmd = ["${fs::bin()}/my-app", "-addr", ":8080"]
@@ -51,23 +60,27 @@ service "go" "my-app" {
 }
 ```
 
-### Source: three pointers
+### Source: `git { }`, `src { }`, `crate { }`
 
-A service is described by three location pointers (the rest comes from
-toolchain defaults — keep the manifest small):
+A service picks exactly one primary. The rest comes from toolchain
+defaults — keep the manifest small.
 
-- **`git = "host/owner/repo"`** — the repo. zordon bare-clones it once
-  into `~/.zordon/src/...`; each invocation gets a fresh `git worktree`.
-- **`src = "/path"` / `"../.."`** — a local checkout to use as the
-  primary instead of cloning `git`. Relative values resolve against the
-  **Alphasfile's directory**. zordon only `git worktree add`s from it —
-  never writes to your primary. Give `git` *or* `src`, not both.
-- **`exe`** — the build target (Go: the main package), **relative to the
-  primary root** (the `src` dir, or the git-clone root). Default: `.`;
-  set it when the main lives elsewhere (e.g. `./cmd/foo`). With neither
-  `git` nor `src`, `exe` is just a binary name resolved from `$PATH`.
+- **`git { url = "host/owner/repo" }`** — remote source. zordon
+  bare-clones once into `~/.zordon/src/...`; each invocation gets a
+  fresh `git worktree`. `branch` / `tag` / `rev` pin the revision.
+- **`src { path = "/path" }`** — local checkout used in place (no
+  clone, edit→start loop). Relative paths resolve against the
+  **Alphasfile's directory**.
+- **`src { exe = "..." }`** — the build target subdir (Go: the main
+  package), relative to the source root. Default `.`. Can ride
+  alongside `git { }` (subdir within the cloned worktree) **or**
+  inside `src { path, exe }` for a local checkout.
+- **`crate { name, version, index, registry, git, branch, tag, rev }`**
+  — rust-only. `cargo install <name>` from a registry or a git URL.
+  Mutually exclusive with `src` / `git` blocks. See
+  [Rust services](services/rust.md) for the full field list.
 
-`branch` / `tag` / `rev` pin the revision. The build is the toolchain
+The build is the toolchain
 default run **in the checkout** — Go: `go build` of `exe` into
 `fs::bin()` (out-of-tree, so it never dirties a `src` worktree); Rust:
 `cargo build --release`; Ruby: `bundle install`. Override it with
@@ -97,7 +110,7 @@ other field). `agent` takes only `env`.
 
 ```hcl
 service "go" "app" {
-  src = "../.."
+  src { path = "../.." }
 
   build {
     env = { BUILD_TAG = "release" }
@@ -192,8 +205,10 @@ time it expands into:
 
 ```hcl
 service "go" "app" {
-  src = "../.."
-  exe = "./cmd/app"
+  src {
+    path = "../.."
+    exe = "./cmd/app"
+  }
 
   vars = { port = net::pickport() }
 

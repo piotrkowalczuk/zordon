@@ -1,41 +1,68 @@
 # Rust services
 
-Rust has two source shapes — a **crate** from crates.io, or a
-**git/src** checkout — and they are mutually exclusive.
+Rust has two source shapes — a **crate** (`cargo install` from a
+registry or a git URL) or a **git/src checkout** (zordon-managed
+worktree, built with `cargo install --path`) — and they are mutually
+exclusive.
 
 ```hcl
-# crates.io
+# crates.io registry
 service "rust" "tansu" {
-  crate    = "tansu"
+  crate {
+    name    = "tansu"
+    version = "0.6.0"
+  }
   features = ["server"]
 }
 
-# from a repo / local checkout
+# cargo install --git (cargo fetches the source itself)
+service "rust" "some-tool" {
+  crate {
+    name = "some-tool"
+    git  = "https://github.com/owner/some-tool"
+    tag  = "v1.0.0"          # or branch = "main", or rev = "abc1234"
+  }
+}
+
+# zordon-managed worktree (clone + cargo install --path)
 service "rust" "broker" {
-  git = "https://github.com/acme/broker"
-  exe = "crates/broker"   # workspace member; "" = repo root
-  bin = "brokerd"         # cargo --bin target (multi-bin crate)
+  git {
+    url = "https://github.com/acme/broker"
+  }
+  src { exe = "crates/broker" }   # workspace member; "" = repo root
+  bin = "brokerd"           # cargo --bin target (multi-bin crate)
+}
+
+# in-place local checkout (no git clone, edit→start loop)
+service "rust" "app" {
+  src {
+    path = "../.."
+    exe = "./examples/rust/src/app"
+  }
 }
 ```
 
-## Source
+## Source blocks
 
-- **`crate`** — a crates.io crate. Mutually exclusive with `git`/`src`
-  (declaring both is an error).
-- **`git`/`src`** — a checkout, like Go. `branch`/`tag`/`rev` pin it.
+- **`crate { name, version, index, registry, git, branch, tag, rev }`**
+  — runs `cargo install <name>` with the cargo CLI source flags.
+  `version` is mutually exclusive with `git`. `branch`/`tag`/`rev` are
+  only valid with `git`. Cargo manages the fetch — no zordon worktree.
+- **`git { url, src, branch, tag, rev, exe }`** — a checkout zordon
+  owns. `url` clones a remote; `src` points at an existing local
+  directory (in-place mode, no clone). `branch`/`tag`/`rev` pin a
+  remote checkout. `exe` is the workspace subdir holding the build
+  target (`""`/`.` = repo root). Builds via `cargo install --path`.
 
 Every Rust service compiles; there is no prebuilt-`$PATH` path.
 
-## `exe` vs `bin`
+## Top-level rust knobs
 
-- **`exe`** — for `git`/`src`, the **workspace subdir** holding the
-  crate to build (`""`/`.` = repo root). It's a path, never a binary
-  name.
-- **`bin`** — selects one `--bin` target from a multi-bin crate. Its
-  installed filename is the cargo bin-target name, and zordon runs
-  `<fs::bin>/<service-name>`, so **name the service after the bin
-  target** you select.
-- **`features`** — passed as `--features a,b`.
+- **`bin`** — selects one `--bin` target from a multi-bin crate.
+  Applies in both `crate` and `git` modes. The installed filename is
+  the cargo bin-target name, and zordon runs `<fs::bin>/<service-name>`,
+  so **name the service after the bin target** you select.
+- **`features`** — passed as `--features a,b`. Applies in both modes.
 
 ## Build & run
 
@@ -44,10 +71,11 @@ artifact (no guessing `target/release/...`):
 
 ```sh
 # crate (immutable → no --force; reuses an already-installed binary)
-CARGO_TARGET_DIR=<cache> cargo install "<crate>" --root <stateDir> \
-  [--features …] [--bin …] --locked
+CARGO_TARGET_DIR=<cache> cargo install "<name>" --root <stateDir> \
+  [--version …] [--git … [--branch|--tag|--rev …]] \
+  [--index …] [--registry …] [--features …] [--bin …] --locked
 
-# git/src (cwd = checkout; --force so code changes are picked up)
+# git/src worktree (cwd = checkout; --force so code changes are picked up)
 CARGO_TARGET_DIR=<cache> cargo install --path "<exe|.>" --root <stateDir> \
   [--features …] [--bin …] --locked --force
 ```

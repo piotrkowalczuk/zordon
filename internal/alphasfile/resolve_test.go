@@ -41,7 +41,7 @@ func svcByName(af *Alphasfile, name string) *Service {
 func TestResolveInvocationDerivedValues(t *testing.T) {
 	src := `
 service "go" "api" {
-  git = "github.com/acme/api"
+  git { url = "github.com/acme/api" }
   vars = { fs = fs::hash(), cfg = cfg::hash(), tmp = fs::tmp() }
   file "env" {
     path = "${fs::tmp()}/.env"
@@ -98,7 +98,7 @@ service "go" "api" {
 func TestResolveFsState(t *testing.T) {
 	src := `
 service "go" "api" {
-  git  = "github.com/acme/api"
+  git { url = "github.com/acme/api" }
   vars = { cache_dir = "${fs::state()}/cache/bootsnap" }
 }
 `
@@ -113,11 +113,11 @@ service "go" "api" {
 func TestResolveCrossServiceRefAndDir(t *testing.T) {
 	src := `
 service "go" "db" {
-  git  = "github.com/acme/db"
+  git { url = "github.com/acme/db" }
   vars = { port = 5432 }
 }
 service "go" "api" {
-  git  = "github.com/acme/api"
+  git { url = "github.com/acme/api" }
   vars = { db_at = "${service.go.db.dir}@${service.go.db.vars.port}" }
 }
 `
@@ -137,7 +137,7 @@ func TestResolveFederationParentFlatNamespace(t *testing.T) {
 	}})
 	src := `
 service "go" "app" {
-  git  = "github.com/acme/app"
+  git { url = "github.com/acme/app" }
   vars = { upstream = "127.0.0.1:${service.go.caddy.vars.http}", caddydir = service.go.caddy.dir }
 }
 `
@@ -154,37 +154,59 @@ service "go" "app" {
 func TestResolveUseOnlyExcludesSrc(t *testing.T) {
 	_, err := Compile("t", []byte(`
 service "rust" "x" {
-  src   = "../.."
-  cargo = "tansu"
+  src { path = "../.." }
+  crate { name = "tansu" }
 }
 `), testInv(), nil, TestConfig{})
-	if err == nil || !strings.Contains(err.Error(), "use-only") {
+	if err == nil || !strings.Contains(err.Error(), "cannot coexist") {
 		t.Fatalf("want use-only/src exclusivity error, got %v", err)
 	}
 }
 
-func TestResolveGitSeedsSrc(t *testing.T) {
-	// git + src is allowed: git is the origin that seeds src; worktree
-	// from src. Both present must not error.
+// `git { }` + `src { exe }` is the canonical remote-with-subdir form:
+// git carries the URL (and ref); src carries only the build subdir
+// within the cloned worktree (no path).
+func TestResolveGitWithSrcExe(t *testing.T) {
 	af := compile(t, `
 service "go" "api" {
-  git = "github.com/a/api"
-  src = "../checkouts/api"
+  git {
+    url = "github.com/a/api"
+    tag = "v1.0.0"
+  }
+  src { exe = "./cmd/api" }
 }
 `, nil)
 	s := svcByName(af, "api")
 	if s == nil || !s.Worktreeable() || s.UseOnly() {
-		t.Fatalf("git+src must be a worktree service: %+v", s.Package)
+		t.Fatalf("git+src{exe} must be a worktree service: %+v", s.Package)
 	}
-	if s.Package.Git != "github.com/a/api" || s.Package.Src == "" {
-		t.Errorf("git+src not carried: %+v", s.Package)
+	if s.Package.Git != "github.com/a/api" || s.Package.Tag != "v1.0.0" || s.Package.Exe != "./cmd/api" {
+		t.Errorf("git+src{exe} not carried: %+v", s.Package)
+	}
+}
+
+// src{path} + git{} together must be rejected — they're alternative
+// source primaries (local-only vs. remote-cloned).
+func TestResolveSrcPathExcludesGit(t *testing.T) {
+	_, err := Compile("t", []byte(`
+service "go" "x" {
+  git { url = "github.com/a/x" }
+  src { path = "../checkouts/x" }
+}
+`), testInv(), nil, TestConfig{})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("want src{path}/git mutual-exclusion error, got %v", err)
 	}
 }
 
 func TestResolveNameCollision(t *testing.T) {
 	_, err := Compile("t", []byte(`
-service "go" "dup" { git = "github.com/a/b" }
-service "go" "dup" { git = "github.com/a/c" }
+service "go" "dup" {
+  git { url = "github.com/a/b" }
+}
+service "go" "dup" {
+  git { url = "github.com/a/c" }
+}
 `), testInv(), nil, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), "duplicate service") {
 		t.Fatalf("want duplicate error, got %v", err)
@@ -195,7 +217,7 @@ func TestResolveUseOnlyNoWorktree(t *testing.T) {
 	// rust use-only block: installed, not worktree-able, no checkout dir.
 	af := compile(t, `
 service "rust" "tansu" {
-  cargo = "tansu"
+  crate { name = "tansu" }
 }
 `, nil)
 	s := svcByName(af, "tansu")
@@ -225,8 +247,10 @@ service "go" "dlv" {
 func TestResolveRustUseOnlyFeaturesVersion(t *testing.T) {
 	af := compile(t, `
 service "rust" "tansu" {
-  cargo    = "tansu"
-  version  = "0.6.0"
+  crate {
+    name    = "tansu"
+    version = "0.6.0"
+  }
   features = ["a", "b"]
 }
 `, nil)
@@ -240,13 +264,13 @@ service "rust" "tansu" {
 }
 
 func TestResolveToolchainFieldMismatch(t *testing.T) {
-	// rust use-only field on a go service is a typed mistake.
+	// rust-only `crate {}` block on a go service is a typed mistake.
 	_, err := Compile("t", []byte(`
 service "go" "x" {
-  cargo = "tansu"
+  crate { name = "tansu" }
 }
 `), testInv(), nil, TestConfig{})
-	if err == nil || !strings.Contains(err.Error(), "rust use-only") {
+	if err == nil || !strings.Contains(err.Error(), "rust-only") {
 		t.Fatalf("want toolchain/field mismatch error, got %v", err)
 	}
 }
@@ -264,7 +288,7 @@ func TestResolveSrc_resolvesAgainstAlphasfileDir(t *testing.T) {
 	// /tmp/proj-root/tools (one level up from /tmp/proj-root/inner/).
 	src := `
 service "go" "tooling" {
-  src = "../tools"
+  src { path = "../tools" }
 }
 `
 	afPath := "/tmp/test-resolve-src/proj/Alphasfile"
@@ -288,12 +312,12 @@ service "go" "tooling" {
 func TestResolveCrossServiceEnvVarsNoFalseCycle(t *testing.T) {
 	src := `
 service "go" "a" {
-  git  = "github.com/acme/a"
+  git { url = "github.com/acme/a" }
   vars = { port = 5000 }
   env  = { B_PORT = "${service.go.b.vars.port}" }
 }
 service "go" "b" {
-  git  = "github.com/acme/b"
+  git { url = "github.com/acme/b" }
   vars = { port = 6000 }
   env  = { A_PORT = "${service.go.a.vars.port}" }
 }
@@ -317,11 +341,11 @@ service "go" "b" {
 func TestResolveCrossServiceVarsCycleStillCaught(t *testing.T) {
 	src := `
 service "go" "a" {
-  git  = "github.com/acme/a"
+  git { url = "github.com/acme/a" }
   vars = { x = service.go.b.vars.x }
 }
 service "go" "b" {
-  git  = "github.com/acme/b"
+  git { url = "github.com/acme/b" }
   vars = { x = service.go.a.vars.x }
 }
 `
@@ -334,7 +358,7 @@ service "go" "b" {
 func TestResolveSudoStepsResolved(t *testing.T) {
 	src := `
 service "go" "dns" {
-  git  = "github.com/acme/dns"
+  git { url = "github.com/acme/dns" }
   vars = { port = 5300 }
   sudo "resolver" {
     check  = "grep -q ${self.vars.port} /etc/resolver/test"
@@ -363,11 +387,11 @@ service "go" "dns" {
 func TestResolveProvisionsResolved(t *testing.T) {
 	src := `
 service "go" "db" {
-  git  = "github.com/acme/db"
+  git { url = "github.com/acme/db" }
   vars = { port = 5432, password = "secret" }
 }
 service "go" "api" {
-  git  = "github.com/acme/api"
+  git { url = "github.com/acme/api" }
   vars = { port = 8080 }
   runtime {
     provision "create-tables" {

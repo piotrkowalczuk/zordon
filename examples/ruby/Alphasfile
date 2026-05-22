@@ -23,7 +23,9 @@ toolchain {
 }
 
 service "ruby" "app" {
-  src = "../.."
+  src {
+    path = "../.."
+  }
 
   build {
     cmd = ["true"]

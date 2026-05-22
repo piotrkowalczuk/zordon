@@ -61,8 +61,10 @@ toolchain {
 }
 
 service "rust" "echo" {
-  src = "./src/echo"
-  exe = "."
+  src {
+    path = "./src/echo"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -120,7 +122,7 @@ toolchain {
 }
 
 service "rust" "echo" {
-  src = "./src/echo"
+  src { path = "./src/echo" }
 
   build {
     cmd = ["cargo", "install", "--path", ".", "--root", "${fs::bin()}/..", "--locked", "--force"]
@@ -168,8 +170,10 @@ toolchain {
 }
 
 service "rust" "echo" {
-  src = "./src/echo"
-  exe = "."
+  src {
+    path = "./src/echo"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -206,8 +210,10 @@ toolchain {
 }
 
 service "rust" "echo" {
-  src      = "./src/echo"
-  exe      = "."
+  src {
+    path = "./src/echo"
+    exe = "."
+  }
   features = ["greeting"]
 
   vars = { port = %d }
@@ -267,8 +273,10 @@ toolchain {
 }
 
 service "rust" "echo" {
-  src = "./src/echo"
-  exe = "."
+  src {
+    path = "./src/echo"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -317,8 +325,10 @@ toolchain {
 }
 
 service "rust" "echo" {
-  src = "./src/echo"
-  exe = "."
+  src {
+    path = "./src/echo"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -385,7 +395,7 @@ toolchain {
 }
 
 service "rust" "echo" {
-  src = "./src/echo"
+  src { path = "./src/echo" }
 
   build {
     cmd = ["cargo", "--zordon-bogus-flag"]

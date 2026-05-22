@@ -2379,6 +2379,23 @@ func defaultBuild(svc *alphasfile.Service, name, binDir, dest string) string {
 			if v := strings.TrimSpace(svc.Package.Version); v != "" {
 				opts += fmt.Sprintf(" --version %q", v)
 			}
+			if u := strings.TrimSpace(svc.Package.Git); u != "" {
+				opts += fmt.Sprintf(" --git %q", u)
+				switch {
+				case svc.Package.Branch != "":
+					opts += fmt.Sprintf(" --branch %q", svc.Package.Branch)
+				case svc.Package.Tag != "":
+					opts += fmt.Sprintf(" --tag %q", svc.Package.Tag)
+				case svc.Package.Rev != "":
+					opts += fmt.Sprintf(" --rev %q", svc.Package.Rev)
+				}
+			}
+			if i := strings.TrimSpace(svc.Package.Index); i != "" {
+				opts += fmt.Sprintf(" --index %q", i)
+			}
+			if reg := strings.TrimSpace(svc.Package.Registry); reg != "" {
+				opts += fmt.Sprintf(" --registry %q", reg)
+			}
 			if b := strings.TrimSpace(svc.Package.Bin); b != "" {
 				opts += fmt.Sprintf(" --bin %q", b)
 			}

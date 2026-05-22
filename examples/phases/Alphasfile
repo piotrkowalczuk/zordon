@@ -1,7 +1,9 @@
 sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 service "go" "app" {
-  src = "../.."
+  src {
+    path = "../.."
+  }
 
   vars = { port = net::pickport() }
 

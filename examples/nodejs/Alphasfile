@@ -16,8 +16,10 @@ toolchain {
 }
 
 service "nodejs" "app" {
-  src = "../.."
-  exe = "examples/nodejs/src/app"
+  src {
+    path = "../.."
+    exe = "examples/nodejs/src/app"
+  }
 
   vars = { port = net::pickport() }
 

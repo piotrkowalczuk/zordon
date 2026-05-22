@@ -19,8 +19,10 @@ toolchain {
 }
 
 service "go" "app" {
-  src = "../.."
-  exe = "./examples/go/src/app"
+  src {
+    path = "../.."
+    exe = "./examples/go/src/app"
+  }
 
   vars = { port = net::pickport() }
 

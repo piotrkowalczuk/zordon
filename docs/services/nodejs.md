@@ -2,7 +2,7 @@
 
 ```hcl
 service "nodejs" "app" {
-  src = "../my-node-app"
+  src { path = "../my-node-app" }
 
   vars = { port = net::pickport() }
   env  = { PORT = "${self.vars.port}" }

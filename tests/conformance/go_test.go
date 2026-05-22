@@ -63,8 +63,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -106,7 +108,7 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
+  src { path = "./src/svc1" }
 
   build {
     cmd = ["go", "build", "-o", "${fs::bin()}/svc1", "."]
@@ -157,8 +159,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -193,8 +197,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -242,8 +248,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -298,8 +306,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = {
     port = %d
@@ -359,8 +369,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = {
     port = %d
@@ -427,8 +439,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -480,8 +494,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -540,8 +556,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -624,8 +642,10 @@ toolchain {
 }
 
 service "go" "fetcher" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
   vars = { port = 27680 }
 
   runtime {
@@ -647,8 +667,10 @@ service "go" "fetcher" {
 }
 
 service "go" "shared-check" {
-  src = "./src/svc2"
-  exe = "."
+  src {
+    path = "./src/svc2"
+    exe = "."
+  }
   vars = { port = 27681 }
 
   runtime {
@@ -671,8 +693,10 @@ service "go" "shared-check" {
 }
 
 service "go" "isolated-check" {
-  src = "./src/svc3"
-  exe = "."
+  src {
+    path = "./src/svc3"
+    exe = "."
+  }
   vars = { port = 27682 }
 
   runtime {
@@ -734,8 +758,10 @@ toolchain {
 }
 
 service "go" "first" {
-  src = "./src/first"
-  exe = "."
+  src {
+    path = "./src/first"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -754,8 +780,10 @@ service "go" "first" {
 }
 
 service "go" "second" {
-  src = "./src/second"
-  exe = "."
+  src {
+    path = "./src/second"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -834,8 +862,10 @@ func TestGoService_buildFailureBlocksRuntime(t *testing.T) {
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -901,8 +931,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = {
     port    = %d
@@ -971,8 +1003,10 @@ toolchain {
 }
 
 service "go" "kafka" {
-  src = "./src/kafka"
-  exe = "."
+  src {
+    path = "./src/kafka"
+    exe = "."
+  }
   vars = {
     port   = %d
     topics = "${fs::tmp()}/topics.txt"
@@ -995,8 +1029,10 @@ service "go" "kafka" {
 }
 
 service "go" "app" {
-  src = "./src/app"
-  exe = "."
+  src {
+    path = "./src/app"
+    exe = "."
+  }
   vars = { port = %d }
   runtime {
     cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -1016,8 +1052,10 @@ service "go" "app" {
 }
 
 service "go" "billing" {
-  src = "./src/billing"
-  exe = "."
+  src {
+    path = "./src/billing"
+    exe = "."
+  }
   vars = { port = %d }
   runtime {
     cmd = ["${fs::bin()}/billing", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -1076,8 +1114,10 @@ toolchain {
 }
 
 service "go" "prov" {
-  src = "./src/prov"
-  exe = "."
+  src {
+    path = "./src/prov"
+    exe = "."
+  }
   vars = {
     port = %d
     f    = "${fs::tmp()}/seeded.txt"
@@ -1099,8 +1139,10 @@ service "go" "prov" {
 }
 
 service "go" "cons" {
-  src = "./src/cons"
-  exe = "."
+  src {
+    path = "./src/cons"
+    exe = "."
+  }
   vars = { port = %d }
   runtime {
     cmd = ["${fs::bin()}/cons", "-addr", "127.0.0.1:${self.vars.port}"]

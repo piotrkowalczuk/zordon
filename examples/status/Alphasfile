@@ -1,8 +1,10 @@
 sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 service "go" "app" {
-  src = "../.."
-  exe = "./examples/status/src/app"
+  src {
+    path = "../.."
+    exe = "./examples/status/src/app"
+  }
 
   vars  = { port = net::pickport() }
   print = "http://127.0.0.1:${self.vars.port}/  (app endpoint)"

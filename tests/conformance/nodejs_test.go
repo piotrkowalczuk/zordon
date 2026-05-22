@@ -35,7 +35,7 @@ toolchain {
 }
 
 service "nodejs" "echo" {
-  src = "./src/echo"
+  src { path = "./src/echo" }
 
   vars = { port = %d }
   env  = { PORT = "${self.vars.port}" }
@@ -71,7 +71,7 @@ toolchain {
 }
 
 service "nodejs" "echo" {
-  src = "./src/echo"
+  src { path = "./src/echo" }
 
   build {
     cmd = ["true"]
@@ -112,7 +112,7 @@ toolchain {
 }
 
 service "nodejs" "echo" {
-  src = "./src/echo"
+  src { path = "./src/echo" }
 
   vars = { port = %d }
 
@@ -150,7 +150,7 @@ toolchain {
 }
 
 service "nodejs" "echo" {
-  src = "./src/echo"
+  src { path = "./src/echo" }
 
   vars = { port = %d }
   env  = { PORT = "${self.vars.port}" }
@@ -178,7 +178,7 @@ toolchain {
 }
 
 service "nodejs" "echo" {
-  src = "./src/echo"
+  src { path = "./src/echo" }
 
   vars = { port = %d }
   env  = {
@@ -269,7 +269,7 @@ toolchain {
 }
 
 service "nodejs" "echo" {
-  src = "./src/echo"
+  src { path = "./src/echo" }
 
   vars = { port = %d }
   env  = { PORT = "${self.vars.port}" }
@@ -344,7 +344,7 @@ toolchain {
 }
 
 service "nodejs" "echo" {
-  src = "./src/echo"
+  src { path = "./src/echo" }
 
   vars = { port = %d }
   env  = { PORT = "${self.vars.port}" }

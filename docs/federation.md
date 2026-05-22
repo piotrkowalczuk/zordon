@@ -106,9 +106,11 @@ anything, and without any per-app glue code. From
 ```hcl
 # examples/federation/Alphasfile  (the root: caddy + coredns)
 service "go" "caddy" {
-  git = "github.com/caddyserver/caddy"
-  tag = "v2.10.0"
-  exe = "./cmd/caddy"
+  git {
+    url = "github.com/caddyserver/caddy"
+    tag = "v2.10.0"
+  }
+  src { exe = "./cmd/caddy" }   # build target within the clone
   vars = {
     http       = net::pickport()
     config_dir = "${fs::tmp()}/conf.d"
@@ -123,10 +125,12 @@ service "go" "caddy" {
 
 # examples/federation/project/Alphasfile  (the project)
 service "go" "prometheus" {
-  git    = "github.com/prometheus/prometheus"
-  tag    = "v3.11.3"
-  exe    = "./cmd/prometheus"
-  vars   = { port = net::pickport() }
+  git {
+    url = "github.com/prometheus/prometheus"
+    tag = "v3.11.3"
+  }
+  src { exe = "./cmd/prometheus" }
+  vars = { port = net::pickport() }
 
   # The entire integration: one dropped vhost fragment.
   file "caddy_vhost" {
