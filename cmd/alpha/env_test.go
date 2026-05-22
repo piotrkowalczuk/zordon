@@ -38,6 +38,31 @@ func TestBuildCmdInjectsEnv(t *testing.T) {
 	}
 }
 
+// Explicit runtime.cmd must still receive runtime.arguments appended as
+// flags — same as every other buildCmd branch (nodejs, built-bin,
+// default). Without this, `runtime { cmd = [...], arguments = {...} }`
+// silently drops the arguments.
+func TestBuildCmdExplicitCmdAppendsArguments(t *testing.T) {
+	svc := &alphasfile.Service{
+		Toolchain: alphasfile.ToolchainGo,
+		Runtime: &alphasfile.RuntimeConfig{
+			Name:       "app",
+			Command:    []string{"/bin/echo", "hi"},
+			Arguments:  map[string]any{"addr": "127.0.0.1:9000"},
+			DoubleDash: true,
+		},
+		Package: &alphasfile.Package{Toolchain: alphasfile.ToolchainGo, Src: "/tmp/x"},
+	}
+	cmd, err := buildCmd(svc, "/tmp/x", nil, false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/bin/echo", "hi", "--addr=127.0.0.1:9000"}
+	if !slices.Equal(cmd.Args, want) {
+		t.Fatalf("argv = %v, want %v", cmd.Args, want)
+	}
+}
+
 // Closed-world sysenv whitelist: with no allow list, the spawned cmd's
 // env contains NONE of the host shell's exports — even widely-present
 // vars like HOME and PATH are filtered out. This is the chokepoint that

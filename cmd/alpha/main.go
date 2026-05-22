@@ -2298,7 +2298,7 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent
 	switch {
 	case svc.Runtime != nil && len(svc.Runtime.Command) > 0:
 		// Explicit argv (subcommand-driven binaries / built artifacts).
-		argv := svc.Runtime.Command
+		argv := append(append([]string{}, svc.Runtime.Command...), svc.Flags()...)
 		cmd = exec.Command(argv[0], argv[1:]...)
 	case svc.Toolchain == alphasfile.ToolchainNode:
 		// Node has no single-binary build artifact; with no explicit
