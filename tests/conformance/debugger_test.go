@@ -54,8 +54,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = 27800 }
 
@@ -103,8 +105,10 @@ func TestDebugger_rejectsNonGoToolchain(t *testing.T) {
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 
 service "rust" "tansu" {
-  cargo = "tansu"
-  version = "0.1.0"
+  crate {
+    name    = "tansu"
+    version = "0.1.0"
+  }
 
   debugger {
     enabled = true
@@ -140,8 +144,10 @@ func TestDebugger_requiresToolchainBlock(t *testing.T) {
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
   vars = { port = 27803 }
   arguments = { addr = "127.0.0.1:${self.vars.port}" }
   debugger { enabled = true }
@@ -196,8 +202,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -260,8 +268,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -315,8 +325,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
   vars = { port = %d }
   arguments = { addr = "127.0.0.1:${self.vars.port}" }
   debugger { enabled = true }
@@ -331,8 +343,10 @@ service "go" "svc1" {
 }
 
 service "go" "svc2" {
-  src = "./src/svc2"
-  exe = "."
+  src {
+    path = "./src/svc2"
+    exe = "."
+  }
   vars = { port = %d }
   arguments = { addr = "127.0.0.1:${self.vars.port}" }
   debugger { enabled = true }
@@ -390,8 +404,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 

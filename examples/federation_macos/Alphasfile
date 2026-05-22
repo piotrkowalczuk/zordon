@@ -1,9 +1,11 @@
 sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 service "go" "caddy" {
-  git   = "github.com/caddyserver/caddy"
-  tag   = "v2.10.0"
-  exe   = "./cmd/caddy"
+  git {
+    url = "github.com/caddyserver/caddy"
+    tag = "v2.10.0"
+  }
+  src { exe = "./cmd/caddy" }
 
   vars = {
     http       = net::pickport()
@@ -67,8 +69,10 @@ service "go" "caddy" {
 }
 
 service "go" "coredns" {
-  git = "github.com/coredns/coredns"
-  tag = "v1.14.3"
+  git {
+    url = "github.com/coredns/coredns"
+    tag = "v1.14.3"
+  }
 
   vars = {
     dns = net::pickport()

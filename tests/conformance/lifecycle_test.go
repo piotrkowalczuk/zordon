@@ -37,8 +37,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -186,8 +188,10 @@ toolchain {
 }
 
 service "go" "svc" {
-  src = "./src/svc"
-  exe = "."
+  src {
+    path = "./src/svc"
+    exe = "."
+  }
 
   runtime {
     cmd = ["sh", "-c", "echo %s\necho %s >&2\nsleep 0.1\nexit 9"]

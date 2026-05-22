@@ -2,7 +2,9 @@
 
 ```hcl
 service "ruby" "ruby-service" {
-  git = "github.com/niwasawa/ruby-sinatra-hello-world"
+  git {
+    url = "github.com/niwasawa/ruby-sinatra-hello-world"
+  }
 
   vars = { port = net::pickport() }
   log  { format = "plain"  filter = "^\\tfrom .*" }

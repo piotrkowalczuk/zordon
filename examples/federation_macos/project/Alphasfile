@@ -10,9 +10,11 @@
 // go.mod needs no newer Go than CI ships, so GOTOOLCHAIN=auto never
 // triggers a redundant toolchain download.
 service "go" "httpbin" {
-  git = "github.com/mccutchen/go-httpbin"
-  tag = "v2.22.1"
-  exe = "./cmd/go-httpbin"
+  git {
+    url = "github.com/mccutchen/go-httpbin"
+    tag = "v2.22.1"
+  }
+  src { exe = "./cmd/go-httpbin" }
 
   vars = {
     port    = net::pickport()

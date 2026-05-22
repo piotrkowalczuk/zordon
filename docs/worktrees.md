@@ -58,8 +58,10 @@ only the listed directories (paths relative to the primary repo root):
 
 ```hcl
 service "go" "example" {
-  src = "../.."                              # primary = the repo this file is in
-  exe = "./examples/worktree/src/example"    # build target, repo-root-relative
+  src {
+    path = "../.."                            # primary = the repo this file is in
+    exe  = "./examples/worktree/src/example"  # build target, repo-root-relative
+  }
   worktree {
     sparse = ["examples/worktree/src/example"]
   }

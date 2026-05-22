@@ -83,9 +83,9 @@ type RuntimeConfig struct {
 }
 
 // Package is the unified, toolchain-tagged source/build manifest. A
-// service's primary is exactly one of: Git (zordon-owned bare clone),
-// Dir (user-owned repo), or neither (Crate / a prebuilt binary on $PATH —
-// not worktree-able). Build overrides the per-toolchain default.
+// service's primary is exactly one of: Git (zordon-owned bare clone or
+// user-owned local checkout via Src), or Install (rust crate from a
+// registry / go module). Build overrides the per-toolchain default.
 type Package struct {
 	Toolchain string   `json:"toolchain"` // go|rust|ruby
 	Git       string   `json:"git,omitempty"`
@@ -99,6 +99,8 @@ type Package struct {
 	// Rust-only. Mutually exclusive with git/src.
 	Install   string   `json:"install,omitempty"`
 	Version   string   `json:"version,omitempty"` // rust use-only: cargo install --version
+	Index     string   `json:"index,omitempty"`   // rust use-only: cargo install --index
+	Registry  string   `json:"registry,omitempty"` // rust use-only: cargo install --registry
 	Features  []string `json:"features,omitempty"`
 	Exe       string   `json:"exe,omitempty"`   // relative subdir within git/src where the build target lives ("" = project root)
 	Bin       string   `json:"bin,omitempty"`   // rust: cargo --bin target (multi-bin crates)
@@ -197,17 +199,25 @@ func ParseServices(path string) ([]*ServiceMeta, error) {
 	base := filepath.Dir(path) // relative src/sparse anchor = Alphasfile dir
 	out := make([]*ServiceMeta, 0, len(root.Services))
 	for _, sb := range root.Services {
-		if sb.Git != "" && sb.Src != "" {
-			return nil, fmt.Errorf("service %q declares both git and src; pick one primary", sb.Name)
+		pkg := &Package{Toolchain: sb.Toolchain}
+		if sb.Crate != nil && (sb.Git != nil || (sb.Src != nil && sb.Src.Path != "")) {
+			return nil, fmt.Errorf("service %q: crate {} cannot coexist with src{path}/git", sb.Name)
 		}
-		pkg := &Package{
-			Toolchain: sb.Toolchain,
-			Git:       sb.Git,
-			Src:       resolveSrcDir(base, sb.Src),
-			Branch:    sb.Branch,
-			Tag:       sb.Tag,
-			Rev:       sb.Rev,
-			Exe:       sb.Exe,
+		if sb.Git != nil && sb.Src != nil && sb.Src.Path != "" {
+			return nil, fmt.Errorf("service %q: src{path} and git{} are mutually exclusive (src can only carry exe alongside git)", sb.Name)
+		}
+		if sb.Git != nil {
+			pkg.Git = sb.Git.URL
+			pkg.Branch = sb.Git.Branch
+			pkg.Tag = sb.Git.Tag
+			pkg.Rev = sb.Git.Rev
+		}
+		if sb.Src != nil {
+			pkg.Src = resolveSrcDir(base, sb.Src.Path)
+			pkg.Exe = sb.Src.Exe
+		}
+		if sb.Crate != nil {
+			pkg.Install = strings.TrimSpace(sb.Crate.Name)
 		}
 		if sb.Worktree != nil && len(sb.Worktree.Sparse) > 0 {
 			pkg.Worktree = &Worktree{Sparse: cleanSparse(sb.Worktree.Sparse)}
@@ -536,27 +546,18 @@ type serviceBlock struct {
 	DoubleDash     bool      `hcl:"doubleDash,optional"`
 	SpaceSeparated bool      `hcl:"space_separated,optional"`
 
-	// Worktree source: a local checkout zordon never writes to. `git`
-	// (optional) is its origin — if set, zordon seeds `src` from it (clone
-	// if absent; verify origin matches if present). `exe`/`bin` locate the
-	// build target inside it.
-	Git    string `hcl:"git,optional"`
-	Src    string `hcl:"src,optional"`
-	Branch string `hcl:"branch,optional"`
-	Tag    string `hcl:"tag,optional"`
-	Rev    string `hcl:"rev,optional"`
-	Exe    string `hcl:"exe,optional"` // git/src: subdir holding the build target ("" = root)
-	Bin    string `hcl:"bin,optional"` // rust: cargo --bin target to install (multi-bin crates)
-
-	// Use-only source: install the dependency's binary into fs::bin, no
-	// worktree. The field used depends on the toolchain label: Go reads
-	// `package` (`go install <package>`), Rust reads `cargo`
-	// (`cargo install <cargo>` + `version`/`features`). Presence of either
-	// is mutually exclusive with git/src.
-	Package  string   `hcl:"package,optional"`
-	Cargo    string   `hcl:"cargo,optional"`
-	Version  string   `hcl:"version,optional"`
-	Features []string `hcl:"features,optional"`
+	// Source: exactly one of `src { ... }` (local checkout, no clone),
+	// `git { ... }` (remote — zordon clones), or `crate { ... }` (rust
+	// use-only install via `cargo install`). Go services also pick:
+	// src/git block XOR top-level `package` (go install <pkg@ver>).
+	// `bin` / `features` are rust-only artifact knobs and apply to all
+	// source modes.
+	Src      *srcBlock   `hcl:"src,block"`
+	Git      *gitBlock   `hcl:"git,block"`
+	Crate    *crateBlock `hcl:"crate,block"`
+	Package  string      `hcl:"package,optional"` // go use-only: `go install <package>` (incl. @version)
+	Bin      string      `hcl:"bin,optional"`     // rust: cargo --bin target
+	Features []string    `hcl:"features,optional"` // rust: cargo --features (applies to crate-install AND worktree build)
 
 	// dynamic (interpolated; order resolved by intra-service dependency DAG)
 	Vars      hcl.Expression `hcl:"vars,optional"`
@@ -650,6 +651,44 @@ type debuggerBlock struct {
 
 type worktreeBlock struct {
 	Sparse []string `hcl:"sparse,optional"`
+}
+
+// gitBlock is a remote-git source. zordon bare-clones `url` and
+// `branch`/`tag`/`rev` pin the revision. The build-target subdir
+// (`exe`) is described by a sibling `src { }` block.
+type gitBlock struct {
+	URL    string `hcl:"url"`
+	Branch string `hcl:"branch,optional"`
+	Tag    string `hcl:"tag,optional"`
+	Rev    string `hcl:"rev,optional"`
+}
+
+// srcBlock describes the local view of the source. Standalone (no
+// sibling `git { }`) it IS the source — `path` is the local checkout
+// zordon uses in place. Alongside `git { }` it carries only `exe`,
+// the subdir within the cloned worktree to build. `path` is therefore
+// optional, but at least one of `path`/`exe` must be set.
+type srcBlock struct {
+	Path string `hcl:"path,optional"`
+	Exe  string `hcl:"exe,optional"`
+}
+
+// crateBlock is the rust use-only primary: `cargo install <name>`.
+// Mirrors the cargo install CLI source-selection flags: `version`/
+// `index`/`registry` for a registry source, or `git`+`branch`/`tag`/
+// `rev` for a git source (cargo handles the fetch — no zordon
+// worktree). Presence of this block is mutually exclusive with the
+// top-level `git {}` block (worktree/source path). `features` and
+// `bin` are top-level on the service.
+type crateBlock struct {
+	Name     string `hcl:"name"`
+	Version  string `hcl:"version,optional"`
+	Index    string `hcl:"index,optional"`
+	Registry string `hcl:"registry,optional"`
+	Git      string `hcl:"git,optional"`
+	Branch   string `hcl:"branch,optional"`
+	Tag      string `hcl:"tag,optional"`
+	Rev      string `hcl:"rev,optional"`
 }
 
 

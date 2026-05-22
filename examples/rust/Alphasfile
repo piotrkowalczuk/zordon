@@ -14,8 +14,10 @@ toolchain {
 }
 
 service "rust" "app" {
-  src = "../.."
-  exe = "./examples/rust/src/app"
+  src {
+    path = "../.."
+    exe = "./examples/rust/src/app"
+  }
 
   vars = { port = net::pickport() }
 

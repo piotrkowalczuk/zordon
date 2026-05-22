@@ -3,8 +3,10 @@ sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 dotenv = "${fs::tmp()}/global.env"
 
 service "go" "cache" {
-  src = "../.."
-  exe = "./examples/interpolation/src/app"
+  src {
+    path = "../.."
+    exe = "./examples/interpolation/src/app"
+  }
 
   vars = {
     port = net::pickport()
@@ -34,8 +36,10 @@ service "go" "cache" {
 }
 
 service "go" "api" {
-  src = "../.."
-  exe = "./examples/interpolation/src/app"
+  src {
+    path = "../.."
+    exe = "./examples/interpolation/src/app"
+  }
 
   arguments = {
     "config.file" = self.file.conf.path

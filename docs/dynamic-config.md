@@ -206,9 +206,11 @@ The DAG ensures the referenced service is evaluated first.
 
 ```hcl
 service "go" "prometheus" {
-  git        = "github.com/prometheus/prometheus"
-  tag        = "v3.11.3"
-  exe        = "./cmd/prometheus"
+  git {
+    url = "github.com/prometheus/prometheus"
+    tag = "v3.11.3"
+  }
+  src { exe = "./cmd/prometheus" }
   doubleDash = true
 
   vars = {

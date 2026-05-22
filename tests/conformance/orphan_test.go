@@ -73,8 +73,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 
@@ -178,8 +180,10 @@ toolchain {
 }
 
 service "go" "svc1" {
-  src = "./src/svc1"
-  exe = "."
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
 
   vars = { port = %d }
 

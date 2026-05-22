@@ -355,10 +355,17 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 		//
 		// Pure: no filesystem touch here.
 		dir := ""
+		var gitURL, srcPath string
+		if sb.Git != nil {
+			gitURL = sb.Git.URL
+		}
+		if sb.Src != nil {
+			srcPath = sb.Src.Path
+		}
 		switch {
-		case sb.Src != "" && sb.Git == "" && r.inv.Worktree == invocation.MainWorktree:
-			dir = r.resolveDir(sb.Src)
-		case sb.Git != "" || sb.Src != "":
+		case srcPath != "" && gitURL == "" && r.inv.Worktree == invocation.MainWorktree:
+			dir = r.resolveDir(srcPath)
+		case gitURL != "" || srcPath != "":
 			dir = r.inv.CheckoutPath(sb.Name)
 		}
 
@@ -733,43 +740,91 @@ func (r *resolver) finishService(st *svcState) error {
 	default:
 		return fmt.Errorf("unknown toolchain %q (want go|rust|ruby|nodejs)", sb.Toolchain)
 	}
-	// Use-only: the install coordinate is read from the field that
-	// matches the toolchain (`package` for go, `cargo` for rust).
-	// Cross-toolchain fields are a mistake.
-	var install, instVersion string
+	// Use-only: the install coordinate comes from `crate {}` (rust) or
+	// `package` (go). Cross-toolchain mixing is a mistake.
+	var install, instVersion, instIndex, instRegistry string
+	var instGit, instBranch, instTag, instRev string
 	var features []string
 	switch sb.Toolchain {
 	case ToolchainGo:
-		if sb.Cargo != "" || len(sb.Features) > 0 {
-			return fmt.Errorf("service %q is go but declares rust use-only fields (cargo/features)", sb.Name)
+		if sb.Crate != nil {
+			return fmt.Errorf("service %q is go but declares a `crate {}` block (rust-only)", sb.Name)
+		}
+		if len(sb.Features) > 0 {
+			return fmt.Errorf("service %q is go but declares `features` (rust-only)", sb.Name)
 		}
 		install = strings.TrimSpace(sb.Package)
 	case ToolchainRust:
 		if sb.Package != "" {
-			return fmt.Errorf("service %q is rust but declares go use-only field (package)", sb.Name)
+			return fmt.Errorf("service %q is rust but declares a top-level `package` field (go-only)", sb.Name)
 		}
-		install = strings.TrimSpace(sb.Cargo)
 		features = sb.Features
-		instVersion = strings.TrimSpace(sb.Version)
+		if sb.Crate != nil {
+			install = strings.TrimSpace(sb.Crate.Name)
+			if install == "" {
+				return fmt.Errorf("service %q: crate { name } is required", sb.Name)
+			}
+			instVersion = strings.TrimSpace(sb.Crate.Version)
+			instIndex = strings.TrimSpace(sb.Crate.Index)
+			instRegistry = strings.TrimSpace(sb.Crate.Registry)
+			instGit = strings.TrimSpace(sb.Crate.Git)
+			instBranch = strings.TrimSpace(sb.Crate.Branch)
+			instTag = strings.TrimSpace(sb.Crate.Tag)
+			instRev = strings.TrimSpace(sb.Crate.Rev)
+			// cargo install rejects --version with --git, and the three
+			// git refs are themselves mutually exclusive.
+			if instGit == "" && (instBranch != "" || instTag != "" || instRev != "") {
+				return fmt.Errorf("service %q: crate { branch/tag/rev } require crate { git }", sb.Name)
+			}
+			if instVersion != "" && instGit != "" {
+				return fmt.Errorf("service %q: crate { version } and crate { git } are mutually exclusive", sb.Name)
+			}
+			refs := 0
+			for _, s := range []string{instBranch, instTag, instRev} {
+				if s != "" {
+					refs++
+				}
+			}
+			if refs > 1 {
+				return fmt.Errorf("service %q: crate { branch/tag/rev } are mutually exclusive", sb.Name)
+			}
+		}
 	default:
-		if sb.Package != "" || sb.Cargo != "" {
+		if sb.Package != "" || sb.Crate != nil {
 			return fmt.Errorf("service %q: %s has no use-only mode", sb.Name, sb.Toolchain)
+		}
+		if len(sb.Features) > 0 {
+			return fmt.Errorf("service %q: features is rust-only", sb.Name)
 		}
 	}
 
-	// Modes: use-only (install) XOR worktree (src, optionally seeded by git).
-	src := sb.Src
+	// Modes: use-only (install), remote-worktree (git block), or
+	// local-worktree (src{path}). git+src{exe} (no path) is allowed:
+	// src carries only the build subdir inside the cloned remote.
+	var srcGitURL, srcLocalPath, srcBranch, srcTag, srcRev, srcExe string
+	if sb.Git != nil {
+		srcGitURL = strings.TrimSpace(sb.Git.URL)
+		srcBranch = sb.Git.Branch
+		srcTag = sb.Git.Tag
+		srcRev = sb.Git.Rev
+	}
+	if sb.Src != nil {
+		srcLocalPath = sb.Src.Path
+		srcExe = sb.Src.Exe
+	}
 	switch {
-	case install != "":
-		if sb.Git != "" || src != "" {
-			return fmt.Errorf("service %q declares use-only (%s) together with git/src; pick one", sb.Name, sb.Toolchain)
-		}
-	case src == "" && sb.Git == "":
+	case sb.Src != nil && sb.Git != nil && srcLocalPath != "":
+		return fmt.Errorf("service %q: src{path} and git{} are mutually exclusive (src can only carry exe alongside git)", sb.Name)
+	case sb.Src != nil && sb.Git == nil && srcLocalPath == "":
+		return fmt.Errorf("service %q: src{} without path requires a sibling git{} block", sb.Name)
+	case install != "" && (srcGitURL != "" || srcLocalPath != "" || (sb.Src != nil && srcExe != "")):
+		return fmt.Errorf("service %q: use-only (crate/package) cannot coexist with src/git", sb.Name)
+	case install == "" && srcGitURL == "" && srcLocalPath == "":
 		field := "package"
 		if sb.Toolchain == ToolchainRust {
-			field = "cargo"
+			field = "crate {}"
 		}
-		return fmt.Errorf("service %q has no source: declare src, git, or %s (use-only)", sb.Name, field)
+		return fmt.Errorf("service %q has no source: declare src {}, git {}, or %s", sb.Name, field)
 	}
 
 	var worktree *Worktree
@@ -791,27 +846,37 @@ func (r *resolver) finishService(st *svcState) error {
 		agent = a
 	}
 
+	// For use-only-from-git (rust crate { git, branch/tag/rev }) the git
+	// fields ride along in Package.Git/Branch/Tag/Rev — the alpha-side
+	// command builder reads them when Install != "". For worktree mode
+	// they hold the clone coordinates instead.
+	pkgGit, pkgBranch, pkgTag, pkgRev := srcGitURL, srcBranch, srcTag, srcRev
+	if install != "" && instGit != "" {
+		pkgGit, pkgBranch, pkgTag, pkgRev = instGit, instBranch, instTag, instRev
+	}
 	svc := &Service{
 		Toolchain: sb.Toolchain,
 		Runtime:   rt,
 		Package: &Package{
 			Toolchain: sb.Toolchain,
-			Git:       sb.Git,
-			Src:       r.resolveDir(src),
-			Branch:    sb.Branch,
-			Tag:       sb.Tag,
-			Rev:       sb.Rev,
+			Git:       pkgGit,
+			Src:       r.resolveDir(srcLocalPath),
+			Branch:    pkgBranch,
+			Tag:       pkgTag,
+			Rev:       pkgRev,
 			Install:   install,
 			Version:   instVersion,
+			Index:     instIndex,
+			Registry:  instRegistry,
 			Features:  features,
-			Exe:       sb.Exe,
+			Exe:       srcExe,
 			Bin:       sb.Bin,
 			BuildCmd:  buildCmd,
 			Cmd:       strings.Join(command, " "),
 			Worktree:  worktree,
 			// In-place: src-only in the "main" worktree → alpha builds/runs
 			// from src as-is (no git worktree add, no HEAD reset).
-			InPlace: sb.Src != "" && sb.Git == "" && r.inv.Worktree == invocation.MainWorktree,
+			InPlace: srcLocalPath != "" && r.inv.Worktree == invocation.MainWorktree,
 		},
 		Debugger: dbg,
 		Agent:    agent,
