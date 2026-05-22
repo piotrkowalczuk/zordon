@@ -101,3 +101,6 @@ Before writing any documentation, determine the user's current need and place th
    * `./docs/reference/`
    * `./docs/explanation/`
 3. **Cross-linking:** Actively use Markdown links to connect related concepts across the four quadrants instead of duplicating information.
+
+### Markdown
+- One sentence, one row. Do not wrap lines.
