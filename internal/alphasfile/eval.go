@@ -344,16 +344,22 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 
 		// dir = where this service's code lives for this invocation.
 		//
-		//   src-only in the "main" worktree → the src dir itself, used
-		//     IN PLACE (your live working tree; zordon never copies or
-		//     git-worktrees it, so uncommitted edits just work — the
-		//     edit→start loop). "main" is only a mental label; in
-		//     practice it means "use src directly".
-		//   anything else (named worktree, or a git primary) → a per-
-		//     invocation checkout alpha materializes via git worktree
-		//     add.
+		//   src-only, used IN PLACE (your live working tree; zordon
+		//     never copies or git-worktrees it) when either:
+		//       - main worktree (the default; "main" just means "use
+		//         src directly"), OR
+		//       - named worktree that did NOT pick this service at
+		//         `worktree create` (we share the anchor Alphasfile's
+		//         tree so provision shells with relative paths like
+		//         `./plik.sql` resolve against the real source).
+		//   anything else (named worktree owning the service, or any
+		//     git primary) → a per-invocation checkout alpha
+		//     materializes via git worktree add.
 		//
-		// Pure: no filesystem touch here.
+		// inv.OwnsService is the FS-derived ownership predicate
+		// (presence of <wtdir>/src/<svc>/.git); see invocation.build.
+		// Pure within this function — the FS scan happens once at
+		// invocation construction.
 		dir := ""
 		var gitURL, srcPath string
 		if sb.Git != nil {
@@ -363,7 +369,7 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 			srcPath = sb.Src.Path
 		}
 		switch {
-		case srcPath != "" && gitURL == "" && r.inv.Worktree == invocation.MainWorktree:
+		case srcPath != "" && gitURL == "" && !r.inv.OwnsService(sb.Name):
 			dir = r.resolveDir(srcPath)
 		case gitURL != "" || srcPath != "":
 			dir = r.inv.CheckoutPath(sb.Name)
@@ -874,9 +880,11 @@ func (r *resolver) finishService(st *svcState) error {
 			BuildCmd:  buildCmd,
 			Cmd:       strings.Join(command, " "),
 			Worktree:  worktree,
-			// In-place: src-only in the "main" worktree → alpha builds/runs
-			// from src as-is (no git worktree add, no HEAD reset).
-			InPlace: srcLocalPath != "" && r.inv.Worktree == invocation.MainWorktree,
+			// In-place: src-only AND either main worktree, or a named
+			// worktree that did not pick this service (no per-worktree
+			// checkout under <wtdir>/src/<svc>). Alpha builds/runs from
+			// src as-is — no git worktree add, no HEAD reset.
+			InPlace: srcLocalPath != "" && !r.inv.OwnsService(sb.Name),
 		},
 		Debugger: dbg,
 		Agent:    agent,
