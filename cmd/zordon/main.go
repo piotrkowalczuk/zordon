@@ -137,6 +137,18 @@ func main() {
 		},
 	}
 
+	// plan
+	planFlags := ff.NewFlagSet("plan").SetParent(rootFlags)
+	planCmd := &ff.Command{
+		Name:      "plan",
+		Usage:     "zordon plan",
+		ShortHelp: "render the resolved Alphasfile chain with every interpolation baked to a concrete value (errors on the first unresolvable expression)",
+		Flags:     planFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runPlan(ctx, zfs.ZordonHome(home.Path()), alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
+		},
+	}
+
 	// get
 	getFlags := ff.NewFlagSet("get").SetParent(rootFlags)
 	getCmd := &ff.Command{
@@ -149,7 +161,7 @@ func main() {
 		},
 	}
 
-	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wtCmd, getCmd)
+	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wtCmd, getCmd, planCmd)
 
 	err := rootCmd.ParseAndRun(context.Background(), os.Args[1:],
 		ff.WithEnvVarPrefix("ZORDON"))

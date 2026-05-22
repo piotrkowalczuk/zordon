@@ -106,6 +106,46 @@ type level struct {
 // gets that worktree's identity); parents are always "main", rooted at
 // their own directory.
 func resolveChain(ctx context.Context, zordonHome string, testCfg alphasfile.TestConfig) ([]*level, error) {
+	return walkChain(zordonHome, func(lv *level) (*protocol.StateInfo, error) {
+		// Prefer the running alpha (carries live PIDs / readiness); fall
+		// back to static evaluation. A static-eval error is tolerated
+		// here — `status` should still print "alpha not running" rather
+		// than refuse the whole report just because one level can't be
+		// re-evaluated from disk.
+		if resp, e := control.Roundtrip(ctx, lv.inv.SocketPath(), &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
+			return resp.State, nil
+		}
+		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, testCfg)
+		if err != nil {
+			return nil, nil //nolint:nilerr // intentional: see comment above
+		}
+		return stateFromAlphasfile(af), nil
+	})
+}
+
+// stateFromAlphasfile projects a resolved Alphasfile into the wire-shape
+// StateInfo used as the static-evaluation fallback for federation walks.
+// No PIDs / Running — only the static facets (services, toolchain pins,
+// sysenv whitelist, file-level dotenv).
+func stateFromAlphasfile(af *alphasfile.Alphasfile) *protocol.StateInfo {
+	return &protocol.StateInfo{
+		Services:  append([]*alphasfile.Service(nil), af.All()...),
+		Toolchain: af.Toolchain,
+		SysEnv:    af.SysEnv,
+		Dotenv:    append([]string(nil), af.Dotenv...),
+	}
+}
+
+// walkChain is the canonical federation-chain walk: discover root→leaf,
+// build the per-level Invocation and ParentContext (accumulating
+// services / toolchain / sysenv as it descends), and delegate to resolve
+// for the level's StateInfo. Used by every command that needs the
+// resolved chain — `status`, `sudo`, `get`, `plan`, `stop`.
+//
+// resolve owns the per-level policy (live alpha first vs. static-only
+// vs. strict-static); a returned (nil, nil) means "no state for this
+// level" — deeper levels won't see its services as parent context.
+func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, error)) ([]*level, error) {
 	chain, invFile, err := discoverChain(zordonHome)
 	if err != nil {
 		return nil, err
@@ -142,20 +182,13 @@ func resolveChain(ctx context.Context, zordonHome string, testCfg alphasfile.Tes
 		if len(accumulated) > 0 || len(accumulatedToolchain) > 0 || len(accumulatedSysEnv) > 0 {
 			pctx = alphasfile.NewParentContext(accumulated).WithToolchain(accumulatedToolchain).WithSysEnv(accumulatedSysEnv)
 		}
-		var st *protocol.StateInfo
-		if resp, e := control.Roundtrip(ctx, inv.SocketPath(), &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
-			st = resp.State
-		} else {
-			// Alpha not running; fallback to static evaluation.
-			if af, err := alphasfile.Open(afPath, inv, pctx, testCfg); err == nil {
-				st = &protocol.StateInfo{
-					Services:  append([]*alphasfile.Service(nil), af.All()...),
-					Toolchain: af.Toolchain,
-					SysEnv:    af.SysEnv,
-				}
-			}
+		lv := &level{afPath: afPath, isInvocation: isInv, inv: inv, parentCtx: pctx}
+		st, err := resolve(lv)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", afPath, err)
 		}
-		out = append(out, &level{afPath: afPath, isInvocation: isInv, inv: inv, parentCtx: pctx, state: st})
+		lv.state = st
+		out = append(out, lv)
 		if st != nil {
 			accumulated = append(accumulated, st.Services...)
 			for k, v := range st.Toolchain {
