@@ -94,6 +94,37 @@ type Invocation struct {
 	CfgHash  string            // sha8(afBytes+parentCtx) — manifest identity
 	TmpDir   string            // $TMPDIR/zordon-<FsHash>  (short; sockets live here)
 	Env      map[string]string // injected into spawned services
+
+	// OwnedServices is the set of services this (named) worktree took at
+	// `zordon worktree create <wt> [svc ...]`. Populated by build() from a
+	// scan of <StateDir>/src/*/.git (presence of .git = a real `git worktree
+	// add` was performed). Services NOT in this set fall back to the anchor
+	// Alphasfile's resolved dir (same as the main worktree's InPlace) so
+	// they share the user's live tree instead of getting a forked, empty
+	// per-worktree checkout.
+	//
+	// nil (the zero value) is "ownership unknown" — preserved for legacy
+	// struct-literal callers and historical behavior (treat every service
+	// as owned). Never consulted in the main worktree.
+	OwnedServices map[string]bool
+}
+
+// OwnsService reports whether the named worktree carries its own per-service
+// checkout for svc. Always false in the main worktree (main never forks; it
+// uses the live src tree in place). In named worktrees: nil OwnedServices ⇒
+// legacy "all owned" default (struct-literal callers in tests); non-nil ⇒
+// explicit set membership (the production path, populated from disk in
+// build()). The MainWorktree check uses the literal "main" string only —
+// an empty Worktree is treated as a (degenerate) named worktree, matching
+// the historical eval semantics relied on by oracle tests.
+func (i *Invocation) OwnsService(svc string) bool {
+	if i == nil || i.Worktree == MainWorktree {
+		return false
+	}
+	if i.OwnedServices == nil {
+		return true
+	}
+	return i.OwnedServices[svc]
 }
 
 // CheckoutPath is where service <svc>'s git worktree is materialized for
@@ -184,12 +215,13 @@ func build(dir, root, wt string, afBytes, parentCtx []byte) (*Invocation, error)
 	cfgh := shortSum(afBytes, parentCtx)
 	tmp := filepath.Join(zfs.SystemTempDir(), "zordon-"+fsh)
 	return &Invocation{
-		Dir:      dir,
-		Worktree: wt,
-		StateDir: stateDir,
-		FsHash:   fsh,
-		CfgHash:  cfgh,
-		TmpDir:   tmp,
+		Dir:           dir,
+		Worktree:      wt,
+		StateDir:      stateDir,
+		FsHash:        fsh,
+		CfgHash:       cfgh,
+		TmpDir:        tmp,
+		OwnedServices: scanOwnedServices(stateDir, wt),
 		Env: map[string]string{
 			"ZORDON_WORKTREE":  wt,
 			"ZORDON_STATE_DIR": stateDir,
@@ -197,6 +229,33 @@ func build(dir, root, wt string, afBytes, parentCtx []byte) (*Invocation, error)
 			"ZORDON_CFG_HASH":  cfgh,
 		},
 	}, nil
+}
+
+// scanOwnedServices reads <stateDir>/src/*/.git markers (one per service
+// that got a real `git worktree add`). Returns nil for the main worktree
+// (irrelevant — main never forks) and for a fresh worktree with no
+// materialized services (== "ownership unknown", legacy default).
+func scanOwnedServices(stateDir, wt string) map[string]bool {
+	if wt == "" || wt == MainWorktree {
+		return nil
+	}
+	entries, err := zfs.ReadDir(filepath.Join(stateDir, "src"))
+	if err != nil {
+		return nil
+	}
+	owned := map[string]bool{}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := zfs.Stat(filepath.Join(stateDir, "src", e.Name(), ".git")); err == nil {
+			owned[e.Name()] = true
+		}
+	}
+	if len(owned) == 0 {
+		return nil
+	}
+	return owned
 }
 
 // IsWorktreeDir reports whether dir is inside a .zordon/worktrees/<name>
