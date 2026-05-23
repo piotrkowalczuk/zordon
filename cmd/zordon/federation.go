@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
@@ -317,7 +318,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
 				log.Error("zordon", "shutdown %s: %v", afPath, e)
 			}
-			if err := waitSocketGone(ctx, sock, timeout); err != nil {
+			if err := waitProcessGone(ctx, st.PID, timeout); err != nil {
 				return fmt.Errorf("%s: waiting for old alpha to exit: %w", afPath, err)
 			}
 		}
@@ -447,19 +448,39 @@ func runSudoSteps(services []*alphasfile.Service, log *zlog.Logger) {
 	}
 }
 
-// waitSocketGone blocks until nothing answers on sock (old alpha exited) or
-// the timeout elapses.
-func waitSocketGone(ctx context.Context, sock string, timeout time.Duration) error {
+// waitProcessGone blocks until the alpha process at pid has actually
+// exited (kill(pid, 0) == ESRCH), not just until its control socket
+// stopped accepting. On timeout it escalates to SIGKILL on the process
+// group (alpha sets Setpgid at spawn so pid == pgid, and the kill also
+// reaps any tommy/service children the dying alpha didn't manage to
+// clean up itself) and re-checks briefly.
+//
+// Why this matters: alpha unlinks its control socket as the FIRST step
+// of shutdown (ln.Close on a *net.UnixListener with UnlinkOnClose), but
+// the process stays alive while shutdownAll drives each service through
+// SIGTERM → grace → SIGKILL. A socket-file poll therefore unblocks
+// seconds before the process is gone, so spawnAlpha would launch a
+// second alpha with the same --socket / --log-file argv. Both processes
+// then coexist (one listening, one cleaning up) until the old one
+// finishes — indefinitely if a service is wedged. waitProcessGone is
+// the tight fix: PID gone ⇒ safe to spawn.
+//
+// A zero/negative pid is treated as "no PID known" and returns nil; the
+// caller falls back to whatever next step it had planned (typically the
+// control.Listen unlinkStale + bind path), preserving behavior for
+// historical callers that don't yet propagate a PID.
+func waitProcessGone(ctx context.Context, pid int, timeout time.Duration) error {
+	if pid <= 0 {
+		return nil
+	}
 	deadline := time.Now().Add(timeout)
 	delay := 20 * time.Millisecond
 	for {
-		c, err := control.Dial(sock, 100*time.Millisecond)
-		if err != nil {
+		if !processAlive(pid) {
 			return nil
 		}
-		c.Close()
 		if time.Now().After(deadline) {
-			return errors.New("old alpha still listening")
+			break
 		}
 		select {
 		case <-ctx.Done():
@@ -470,4 +491,35 @@ func waitSocketGone(ctx context.Context, sock string, timeout time.Duration) err
 			delay *= 2
 		}
 	}
+	// Escalation: SIGKILL the pgid (covers any service/tommy the wedged
+	// alpha was supervising) and give the kernel a short window to flip
+	// the PID to ESRCH. Only an uninterruptible-IO straggler can survive
+	// this; in that case we report the error so the caller fails loudly
+	// instead of spawning a sibling.
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	for i := 0; i < 20; i++ {
+		if !processAlive(pid) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("alpha pid %d still alive after SIGKILL", pid)
+}
+
+// processAlive reports whether pid corresponds to a live process. EPERM
+// means "exists but we can't signal it", which still counts as alive
+// for our purposes (we won't spawn over a process we can see).
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	if err == nil {
+		return true
+	}
+	return errors.Is(err, syscall.EPERM)
 }
