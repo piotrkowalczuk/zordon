@@ -1830,6 +1830,27 @@ func bringupAndSupervise(svc *alphasfile.Service, sc *serviceCtx, state *alphaSt
 			state.requestShutdown(fmt.Sprintf("failfast: service %s prepare failed: %v", name, err))
 		}
 	}
+	// prepCtx bridges alpha-wide shutdown + this-service stop into a ctx so
+	// newPrepareRunner can SIGTERM/SIGKILL the build/git pgid on cancel.
+	// Without it, a long-running build (cargo install, big go module graph)
+	// or a slow git clone would block bringupAndSupervise in c.Wait, sc.done
+	// would never close, and state.shutdownAll would hang alpha forever —
+	// which is what surfaced as multiple alpha processes accumulating across
+	// repeated Ctrl-C-then-restart cycles. Background is acceptable here:
+	// bringupAndSupervise is one service's lifecycle entry point and has no
+	// parent ctx to inherit; the cancel channels above ARE the parent.
+	prepCtx, cancelPrep := context.WithCancel(context.Background())
+	defer cancelPrep()
+	go func() {
+		select {
+		case <-state.shutdownCh:
+			cancelPrep()
+		case <-sc.stopCh:
+			cancelPrep()
+		case <-prepCtx.Done():
+		}
+	}()
+
 	var (
 		repoDir string
 		err     error
@@ -1837,16 +1858,16 @@ func bringupAndSupervise(svc *alphasfile.Service, sc *serviceCtx, state *alphaSt
 	if primaryKey := primaryKeyOf(svc); primaryKey != "" {
 		mu := state.primaryLockFor(primaryKey)
 		mu.Lock()
-		repoDir, err = prepareWorktree(svc, name, state.worktree, state.zordonHome, stream, log)
+		repoDir, err = prepareWorktree(prepCtx, svc, name, state.worktree, state.zordonHome, stream, log)
 		mu.Unlock()
 	} else {
-		repoDir, err = prepareWorktree(svc, name, state.worktree, state.zordonHome, stream, log)
+		repoDir, err = prepareWorktree(prepCtx, svc, name, state.worktree, state.zordonHome, stream, log)
 	}
 	if err != nil {
 		prepareFail(err)
 		return
 	}
-	if err := prepareBuild(svc, name, repoDir, agent, state, stream, log); err != nil {
+	if err := prepareBuild(prepCtx, svc, name, repoDir, agent, state, stream, log); err != nil {
 		prepareFail(err)
 		return
 	}
@@ -2617,12 +2638,11 @@ func inferNodeRunCmd(root string) ([]string, error) {
 // = has a git or dir primary; crate/prebuilt services return "" here
 // and let the subsequent build step (`cargo install <crate>` /
 // `go install ...`) materialize the binary into bin dir.
-func prepareWorktree(svc *alphasfile.Service, name, wtName, zordonHome string, stream *safeEncoder, log *zlog.Logger) (string, error) {
+func prepareWorktree(ctx context.Context, svc *alphasfile.Service, name, wtName, zordonHome string, stream *safeEncoder, log *zlog.Logger) (string, error) {
 	if svc.Package == nil || !svc.Buildable() {
 		return "", nil
 	}
 	runner := newPrepareRunner(name, stream, log)
-	ctx := context.Background()
 
 	switch {
 	case svc.Package.InPlace:
@@ -2678,12 +2698,11 @@ func prepareWorktree(svc *alphasfile.Service, name, wtName, zordonHome string, s
 // Safe to run concurrently across services: each writes to its own
 // dest and bin dir; the per-primary lock is released BEFORE this step,
 // so monorepo siblings build in parallel.
-func prepareBuild(svc *alphasfile.Service, name, dest string, agent bool, state *alphaState, stream *safeEncoder, log *zlog.Logger) error {
+func prepareBuild(ctx context.Context, svc *alphasfile.Service, name, dest string, agent bool, state *alphaState, stream *safeEncoder, log *zlog.Logger) error {
 	if svc.Package == nil || !svc.Buildable() {
 		return nil
 	}
 	runner := newPrepareRunner(name, stream, log)
-	ctx := context.Background()
 
 	binDir := ""
 	if svc.Runtime != nil {
@@ -2749,7 +2768,18 @@ func prepareBuild(svc *alphasfile.Service, name, dest string, agent bool, state 
 }
 
 // newPrepareRunner builds a source.Runner that pipes exec.Cmd output through
-// the per-service log stream and waits for the command to exit.
+// the per-service log stream and waits for the command to exit. Honors the
+// caller's ctx: on ctx.Done() the subprocess group gets SIGTERM, grace,
+// then SIGKILL — without this, a `go build` / `cargo install` / `git clone`
+// started during bringup would block forever in c.Wait, which is what kept
+// bringupAndSupervise from closing sc.done and made state.shutdownAll hang
+// alpha indefinitely on Ctrl-C of zordon.
+//
+// Setpgid is forced (preserving any other SysProcAttr fields the caller set)
+// so the kill targets the whole group — necessary because build tools
+// routinely fork helpers (go's cgo, cargo's rustc workers, git's pack/index
+// helpers) that would otherwise survive a bare PID kill and keep stdout/
+// stderr pipes open, hanging the parent's Wait.
 func newPrepareRunner(name string, stream *safeEncoder, log *zlog.Logger) source.Runner {
 	return func(ctx context.Context, c *exec.Cmd) error {
 		stdout, err := c.StdoutPipe()
@@ -2760,14 +2790,48 @@ func newPrepareRunner(name string, stream *safeEncoder, log *zlog.Logger) source
 		if err != nil {
 			return err
 		}
+		if c.SysProcAttr == nil {
+			c.SysProcAttr = &syscall.SysProcAttr{}
+		}
+		c.SysProcAttr.Setpgid = true
 		if err := c.Start(); err != nil {
 			return err
 		}
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() { defer wg.Done(); streamLines(name, "prepare", stdout, stream, log) }()
-		go func() { defer wg.Done(); streamLines(name, "prepare", stderr, stream, log) }()
-		wg.Wait()
-		return c.Wait()
+		// Single goroutine owns Wait. Stdio drain happens inline so we don't
+		// double-defer wg.Wait() across the cancel path — if streamLines
+		// blocks on a pipe held open by an escaped grandchild, the cancel
+		// path's pgid SIGKILL is what frees it.
+		waitErr := make(chan error, 1)
+		go func() {
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() { defer wg.Done(); streamLines(name, "prepare", stdout, stream, log) }()
+			go func() { defer wg.Done(); streamLines(name, "prepare", stderr, stream, log) }()
+			wg.Wait()
+			waitErr <- c.Wait()
+		}()
+		select {
+		case err := <-waitErr:
+			return err
+		case <-ctx.Done():
+			pid := 0
+			if c.Process != nil {
+				pid = c.Process.Pid
+			}
+			if pid > 0 {
+				log.Info("alpha", "prepare %s: ctx cancelled, SIGTERM pgid=%d", name, pid)
+				_ = syscall.Kill(-pid, syscall.SIGTERM)
+			}
+			select {
+			case <-waitErr:
+			case <-time.After(2 * time.Second):
+				if pid > 0 {
+					log.Info("alpha", "prepare %s: SIGKILL pgid=%d (grace expired)", name, pid)
+					_ = syscall.Kill(-pid, syscall.SIGKILL)
+				}
+				<-waitErr
+			}
+			return ctx.Err()
+		}
 	}
 }
