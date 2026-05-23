@@ -145,23 +145,6 @@ service "go" "svc1" {
 	t.Fatalf("alpha pid %d still alive 8s after zordon SIGINT — prepareBuild's c.Wait blocked the shutdownAll path", alphaPID)
 }
 
-// waitForLogContent blocks until `substr` appears anywhere in logPath,
-// or `within` elapses. Distinct from waitForNewLogMarker (which takes
-// an offset) because this test runs a single zordon invocation, so
-// reading from byte 0 is correct and an offset would be noise.
-func waitForLogContent(t *testing.T, logPath, substr string, within time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	for time.Now().Before(deadline) {
-		b, err := os.ReadFile(logPath)
-		if err == nil && len(b) > 0 {
-			for i := 0; i+len(substr) <= len(b); i++ {
-				if string(b[i:i+len(substr)]) == substr {
-					return
-				}
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("log content %q did not appear within %s; log %s", substr, within, logPath)
-}
+// waitForLogContent + lastAlphaPIDFromLog live in log_helpers_test.go
+// so stuck_provision_test (and future siblings) can share them without
+// crossing test-file include boundaries.
