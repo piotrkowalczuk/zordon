@@ -2797,21 +2797,36 @@ func newPrepareRunner(name string, stream *safeEncoder, log *zlog.Logger) source
 		if err := c.Start(); err != nil {
 			return err
 		}
-		// Single goroutine owns Wait. Stdio drain happens inline so we don't
-		// double-defer wg.Wait() across the cancel path — if streamLines
-		// blocks on a pipe held open by an escaped grandchild, the cancel
-		// path's pgid SIGKILL is what frees it.
+		// Two INDEPENDENT goroutines:
+		//   1. cmd.Wait — reaps the direct child. As a side effect (per
+		//      os/exec.Wait docs) it closes our parent-side stdout/stderr
+		//      pipe fds once the process has exited.
+		//   2. streamLines × 2 — drain the pipes until they EOF.
+		//
+		// Critical that #1 does NOT sit behind #2 (the prior shape did:
+		// wg.Wait → c.Wait inside the same goroutine). A grandchild that
+		// escapes the pgid via setsid (Spring forked by bundle install,
+		// mise reshim helpers, etc.) keeps the inherited write fd alive
+		// after our SIGKILL hits the original pgid. With #1 behind #2,
+		// the scanners block on Read with no EOF, wg.Wait blocks, c.Wait
+		// is never called, and the cancel path deadlocks. With them
+		// independent, c.Wait reaps and closes OUR pipe fds — scanners
+		// get EBADF and exit even if the grandchild still holds the
+		// write end.
+		var streamWg sync.WaitGroup
+		streamWg.Add(2)
+		go func() { defer streamWg.Done(); streamLines(name, "prepare", stdout, stream, log) }()
+		go func() { defer streamWg.Done(); streamLines(name, "prepare", stderr, stream, log) }()
+
 		waitErr := make(chan error, 1)
-		go func() {
-			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() { defer wg.Done(); streamLines(name, "prepare", stdout, stream, log) }()
-			go func() { defer wg.Done(); streamLines(name, "prepare", stderr, stream, log) }()
-			wg.Wait()
-			waitErr <- c.Wait()
-		}()
+		go func() { waitErr <- c.Wait() }()
+
 		select {
 		case err := <-waitErr:
+			// Happy path: cmd exited naturally. Drain remaining buffered
+			// log lines (c.Wait already closed the pipes, so the scanners
+			// are already returning).
+			streamWg.Wait()
 			return err
 		case <-ctx.Done():
 			pid := 0
@@ -2831,6 +2846,7 @@ func newPrepareRunner(name string, stream *safeEncoder, log *zlog.Logger) source
 				}
 				<-waitErr
 			}
+			streamWg.Wait()
 			return ctx.Err()
 		}
 	}
