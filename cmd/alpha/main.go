@@ -1640,6 +1640,18 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 			// they fire only when a peer invokes them for itself.
 			state.addProvision(pc)
 			if step.Latent {
+				// No supervisor will ever set this latent's `done`, so
+				// close it eagerly. Without this, shutdownAll's
+				// `for pc := range provisions { <-pc.done }` deadlocks
+				// on the latent's never-fired channel — alpha then
+				// lingers forever on any subsequent OpShutdown / SIGINT,
+				// pgrep stacks alphas, and the user has no clean way
+				// out except SIGKILL of every alpha by hand. We do NOT
+				// Reach() any lifecycle state: peer waiters on a
+				// latent's barrier are a configuration error (templates
+				// are not real entities to depend on), and silently
+				// satisfying their wait would mask that error.
+				close(pc.done)
 				continue
 			}
 			provs = append(provs, provEntry{pc: pc, parent: parent, detached: step.Detached})
