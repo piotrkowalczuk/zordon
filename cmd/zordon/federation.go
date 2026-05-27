@@ -221,7 +221,7 @@ func appendUniqueStrings(dst, extra []string) []string {
 	return dst
 }
 
-func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent bool, zordonHome string, testCfg alphasfile.TestConfig) error {
+func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent bool, picks []string, zordonHome string, testCfg alphasfile.TestConfig) error {
 	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
 
 	chain, invFile, err := discoverChain(zordonHome)
@@ -325,6 +325,15 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		af, err := alphasfile.Open(afPath, inv, parentCtx, testCfg)
 		if err != nil {
 			return fmt.Errorf("%s: %w", afPath, err)
+		}
+
+		if isInvocation && len(picks) > 0 {
+			filtered, err := pickServices(af.All(), picks)
+			if err != nil {
+				return fmt.Errorf("%s: %w", afPath, err)
+			}
+			log.Info("zordon", "picks=%v → bringing up %d of %d service(s)", picks, len(filtered), len(af.All()))
+			af.Services = filtered
 		}
 
 		levelLog := inv.AlphaLogPath()
