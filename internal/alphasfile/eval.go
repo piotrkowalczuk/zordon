@@ -98,7 +98,7 @@ type resolver struct {
 	// subdir (walkUp finds the same Alphasfile either way).
 	afDir string
 	root  *rootBlock
-	inv   *invocation.Invocation
+	inv   *invocation.InvocationState
 	// cfgHash is the manifest identity (sha8 of Alphasfile bytes + parent
 	// ctx), threaded in by the caller because it depends on data the
 	// resolver doesn't hold (raw bytes + serialized parent). It is what
@@ -130,7 +130,25 @@ type resolver struct {
 	resolvedServices []*Service
 }
 
-func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *ParentContext, cfgHash string, testCfg TestConfig) (*Alphasfile, error) {
+// Plan is a manifest's evaluation order: the prepared resolver, the topo-sorted
+// producer nodes, and the toolchain pins — everything Compute needs to run the
+// eval fold. Building a Plan is the structural pass; a dependency CYCLE surfaces
+// HERE (topoSort), before Compute touches any effectful HCL function.
+type Plan struct {
+	r         *resolver
+	order     []*node
+	states    map[string]*svcState
+	toolchain map[string]*ToolchainConfig
+	parent    *ParentContext
+}
+
+// Plan prepares the manifest for evaluation: seeds the parent namespace,
+// resolves toolchain pins, builds each service's static `self`, and topo-sorts
+// the producer DAG. A real dependency cycle (A.vars→B.vars ∧ B.vars→A.vars) is
+// the hard error here — caught before any effectful eval (net::pickport,
+// src::hash) runs in Compute.
+func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg TestConfig) (*Plan, error) {
+	name, root := m.name, m.root
 	var seed map[string]map[string]cty.Value
 	if parent != nil {
 		seed = parent.byTC
@@ -147,7 +165,7 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 		path:        name,
 		afDir:       filepath.Dir(absPath),
 		root:        root,
-		inv:         inv,
+		inv:         m.inv,
 		cfgHash:     cfgHash,
 		serviceByTC: seed,
 		taken:       map[string]string{},
@@ -221,23 +239,31 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 	if err != nil {
 		return nil, err
 	}
-	for _, n := range order {
-		st := states[n.svcID]
+	return &Plan{r: r, order: order, states: states, toolchain: toolchain, parent: parent}, nil
+}
+
+// Compute runs the evaluation the Plan ordered: the producer fold (vars /
+// arguments / env / file in dependency order), then per-service sinks
+// (runtime/build/agent env, dotenv, print, sudo, provisions, readiness, the
+// wire-stable Service), top-level dotenv + sysenv, the debugger-tools
+// post-pass, and assembles the *Alphasfile. This is where the effectful HCL
+// functions (net::pickport, src::hash, os::env) actually fire.
+func (p *Plan) Compute() (*Alphasfile, error) {
+	r := p.r
+	root := r.root
+	for _, n := range p.order {
+		st := p.states[n.svcID]
 		if err := r.evalProducerNode(n, st); err != nil {
 			return nil, fmt.Errorf("%s.%s: %w", n.svcID, producerLabel(n), err)
 		}
 	}
 
-	// Sinks per service: runtime.cmd, build.cmd, build/runtime/agent env,
-	// dotenv, print, sudo, provisions, readiness, wire-stable Service
-	// finalization. Cross-service references in sinks reach into other
-	// services' fully-evaluated producers via r.serviceByTC; intra-
-	// service sinks read the populated st.self. Sink-to-sink references
-	// across services aren't supported (sinks aren't published back to
-	// self/serviceByTC), so sink order doesn't matter.
+	// Sinks per service. Cross-service references in sinks reach into other
+	// services' fully-evaluated producers via r.serviceByTC; sink-to-sink
+	// references across services aren't supported, so sink order doesn't matter.
 	for _, sb := range root.Services {
 		sid := serviceID(sb.Toolchain, sb.Name)
-		if err := r.finishService(states[sid]); err != nil {
+		if err := r.finishService(p.states[sid]); err != nil {
 			return nil, fmt.Errorf("%s: %w", sid, err)
 		}
 	}
@@ -246,6 +272,7 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 	if err != nil {
 		return nil, err
 	}
+	toolchain := p.toolchain
 	if len(toolchain) == 0 {
 		toolchain = nil
 	}
@@ -256,8 +283,8 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 		return nil, err
 	}
 	var parentSysEnv []string
-	if parent != nil {
-		parentSysEnv = parent.sysenv
+	if p.parent != nil {
+		parentSysEnv = p.parent.sysenv
 	}
 	sysEnv := mergeSysEnv(parentSysEnv, localSysEnv)
 	if len(sysEnv) == 0 {
@@ -271,7 +298,7 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 		return nil, err
 	}
 	return &Alphasfile{
-		CfgHash:   cfgHash,
+		CfgHash:   r.cfgHash,
 		Dotenv:    gdot,
 		Services:  r.resolvedServices,
 		Toolchain: toolchain,
@@ -1143,12 +1170,18 @@ func (r *resolver) ctxWith(self map[string]cty.Value) *hcl.EvalContext {
 	if len(r.toolchainCty) > 0 {
 		vars["toolchain"] = cty.ObjectVal(copyCtyMap(r.toolchainCty))
 	}
+	// fs::src / src::hash exist only in a SERVICE scope: checkout is the
+	// current service's checkout when `self` is set, or "" at file scope
+	// (top-level dotenv/sysenv, toolchain) — where they then error clearly
+	// instead of leaking a prior service's stale checkout.
+	checkout := ""
 	if self != nil {
 		vars["self"] = cty.ObjectVal(copyCtyMap(self))
+		checkout = r.curCheckout
 	}
 	return &hcl.EvalContext{
 		Variables: vars,
-		Functions: r.functions(),
+		Functions: r.functions(checkout),
 	}
 }
 
@@ -1203,7 +1236,7 @@ func serviceDirOf(s *Service) string {
 
 // --- functions exposed in HCL expressions ---------------------------------
 
-func (r *resolver) functions() map[string]function.Function {
+func (r *resolver) functions(checkout string) map[string]function.Function {
 	str := func(get func() string) function.Function {
 		return function.New(&function.Spec{
 			Type: function.StaticReturnType(cty.String),
@@ -1219,14 +1252,14 @@ func (r *resolver) functions() map[string]function.Function {
 	return map[string]function.Function{
 		// fs:: namespace — per-invocation filesystem coordinates and identity.
 		"fs::tmp":   str(func() string { return r.inv.TmpDir }),   // generated files
-		"fs::src":   str(func() string { return r.curCheckout }),  // this service's checkout
+		"fs::src":   str(func() string { return checkout }),       // this service's checkout (service scope only)
 		"fs::bin":   str(func() string { return r.inv.BinDir() }), // build outputs (outside src)
 		"fs::state": str(func() string { return r.inv.StateDir }), // per-worktree state root (.zordon/worktrees/<wt>)
 		"fs::hash":  r.fsHashFunc(),                               // instance identity (location)
 		// cfg:: namespace — manifest identity (Alphasfile bytes + parent ctx).
 		"cfg::hash": r.cfgHashFunc(),
 		// src:: namespace — current service's source code identity.
-		"src::hash": r.srcHashFunc(),
+		"src::hash": r.srcHashFunc(checkout),
 
 		"net::pickport": pickPortFunc(),
 		"os::env":       osEnvFunc(),
@@ -1314,11 +1347,11 @@ func (r *resolver) cfgHashFunc() function.Function {
 // worktree) that's `git rev-parse --short HEAD`; otherwise it errors. Use
 // it as a build cache key or a "code generation" stamp — pair with
 // fs::hash() when you also need the location.
-func (r *resolver) srcHashFunc() function.Function {
+func (r *resolver) srcHashFunc(checkout string) function.Function {
 	return function.New(&function.Spec{
 		Type: function.StaticReturnType(cty.String),
 		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
-			dir := r.curCheckout
+			dir := checkout
 			if dir == "" {
 				return cty.NilVal, errors.New("src::hash(): no source primary for this service (use-only or no checkout)")
 			}

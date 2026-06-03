@@ -1,20 +1,20 @@
 // End-to-end reproduction of the "alpha hangs because build can't be
 // cancelled" bug. Pinned scenario:
 //
-//   1. service has an explicit build cmd that traps SIGTERM and sleeps
-//      for ~30s — mirrors the real-world failure mode (a `set -euo
-//      pipefail; xargs -P` block, a heavy `cargo install`, a misbehaving
-//      build helper).
-//   2. zordon spawns alpha, alpha logs "prepare svc1: build (...)",
-//      i.e. the build subprocess is running.
-//   3. test SIGINTs zordon. parentwatch in alpha fires, requestShutdown
-//      closes shutdownCh, state.shutdownAll requests stop on every
-//      service, sc.done is supposed to close.
-//   4. assertion: alpha process is gone within shutdownGrace + small
-//      slack (~5s total). Without the fix shipped in this PR, alpha
-//      would block in bringupAndSupervise → prepareBuild → c.Wait()
-//      until the trap-then-sleep finishes (~30s), and a follow-up
-//      `zordon start` would happily spawn a second alpha on top.
+//  1. service has an explicit build cmd that traps SIGTERM and sleeps
+//     for ~30s — mirrors the real-world failure mode (a `set -euo
+//     pipefail; xargs -P` block, a heavy `cargo install`, a misbehaving
+//     build helper).
+//  2. zordon spawns alpha, alpha logs "prepare svc1: build (...)",
+//     i.e. the build subprocess is running.
+//  3. test SIGINTs zordon. parentwatch in alpha fires, requestShutdown
+//     closes shutdownCh, state.shutdownAll requests stop on every
+//     service, sc.done is supposed to close.
+//  4. assertion: alpha process is gone within shutdownGrace + small
+//     slack (~5s total). Without the fix shipped in this PR, alpha
+//     would block in bringupAndSupervise → prepareBuild → c.Wait()
+//     until the trap-then-sleep finishes (~30s), and a follow-up
+//     `zordon start` would happily spawn a second alpha on top.
 //
 // The trap-then-sleep is the load-bearing detail: a build that exits
 // on SIGTERM would mask the bug because c.Wait would return naturally

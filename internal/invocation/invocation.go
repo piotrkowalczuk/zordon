@@ -74,15 +74,15 @@ func (w WorktreeName) IsMain() bool {
 	return w == "" || w == MainWorktree
 }
 
-// Invocation is the filesystem-location identity of a run: pure directory
+// InvocationState is the filesystem-location identity of a run: pure directory
 // facts. FsHash depends only on Dir, so two runs from the same directory get
 // the same FsHash, letting zordon re-attach to an already-running alpha; it
 // names the socket / tmp dir and answers "is this the same alpha instance?".
 //
-// The manifest identity (CfgHash) is deliberately NOT here — it depends on the
+// The manifest identity (ConfigHash) is deliberately NOT here — it depends on the
 // Alphasfile bytes + resolved parent context, so it is computed at the call
-// site via CfgHash() and carried by the resolved alphasfile.Alphasfile.
-type Invocation struct {
+// site via ConfigHash() and carried by the resolved alphasfile.Alphasfile.
+type InvocationState struct {
 	Dir      string            // normalized invocation dir (project root or worktree dir)
 	Worktree string            // "main" or "<name>"
 	StateDir string            // <X>/.zordon/worktrees/<Worktree>
@@ -112,7 +112,7 @@ type Invocation struct {
 // build()). The MainWorktree check uses the literal "main" string only —
 // an empty Worktree is treated as a (degenerate) named worktree, matching
 // the historical eval semantics relied on by oracle tests.
-func (i *Invocation) OwnsService(svc string) bool {
+func (i *InvocationState) OwnsService(svc string) bool {
 	if i == nil || i.Worktree == MainWorktree {
 		return false
 	}
@@ -124,33 +124,33 @@ func (i *Invocation) OwnsService(svc string) bool {
 
 // CheckoutPath is where service <svc>'s git worktree is materialized for
 // this invocation.
-func (i *Invocation) CheckoutPath(svc string) string {
+func (i *InvocationState) CheckoutPath(svc string) string {
 	return filepath.Join(i.StateDir, "src", svc)
 }
 
 // BinDir is where build outputs land for this invocation — deliberately
 // OUTSIDE the source checkouts so building never dirties a `dir` primary's
 // git worktree. This is what fs::bin() returns.
-func (i *Invocation) BinDir() string {
+func (i *InvocationState) BinDir() string {
 	return filepath.Join(i.StateDir, "bin")
 }
 
 // ProjectRoot is the directory the leaf Alphasfile lives in (the worktree's
 // <X>). Relative `dir` primaries resolve against this.
-func (i *Invocation) ProjectRoot() string {
+func (i *InvocationState) ProjectRoot() string {
 	// StateDir == <root>/.zordon/worktrees/<wt>
 	return filepath.Dir(filepath.Dir(filepath.Dir(i.StateDir)))
 }
 
 // SocketPath is the alpha control socket for this invocation (kept under
 // $TMPDIR to stay within the unix-socket path length limit).
-func (i *Invocation) SocketPath() string {
+func (i *InvocationState) SocketPath() string {
 	return filepath.Join(i.TmpDir, "alpha.sock")
 }
 
 // LockPath / AlphaLogPath live in the (in-tree) state dir.
-func (i *Invocation) LockPath() string     { return filepath.Join(i.StateDir, "start.lock") }
-func (i *Invocation) AlphaLogPath() string { return filepath.Join(i.StateDir, "alpha.log") }
+func (i *InvocationState) LockPath() string     { return filepath.Join(i.StateDir, "start.lock") }
+func (i *InvocationState) AlphaLogPath() string { return filepath.Join(i.StateDir, "alpha.log") }
 
 // projectRootAndWorktree decides, purely from a directory, whether it is a
 // worktree dir (<X>/.zordon/worktrees/<name>) and returns the project root
@@ -180,11 +180,11 @@ func shortSum(parts ...[]byte) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// New builds the invocation for a leaf Alphasfile. invocationDir is the
+// NewInvocationState builds the invocation for a leaf Alphasfile. invocationDir is the
 // directory the user ran zordon from (normalized CWD). Pure directory facts:
-// the manifest identity (CfgHash) is NOT here — it is the resolved
-// Alphasfile's concern (see CfgHash + alphasfile.Alphasfile.CfgHash).
-func New(invocationDir string) (*Invocation, error) {
+// the manifest identity (ConfigHash) is NOT here — it is the resolved
+// Alphasfile's concern (see ConfigHash + alphasfile.Alphasfile.CfgHash).
+func NewInvocationState(invocationDir string) (*InvocationState, error) {
 	abs, err := filepath.Abs(invocationDir)
 	if err != nil {
 		return nil, err
@@ -193,10 +193,10 @@ func New(invocationDir string) (*Invocation, error) {
 	return build(abs, root, wt), nil
 }
 
-// NewAt builds the invocation for an Alphasfile addressed by its own
+// NewInvocationStateAt builds the invocation for an Alphasfile addressed by its own
 // directory (used for federation parents, which are never worktrees —
 // always "main" rooted at the file's dir).
-func NewAt(alphasfileDir string) (*Invocation, error) {
+func NewInvocationStateAt(alphasfileDir string) (*InvocationState, error) {
 	abs, err := filepath.Abs(alphasfileDir)
 	if err != nil {
 		return nil, err
@@ -204,21 +204,21 @@ func NewAt(alphasfileDir string) (*Invocation, error) {
 	return build(abs, abs, MainWorktree), nil
 }
 
-// CfgHash is the manifest identity: sha8 of the Alphasfile bytes joined with
+// ConfigHash is the manifest identity: sha8 of the Alphasfile bytes joined with
 // the serialized resolved parent context. It changes whenever the manifest (or
 // any federation parent it sees) changes, and drives drift detection. It lives
 // here (next to FsHash) because both share shortSum, but it is a property of
 // the (bytes, parent) pair — NOT of the directory — so it is computed at the
-// call site, never stored on Invocation.
-func CfgHash(afBytes, parentCtx []byte) string {
+// call site, never stored on InvocationState.
+func ConfigHash(afBytes, parentCtx []byte) string {
 	return shortSum(afBytes, parentCtx)
 }
 
-func build(dir, root, wt string) *Invocation {
+func build(dir, root, wt string) *InvocationState {
 	stateDir := filepath.Join(root, ".zordon", "worktrees", wt)
 	fsh := shortSum([]byte(dir))
 	tmp := filepath.Join(zfs.SystemTempDir(), "zordon-"+fsh)
-	return &Invocation{
+	return &InvocationState{
 		Dir:           dir,
 		Worktree:      wt,
 		StateDir:      stateDir,
@@ -258,11 +258,4 @@ func scanOwnedServices(stateDir, wt string) map[string]bool {
 		return nil
 	}
 	return owned
-}
-
-// IsWorktreeDir reports whether dir is inside a .zordon/worktrees/<name>
-// layout (used by walk-up to adopt the parent Alphasfile as the leaf).
-func IsWorktreeDir(dir string) bool {
-	_, wt := projectRootAndWorktree(dir)
-	return wt != MainWorktree
 }

@@ -1,10 +1,14 @@
 .idea
+.antigravitycli
 .DS_Store
 data
 .zordon
 examples/zordon
 _*.md
-.claude
+# Ignore personal/local Claude state, but share the project hook config.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 tmp
 examples/.zordon
 bin

@@ -16,7 +16,7 @@ func TestExampleFederationPrint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	iv := &invocation.Invocation{
+	iv := &invocation.InvocationState{
 		FsHash: "feedface00001111", TmpDir: "/tmp/zordon-feedface00001111",
 		Worktree: invocation.MainWorktree,
 		StateDir: "/repo/examples/federation_macos/project/.zordon/worktrees/main",

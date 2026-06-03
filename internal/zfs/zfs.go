@@ -355,10 +355,10 @@ func ZordonHome(override string) string {
 //
 //   - "" / "."         ⇒ the checkout itself (no offset).
 //   - relative path    ⇒ joined to checkout; the result is the dir
-//                        where the user holds go.mod / Cargo.toml /
-//                        package.json.
+//     where the user holds go.mod / Cargo.toml /
+//     package.json.
 //   - absolute path    ⇒ returned verbatim (escape hatch; not used
-//                        by current HCL grammar but kept robust).
+//     by current HCL grammar but kept robust).
 //
 // Empty `checkout` returns "" — callers (use-only crate installs)
 // fall back to their own cwd policy.

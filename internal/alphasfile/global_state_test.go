@@ -29,17 +29,17 @@ func TestGlobalComputedState_ZeroValue(t *testing.T) {
 // appends root-first.
 func TestGlobalComputedState_Join(t *testing.T) {
 	var g GlobalComputedState
-	g.Join(Contribution{
-		Services:  []*Service{svc("go", "a")},
-		Toolchain: map[string]*ToolchainConfig{"go": {Version: "1.21"}},
-		SysEnv:    []string{"PATH", "HOME"},
-		Dotenv:    []string{".env"},
+	g.Join(BlockComputedState{
+		services:  []*Service{svc("go", "a")},
+		toolchain: map[string]*ToolchainConfig{"go": {Version: "1.21"}},
+		sysenv:    []string{"PATH", "HOME"},
+		dotenv:    []string{".env"},
 	})
-	g.Join(Contribution{
-		Services:  []*Service{svc("rust", "b")},
-		Toolchain: map[string]*ToolchainConfig{"go": {Version: "1.22"}, "rust": {Version: "1.79"}},
-		SysEnv:    []string{"HOME", "TERM"},
-		Dotenv:    []string{".env.local"},
+	g.Join(BlockComputedState{
+		services:  []*Service{svc("rust", "b")},
+		toolchain: map[string]*ToolchainConfig{"go": {Version: "1.22"}, "rust": {Version: "1.79"}},
+		sysenv:    []string{"HOME", "TERM"},
+		dotenv:    []string{".env.local"},
 	})
 
 	var gotNames []string
@@ -75,7 +75,7 @@ func TestGlobalComputedState_Join(t *testing.T) {
 // `if len(accumulated) > 0 || len(toolchain) > 0 || len(sysenv) > 0` did.
 func TestGlobalComputedState_ParentContextNilWithoutEvalFacts(t *testing.T) {
 	var g GlobalComputedState
-	g.Join(Contribution{Dotenv: []string{".env"}})
+	g.Join(BlockComputedState{dotenv: []string{".env"}})
 	if g.ParentContext() != nil {
 		t.Error("ParentContext() non-nil after dotenv-only Join, want nil")
 	}

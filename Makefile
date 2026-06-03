@@ -1,6 +1,10 @@
-.PHONY: build test e2e lint clean
+.PHONY: fmt build test e2e lint clean
 
 EXAMPLES ?= $(shell ls -d examples/*/)
+
+fmt:
+	go fix ./...
+	gofmt -s -w $$(find . -type d -name .zordon -prune -o -name '*.go' -print)
 
 build:
 	mkdir -p bin

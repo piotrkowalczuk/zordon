@@ -16,7 +16,7 @@ func TestExampleGoResolves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	iv := &invocation.Invocation{
+	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
 		StateDir: "/repo/examples/go/.zordon/worktrees/main",
 	}

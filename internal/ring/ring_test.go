@@ -67,7 +67,7 @@ func TestOverflowDropsOldest(t *testing.T) {
 
 func TestMultipleWrapsKeepsLastCap(t *testing.T) {
 	b := New(3)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		b.Push(string(rune('a' + (i % 26))))
 	}
 	got := b.Dump()

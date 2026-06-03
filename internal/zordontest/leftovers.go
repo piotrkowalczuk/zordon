@@ -110,7 +110,7 @@ func (p *Project) fsHash() string {
 	if _, err := os.ReadFile(filepath.Join(p.root, "Alphasfile")); err != nil {
 		return ""
 	}
-	inv, err := invocation.New(p.root)
+	inv, err := invocation.NewInvocationState(p.root)
 	if err != nil {
 		return ""
 	}

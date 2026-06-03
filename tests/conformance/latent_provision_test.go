@@ -16,11 +16,11 @@
 // the old one's socket is gone but the process is still alive).
 //
 // Reproduction shape:
-//   1. Alphasfile with a normal service plus a latent provision.
-//   2. `zordon start` — bringup completes cleanly (latent doesn't run,
-//      service comes up).
-//   3. `zordon stop` — sends OpShutdown; without the fix alpha hangs
-//      indefinitely in shutdownAll. With the fix alpha exits promptly.
+//  1. Alphasfile with a normal service plus a latent provision.
+//  2. `zordon start` — bringup completes cleanly (latent doesn't run,
+//     service comes up).
+//  3. `zordon stop` — sends OpShutdown; without the fix alpha hangs
+//     indefinitely in shutdownAll. With the fix alpha exits promptly.
 package conformance_test
 
 import (

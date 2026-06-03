@@ -218,7 +218,7 @@ func branchWorktreePath(ctx context.Context, gitDir, branch string) (string, boo
 	}
 	want := "branch refs/heads/" + branch
 	var cur string
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		switch {
 		case strings.HasPrefix(line, "worktree "):
 			cur = strings.TrimPrefix(line, "worktree ")
@@ -247,7 +247,7 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 	if start == "" {
 		start = "HEAD"
 	}
-	
+
 	// If the directory was manually deleted but Git still tracks it, a later
 	// `worktree add` fails. `worktree prune` silently drops stale admin
 	// entries and is a no-op otherwise (unlike `worktree remove <dest>`,

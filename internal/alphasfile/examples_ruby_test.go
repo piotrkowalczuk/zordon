@@ -16,7 +16,7 @@ func TestExampleRubyResolves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	iv := &invocation.Invocation{
+	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
 		StateDir: "/repo/examples/ruby/.zordon/worktrees/main",
 	}

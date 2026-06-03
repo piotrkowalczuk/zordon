@@ -14,8 +14,8 @@ const testCfgHash = "00000000cfg00000"
 
 // testInv is a fixed, deterministic invocation so assertions don't depend
 // on $TMPDIR / cwd. Resolution must be pure: no clone, no spawn, no fs.
-func testInv() *invocation.Invocation {
-	return &invocation.Invocation{
+func testInv() *invocation.InvocationState {
+	return &invocation.InvocationState{
 		Dir:      "/proj",
 		Worktree: "main",
 		StateDir: "/proj/.zordon/worktrees/main",

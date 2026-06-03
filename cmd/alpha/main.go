@@ -87,7 +87,7 @@ type writeLog struct {
 }
 
 func (w *writeLog) Write(p []byte) (int, error) {
-	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(string(p), "\n"), "\n") {
 		if line != "" {
 			w.log.Info(w.src, "%s", line)
 		}
@@ -96,7 +96,6 @@ func (w *writeLog) Write(p []byte) (int, error) {
 }
 
 func logWriter(log *zlog.Logger, src string) io.Writer { return &writeLog{log: log, src: src} }
-
 
 // fsHashFromSocket extracts the fs_hash segment from an alpha socket
 // path of the form `<tmpdir>/zordon-<fsHash>/alpha.sock`. Empty
@@ -247,8 +246,8 @@ type runConfig struct {
 	Home          zfs.DirName             // resolved zordon home (--home → ZORDON_HOME; "" ⇒ ~/.zordon)
 	TommyBin      zfs.DirName             // tommy wrapper override (--tommy-bin → ZORDON_TOMMY_BIN)
 	Worktree      invocation.WorktreeName // which worktree this alpha runs for (--worktree → ZORDON_WORKTREE)
-	ReadyFD       zfs.FileDescriptor // parent handshake fd (--ready-fd → ZORDON_READY_FD; 0 ⇒ no handshake)
-	ParentFD      zfs.FileDescriptor // parent-death pipe fd (--parent-fd → ZORDON_PARENT_FD; 0 ⇒ standalone)
+	ReadyFD       zfs.FileDescriptor      // parent handshake fd (--ready-fd → ZORDON_READY_FD; 0 ⇒ no handshake)
+	ParentFD      zfs.FileDescriptor      // parent-death pipe fd (--parent-fd → ZORDON_PARENT_FD; 0 ⇒ standalone)
 }
 
 func main() {
@@ -305,7 +304,6 @@ func main() {
 	}
 }
 
-
 type alphaState struct {
 	mu             sync.RWMutex
 	startedAt      time.Time
@@ -318,11 +316,11 @@ type alphaState struct {
 	parentDotenv   []string // file-level dotenv paths inherited from federation parents
 	agentMode      bool     // configured via `zordon --agent`: apply agent{} env overlay
 	config         *alphasfile.Alphasfile
-	services       map[string]*serviceCtx    // keyed by service name
-	provisions     map[string]*provisionCtx  // keyed by provision ID ("service.<tc>.<svc>.runtime.provision.<name>")
-	toolchains     map[string]*toolchainCtx  // keyed by lang ("go", "rust", "ruby")
-	readiness      map[string]string         // service name -> readiness state ("probing", "ready", "failed")
-	files          []string                  // absolute paths of file{} outputs to unlink on shutdown
+	services       map[string]*serviceCtx   // keyed by service name
+	provisions     map[string]*provisionCtx // keyed by provision ID ("service.<tc>.<svc>.runtime.provision.<name>")
+	toolchains     map[string]*toolchainCtx // keyed by lang ("go", "rust", "ruby")
+	readiness      map[string]string        // service name -> readiness state ("probing", "ready", "failed")
+	files          []string                 // absolute paths of file{} outputs to unlink on shutdown
 
 	// shutdownCh is closed exactly once to signal whole-alpha shutdown.
 	// Each service supervisor selects on it; the runAlpha main goroutine
@@ -406,8 +404,8 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 	entityID, state := ref[:at], lifecycle.State(ref[at+1:])
 	// Toolchain ref: `toolchain.<lang>`. Cheapest to check first by
 	// prefix because nothing else starts with it.
-	if strings.HasPrefix(entityID, "toolchain.") {
-		lang := strings.TrimPrefix(entityID, "toolchain.")
+	if after, ok := strings.CutPrefix(entityID, "toolchain."); ok {
+		lang := after
 		s.mu.RLock()
 		tc := s.toolchains[lang]
 		s.mu.RUnlock()
@@ -421,7 +419,7 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 		return &barrierTarget{target: t, fail: tc.TerminalFailure()}, nil
 	}
 	// Provision ref: ends with `.runtime.provision.<name>`.
-	if idx := strings.Index(entityID, ".runtime.provision."); idx >= 0 {
+	if found := strings.Contains(entityID, ".runtime.provision."); found {
 		s.mu.RLock()
 		pc := s.provisions[entityID]
 		s.mu.RUnlock()
@@ -437,8 +435,8 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 	// Service build ref: ends with `.build` (and isn't a provision).
 	// Check before `.runtime` so a future `service.X.build.subblock`
 	// doesn't get misdispatched.
-	if strings.HasSuffix(entityID, ".build") {
-		svcID := strings.TrimSuffix(entityID, ".build")
+	if before, ok := strings.CutSuffix(entityID, ".build"); ok {
+		svcID := before
 		parts := strings.SplitN(svcID, ".", 3)
 		if len(parts) != 3 || parts[0] != "service" {
 			return nil, fmt.Errorf("bad barrier entity ID %q", entityID)
@@ -457,8 +455,8 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 		return &barrierTarget{target: t, fail: sc.BuildTerminalFailure()}, nil
 	}
 	// Service runtime ref: ends with `.runtime` (and isn't a provision).
-	if strings.HasSuffix(entityID, ".runtime") {
-		svcID := strings.TrimSuffix(entityID, ".runtime")
+	if before, ok := strings.CutSuffix(entityID, ".runtime"); ok {
+		svcID := before
 		parts := strings.SplitN(svcID, ".", 3)
 		if len(parts) != 3 || parts[0] != "service" {
 			return nil, fmt.Errorf("bad barrier entity ID %q", entityID)
@@ -2269,7 +2267,7 @@ func streamLines(name, kind string, r io.Reader, stream *safeEncoder, log *zlog.
 // serviceEnv composes a child process env in the precedence documented
 // at the top of this file (lowest → highest):
 //
-//   NewEnvironmentVariablesFromHost(allow) → toolchain → dotenv files → env
+//	NewEnvironmentVariablesFromHost(allow) → toolchain → dotenv files → env
 //
 // Thin wrapper over zenv.EnvironmentVariables.Join / .JoinFile so the
 // spawn sites don't have to spell out the chain four times.

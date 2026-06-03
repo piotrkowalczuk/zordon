@@ -18,7 +18,7 @@ func TestExampleWorktreeMonorepo(t *testing.T) {
 	}
 	names := []string{"serviceA", "serviceB", "serviceC"}
 	compile := func(wt, stateDir string) []*Service {
-		iv := &invocation.Invocation{
+		iv := &invocation.InvocationState{
 			FsHash: "abc0000011112222", TmpDir: "/tmp/zordon-abc0000011112222",
 			Worktree: wt, StateDir: stateDir,
 		}

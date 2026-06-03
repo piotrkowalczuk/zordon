@@ -360,7 +360,7 @@ func dumpAlphaLog(t *testing.T, logPath string) {
 		t.Logf("alpha.log unreadable: %v", err)
 		return
 	}
-	for _, ln := range strings.Split(string(b), "\n") {
+	for ln := range strings.SplitSeq(string(b), "\n") {
 		if strings.Contains(ln, "tommy") || strings.Contains(ln, "started svc1") ||
 			strings.Contains(ln, "starting pid=") {
 			t.Logf("alpha.log| %s", ln)

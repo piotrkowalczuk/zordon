@@ -18,10 +18,10 @@
 // We exercise the BUILD path specifically (not provision via
 // runShell, which DOES start c.Wait independently and is therefore
 // not vulnerable to this exact deadlock). The build cmd:
-//   1. installs SIGTERM trap so SIGTERM doesn't kill it before grace
-//   2. forks a python that setsid's into a new session and sleeps
-//      120s while holding the inherited stdout/stderr write fds
-//   3. sleeps 30s itself so the cancel race window is open
+//  1. installs SIGTERM trap so SIGTERM doesn't kill it before grace
+//  2. forks a python that setsid's into a new session and sleeps
+//     120s while holding the inherited stdout/stderr write fds
+//  3. sleeps 30s itself so the cancel race window is open
 package conformance_test
 
 import (

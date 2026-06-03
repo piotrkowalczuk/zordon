@@ -16,7 +16,7 @@ func TestExampleEnvResolves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	iv := &invocation.Invocation{
+	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
 		Worktree: invocation.MainWorktree,
 		StateDir: "/repo/examples/env/.zordon/worktrees/main",

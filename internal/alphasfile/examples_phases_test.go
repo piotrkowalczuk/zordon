@@ -17,7 +17,7 @@ func TestExamplePhasesResolves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	iv := &invocation.Invocation{
+	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
 		Worktree: invocation.MainWorktree,
 		StateDir: "/repo/examples/phases/.zordon/worktrees/main",

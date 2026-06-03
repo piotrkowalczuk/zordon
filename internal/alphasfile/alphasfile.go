@@ -737,7 +737,7 @@ type fileBlock struct {
 // invocation identity (hash, tmp dir, per-service checkout paths); parent
 // pre-seeds the flat service namespace with values resolved by Alphasfiles
 // higher in a federation chain (nil for a standalone file).
-func Open(path string, inv *invocation.Invocation, parent *ParentContext, cfgHash string, testCfg TestConfig) (*Alphasfile, error) {
+func Open(path string, inv *invocation.InvocationState, parent *ParentContext, cfgHash string, testCfg TestConfig) (*Alphasfile, error) {
 	b, err := zfs.Read(path)
 	if err != nil {
 		return nil, fmt.Errorf("alphasfile read: %w", err)
@@ -752,7 +752,31 @@ func Open(path string, inv *invocation.Invocation, parent *ParentContext, cfgHas
 // testCfg gates the test:: HCL functions; the zero value (production
 // default) leaves them erroring out so a non-harness Alphasfile that
 // uses test::log() fails fast.
-func Compile(name string, src []byte, inv *invocation.Invocation, parent *ParentContext, cfgHash string, testCfg TestConfig) (*Alphasfile, error) {
+func Compile(name string, src []byte, inv *invocation.InvocationState, parent *ParentContext, cfgHash string, testCfg TestConfig) (*Alphasfile, error) {
+	m, err := NewManifestState(name, src, inv)
+	if err != nil {
+		return nil, err
+	}
+	p, err := m.Plan(parent, cfgHash, testCfg)
+	if err != nil {
+		return nil, err
+	}
+	return p.Compute()
+}
+
+// ManifestState is a parsed-but-not-evaluated Alphasfile placed in its
+// invocation: the raw block tree ready to be planned and computed. Parent-free
+// — federation parent context enters at Plan, not here.
+type ManifestState struct {
+	name string
+	root *rootBlock
+	inv  *invocation.InvocationState
+}
+
+// NewManifestState parses Alphasfile source into its block tree. This is the
+// only step that fails on HCL syntax; ordering (Plan) and evaluation (Compute)
+// come after.
+func NewManifestState(name string, src []byte, inv *invocation.InvocationState) (*ManifestState, error) {
 	parser := hclparse.NewParser()
 	file, diags := parser.ParseHCL(src, name)
 	if diags.HasErrors() {
@@ -762,7 +786,7 @@ func Compile(name string, src []byte, inv *invocation.Invocation, parent *Parent
 	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
 		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
 	}
-	return resolve(name, &root, inv, parent, cfgHash, testCfg)
+	return &ManifestState{name: name, root: &root, inv: inv}, nil
 }
 
 // ParentContext carries what a federation child needs from its parents:
@@ -862,23 +886,48 @@ func (pc *ParentContext) SysEnv() []string {
 	return pc.sysenv
 }
 
-// Contribution is one federation level's resolved facts as they accumulate
-// down the chain into a GlobalComputedState. Sourced from a freshly resolved
-// Alphasfile (Alphasfile.Contribution) or a running parent's StateInfo.
-type Contribution struct {
-	Services  []*Service
-	Toolchain map[string]*ToolchainConfig
-	SysEnv    []string
-	Dotenv    []string
+// BlockComputedState is the computed state of one federation level: the static
+// facts it contributes to its children (services / toolchain / sysenv / dotenv)
+// plus its manifest identity (CfgHash). Both a freshly resolved Alphasfile
+// (Alphasfile.Block) and an adopted running alpha (AdoptBlock) produce one, so
+// GlobalComputedState.Join folds a STATE — not a loose glue struct, and there
+// is a single result type regardless of source.
+type BlockComputedState struct {
+	services  []*Service
+	toolchain map[string]*ToolchainConfig
+	sysenv    []string
+	dotenv    []string
+	cfgHash   string
 }
 
-// Contribution projects a resolved Alphasfile into its accumulable facts.
-func (af *Alphasfile) Contribution() Contribution {
-	return Contribution{
-		Services:  af.Services,
-		Toolchain: af.Toolchain,
-		SysEnv:    af.SysEnv,
-		Dotenv:    af.Dotenv,
+func (b BlockComputedState) Services() []*Service                   { return b.services }
+func (b BlockComputedState) Toolchain() map[string]*ToolchainConfig { return b.toolchain }
+func (b BlockComputedState) SysEnv() []string                       { return b.sysenv }
+func (b BlockComputedState) Dotenv() []string                       { return b.dotenv }
+func (b BlockComputedState) CfgHash() string                        { return b.cfgHash }
+
+// Block is the fresh-eval constructor: the resolved Alphasfile's own computed
+// state of this level.
+func (af *Alphasfile) Block() BlockComputedState {
+	return BlockComputedState{
+		services:  af.Services,
+		toolchain: af.Toolchain,
+		sysenv:    af.SysEnv,
+		dotenv:    af.Dotenv,
+		cfgHash:   af.CfgHash,
+	}
+}
+
+// AdoptBlock is the reuse constructor: the computed state of a running alpha,
+// rebuilt from its reported facts (the caller reads these off a
+// protocol.StateInfo, which this package can't import without a cycle).
+func AdoptBlock(services []*Service, toolchain map[string]*ToolchainConfig, sysenv, dotenv []string, cfgHash string) BlockComputedState {
+	return BlockComputedState{
+		services:  services,
+		toolchain: toolchain,
+		sysenv:    sysenv,
+		dotenv:    dotenv,
+		cfgHash:   cfgHash,
 	}
 }
 
@@ -894,21 +943,21 @@ type GlobalComputedState struct {
 	dotenv    []string
 }
 
-// Join folds one level's contribution into the accumulator, preserving the
+// Join folds one level's computed block into the accumulator, preserving the
 // chain's merge rules: services append (the resolver de-dups on seed via
 // NewParentContext, child overriding parent by name), toolchain map-merges
 // with the later (deeper/child) entry winning, sysenv unions order-preserving,
-// dotenv appends root-first.
-func (g *GlobalComputedState) Join(c Contribution) {
-	g.services = append(g.services, c.Services...)
-	if len(c.Toolchain) > 0 {
+// dotenv appends root-first. CfgHash is per-level identity, not accumulated.
+func (g *GlobalComputedState) Join(b BlockComputedState) {
+	g.services = append(g.services, b.services...)
+	if len(b.toolchain) > 0 {
 		if g.toolchain == nil {
-			g.toolchain = make(map[string]*ToolchainConfig, len(c.Toolchain))
+			g.toolchain = make(map[string]*ToolchainConfig, len(b.toolchain))
 		}
-		maps.Copy(g.toolchain, c.Toolchain)
+		maps.Copy(g.toolchain, b.toolchain)
 	}
-	g.sysenv = mergeSysEnv(g.sysenv, c.SysEnv)
-	g.dotenv = append(g.dotenv, c.Dotenv...)
+	g.sysenv = mergeSysEnv(g.sysenv, b.sysenv)
+	g.dotenv = append(g.dotenv, b.dotenv...)
 }
 
 // Services returns the accumulated services (root-first, undeduped) — the slice

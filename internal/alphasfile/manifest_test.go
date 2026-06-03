@@ -1,0 +1,69 @@
+package alphasfile
+
+import "testing"
+
+// The staged pipeline's payoff: a dependency cycle is a PLANNING error, caught
+// by Plan (topo-sort) before Compute runs any effectful HCL function. Parse
+// (NewManifestState) still succeeds — a cycle is structural, not syntactic.
+func TestManifestState_PlanCatchesCycleBeforeCompute(t *testing.T) {
+	src := `
+service "go" "a" {
+  git { url = "github.com/x/a" }
+  vars = { v = service.go.b.vars.v }
+}
+service "go" "b" {
+  git { url = "github.com/x/b" }
+  vars = { v = service.go.a.vars.v }
+}
+`
+	m, err := NewManifestState("cycle.hcl", []byte(src), testInv())
+	if err != nil {
+		t.Fatalf("parse must succeed (a cycle is a planning error, not syntax): %v", err)
+	}
+	if _, err := m.Plan(nil, testCfgHash, TestConfig{}); err == nil {
+		t.Fatal("Plan must fail on a vars↔vars cycle, before any Compute")
+	}
+}
+
+// A clean manifest stages all the way through: parse → Plan → Compute, with
+// cfg::hash() (threaded via Plan) surfacing in the computed result.
+func TestManifestState_PlanComputeStages(t *testing.T) {
+	src := `
+service "go" "api" {
+  git { url = "github.com/x/api" }
+  vars = { cfg = cfg::hash() }
+}
+`
+	m, err := NewManifestState("ok.hcl", []byte(src), testInv())
+	if err != nil {
+		t.Fatalf("NewManifestState: %v", err)
+	}
+	p, err := m.Plan(nil, testCfgHash, TestConfig{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	af, err := p.Compute()
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	if af.CfgHash != testCfgHash {
+		t.Errorf("Alphasfile.CfgHash = %q, want %q", af.CfgHash, testCfgHash)
+	}
+	api := svcByName(af, "api")
+	if api == nil || api.Runtime.Vars["cfg"] != testCfgHash {
+		t.Errorf("cfg::hash() through Plan/Compute = %v, want %q", api.Runtime.Vars["cfg"], testCfgHash)
+	}
+}
+
+// fs::src() is a SERVICE-scope function. At file scope (top-level dotenv) there
+// is no checkout, so it must error — NOT leak a prior service's stale checkout,
+// which is exactly the footgun the scope split fixes.
+func TestCompute_FsSrcErrorsAtFileScope(t *testing.T) {
+	src := `
+service "go" "a" { git { url = "github.com/x/a" } }
+dotenv = "${fs::src()}/.env"
+`
+	if _, err := Compile("fs.hcl", []byte(src), testInv(), nil, testCfgHash, TestConfig{}); err == nil {
+		t.Fatal("fs::src() in top-level dotenv (file scope) must error, not return a stale checkout")
+	}
+}

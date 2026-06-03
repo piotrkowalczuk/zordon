@@ -4,10 +4,10 @@ package tools
 // mise's `env --json` output, BEFORE the user's toolchain.<lang>.env
 // overlay. Layered model:
 //
-//   1. sysenv whitelist  — filters host env
-//   2. mise env --json   — toolchain base (PATH, GOROOT, GEM_PATH, ...)
-//   3. PostMiseEnv       — language pin reinforcement (this function)
-//   4. toolchain.<lang>.env  — user override (power-user path, no safety net)
+//  1. sysenv whitelist  — filters host env
+//  2. mise env --json   — toolchain base (PATH, GOROOT, GEM_PATH, ...)
+//  3. PostMiseEnv       — language pin reinforcement (this function)
+//  4. toolchain.<lang>.env  — user override (power-user path, no safety net)
 //
 // Layer 3 exists for ONE narrow purpose per language: to make sure
 // mise's pin actually takes effect at the language-runtime level and
