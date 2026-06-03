@@ -360,20 +360,26 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 		// (presence of <wtdir>/src/<svc>/.git); see invocation.build.
 		// Pure within this function — the FS scan happens once at
 		// invocation construction.
-		dir := ""
-		var gitURL, srcPath string
+		checkout := ""
+		var gitURL, srcPath, srcExeFromSB string
 		if sb.Git != nil {
 			gitURL = sb.Git.URL
 		}
 		if sb.Src != nil {
 			srcPath = sb.Src.Path
+			srcExeFromSB = sb.Src.Exe
 		}
 		switch {
 		case srcPath != "" && gitURL == "" && !r.inv.OwnsService(sb.Name):
-			dir = r.resolveDir(srcPath)
+			checkout = r.resolveDir(srcPath)
 		case gitURL != "" || srcPath != "":
-			dir = r.inv.CheckoutPath(sb.Name)
+			checkout = r.inv.CheckoutPath(sb.Name)
 		}
+		// Exe-anchor: the canonical "service working directory" is
+		// `<checkout>/<exe>`, computed once via zfs.ServiceCwd and used
+		// uniformly for build cwd, runtime cwd, provision cwd, and
+		// `fs::src()`. checkout == "" (use-only install) keeps dir == "".
+		dir := zfs.ServiceCwd(checkout, srcExeFromSB)
 
 		// self_base — known from labels + primary, before any eval.
 		//

@@ -32,12 +32,15 @@ func TestExampleEnvResolves(t *testing.T) {
 
 	// src-only in the main worktree → in place: build/run from src as-is
 	// (no git worktree add, no HEAD reset → uncommitted edits work). dir
-	// is the resolved src (../.. of the Alphasfile), NOT a CheckoutPath.
+	// is the exe-anchored service work dir: resolved src (../.. ⇒ /repo)
+	// joined with `exe = "./examples/env/src/app"`. zfs.ServiceCwd is the
+	// single source of truth for this join.
 	if !s.Package.InPlace {
 		t.Error("src-only @ main must be InPlace")
 	}
-	if s.Runtime.Dir != "/repo" {
-		t.Errorf("in-place dir = %q, want /repo (resolved ../..)", s.Runtime.Dir)
+	const wantDir = "/repo/examples/env/src/app"
+	if s.Runtime.Dir != wantDir {
+		t.Errorf("in-place dir = %q, want %q (resolved ../.. + exe)", s.Runtime.Dir, wantDir)
 	}
 	if strings.Contains(s.Runtime.Dir, "/.zordon/worktrees/") {
 		t.Errorf("in-place must not be a worktree checkout: %q", s.Runtime.Dir)

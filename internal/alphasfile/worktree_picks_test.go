@@ -76,10 +76,14 @@ service "go" "serviceC" {
 		t.Fatalf("compile: %v", err)
 	}
 
+	// Runtime.Dir is the exe-anchored work dir (zfs.ServiceCwd): the
+	// checkout root joined with src.exe. Owned services anchor on the
+	// per-worktree checkout; non-picked services anchor on the
+	// (in-place) project root. Both join the service's `exe` offset.
 	want := map[string]string{
-		"serviceA": svcADir, // owned → per-worktree checkout
-		"serviceB": tmp,     // not owned → anchor (= main InPlace)
-		"serviceC": tmp,     // not owned → anchor (= main InPlace)
+		"serviceA": filepath.Join(svcADir, "a"), // owned: <wtdir>/src/serviceA + ./a
+		"serviceB": filepath.Join(tmp, "b"),     // not owned: <project> + ./b
+		"serviceC": filepath.Join(tmp, "c"),     // not owned: <project> + ./c
 	}
 	for name, wantDir := range want {
 		s := svcByName(got, name)

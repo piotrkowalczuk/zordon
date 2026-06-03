@@ -29,7 +29,11 @@ func TestExampleGoResolves(t *testing.T) {
 	if app == nil || !app.Worktreeable() || app.UseOnly() {
 		t.Fatalf("app must be a worktree service: %+v", app)
 	}
-	wantDir := "/repo/examples/go/.zordon/worktrees/main/src/app"
+	// Runtime.Dir is the exe-anchored work dir (zfs.ServiceCwd): the
+	// per-invocation checkout joined with src.exe. examples/go pins
+	// `exe = "./examples/go/src/app"`, the build target inside the
+	// repo-rooted checkout.
+	wantDir := "/repo/examples/go/.zordon/worktrees/main/src/app/examples/go/src/app"
 	if app.Runtime.Dir != wantDir {
 		t.Errorf("app dir = %q, want %q", app.Runtime.Dir, wantDir)
 	}

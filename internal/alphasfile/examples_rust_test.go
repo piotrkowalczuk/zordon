@@ -32,7 +32,8 @@ func TestExampleRustResolves(t *testing.T) {
 	if app.Toolchain != ToolchainRust {
 		t.Errorf("toolchain = %q, want rust", app.Toolchain)
 	}
-	wantDir := "/repo/examples/rust/.zordon/worktrees/main/src/app"
+	// Runtime.Dir is the exe-anchored work dir (zfs.ServiceCwd).
+	wantDir := "/repo/examples/rust/.zordon/worktrees/main/src/app/examples/rust/src/app"
 	if app.Runtime.Dir != wantDir {
 		t.Errorf("app dir = %q, want %q", app.Runtime.Dir, wantDir)
 	}

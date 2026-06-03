@@ -2337,11 +2337,10 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent
 		// Node has no single-binary build artifact; with no explicit
 		// runtime cmd, inference reads package.json (scripts.start →
 		// main → bin) so the common case "just run my package.json"
-		// needs zero config. checkout is the worktree dir; the project
-		// root sits at checkout+exe.
-		root := checkout
-		if svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
-			root = filepath.Join(checkout, svc.Package.Exe)
+		// needs zero config.
+		root := serviceCwd(svc)
+		if root == "" {
+			root = checkout
 		}
 		argv, err := inferNodeRunCmd(root)
 		if err != nil {
@@ -2360,14 +2359,14 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent
 		cmd = exec.Command(argv[0], argv[1:]...)
 	}
 	if checkout != "" {
-		cmd.Dir = checkout
-		// nodejs: cwd is the package.json directory (checkout + exe
-		// offset), not the worktree root. npm / pnpm / yarn pick up
-		// package.json by walking up, but if cwd is *below* it via a
-		// monorepo offset they'd find the wrong one; setting cwd here
-		// is the unambiguous version.
-		if svc.Toolchain == alphasfile.ToolchainNode && svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
-			cmd.Dir = filepath.Join(checkout, svc.Package.Exe)
+		// Exe-anchored runtime cwd for every toolchain: `<checkout>/<exe>`,
+		// matching the build cwd. Without this, a monorepo Go/Rust service
+		// would start with cwd at the repo root mirror and relative file
+		// refs (`./config.yml`) would resolve differently in main vs named
+		// worktree — a footgun the unification closes.
+		cmd.Dir = serviceCwd(svc)
+		if cmd.Dir == "" {
+			cmd.Dir = checkout
 		}
 	}
 	var runEnv map[string]string
@@ -2439,14 +2438,13 @@ func defaultBuild(svc *alphasfile.Service, name, binDir, dest string) string {
 		return ""
 	}
 
+	// Build cwd is `<dest>/<exe>` for every toolchain (see serviceCwd /
+	// prepareBuild). The defaultBuild snippet runs from there, so it
+	// references the module root as ".": Go's main package, Rust's
+	// crate, Node's package.json all sit at the exe-anchor by
+	// convention.
 	switch svc.Toolchain {
 	case alphasfile.ToolchainGo:
-		// cwd is the anchored workdir (checkout + Alphasfile offset); exe is
-		// the build target relative to it (default ".").
-		pkg := "."
-		if svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
-			pkg = svc.Package.Exe
-		}
 		// dlv breakpoints land on wrong lines (or "could not find file" for
 		// inlined frames) without -N -l. Quoted because the build runs
 		// through /bin/sh -c and the value has an embedded space.
@@ -2454,9 +2452,9 @@ func defaultBuild(svc *alphasfile.Service, name, binDir, dest string) string {
 		if svc.Debugger != nil && svc.Debugger.Enabled {
 			gcflags = `-gcflags='all=-N -l' `
 		}
-		return fmt.Sprintf("go build %s-o %q %s", gcflags, out, pkg)
+		return fmt.Sprintf("go build %s-o %q .", gcflags, out)
 	case alphasfile.ToolchainRust:
-		// Worktree rust: `cargo install --path` from the checkout into
+		// Worktree rust: `cargo install --path .` from the exe-anchor into
 		// <stateDir>/bin (== binDir). Stable CARGO_TARGET_DIR keeps
 		// compilation incremental across runs; --force so code edits land.
 		opts := ""
@@ -2466,29 +2464,36 @@ func defaultBuild(svc *alphasfile.Service, name, binDir, dest string) string {
 		if svc.Package != nil && strings.TrimSpace(svc.Package.Bin) != "" {
 			opts += fmt.Sprintf(" --bin %q", svc.Package.Bin)
 		}
-		path := "."
-		if svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
-			path = svc.Package.Exe
-		}
-		return fmt.Sprintf("CARGO_TARGET_DIR=%q cargo install --path %q --root %q%s --locked --force",
-			rustCache, path, root, opts)
+		return fmt.Sprintf("CARGO_TARGET_DIR=%q cargo install --path . --root %q%s --locked --force",
+			rustCache, root, opts)
 	case alphasfile.ToolchainRuby:
 		// `--path` was removed in Bundler 2.x — write the path into the
 		// per-checkout .bundle/config first (so `bundle exec` at runtime
 		// finds the gems too) and then install.
 		return "bundle config set --local path vendor/bundle && bundle install"
 	case alphasfile.ToolchainNode:
-		// PM detection reads the project root (checkout + exe offset).
-		// All four PMs install into ./node_modules in the project; we
-		// never copy the artifact out (Node has no single binary).
-		root := dest
-		if svc.Package != nil && strings.TrimSpace(svc.Package.Exe) != "" {
-			root = filepath.Join(dest, svc.Package.Exe)
-		}
+		// PM detection reads cwd (the exe-anchor). All four PMs install
+		// into ./node_modules there; we never copy the artifact out
+		// (Node has no single binary).
+		root := serviceCwd(svc)
 		pm := detectNodePM(root)
 		return nodeInstallCmd(pm, root)
 	}
 	return ""
+}
+
+// serviceCwd reads the canonical "where this service works from".
+// Single source of truth lives in zfs.ServiceCwd; eval bakes the
+// exe-anchored path into Runtime.Dir at compile time, so here we
+// just read it back. Kept as a one-line helper so any new alpha-side
+// consumer (build, runtime, provision, future probe sandboxing, ...)
+// goes through the same accessor and a regression that tries to
+// re-derive `<checkout>/<exe>` locally stands out.
+func serviceCwd(svc *alphasfile.Service) string {
+	if svc == nil || svc.Runtime == nil {
+		return ""
+	}
+	return svc.Runtime.Dir
 }
 
 // nodePM is the result of PM detection — both the binary to invoke and
@@ -2740,7 +2745,10 @@ func prepareBuild(ctx context.Context, svc *alphasfile.Service, name, dest strin
 	if c == nil {
 		return nil
 	}
-	c.Dir = dest // "" ⇒ alpha's cwd; fine for `cargo install <crate>`
+	c.Dir = serviceCwd(svc) // exe-anchored; "" ⇒ alpha's cwd (use-only crate install)
+	if c.Dir == "" {
+		c.Dir = dest
+	}
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var be map[string]string
 	if svc.Runtime != nil {

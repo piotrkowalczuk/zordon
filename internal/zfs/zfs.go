@@ -343,6 +343,39 @@ func ZordonHome(override string) string {
 	return filepath.Join(h, ".zordon")
 }
 
+// ServiceCwd is the canonical "where does this service work from?"
+// answer: the checkout root joined with the service's exe offset.
+// Single source of truth across the codebase — the resolved value is
+// baked into Service.Runtime.Dir at eval time, exposed to HCL as
+// `fs::src()`, and read by alpha for build cwd, runtime cwd, and
+// provision cwd. Adding a new consumer means calling THIS function,
+// not re-deriving the join inline.
+//
+// `exe` semantics:
+//
+//   - "" / "."         ⇒ the checkout itself (no offset).
+//   - relative path    ⇒ joined to checkout; the result is the dir
+//                        where the user holds go.mod / Cargo.toml /
+//                        package.json.
+//   - absolute path    ⇒ returned verbatim (escape hatch; not used
+//                        by current HCL grammar but kept robust).
+//
+// Empty `checkout` returns "" — callers (use-only crate installs)
+// fall back to their own cwd policy.
+func ServiceCwd(checkout, exe string) string {
+	if checkout == "" {
+		return ""
+	}
+	exe = strings.TrimSpace(exe)
+	if exe == "" || exe == "." {
+		return checkout
+	}
+	if filepath.IsAbs(exe) {
+		return filepath.Clean(exe)
+	}
+	return filepath.Clean(filepath.Join(checkout, exe))
+}
+
 // Copy streams src into dst with 0o600. Used for moving build
 // artifacts into invocation bin dirs without going through `cp` and
 // without inheriting an in-tree mode.
