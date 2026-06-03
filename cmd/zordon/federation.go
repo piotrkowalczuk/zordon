@@ -97,6 +97,7 @@ type level struct {
 	isInvocation bool
 	inv          *invocation.Invocation
 	parentCtx    *alphasfile.ParentContext
+	cfgHash      string              // manifest identity: invocation.CfgHash(bytes, parentJSON)
 	state        *protocol.StateInfo // nil ⇒ not running
 }
 
@@ -115,7 +116,7 @@ func resolveChain(ctx context.Context, zordonHome string, testCfg alphasfile.Tes
 		if resp, e := control.Roundtrip(ctx, lv.inv.SocketPath(), &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
 			return resp.State, nil
 		}
-		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, testCfg)
+		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
 		if err != nil {
 			return nil, nil //nolint:nilerr // intentional: see comment above
 		}
@@ -155,9 +156,7 @@ func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, err
 		return nil, err
 	}
 
-	var accumulated []*alphasfile.Service
-	accumulatedToolchain := map[string]*alphasfile.ToolchainConfig{}
-	var accumulatedSysEnv []string
+	var parents alphasfile.GlobalComputedState
 	out := make([]*level, 0, len(chain))
 	for _, afPath := range chain {
 		isInv := afPath == invFile
@@ -165,24 +164,26 @@ func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, err
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", afPath, err)
 		}
-		parentJSON, err := json.Marshal(accumulated)
+		parentJSON, err := json.Marshal(parents.Services())
 		if err != nil {
 			return nil, fmt.Errorf("marshal parent ctx: %w", err)
 		}
 		var inv *invocation.Invocation
 		if isInv {
-			inv, err = invocation.New(cwd, raw, parentJSON)
+			inv, err = invocation.New(cwd)
 		} else {
-			inv, err = invocation.NewAt(filepath.Dir(afPath), raw, parentJSON)
+			inv, err = invocation.NewAt(filepath.Dir(afPath))
 		}
 		if err != nil {
 			return nil, err
 		}
-		var pctx *alphasfile.ParentContext
-		if len(accumulated) > 0 || len(accumulatedToolchain) > 0 || len(accumulatedSysEnv) > 0 {
-			pctx = alphasfile.NewParentContext(accumulated).WithToolchain(accumulatedToolchain).WithSysEnv(accumulatedSysEnv)
+		lv := &level{
+			afPath:       afPath,
+			isInvocation: isInv,
+			inv:          inv,
+			parentCtx:    parents.ParentContext(),
+			cfgHash:      invocation.CfgHash(raw, parentJSON),
 		}
-		lv := &level{afPath: afPath, isInvocation: isInv, inv: inv, parentCtx: pctx}
 		st, err := resolve(lv)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", afPath, err)
@@ -190,35 +191,15 @@ func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, err
 		lv.state = st
 		out = append(out, lv)
 		if st != nil {
-			accumulated = append(accumulated, st.Services...)
-			for k, v := range st.Toolchain {
-				accumulatedToolchain[k] = v
-			}
-			accumulatedSysEnv = appendUniqueStrings(accumulatedSysEnv, st.SysEnv)
+			parents.Join(alphasfile.Contribution{
+				Services:  st.Services,
+				Toolchain: st.Toolchain,
+				SysEnv:    st.SysEnv,
+				Dotenv:    st.Dotenv,
+			})
 		}
 	}
 	return out, nil
-}
-
-// appendUniqueStrings adds entries from extra to dst preserving order of
-// first occurrence. Used to accumulate sysenv whitelists down a federation
-// chain without duplicates (a key wider repeats are no-ops).
-func appendUniqueStrings(dst, extra []string) []string {
-	seen := make(map[string]struct{}, len(dst))
-	for _, s := range dst {
-		seen[s] = struct{}{}
-	}
-	for _, s := range extra {
-		if s == "" {
-			continue
-		}
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		dst = append(dst, s)
-	}
-	return dst
 }
 
 func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent bool, picks []string, zordonHome string, testCfg alphasfile.TestConfig) error {
@@ -252,32 +233,30 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		}
 	}()
 
-	var accumulated []*alphasfile.Service
-	accumulatedToolchain := map[string]*alphasfile.ToolchainConfig{}
-	var accumulatedSysEnv []string
-	var dotenvChain []string // file-level dotenv of every ancestor, root-first
+	var parents alphasfile.GlobalComputedState
 
 	for _, afPath := range chain {
 		isInvocation := afPath == invFile
-		parentDotenv := append([]string{}, dotenvChain...)
+		parentDotenv := append([]string{}, parents.Dotenv()...)
 
 		raw, err := zfs.Read(afPath)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", afPath, err)
 		}
-		parentJSON, err := json.Marshal(accumulated)
+		parentJSON, err := json.Marshal(parents.Services())
 		if err != nil {
 			return fmt.Errorf("marshal parent ctx: %w", err)
 		}
 		var inv *invocation.Invocation
 		if isInvocation {
-			inv, err = invocation.New(cwd, raw, parentJSON)
+			inv, err = invocation.New(cwd)
 		} else {
-			inv, err = invocation.NewAt(filepath.Dir(afPath), raw, parentJSON)
+			inv, err = invocation.NewAt(filepath.Dir(afPath))
 		}
 		if err != nil {
 			return err
 		}
+		cfgHash := invocation.CfgHash(raw, parentJSON)
 
 		unlock, err := control.Lock(inv.StateDir)
 		if err != nil {
@@ -287,10 +266,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 
 		sock := inv.SocketPath()
 
-		var parentCtx *alphasfile.ParentContext
-		if len(accumulated) > 0 || len(accumulatedToolchain) > 0 || len(accumulatedSysEnv) > 0 {
-			parentCtx = alphasfile.NewParentContext(accumulated).WithToolchain(accumulatedToolchain).WithSysEnv(accumulatedSysEnv)
-		}
+		parentCtx := parents.ParentContext()
 
 		var st *protocol.StateInfo
 		if resp, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
@@ -298,14 +274,14 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		}
 
 		switch {
-		case st != nil && !isInvocation && st.CfgHash == inv.CfgHash:
+		case st != nil && !isInvocation && st.CfgHash == cfgHash:
 			log.Info("zordon", "%s [%s] up-to-date (alpha pid=%d), reusing", afPath, inv.FsHash, st.PID)
-			accumulated = append(accumulated, st.Services...)
-			for k, v := range st.Toolchain {
-				accumulatedToolchain[k] = v
-			}
-			accumulatedSysEnv = appendUniqueStrings(accumulatedSysEnv, st.SysEnv)
-			dotenvChain = append(dotenvChain, st.Dotenv...)
+			parents.Join(alphasfile.Contribution{
+				Services:  st.Services,
+				Toolchain: st.Toolchain,
+				SysEnv:    st.SysEnv,
+				Dotenv:    st.Dotenv,
+			})
 			continue
 
 		case st != nil:
@@ -322,7 +298,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			}
 		}
 
-		af, err := alphasfile.Open(afPath, inv, parentCtx, testCfg)
+		af, err := alphasfile.Open(afPath, inv, parentCtx, cfgHash, testCfg)
 		if err != nil {
 			return fmt.Errorf("%s: %w", afPath, err)
 		}
@@ -358,21 +334,16 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			cancel()
 			return fmt.Errorf("%s: waiting for alpha socket: %w", afPath, err)
 		}
-		if err := pushConfigure(ctxLevel, log, sock, afPath, inv.FsHash, inv.CfgHash, parentDotenv, af, failfast, agent); err != nil {
+		if err := pushConfigure(ctxLevel, log, sock, afPath, inv.FsHash, af.CfgHash, parentDotenv, af, failfast, agent); err != nil {
 			cancel()
 			return fmt.Errorf("%s: %w", afPath, err)
 		}
 		cancel()
-		dotenvChain = append(dotenvChain, af.Dotenv...)
 
 		// Privileged hooks are NOT run here — `zordon start` stays
 		// non-interactive. Run `zordon sudo` to apply them across the chain.
 
-		accumulated = append(accumulated, af.All()...)
-		for k, v := range af.Toolchain {
-			accumulatedToolchain[k] = v
-		}
-		accumulatedSysEnv = appendUniqueStrings(accumulatedSysEnv, af.SysEnv)
+		parents.Join(af.Contribution())
 	}
 	return nil
 }

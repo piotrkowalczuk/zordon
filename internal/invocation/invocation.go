@@ -74,24 +74,19 @@ func (w WorktreeName) IsMain() bool {
 	return w == "" || w == MainWorktree
 }
 
-// Invocation carries two orthogonal identities:
+// Invocation is the filesystem-location identity of a run: pure directory
+// facts. FsHash depends only on Dir, so two runs from the same directory get
+// the same FsHash, letting zordon re-attach to an already-running alpha; it
+// names the socket / tmp dir and answers "is this the same alpha instance?".
 //
-//   - FsHash is the filesystem-location identity. It depends only on Dir, so
-//     two runs from the same directory get the same FsHash, allowing zordon
-//     to re-attach to an already-running alpha. It names the socket / tmp
-//     dir and answers "is this the same alpha instance?".
-//
-//   - CfgHash is the manifest identity. It depends on the Alphasfile bytes
-//     and the resolved parent context, so it changes whenever the manifest
-//     (or any federation parent it sees) changes. It answers "is the
-//     configuration of this alpha still current?" and drives drift
-//     detection in federation chains.
+// The manifest identity (CfgHash) is deliberately NOT here — it depends on the
+// Alphasfile bytes + resolved parent context, so it is computed at the call
+// site via CfgHash() and carried by the resolved alphasfile.Alphasfile.
 type Invocation struct {
 	Dir      string            // normalized invocation dir (project root or worktree dir)
 	Worktree string            // "main" or "<name>"
 	StateDir string            // <X>/.zordon/worktrees/<Worktree>
-	FsHash   string            // sha8(Dir)               — instance identity
-	CfgHash  string            // sha8(afBytes+parentCtx) — manifest identity
+	FsHash   string            // sha8(Dir) — instance identity
 	TmpDir   string            // $TMPDIR/zordon-<FsHash>  (short; sockets live here)
 	Env      map[string]string // injected into spawned services
 
@@ -163,8 +158,8 @@ func (i *Invocation) AlphaLogPath() string { return filepath.Join(i.StateDir, "a
 // and the worktree is "main".
 func projectRootAndWorktree(dir string) (root, worktree string) {
 	clean := filepath.Clean(dir)
-	parent := filepath.Dir(clean)             // .../.zordon/worktrees
-	gp := filepath.Dir(parent)                // .../.zordon
+	parent := filepath.Dir(clean) // .../.zordon/worktrees
+	gp := filepath.Dir(parent)    // .../.zordon
 	if filepath.Base(parent) == "worktrees" && filepath.Base(gp) == ".zordon" {
 		return filepath.Dir(gp), filepath.Base(clean)
 	}
@@ -186,49 +181,56 @@ func shortSum(parts ...[]byte) string {
 }
 
 // New builds the invocation for a leaf Alphasfile. invocationDir is the
-// directory the user ran zordon from (normalized CWD); afBytes is the
-// adopted Alphasfile's content; parentCtx is the serialized resolved
-// services of all federation parents (nil for a standalone file).
-func New(invocationDir string, afBytes, parentCtx []byte) (*Invocation, error) {
+// directory the user ran zordon from (normalized CWD). Pure directory facts:
+// the manifest identity (CfgHash) is NOT here — it is the resolved
+// Alphasfile's concern (see CfgHash + alphasfile.Alphasfile.CfgHash).
+func New(invocationDir string) (*Invocation, error) {
 	abs, err := filepath.Abs(invocationDir)
 	if err != nil {
 		return nil, err
 	}
 	root, wt := projectRootAndWorktree(abs)
-	return build(abs, root, wt, afBytes, parentCtx)
+	return build(abs, root, wt), nil
 }
 
 // NewAt builds the invocation for an Alphasfile addressed by its own
 // directory (used for federation parents, which are never worktrees —
 // always "main" rooted at the file's dir).
-func NewAt(alphasfileDir string, afBytes, parentCtx []byte) (*Invocation, error) {
+func NewAt(alphasfileDir string) (*Invocation, error) {
 	abs, err := filepath.Abs(alphasfileDir)
 	if err != nil {
 		return nil, err
 	}
-	return build(abs, abs, MainWorktree, afBytes, parentCtx)
+	return build(abs, abs, MainWorktree), nil
 }
 
-func build(dir, root, wt string, afBytes, parentCtx []byte) (*Invocation, error) {
+// CfgHash is the manifest identity: sha8 of the Alphasfile bytes joined with
+// the serialized resolved parent context. It changes whenever the manifest (or
+// any federation parent it sees) changes, and drives drift detection. It lives
+// here (next to FsHash) because both share shortSum, but it is a property of
+// the (bytes, parent) pair — NOT of the directory — so it is computed at the
+// call site, never stored on Invocation.
+func CfgHash(afBytes, parentCtx []byte) string {
+	return shortSum(afBytes, parentCtx)
+}
+
+func build(dir, root, wt string) *Invocation {
 	stateDir := filepath.Join(root, ".zordon", "worktrees", wt)
 	fsh := shortSum([]byte(dir))
-	cfgh := shortSum(afBytes, parentCtx)
 	tmp := filepath.Join(zfs.SystemTempDir(), "zordon-"+fsh)
 	return &Invocation{
 		Dir:           dir,
 		Worktree:      wt,
 		StateDir:      stateDir,
 		FsHash:        fsh,
-		CfgHash:       cfgh,
 		TmpDir:        tmp,
 		OwnedServices: scanOwnedServices(stateDir, wt),
 		Env: map[string]string{
 			"ZORDON_WORKTREE":  wt,
 			"ZORDON_STATE_DIR": stateDir,
 			"ZORDON_FS_HASH":   fsh,
-			"ZORDON_CFG_HASH":  cfgh,
 		},
-	}, nil
+	}
 }
 
 // scanOwnedServices reads <stateDir>/src/*/.git markers (one per service

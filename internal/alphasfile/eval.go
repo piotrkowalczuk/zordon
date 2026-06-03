@@ -3,6 +3,7 @@ package alphasfile
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os/exec"
 	"path/filepath"
@@ -79,11 +80,11 @@ func (r *resolver) provisionRefOf(expr hcl.Expression, self map[string]cty.Value
 // Within each service, evaluation goes through a fixed sequence so that
 // `self` can grow incrementally:
 //
-//	1. self_base   = { name, toolchain, dir }
-//	2. eval Vars   → self.vars  = {...}
-//	3. eval Files  → self.file.<name> = { path, body }
-//	4. eval Args   → self.arguments = {...}
-//	5. eval Probe  → readiness port
+//  1. self_base   = { name, toolchain, dir }
+//  2. eval Vars   → self.vars  = {...}
+//  3. eval Files  → self.file.<name> = { path, body }
+//  4. eval Args   → self.arguments = {...}
+//  5. eval Probe  → readiness port
 //
 // Files come before arguments because the common pattern is to generate a
 // config file and pass its path as a flag. Going the other way (file body
@@ -98,6 +99,11 @@ type resolver struct {
 	afDir string
 	root  *rootBlock
 	inv   *invocation.Invocation
+	// cfgHash is the manifest identity (sha8 of Alphasfile bytes + parent
+	// ctx), threaded in by the caller because it depends on data the
+	// resolver doesn't hold (raw bytes + serialized parent). It is what
+	// cfg::hash() returns and what the resolved Alphasfile carries.
+	cfgHash string
 
 	// Already-evaluated services, keyed by toolchain then name. Re-projected
 	// into the EvalContext under "service" before each new eval step. May be
@@ -124,7 +130,7 @@ type resolver struct {
 	resolvedServices []*Service
 }
 
-func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *ParentContext, testCfg TestConfig) (*Alphasfile, error) {
+func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *ParentContext, cfgHash string, testCfg TestConfig) (*Alphasfile, error) {
 	var seed map[string]map[string]cty.Value
 	if parent != nil {
 		seed = parent.byTC
@@ -142,6 +148,7 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 		afDir:       filepath.Dir(absPath),
 		root:        root,
 		inv:         inv,
+		cfgHash:     cfgHash,
 		serviceByTC: seed,
 		taken:       map[string]string{},
 		testCfg:     testCfg,
@@ -161,9 +168,7 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 	// services, so ordering this first costs nothing.
 	toolchain := map[string]*ToolchainConfig{}
 	if parent != nil {
-		for k, v := range parent.toolchain {
-			toolchain[k] = v
-		}
+		maps.Copy(toolchain, parent.toolchain)
 	}
 	if root.Toolchain != nil {
 		for lang, sub := range root.Toolchain.byLabel() {
@@ -266,6 +271,7 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 		return nil, err
 	}
 	return &Alphasfile{
+		CfgHash:   cfgHash,
 		Dotenv:    gdot,
 		Services:  r.resolvedServices,
 		Toolchain: toolchain,
@@ -1013,7 +1019,6 @@ func (r *resolver) evalMap(expr hcl.Expression, self map[string]cty.Value, field
 	return out, nil
 }
 
-
 func evalFileExpr(fb *fileBlock, ctx *hcl.EvalContext) (string, string, error) {
 	pathVal, diags := fb.Path.Value(ctx)
 	if diags.HasErrors() {
@@ -1047,7 +1052,7 @@ func evalIntExpr(expr hcl.Expression, ctx *hcl.EvalContext, field string) (int, 
 	return int(i64), nil
 }
 
-	// evalStrList evaluates an expression expected to be a tuple/list of strings
+// evalStrList evaluates an expression expected to be a tuple/list of strings
 func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, field string) ([]string, error) {
 	if expr == nil {
 		return nil, nil
@@ -1149,9 +1154,7 @@ func (r *resolver) ctxWith(self map[string]cty.Value) *hcl.EvalContext {
 
 func copyCtyMap(in map[string]cty.Value) map[string]cty.Value {
 	out := make(map[string]cty.Value, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -1215,11 +1218,11 @@ func (r *resolver) functions() map[string]function.Function {
 	}
 	return map[string]function.Function{
 		// fs:: namespace — per-invocation filesystem coordinates and identity.
-		"fs::tmp":   str(func() string { return r.inv.TmpDir }),    // generated files
-		"fs::src":   str(func() string { return r.curCheckout }),   // this service's checkout
-		"fs::bin":   str(func() string { return r.inv.BinDir() }),  // build outputs (outside src)
+		"fs::tmp":   str(func() string { return r.inv.TmpDir }),   // generated files
+		"fs::src":   str(func() string { return r.curCheckout }),  // this service's checkout
+		"fs::bin":   str(func() string { return r.inv.BinDir() }), // build outputs (outside src)
 		"fs::state": str(func() string { return r.inv.StateDir }), // per-worktree state root (.zordon/worktrees/<wt>)
-		"fs::hash":  r.fsHashFunc(),                                // instance identity (location)
+		"fs::hash":  r.fsHashFunc(),                               // instance identity (location)
 		// cfg:: namespace — manifest identity (Alphasfile bytes + parent ctx).
 		"cfg::hash": r.cfgHashFunc(),
 		// src:: namespace — current service's source code identity.
@@ -1298,10 +1301,10 @@ func (r *resolver) cfgHashFunc() function.Function {
 	return function.New(&function.Spec{
 		Type: function.StaticReturnType(cty.String),
 		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
-			if r.inv == nil || r.inv.CfgHash == "" {
-				return cty.NilVal, errors.New("cfg::hash() called but no invocation configured")
+			if r.cfgHash == "" {
+				return cty.NilVal, errors.New("cfg::hash() called but no manifest identity configured")
 			}
-			return cty.StringVal(r.inv.CfgHash), nil
+			return cty.StringVal(r.cfgHash), nil
 		},
 	})
 }

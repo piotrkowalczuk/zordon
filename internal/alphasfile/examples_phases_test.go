@@ -22,7 +22,7 @@ func TestExamplePhasesResolves(t *testing.T) {
 		Worktree: invocation.MainWorktree,
 		StateDir: "/repo/examples/phases/.zordon/worktrees/main",
 	}
-	af, err := Compile("/repo/examples/phases/Alphasfile", b, iv, nil, TestConfig{})
+	af, err := Compile("/repo/examples/phases/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

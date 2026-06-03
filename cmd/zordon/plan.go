@@ -22,7 +22,7 @@ import (
 // before we touch the system" preflight, not a partial dump.
 func runPlan(_ context.Context, zordonHome string, testCfg alphasfile.TestConfig) error {
 	levels, err := walkChain(zordonHome, func(lv *level) (*protocol.StateInfo, error) {
-		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, testCfg)
+		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
 		if err != nil {
 			return nil, err
 		}

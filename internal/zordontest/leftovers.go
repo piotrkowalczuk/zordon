@@ -103,15 +103,14 @@ func (p *Project) Nuke() {
 }
 
 // fsHash resolves this project's identity the same way alpha does:
-// from the invocation dir + Alphasfile bytes. Returns "" when no
-// Alphasfile is present (test never wrote one), which is a signal
-// to skip leftover checks rather than fail noisily.
+// from the invocation dir (FsHash depends only on the dir). Returns ""
+// when no Alphasfile is present (test never wrote one), which is a
+// signal to skip leftover checks rather than fail noisily.
 func (p *Project) fsHash() string {
-	af, err := os.ReadFile(filepath.Join(p.root, "Alphasfile"))
-	if err != nil {
+	if _, err := os.ReadFile(filepath.Join(p.root, "Alphasfile")); err != nil {
 		return ""
 	}
-	inv, err := invocation.New(p.root, af, nil)
+	inv, err := invocation.New(p.root)
 	if err != nil {
 		return ""
 	}

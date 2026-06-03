@@ -9,6 +9,7 @@ package alphasfile
 
 import (
 	"fmt"
+	"maps"
 	"math/big"
 	"path/filepath"
 	"strings"
@@ -50,14 +51,14 @@ type LogConfig struct {
 }
 
 type RuntimeConfig struct {
-	Name           string         `json:"name"`
-	Color          string         `json:"color,omitempty"`
-	Log            *LogConfig     `json:"log,omitempty"`
-	DoubleDash     bool           `json:"double_dash,omitempty"`
-	SpaceSeparated bool           `json:"space_separated,omitempty"`
-	Vars           map[string]any    `json:"vars,omitempty"`
-	Arguments      map[string]any    `json:"arguments,omitempty"`
-	Env            zenv.EnvironmentVariables `json:"env,omitempty"`    // explicit env (overrides dotenv)
+	Name           string                    `json:"name"`
+	Color          string                    `json:"color,omitempty"`
+	Log            *LogConfig                `json:"log,omitempty"`
+	DoubleDash     bool                      `json:"double_dash,omitempty"`
+	SpaceSeparated bool                      `json:"space_separated,omitempty"`
+	Vars           map[string]any            `json:"vars,omitempty"`
+	Arguments      map[string]any            `json:"arguments,omitempty"`
+	Env            zenv.EnvironmentVariables `json:"env,omitempty"` // explicit env (overrides dotenv)
 	// Phase-scoped env. BuildEnv is injected only while zordon builds the
 	// service (go build / cargo install / bundle); RunEnv only into the
 	// running process; AgentEnv is an override layer applied on top (for
@@ -66,20 +67,20 @@ type RuntimeConfig struct {
 	BuildEnv zenv.EnvironmentVariables `json:"build_env,omitempty"`
 	RunEnv   zenv.EnvironmentVariables `json:"run_env,omitempty"`
 	AgentEnv zenv.EnvironmentVariables `json:"agent_env,omitempty"`
-	Dotenv   []string          `json:"dotenv,omitempty"` // paths to .env files loaded before Env (in order)
-	Command        []string          `json:"command,omitempty"`
+	Dotenv   []string                  `json:"dotenv,omitempty"` // paths to .env files loaded before Env (in order)
+	Command  []string                  `json:"command,omitempty"`
 	// After holds runtime-level barrier refs. alpha's per-service
 	// bringup goroutine selects on each before starting cmd; with no
 	// entries the service starts in parallel with everything else.
 	// Same canonical-string grammar as ProvisionStep.After.
-	After          []string          `json:"after,omitempty"`
-	Sudo           []*SudoStep    `json:"sudo,omitempty"`
-	Provision      []*ProvisionStep `json:"provision,omitempty"`
-	Files          []*File        `json:"files,omitempty"`
-	Dir            string         `json:"dir,omitempty"`     // per-invocation source checkout (= fs::src)
-	BinDir         string         `json:"bin_dir,omitempty"` // per-invocation build output (= fs::bin)
-	Print          string         `json:"print,omitempty"`   // extra `zordon status` line (resolved)
-	Readiness      *probe.Probe   `json:"readiness,omitempty"`
+	After     []string         `json:"after,omitempty"`
+	Sudo      []*SudoStep      `json:"sudo,omitempty"`
+	Provision []*ProvisionStep `json:"provision,omitempty"`
+	Files     []*File          `json:"files,omitempty"`
+	Dir       string           `json:"dir,omitempty"`     // per-invocation source checkout (= fs::src)
+	BinDir    string           `json:"bin_dir,omitempty"` // per-invocation build output (= fs::bin)
+	Print     string           `json:"print,omitempty"`   // extra `zordon status` line (resolved)
+	Readiness *probe.Probe     `json:"readiness,omitempty"`
 }
 
 // Package is the unified, toolchain-tagged source/build manifest. A
@@ -87,26 +88,26 @@ type RuntimeConfig struct {
 // user-owned local checkout via Src), or Install (rust crate from a
 // registry / go module). Build overrides the per-toolchain default.
 type Package struct {
-	Toolchain string   `json:"toolchain"` // go|rust|ruby
-	Git       string   `json:"git,omitempty"`
-	Src       string   `json:"src,omitempty"` // Relates to the local checkout path
-	Branch    string   `json:"branch,omitempty"`
-	Tag       string   `json:"tag,omitempty"`
-	Rev       string   `json:"rev,omitempty"`
+	Toolchain string `json:"toolchain"` // go|rust|ruby
+	Git       string `json:"git,omitempty"`
+	Src       string `json:"src,omitempty"` // Relates to the local checkout path
+	Branch    string `json:"branch,omitempty"`
+	Tag       string `json:"tag,omitempty"`
+	Rev       string `json:"rev,omitempty"`
 	// Use-only: install a dependency instead of giving it a worktree.
 	// Install is the resolved coordinate — Go: `pkg@version` for
 	// `go install`; Rust: the crate name for `cargo install`. Features is
 	// Rust-only. Mutually exclusive with git/src.
-	Install   string   `json:"install,omitempty"`
-	Version   string   `json:"version,omitempty"` // rust use-only: cargo install --version
-	Index     string   `json:"index,omitempty"`   // rust use-only: cargo install --index
-	Registry  string   `json:"registry,omitempty"` // rust use-only: cargo install --registry
-	Features  []string `json:"features,omitempty"`
-	Exe       string   `json:"exe,omitempty"`   // relative subdir within git/src where the build target lives ("" = project root)
-	Bin       string   `json:"bin,omitempty"`   // rust: cargo --bin target (multi-bin crates)
-	BuildCmd  []string `json:"build_cmd,omitempty"` // explicit build argv (from build{cmd}); empty ⇒ toolchain default
-	Cmd       string   `json:"cmd,omitempty"`       // Explicit execution argv if needed
-	Worktree  *Worktree `json:"worktree,omitempty"`
+	Install  string    `json:"install,omitempty"`
+	Version  string    `json:"version,omitempty"`  // rust use-only: cargo install --version
+	Index    string    `json:"index,omitempty"`    // rust use-only: cargo install --index
+	Registry string    `json:"registry,omitempty"` // rust use-only: cargo install --registry
+	Features []string  `json:"features,omitempty"`
+	Exe      string    `json:"exe,omitempty"`       // relative subdir within git/src where the build target lives ("" = project root)
+	Bin      string    `json:"bin,omitempty"`       // rust: cargo --bin target (multi-bin crates)
+	BuildCmd []string  `json:"build_cmd,omitempty"` // explicit build argv (from build{cmd}); empty ⇒ toolchain default
+	Cmd      string    `json:"cmd,omitempty"`       // Explicit execution argv if needed
+	Worktree *Worktree `json:"worktree,omitempty"`
 	// InPlace: src-only in the "main" worktree — build/run from src as-is,
 	// no git worktree add, no HEAD reset (the edit→start loop).
 	InPlace bool `json:"in_place,omitempty"`
@@ -117,11 +118,11 @@ type Worktree struct {
 }
 
 type Service struct {
-	Toolchain string         `json:"toolchain"`
-	Runtime   *RuntimeConfig `json:"runtime"`
-	Package   *Package       `json:"package,omitempty"`
-	Debugger *DebuggerConfig    `json:"debugger,omitempty"`
-	Agent    *ServiceAgent      `json:"agent,omitempty"`
+	Toolchain string          `json:"toolchain"`
+	Runtime   *RuntimeConfig  `json:"runtime"`
+	Package   *Package        `json:"package,omitempty"`
+	Debugger  *DebuggerConfig `json:"debugger,omitempty"`
+	Agent     *ServiceAgent   `json:"agent,omitempty"`
 }
 
 type ServiceAgent struct {
@@ -393,10 +394,10 @@ type SudoStep struct {
 //	"service.<tc>.<svc>.ready"              wait for another service ready
 //	"service.<tc>.<svc>.provision.<name>"   wait for another provision
 type ProvisionStep struct {
-	Name   string            `json:"name"`
-	Check  string            `json:"check,omitempty"`
-	Cmd    string            `json:"cmd"`
-	Verify string            `json:"verify,omitempty"`
+	Name   string                    `json:"name"`
+	Check  string                    `json:"check,omitempty"`
+	Cmd    string                    `json:"cmd"`
+	Verify string                    `json:"verify,omitempty"`
 	Env    zenv.EnvironmentVariables `json:"env,omitempty"`
 	// After holds the resolved barrier refs ("service.go.db@ready",
 	// "service.go.api.runtime.provision.create-tables@success", ...).
@@ -428,6 +429,10 @@ type ProvisionStep struct {
 }
 
 type Alphasfile struct {
+	// CfgHash is the manifest identity (sha8 of Alphasfile bytes + resolved
+	// parent ctx) — the value cfg::hash() returns. Carried on the resolved
+	// result, not on the Invocation (which is pure directory facts).
+	CfgHash  string     `json:"cfg_hash,omitempty"`
 	Dotenv   []string   `json:"dotenv,omitempty"` // file-level .env files, applied under every service's env (in order)
 	Services []*Service `json:"services,omitempty"`
 	// Toolchain pins the version+env of each language toolchain
@@ -473,7 +478,7 @@ type ToolchainConfig struct {
 	//   go     → `go install <name>@<ver>`
 	// All run through `mise exec <lang>@<version> -- ...` so they
 	// land in the right version's tool world.
-	Tools map[string]string        `json:"tools,omitempty"`
+	Tools map[string]string         `json:"tools,omitempty"`
 	Env   zenv.EnvironmentVariables `json:"env,omitempty"`
 }
 
@@ -555,8 +560,8 @@ type serviceBlock struct {
 	Src      *srcBlock   `hcl:"src,block"`
 	Git      *gitBlock   `hcl:"git,block"`
 	Crate    *crateBlock `hcl:"crate,block"`
-	Package  string      `hcl:"package,optional"` // go use-only: `go install <package>` (incl. @version)
-	Bin      string      `hcl:"bin,optional"`     // rust: cargo --bin target
+	Package  string      `hcl:"package,optional"`  // go use-only: `go install <package>` (incl. @version)
+	Bin      string      `hcl:"bin,optional"`      // rust: cargo --bin target
 	Features []string    `hcl:"features,optional"` // rust: cargo --features (applies to crate-install AND worktree build)
 
 	// dynamic (interpolated; order resolved by intra-service dependency DAG)
@@ -691,7 +696,6 @@ type crateBlock struct {
 	Rev      string `hcl:"rev,optional"`
 }
 
-
 type sudoBlock struct {
 	Name   string         `hcl:"name,label"`
 	Check  hcl.Expression `hcl:"check,optional"`
@@ -733,12 +737,12 @@ type fileBlock struct {
 // invocation identity (hash, tmp dir, per-service checkout paths); parent
 // pre-seeds the flat service namespace with values resolved by Alphasfiles
 // higher in a federation chain (nil for a standalone file).
-func Open(path string, inv *invocation.Invocation, parent *ParentContext, testCfg TestConfig) (*Alphasfile, error) {
+func Open(path string, inv *invocation.Invocation, parent *ParentContext, cfgHash string, testCfg TestConfig) (*Alphasfile, error) {
 	b, err := zfs.Read(path)
 	if err != nil {
 		return nil, fmt.Errorf("alphasfile read: %w", err)
 	}
-	return Compile(path, b, inv, parent, testCfg)
+	return Compile(path, b, inv, parent, cfgHash, testCfg)
 }
 
 // Compile is Open without filesystem I/O: it resolves the given Alphasfile
@@ -748,7 +752,7 @@ func Open(path string, inv *invocation.Invocation, parent *ParentContext, testCf
 // testCfg gates the test:: HCL functions; the zero value (production
 // default) leaves them erroring out so a non-harness Alphasfile that
 // uses test::log() fails fast.
-func Compile(name string, src []byte, inv *invocation.Invocation, parent *ParentContext, testCfg TestConfig) (*Alphasfile, error) {
+func Compile(name string, src []byte, inv *invocation.Invocation, parent *ParentContext, cfgHash string, testCfg TestConfig) (*Alphasfile, error) {
 	parser := hclparse.NewParser()
 	file, diags := parser.ParseHCL(src, name)
 	if diags.HasErrors() {
@@ -758,7 +762,7 @@ func Compile(name string, src []byte, inv *invocation.Invocation, parent *Parent
 	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
 		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
 	}
-	return resolve(name, &root, inv, parent, testCfg)
+	return resolve(name, &root, inv, parent, cfgHash, testCfg)
 }
 
 // ParentContext carries what a federation child needs from its parents:
@@ -821,9 +825,7 @@ func (pc *ParentContext) Merge(services []*Service) *ParentContext {
 		if pc.byTC[tc] == nil {
 			pc.byTC[tc] = map[string]cty.Value{}
 		}
-		for name, v := range byName {
-			pc.byTC[tc][name] = v
-		}
+		maps.Copy(pc.byTC[tc], byName)
 	}
 	return pc
 }
@@ -836,9 +838,7 @@ func (pc *ParentContext) WithToolchain(tc map[string]*ToolchainConfig) *ParentCo
 	if pc.toolchain == nil {
 		pc.toolchain = map[string]*ToolchainConfig{}
 	}
-	for k, v := range tc {
-		pc.toolchain[k] = v
-	}
+	maps.Copy(pc.toolchain, tc)
 	return pc
 }
 
@@ -860,6 +860,74 @@ func (pc *ParentContext) WithSysEnv(names []string) *ParentContext {
 // SysEnv returns the accumulated whitelist from the federation chain.
 func (pc *ParentContext) SysEnv() []string {
 	return pc.sysenv
+}
+
+// Contribution is one federation level's resolved facts as they accumulate
+// down the chain into a GlobalComputedState. Sourced from a freshly resolved
+// Alphasfile (Alphasfile.Contribution) or a running parent's StateInfo.
+type Contribution struct {
+	Services  []*Service
+	Toolchain map[string]*ToolchainConfig
+	SysEnv    []string
+	Dotenv    []string
+}
+
+// Contribution projects a resolved Alphasfile into its accumulable facts.
+func (af *Alphasfile) Contribution() Contribution {
+	return Contribution{
+		Services:  af.Services,
+		Toolchain: af.Toolchain,
+		SysEnv:    af.SysEnv,
+		Dotenv:    af.Dotenv,
+	}
+}
+
+// GlobalComputedState accumulates the resolved facts of every federation
+// ancestor, root-first, into the single parent context a child level evaluates
+// against. The zero value is the empty context the chain root sees — usable
+// without construction. Join mutates the receiver in place (math/big style);
+// pass it down the chain as a single accumulator, not by value copy.
+type GlobalComputedState struct {
+	services  []*Service
+	toolchain map[string]*ToolchainConfig
+	sysenv    []string
+	dotenv    []string
+}
+
+// Join folds one level's contribution into the accumulator, preserving the
+// chain's merge rules: services append (the resolver de-dups on seed via
+// NewParentContext, child overriding parent by name), toolchain map-merges
+// with the later (deeper/child) entry winning, sysenv unions order-preserving,
+// dotenv appends root-first.
+func (g *GlobalComputedState) Join(c Contribution) {
+	g.services = append(g.services, c.Services...)
+	if len(c.Toolchain) > 0 {
+		if g.toolchain == nil {
+			g.toolchain = make(map[string]*ToolchainConfig, len(c.Toolchain))
+		}
+		maps.Copy(g.toolchain, c.Toolchain)
+	}
+	g.sysenv = mergeSysEnv(g.sysenv, c.SysEnv)
+	g.dotenv = append(g.dotenv, c.Dotenv...)
+}
+
+// Services returns the accumulated services (root-first, undeduped) — the slice
+// federation marshals into the parent-context bytes feeding cfg::hash().
+func (g *GlobalComputedState) Services() []*Service { return g.services }
+
+// Dotenv returns the accumulated file-level dotenv paths, root-first — the
+// parentDotenv a child alpha layers under its own services' env.
+func (g *GlobalComputedState) Dotenv() []string { return g.dotenv }
+
+// ParentContext projects the accumulator into the *ParentContext the resolver
+// consumes, or nil when nothing has accumulated yet (the root level passes nil,
+// exactly as before). Dotenv is excluded by design — it flows via Dotenv(), not
+// through eval.
+func (g *GlobalComputedState) ParentContext() *ParentContext {
+	if len(g.services) == 0 && len(g.toolchain) == 0 && len(g.sysenv) == 0 {
+		return nil
+	}
+	return NewParentContext(g.services).WithToolchain(g.toolchain).WithSysEnv(g.sysenv)
 }
 
 // mergeSysEnv unions two sysenv lists preserving the order of first

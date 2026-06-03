@@ -20,7 +20,7 @@ func TestExampleStatusResolves(t *testing.T) {
 		Worktree: invocation.MainWorktree,
 		StateDir: "/repo/examples/status/.zordon/worktrees/main",
 	}
-	af, err := Compile("/repo/examples/status/Alphasfile", b, iv, nil, TestConfig{})
+	af, err := Compile("/repo/examples/status/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
