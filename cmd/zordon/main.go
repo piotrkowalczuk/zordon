@@ -79,11 +79,12 @@ func main() {
 	startFailfast := startFlags.BoolLongDefault("failfast", true, "abort bringup and shut down alpha on first service failure")
 	startCmd := &ff.Command{
 		Name:      "start",
-		Usage:     "zordon start [FLAGS]",
-		ShortHelp: "ensure alpha is running and push the Alphasfile config",
+		Usage:     "zordon start [FLAGS] [service ...]",
+		ShortHelp: "ensure alpha is running and push the Alphasfile config (optional service args bring up just that subset)",
 		Flags:     startFlags,
 		Exec: func(ctx context.Context, args []string) error {
 			return runStart(ctx, zlog.New(os.Stderr, *agent), *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent,
+				parsePicks(args),
 				zfs.ZordonHome(home.Path()),
 				alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
 		},

@@ -1,0 +1,73 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+# Three services so `zordon start <picks>` can demonstrate:
+#   - bringing up one in isolation (api, no deps);
+#   - transitive after pulls a dep in (web → api);
+#   - whatever isn't asked for (worker) stays down.
+
+service "go" "api" {
+  src {
+    path = "../.."
+    exe  = "./examples/status/src/app"
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/api", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "web" {
+  src {
+    path = "../.."
+    exe  = "./examples/status/src/app"
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd   = ["${fs::bin()}/web", "-addr", "127.0.0.1:${self.vars.port}"]
+    after = [service.go.api.runtime.ready]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "worker" {
+  src {
+    path = "../.."
+    exe  = "./examples/status/src/app"
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/worker", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

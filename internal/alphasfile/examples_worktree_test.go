@@ -34,19 +34,23 @@ func TestExampleWorktreeMonorepo(t *testing.T) {
 	}
 
 	// main → all in-place from the live repo, no per-service checkout.
-	for _, s := range compile(invocation.MainWorktree,
+	// Runtime.Dir is the exe-anchored work dir (zfs.ServiceCwd): the
+	// resolved src.path (/repo) joined with each service's exe offset.
+	for i, s := range compile(invocation.MainWorktree,
 		"/repo/examples/worktree/.zordon/worktrees/main") {
-		if s == nil || !s.Package.InPlace || s.Runtime.Dir != "/repo" {
-			t.Fatalf("main: %s must be in-place @ /repo: %+v", s.Name(), s.Package)
+		want := "/repo/examples/worktree/src/" + names[i]
+		if s == nil || !s.Package.InPlace || s.Runtime.Dir != want {
+			t.Fatalf("main: %s must be in-place @ %s: got dir %q, %+v",
+				s.Name(), want, s.Runtime.Dir, s.Package)
 		}
 		if !strings.Contains(s.Runtime.Print, "127.0.0.1:") {
 			t.Errorf("%s print not resolved: %q", s.Name(), s.Runtime.Print)
 		}
 	}
 
-	// named worktree → all worktree-able, NOT in-place, and each gets
-	// its OWN checkout dir (the monorepo branch/dir is per-service, so
-	// services sharing one primary don't collide).
+	// named worktree → all worktree-able, NOT in-place. Each gets its
+	// OWN checkout dir (monorepo branch/dir is per-service), and dir is
+	// the exe-anchored work dir = <checkout>/<exe>.
 	svcs := compile("feature",
 		"/repo/examples/worktree/.zordon/worktrees/feature")
 	seen := map[string]bool{}
@@ -57,13 +61,14 @@ func TestExampleWorktreeMonorepo(t *testing.T) {
 		if !s.Worktreeable() {
 			t.Fatalf("%s must be worktree-able", s.Name())
 		}
-		want := "/repo/examples/worktree/.zordon/worktrees/feature/src/" + names[i]
+		want := "/repo/examples/worktree/.zordon/worktrees/feature/src/" + names[i] +
+			"/examples/worktree/src/" + names[i]
 		if s.Runtime.Dir != want {
-			t.Fatalf("%s checkout dir wrong: got %q want %q",
+			t.Fatalf("%s work dir wrong: got %q want %q",
 				s.Name(), s.Runtime.Dir, want)
 		}
 		if seen[s.Runtime.Dir] {
-			t.Fatalf("monorepo services must have distinct checkout dirs: %q", s.Runtime.Dir)
+			t.Fatalf("monorepo services must have distinct work dirs: %q", s.Runtime.Dir)
 		}
 		seen[s.Runtime.Dir] = true
 	}

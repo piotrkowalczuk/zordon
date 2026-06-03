@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ type ZordonCmd struct {
 	args     []string
 	extraEnv map[string]string
 	timeout  time.Duration
+	dir      string // override for cwd; relative to project root
 }
 
 // Zordon returns a builder for the given subcommand (start / stop /
@@ -38,6 +40,15 @@ func (z *ZordonCmd) WithEnv(key, value string) *ZordonCmd {
 		z.extraEnv = map[string]string{}
 	}
 	z.extraEnv[key] = value
+	return z
+}
+
+// WithDir runs the invocation from relPath (relative to the project
+// root) instead of the project root itself. Use it to drive zordon
+// from inside a worktree subdir so walkUp picks up the same Alphasfile
+// the way a developer would by `cd`-ing in.
+func (z *ZordonCmd) WithDir(relPath string) *ZordonCmd {
+	z.dir = relPath
 	return z
 }
 
@@ -69,6 +80,9 @@ func (z *ZordonCmd) Run(t *testing.T) ZordonResult {
 
 	cmd := exec.CommandContext(ctx, z.p.binZ, z.args...)
 	cmd.Dir = z.p.root
+	if z.dir != "" {
+		cmd.Dir = filepath.Join(z.p.root, z.dir)
+	}
 	cmd.Env = z.envWithOverrides()
 
 	var stdout, stderr bytes.Buffer

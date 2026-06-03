@@ -180,6 +180,38 @@ func (p *Project) MkdirAll(relPath string) *Project {
 	return p
 }
 
+// GitInit turns relPath into a real git repo with a single initial
+// commit holding whatever files are already there. `zordon worktree`
+// runs `git worktree add` against this dir, which requires a git repo
+// with at least HEAD pointing at a commit.
+//
+// Branch is hard-coded to "main" so the per-worktree branches zordon
+// creates (`zordon/<wt>/<svc>`) all base off the same start ref —
+// what a developer would get from a freshly initialized repo.
+func (p *Project) GitInit(relPath string) *Project {
+	p.t.Helper()
+	dir := filepath.Join(p.root, relPath)
+	steps := [][]string{
+		{"git", "init", "-q", "-b", "main"},
+		{"git", "config", "user.email", "test@example.invalid"},
+		{"git", "config", "user.name", "test"},
+		{"git", "config", "commit.gpgsign", "false"},
+		{"git", "add", "-A"},
+		{"git", "commit", "-q", "-m", "init"},
+	}
+	for _, argv := range steps {
+		c := exec.Command(argv[0], argv[1:]...)
+		c.Dir = dir
+		// Force a clean env for git: GIT_DIR / GIT_WORK_TREE inherited from
+		// the test runner would point the new repo at the wrong tree.
+		c.Env = append([]string{}, os.Environ()...)
+		if out, err := c.CombinedOutput(); err != nil {
+			p.t.Fatalf("GitInit(%q): %s: %v\n%s", relPath, strings.Join(argv, " "), err, out)
+		}
+	}
+	return p
+}
+
 // cleanup is wired via t.Cleanup. Three phases:
 //
 //  1. zordon stop — best-effort graceful path; alpha killGroup's
