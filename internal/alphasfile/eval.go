@@ -53,11 +53,11 @@ const provisionRefMarker = ".runtime.provision."
 // so, returns the canonical target provision ID. A normal shell snippet
 // (string, possibly templated) returns ("", false, nil); only genuine
 // evaluation errors propagate.
-func (r *resolver) provisionRefOf(expr hcl.Expression, self map[string]cty.Value) (string, bool, error) {
+func (r *resolver) provisionRefOf(expr hcl.Expression, self map[string]cty.Value, checkout string) (string, bool, error) {
 	if expr == nil {
 		return "", false, nil
 	}
-	val, diags := expr.Value(r.ctxWith(self))
+	val, diags := expr.Value(r.ctxWith(self, checkout))
 	if diags.HasErrors() {
 		return "", false, fmt.Errorf("%s", diags.Error())
 	}
@@ -119,9 +119,6 @@ type resolver struct {
 
 	// names already taken (parent or local); collision is an error.
 	taken map[string]string // "tc/name" → origin ("parent" | "local")
-
-	// checkout dir of the service currently being evaluated (fs::src()).
-	curCheckout string
 
 	// testCfg carries the conformance-harness gating + log path the
 	// test:: HCL functions need; zero value disables them.
@@ -190,11 +187,11 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	}
 	if root.Toolchain != nil {
 		for lang, sub := range root.Toolchain.byLabel() {
-			envMap, err := r.evalMap(sub.Env, nil, "toolchain."+lang+".env")
+			envMap, err := r.evalMap(sub.Env, nil, "toolchain."+lang+".env", "")
 			if err != nil {
 				return nil, err
 			}
-			toolsMap, err := r.evalMap(sub.Tools, nil, "toolchain."+lang+".tools")
+			toolsMap, err := r.evalMap(sub.Tools, nil, "toolchain."+lang+".tools", "")
 			if err != nil {
 				return nil, err
 			}
@@ -268,7 +265,7 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 		}
 	}
 	// File-level dotenv: top-level, no `self`; may use fs::/cfg:: funcs.
-	gdot, err := r.evalStrOrList(root.Dotenv, nil, "dotenv")
+	gdot, err := r.evalStrOrList(root.Dotenv, nil, "dotenv", "")
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +275,7 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	}
 	// SysEnv: parent's accumulated whitelist + this level's own.
 	// Order-preserving union (see mergeSysEnv) so cfg::hash() is stable.
-	localSysEnv, err := r.evalStrList(root.SysEnv, nil, "sysenv")
+	localSysEnv, err := r.evalStrList(root.SysEnv, nil, "sysenv", "")
 	if err != nil {
 		return nil, err
 	}
@@ -482,13 +479,12 @@ func (r *resolver) publishSelf(st *svcState) {
 // place and re-publishes to r.serviceByTC so downstream nodes see the
 // new value.
 func (r *resolver) evalProducerNode(n *node, st *svcState) error {
-	r.curCheckout = st.curCheckout
 	switch n.kind {
 	case kindVars:
 		if st.sb.Vars == nil {
 			return nil
 		}
-		v, err := r.evalMap(st.sb.Vars, st.self, "vars")
+		v, err := r.evalMap(st.sb.Vars, st.self, "vars", st.curCheckout)
 		if err != nil {
 			return err
 		}
@@ -498,7 +494,7 @@ func (r *resolver) evalProducerNode(n *node, st *svcState) error {
 		if st.sb.Arguments == nil {
 			return nil
 		}
-		a, err := r.evalMap(st.sb.Arguments, st.self, "arguments")
+		a, err := r.evalMap(st.sb.Arguments, st.self, "arguments", st.curCheckout)
 		if err != nil {
 			return err
 		}
@@ -508,7 +504,7 @@ func (r *resolver) evalProducerNode(n *node, st *svcState) error {
 		if st.sb.Env == nil {
 			return nil
 		}
-		e, err := r.evalMap(st.sb.Env, st.self, "env")
+		e, err := r.evalMap(st.sb.Env, st.self, "env", st.curCheckout)
 		if err != nil {
 			return err
 		}
@@ -525,7 +521,7 @@ func (r *resolver) evalProducerNode(n *node, st *svcState) error {
 		if fb == nil {
 			return fmt.Errorf("file %q: block lost between parse and eval", n.name)
 		}
-		path, body, err := evalFileExpr(fb, r.ctxWith(st.self))
+		path, body, err := evalFileExpr(fb, r.ctxWith(st.self, st.curCheckout))
 		if err != nil {
 			return err
 		}
@@ -558,7 +554,7 @@ func producerLabel(n *node) string {
 func (r *resolver) finishService(st *svcState) error {
 	sb := st.sb
 	self := st.self
-	r.curCheckout = st.curCheckout
+	checkout := st.curCheckout
 
 	// Sinks: consume the fully-populated self; order among them is
 	// irrelevant since nothing reads them back.
@@ -567,14 +563,14 @@ func (r *resolver) finishService(st *svcState) error {
 		err     error
 	)
 	if sb.Runtime != nil && sb.Runtime.Cmd != nil {
-		command, err = r.evalStrList(sb.Runtime.Cmd, self, "runtime.cmd")
+		command, err = r.evalStrList(sb.Runtime.Cmd, self, "runtime.cmd", checkout)
 		if err != nil {
 			return err
 		}
 	}
 	var buildCmd []string
 	if sb.Build != nil && sb.Build.Cmd != nil {
-		buildCmd, err = r.evalStrList(sb.Build.Cmd, self, "build.cmd")
+		buildCmd, err = r.evalStrList(sb.Build.Cmd, self, "build.cmd", checkout)
 		if err != nil {
 			return err
 		}
@@ -583,7 +579,7 @@ func (r *resolver) finishService(st *svcState) error {
 		if expr == nil {
 			return nil, nil
 		}
-		m, e := r.evalMap(expr, self, label)
+		m, e := r.evalMap(expr, self, label, checkout)
 		if e != nil {
 			return nil, e
 		}
@@ -600,7 +596,7 @@ func (r *resolver) finishService(st *svcState) error {
 		if runEnv, err = phaseEnv(sb.Runtime.Env, "runtime.env"); err != nil {
 			return err
 		}
-		runtimeAfter, err = r.evalStrList(sb.Runtime.After, self, "runtime.after")
+		runtimeAfter, err = r.evalStrList(sb.Runtime.After, self, "runtime.after", checkout)
 		if err != nil {
 			return err
 		}
@@ -610,26 +606,26 @@ func (r *resolver) finishService(st *svcState) error {
 			return err
 		}
 	}
-	dotenv, err := r.evalStrOrList(sb.Dotenv, self, "dotenv")
+	dotenv, err := r.evalStrOrList(sb.Dotenv, self, "dotenv", checkout)
 	if err != nil {
 		return err
 	}
-	printLine, err := r.evalStr(sb.Print, self, "print")
+	printLine, err := r.evalStr(sb.Print, self, "print", checkout)
 	if err != nil {
 		return err
 	}
 	// sudo hooks (may reference everything resolved so far).
 	var sudo []*SudoStep
 	for _, sblk := range sb.Sudo {
-		check, err := r.evalStr(sblk.Check, self, "sudo."+sblk.Name+".check")
+		check, err := r.evalStr(sblk.Check, self, "sudo."+sblk.Name+".check", checkout)
 		if err != nil {
 			return err
 		}
-		apply, err := r.evalStr(sblk.Apply, self, "sudo."+sblk.Name+".apply")
+		apply, err := r.evalStr(sblk.Apply, self, "sudo."+sblk.Name+".apply", checkout)
 		if err != nil {
 			return err
 		}
-		verify, err := r.evalStr(sblk.Verify, self, "sudo."+sblk.Name+".verify")
+		verify, err := r.evalStr(sblk.Verify, self, "sudo."+sblk.Name+".verify", checkout)
 		if err != nil {
 			return err
 		}
@@ -645,13 +641,13 @@ func (r *resolver) finishService(st *svcState) error {
 	if sb.Runtime != nil {
 		for _, pb := range sb.Runtime.Provision {
 			label := "provision." + pb.Name
-			check, err := r.evalStr(pb.Check, self, label+".check")
+			check, err := r.evalStr(pb.Check, self, label+".check", checkout)
 			if err != nil {
 				return err
 			}
 			// cmd is either an inline shell snippet (string) or a bare
 			// reference to another (latent) provision used as a template.
-			cmdRef, isRef, err := r.provisionRefOf(pb.Cmd, self)
+			cmdRef, isRef, err := r.provisionRefOf(pb.Cmd, self, checkout)
 			if err != nil {
 				return fmt.Errorf("%s.cmd: %w", label, err)
 			}
@@ -661,12 +657,12 @@ func (r *resolver) finishService(st *svcState) error {
 					return fmt.Errorf("%s.cmd: provision cannot reference itself", label)
 				}
 			} else {
-				cmd, err = r.evalStr(pb.Cmd, self, label+".cmd")
+				cmd, err = r.evalStr(pb.Cmd, self, label+".cmd", checkout)
 				if err != nil {
 					return err
 				}
 			}
-			verify, err := r.evalStr(pb.Verify, self, label+".verify")
+			verify, err := r.evalStr(pb.Verify, self, label+".verify", checkout)
 			if err != nil {
 				return err
 			}
@@ -675,7 +671,7 @@ func (r *resolver) finishService(st *svcState) error {
 			}
 			var penv map[string]string
 			if pb.Env != nil {
-				m, err := r.evalMap(pb.Env, self, label+".env")
+				m, err := r.evalMap(pb.Env, self, label+".env", checkout)
 				if err != nil {
 					return err
 				}
@@ -684,7 +680,7 @@ func (r *resolver) finishService(st *svcState) error {
 			// `after` accepts the bare keyword `never` (a latent
 			// provision: registered but not auto-run) OR a list of
 			// barrier refs — never both.
-			afterList, err := r.evalStrOrList(pb.After, self, label+".after")
+			afterList, err := r.evalStrOrList(pb.After, self, label+".after", checkout)
 			if err != nil {
 				return err
 			}
@@ -720,7 +716,7 @@ func (r *resolver) finishService(st *svcState) error {
 	// Stage 7: readiness port (may reference everything in self).
 	var probePort int
 	if sb.Readiness != nil {
-		ctx := r.ctxWith(self)
+		ctx := r.ctxWith(self, checkout)
 		var (
 			expr  hcl.Expression
 			field string
@@ -883,7 +879,7 @@ func (r *resolver) finishService(st *svcState) error {
 	var dbg *DebuggerConfig
 	var agent *ServiceAgent
 	if sb.Debugger != nil && sb.Debugger.Enabled {
-		d, a, err := r.evalDebugger(sb, self, command)
+		d, a, err := r.evalDebugger(sb, self, command, checkout)
 		if err != nil {
 			return err
 		}
@@ -932,7 +928,7 @@ func (r *resolver) finishService(st *svcState) error {
 	return nil
 }
 
-func (r *resolver) evalDebugger(sb *serviceBlock, self map[string]cty.Value, command []string) (*DebuggerConfig, *ServiceAgent, error) {
+func (r *resolver) evalDebugger(sb *serviceBlock, self map[string]cty.Value, command []string, checkout string) (*DebuggerConfig, *ServiceAgent, error) {
 	db := sb.Debugger
 	if sb.Toolchain != ToolchainGo {
 		return nil, nil, fmt.Errorf("service %q: debugger {} is currently only supported on service \"go\" (got %q)", sb.Name, sb.Toolchain)
@@ -956,7 +952,7 @@ func (r *resolver) evalDebugger(sb *serviceBlock, self map[string]cty.Value, com
 	if wrap && len(command) > 0 {
 		return nil, nil, fmt.Errorf("service %q: debugger.enabled = true wraps runtime itself (`dlv exec <binary> -- <args>`), which is incompatible with an explicit `runtime.cmd`. Use `arguments = {…}` for flags, or set `debugger.wrap_runtime = false` to keep your own cmd", sb.Name)
 	}
-	port, err := r.evalDebuggerPort(db.Port, self)
+	port, err := r.evalDebuggerPort(db.Port, self, checkout)
 	if err != nil {
 		return nil, nil, fmt.Errorf("service %q: debugger.port: %w", sb.Name, err)
 	}
@@ -988,9 +984,9 @@ func (r *resolver) evalDebugger(sb *serviceBlock, self map[string]cty.Value, com
 // (`port = os::env("DLV_PORT", "2345")`). When the expression is nil,
 // it falls back to $DLV_PORT then 2345 — matching the default we'd
 // write inline if the macro didn't exist.
-func (r *resolver) evalDebuggerPort(expr hcl.Expression, self map[string]cty.Value) (int, error) {
+func (r *resolver) evalDebuggerPort(expr hcl.Expression, self map[string]cty.Value, checkout string) (int, error) {
 	if expr != nil {
-		val, diags := expr.Value(r.ctxWith(self))
+		val, diags := expr.Value(r.ctxWith(self, checkout))
 		if diags.HasErrors() {
 			return 0, fmt.Errorf("%s", diags.Error())
 		}
@@ -1023,11 +1019,11 @@ func parsePort(s string) (int, error) {
 // evalMap evaluates an HCL expression that should yield a map/object and
 // returns its members as a Go map (for embedding in RuntimeConfig) plus
 // nil-safety. Used for both `vars` and `arguments`.
-func (r *resolver) evalMap(expr hcl.Expression, self map[string]cty.Value, field string) (map[string]any, error) {
+func (r *resolver) evalMap(expr hcl.Expression, self map[string]cty.Value, field, checkout string) (map[string]any, error) {
 	if expr == nil {
 		return nil, nil
 	}
-	ctx := r.ctxWith(self)
+	ctx := r.ctxWith(self, checkout)
 	val, diags := expr.Value(ctx)
 	if diags.HasErrors() {
 		return nil, fmt.Errorf("%s: %s", field, diags.Error())
@@ -1080,11 +1076,11 @@ func evalIntExpr(expr hcl.Expression, ctx *hcl.EvalContext, field string) (int, 
 }
 
 // evalStrList evaluates an expression expected to be a tuple/list of strings
-func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, field string) ([]string, error) {
+func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, field, checkout string) ([]string, error) {
 	if expr == nil {
 		return nil, nil
 	}
-	ctx := r.ctxWith(self)
+	ctx := r.ctxWith(self, checkout)
 	val, diags := expr.Value(ctx)
 	if diags.HasErrors() {
 		return nil, fmt.Errorf("%s: %s", field, diags.Error())
@@ -1114,11 +1110,11 @@ func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, f
 // or a list of strings, always yielding []string. A bare string becomes a
 // one-element slice. Nil/null ⇒ nil. Used by `dotenv`, which accepts both
 // `dotenv = ".env"` and `dotenv = [".env", ".env.local"]`.
-func (r *resolver) evalStrOrList(expr hcl.Expression, self map[string]cty.Value, field string) ([]string, error) {
+func (r *resolver) evalStrOrList(expr hcl.Expression, self map[string]cty.Value, field, checkout string) ([]string, error) {
 	if expr == nil {
 		return nil, nil
 	}
-	ctx := r.ctxWith(self)
+	ctx := r.ctxWith(self, checkout)
 	val, diags := expr.Value(ctx)
 	if diags.HasErrors() {
 		return nil, fmt.Errorf("%s: %s", field, diags.Error())
@@ -1129,16 +1125,16 @@ func (r *resolver) evalStrOrList(expr hcl.Expression, self map[string]cty.Value,
 	if val.Type() == cty.String {
 		return []string{val.AsString()}, nil
 	}
-	return r.evalStrList(expr, self, field)
+	return r.evalStrList(expr, self, field, checkout)
 }
 
 // evalStr evaluates an expression expected to be a string (the `sudo`
 // snippet). Nil expression ⇒ "".
-func (r *resolver) evalStr(expr hcl.Expression, self map[string]cty.Value, field string) (string, error) {
+func (r *resolver) evalStr(expr hcl.Expression, self map[string]cty.Value, field, checkout string) (string, error) {
 	if expr == nil {
 		return "", nil
 	}
-	ctx := r.ctxWith(self)
+	ctx := r.ctxWith(self, checkout)
 	val, diags := expr.Value(ctx)
 	if diags.HasErrors() {
 		return "", fmt.Errorf("%s: %s", field, diags.Error())
@@ -1155,7 +1151,7 @@ func (r *resolver) evalStr(expr hcl.Expression, self map[string]cty.Value, field
 // ctxWith assembles the EvalContext from the resolver's running state plus
 // the per-service `self` (omitted for non-service evaluation paths, if any
 // are added in the future).
-func (r *resolver) ctxWith(self map[string]cty.Value) *hcl.EvalContext {
+func (r *resolver) ctxWith(self map[string]cty.Value, checkout string) *hcl.EvalContext {
 	// `never` is the keyword that marks a provision latent
 	// (`after = never`). Defined as a plain string so the bare
 	// identifier resolves; it never matches a real barrier ref ('@').
@@ -1170,14 +1166,12 @@ func (r *resolver) ctxWith(self map[string]cty.Value) *hcl.EvalContext {
 	if len(r.toolchainCty) > 0 {
 		vars["toolchain"] = cty.ObjectVal(copyCtyMap(r.toolchainCty))
 	}
-	// fs::src / src::hash exist only in a SERVICE scope: checkout is the
-	// current service's checkout when `self` is set, or "" at file scope
-	// (top-level dotenv/sysenv, toolchain) — where they then error clearly
+	// fs::src / src::hash exist only in a SERVICE scope — they read `checkout`,
+	// which the caller passes as the current service's checkout, or "" at file
+	// scope (top-level dotenv/sysenv, toolchain), where they then error clearly
 	// instead of leaking a prior service's stale checkout.
-	checkout := ""
 	if self != nil {
 		vars["self"] = cty.ObjectVal(copyCtyMap(self))
-		checkout = r.curCheckout
 	}
 	return &hcl.EvalContext{
 		Variables: vars,
