@@ -55,6 +55,42 @@ service "go" "api" {
 	}
 }
 
+// fs::src() is the checkout ROOT (≈ src.path); fs::exe() is the exe-anchored
+// working dir (≈ src.path + src.exe), which equals self.dir. With src{exe} set
+// they DIFFER — that's why both exist. (Without exe they coincide.)
+func TestResolve_FsSrcRootVsFsExe(t *testing.T) {
+	src := `
+service "go" "api" {
+  git { url = "github.com/acme/api" }
+  src { exe = "./cmd/api" }
+  vars = {
+    root = fs::src()
+    exe  = fs::exe()
+    dir  = self.dir
+  }
+}
+`
+	af := compile(t, src, nil)
+	api := svcByName(af, "api")
+	if api == nil {
+		t.Fatal("service api not resolved")
+	}
+	const wantRoot = "/proj/.zordon/worktrees/main/src/api"
+	const wantExe = wantRoot + "/cmd/api"
+	if got := api.Runtime.Vars["root"]; got != wantRoot {
+		t.Errorf("fs::src() = %v, want checkout root %q", got, wantRoot)
+	}
+	if got := api.Runtime.Vars["exe"]; got != wantExe {
+		t.Errorf("fs::exe() = %v, want exe-anchored %q", got, wantExe)
+	}
+	if got := api.Runtime.Vars["dir"]; got != wantExe {
+		t.Errorf("self.dir = %v, want exe-anchored %q (== fs::exe())", got, wantExe)
+	}
+	if api.Runtime.Vars["root"] == api.Runtime.Vars["exe"] {
+		t.Error("fs::src() and fs::exe() must differ when src.exe is set")
+	}
+}
+
 // fs::src() is a SERVICE-scope function. At file scope (top-level dotenv) there
 // is no checkout, so it must error — NOT leak a prior service's stale checkout,
 // which is exactly the footgun the scope split fixes.
