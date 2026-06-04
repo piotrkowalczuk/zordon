@@ -73,7 +73,7 @@ type ZordonResult struct {
 // Fails the test if the binary can't even be spawned (path wrong,
 // permission denied) — non-zero exit codes are NOT fatal; the test
 // inspects ZordonResult.ExitCode and decides.
-func (z *ZordonCmd) Run(t *testing.T) ZordonResult {
+func (z *ZordonCmd) Run(t testing.TB) ZordonResult {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), z.timeout)
 	defer cancel()

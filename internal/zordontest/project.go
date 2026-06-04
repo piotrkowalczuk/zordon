@@ -121,21 +121,6 @@ func (p *Project) AlphaLogPath() string {
 	return filepath.Join(p.root, "alpha.log")
 }
 
-// Get evaluates a zordon-resolved expression (dotted path or Go
-// template) by shelling out to `zordon get <expr>` and returns the
-// trimmed stdout. Fails the test on non-zero exit — the typical
-// use is to resolve a vars-derived value (port, derived URL, etc.)
-// for an HTTP assertion, and a missing expression is a real bug.
-func (p *Project) Get(expr string) string {
-	p.t.Helper()
-	res := p.Zordon("get", expr).Run(p.t)
-	if res.ExitCode != 0 {
-		p.t.Fatalf("zordon get %q: exit %d\nstdout: %s\nstderr: %s",
-			expr, res.ExitCode, res.Stdout, res.Stderr)
-	}
-	return strings.TrimSpace(res.Stdout)
-}
-
 // CopyTree recursively copies a source directory into the project,
 // preserving file modes. srcRel is relative to the zordon repo root
 // (the location of this test binary's package), so tests can reference

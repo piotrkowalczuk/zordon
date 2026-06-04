@@ -24,7 +24,6 @@ package conformance_test
 import (
 	"fmt"
 	"net"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -71,25 +70,14 @@ service "go" "svc1" {
 }
 `)
 
-	res := p.Zordon("start",
-		"--timeout", "30s",
-		"--alpha-log", p.AlphaLogPath(),
-	).WithTimeout(60 * time.Second).Run(t)
-	if res.ExitCode == 0 {
-		t.Fatalf("zordon start: exit 0 but expected parse failure (debugger + explicit runtime.cmd)")
-	}
-	wantSubstr := []string{
-		`debugger.enabled = true`,
-		`incompatible with an explicit`,
-		`runtime.cmd`,
-		`wrap_runtime = false`,
-	}
-	combined := res.Stderr + res.Stdout
-	for _, s := range wantSubstr {
-		if !strings.Contains(combined, s) {
-			t.Errorf("error output missing %q\n--- stderr ---\n%s\n--- stdout ---\n%s", s, res.Stderr, res.Stdout)
-		}
-	}
+	p.Start(t, zordontest.StartTimeout(30*time.Second)).
+		Failed().
+		OutputContains(
+			`debugger.enabled = true`,
+			`incompatible with an explicit`,
+			`runtime.cmd`,
+			`wrap_runtime = false`,
+		)
 }
 
 // TestDebugger_rejectsNonGoToolchain pins the toolchain-scoped
@@ -116,19 +104,9 @@ service "rust" "tansu" {
 }
 `)
 
-	res := p.Zordon("start",
-		"--timeout", "30s",
-		"--alpha-log", p.AlphaLogPath(),
-	).WithTimeout(60 * time.Second).Run(t)
-	if res.ExitCode == 0 {
-		t.Fatalf("zordon start: exit 0 but expected parse failure (debugger on non-Go service)")
-	}
-	combined := res.Stderr + res.Stdout
-	for _, s := range []string{`debugger`, `only supported on service "go"`} {
-		if !strings.Contains(combined, s) {
-			t.Errorf("error output missing %q\n--- stderr ---\n%s\n--- stdout ---\n%s", s, res.Stderr, res.Stdout)
-		}
-	}
+	p.Start(t, zordontest.StartTimeout(30*time.Second)).
+		Failed().
+		OutputContains(`debugger`, `only supported on service "go"`)
 }
 
 // TestDebugger_requiresToolchainBlock pins the dependency: `debugger {
@@ -154,19 +132,9 @@ service "go" "svc1" {
 }
 `)
 
-	res := p.Zordon("start",
-		"--timeout", "30s",
-		"--alpha-log", p.AlphaLogPath(),
-	).WithTimeout(60 * time.Second).Run(t)
-	if res.ExitCode == 0 {
-		t.Fatalf("zordon start: exit 0 but expected parse failure (no toolchain.go block)")
-	}
-	combined := res.Stderr + res.Stdout
-	for _, s := range []string{`debugger`, `toolchain`, `go`} {
-		if !strings.Contains(combined, s) {
-			t.Errorf("error output missing %q\n--- stderr ---\n%s\n--- stdout ---\n%s", s, res.Stderr, res.Stdout)
-		}
-	}
+	p.Start(t, zordontest.StartTimeout(30*time.Second)).
+		Failed().
+		OutputContains(`debugger`, `toolchain`, `go`)
 }
 
 // --- behavior (slow: cold-cache install + dlv-wrapped bringup) -------
@@ -235,11 +203,11 @@ service "go" "svc1" {
 	// semantics, so the literal value isn't predictable but it MUST
 	// be a valid TCP port and equal to what agent.mcp.debug.address
 	// advertises.
-	dapPort, err := strconv.Atoi(p.Get("service.go.svc1.debugger.port"))
-	if err != nil || dapPort <= 0 || dapPort > 65535 {
-		t.Fatalf("debugger.port = %q: %v (want a picked TCP port)", p.Get("service.go.svc1.debugger.port"), err)
+	dapPort := p.Get(t, "service.go.svc1.debugger.port").Int()
+	if dapPort <= 0 || dapPort > 65535 {
+		t.Fatalf("debugger.port = %d; want a picked TCP port (1-65535)", dapPort)
 	}
-	gotAddr := p.Get("service.go.svc1.agent.mcp.debug.address")
+	gotAddr := p.Get(t, "service.go.svc1.agent.mcp.debug.address").String()
 	wantAddr := fmt.Sprintf("127.0.0.1:%d", dapPort)
 	if gotAddr != wantAddr {
 		t.Errorf("agent.mcp.debug.address = %q; want %q", gotAddr, wantAddr)
@@ -296,9 +264,8 @@ service "go" "svc1" {
 `, httpPort, dapPort))
 
 	mustStart(t, p)
-	gotPort, err := strconv.Atoi(p.Get("service.go.svc1.debugger.port"))
-	if err != nil || gotPort != dapPort {
-		t.Errorf("debugger.port = %q; want %d (explicit pin)", p.Get("service.go.svc1.debugger.port"), dapPort)
+	if gotPort := p.Get(t, "service.go.svc1.debugger.port").Int(); gotPort != dapPort {
+		t.Errorf("debugger.port = %d; want %d (explicit pin)", gotPort, dapPort)
 	}
 	if err := dapInitialize(fmt.Sprintf("127.0.0.1:%d", dapPort)); err != nil {
 		t.Errorf("dlv DAP listener not responding on pinned port %d: %v", dapPort, err)
@@ -362,13 +329,13 @@ service "go" "svc2" {
 `, httpA, httpB))
 
 	mustStart(t, p)
-	a, err := strconv.Atoi(p.Get("service.go.svc1.debugger.port"))
-	if err != nil || a <= 0 {
-		t.Fatalf("svc1 debugger.port = %q: %v", p.Get("service.go.svc1.debugger.port"), err)
+	a := p.Get(t, "service.go.svc1.debugger.port").Int()
+	if a <= 0 {
+		t.Fatalf("svc1 debugger.port = %d; want a picked TCP port", a)
 	}
-	b, err := strconv.Atoi(p.Get("service.go.svc2.debugger.port"))
-	if err != nil || b <= 0 {
-		t.Fatalf("svc2 debugger.port = %q: %v", p.Get("service.go.svc2.debugger.port"), err)
+	b := p.Get(t, "service.go.svc2.debugger.port").Int()
+	if b <= 0 {
+		t.Fatalf("svc2 debugger.port = %d; want a picked TCP port", b)
 	}
 	if a == b {
 		t.Errorf("two debugger-enabled services got the same port %d — picked-port default failed to isolate", a)

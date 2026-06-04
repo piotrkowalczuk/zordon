@@ -406,7 +406,7 @@ service "go" "svc1" {
 	// the Alphasfile and `zordon get` can resolve it.
 	// `file` is keyed by the HCL block's name label — `file "config"
 	// { ... }` → service.go.svc1.file.config.*.
-	confPath := p.Get("service.go.svc1.file.config.path")
+	confPath := p.Get(t, "service.go.svc1.file.config.path").String()
 	data, err := readFile(t, confPath)
 	if err != nil {
 		t.Fatalf("read generated file %s: %v", confPath, err)
@@ -579,13 +579,7 @@ service "go" "svc1" {
 `, port))
 
 	// Failfast will kill the bringup; we expect non-zero exit.
-	res := p.Zordon("start",
-		"--timeout", "5m",
-		"--alpha-log", p.AlphaLogPath(),
-	).WithTimeout(6 * time.Minute).Run(t)
-	if res.ExitCode == 0 {
-		t.Fatalf("zordon start: exit 0 but expected failure (broken provision should have triggered failfast)")
-	}
+	p.Start(t, zordontest.StartTimeout(5*time.Minute)).Failed()
 
 	for _, ln := range p.TestLog() {
 		if ln == "UNREACHABLE" {
@@ -646,7 +640,7 @@ service "go" "fetcher" {
     path = "./src/svc1"
     exe = "."
   }
-  vars = { port = 27680 }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/fetcher", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -671,7 +665,7 @@ service "go" "shared-check" {
     path = "./src/svc2"
     exe = "."
   }
-  vars = { port = 27681 }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/shared-check", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -697,7 +691,7 @@ service "go" "isolated-check" {
     path = "./src/svc3"
     exe = "."
   }
-  vars = { port = 27682 }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/isolated-check", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -881,13 +875,7 @@ service "go" "svc1" {
 
 	// Failfast tears the bringup down on the build failure: non-zero
 	// exit is the expected, correct outcome.
-	res := p.Zordon("start",
-		"--timeout", "5m",
-		"--alpha-log", p.AlphaLogPath(),
-	).WithTimeout(6 * time.Minute).Run(t)
-	if res.ExitCode == 0 {
-		t.Fatalf("zordon start: exit 0 but expected failure (forced build error must failfast)")
-	}
+	p.Start(t, zordontest.StartTimeout(5*time.Minute)).Failed()
 
 	for _, ln := range p.TestLog() {
 		if ln == "RUNTIME_STARTED_MUST_NOT_HAPPEN" {
@@ -961,13 +949,13 @@ service "go" "svc1" {
 `, port))
 
 	mustStart(t, p)
-	cwdFile := p.Get("service.go.svc1.vars.cwdfile")
+	cwdFile := p.Get(t, "service.go.svc1.vars.cwdfile").String()
 	gotCwd, err := readFile(t, cwdFile)
 	if err != nil {
 		t.Fatalf("read cwd capture %s: %v", cwdFile, err)
 	}
 	gotCwd = strings.TrimSpace(gotCwd)
-	wantDir := p.Get("service.go.svc1.dir")
+	wantDir := p.Get(t, "service.go.svc1.dir").String()
 	if gotCwd != wantDir {
 		t.Errorf("provision cwd = %q; want service src dir %q", gotCwd, wantDir)
 	}
@@ -1077,7 +1065,7 @@ service "go" "billing" {
 
 	mustStart(t, p)
 
-	topicsPath := p.Get("service.go.kafka.vars.topics")
+	topicsPath := p.Get(t, "service.go.kafka.vars.topics").String()
 	data, err := readFile(t, topicsPath)
 	if err != nil {
 		t.Fatalf("read topics file %s: %v (invocations did not run?)", topicsPath, err)
@@ -1165,7 +1153,7 @@ service "go" "cons" {
 
 	mustStart(t, p)
 
-	fPath := p.Get("service.go.prov.vars.f")
+	fPath := p.Get(t, "service.go.prov.vars.f").String()
 	data, err := readFile(t, fPath)
 	if err != nil {
 		t.Fatalf("read seeded file %s: %v", fPath, err)
@@ -1182,14 +1170,7 @@ service "go" "cons" {
 
 func mustStart(t *testing.T, p *zordontest.Project) {
 	t.Helper()
-	res := p.Zordon("start",
-		"--timeout", "15m",
-		"--alpha-log", p.AlphaLogPath(),
-	).WithTimeout(16 * time.Minute).Run(t)
-	if res.ExitCode != 0 {
-		t.Fatalf("zordon start: exit %d\nstdout: %s\nstderr: %s",
-			res.ExitCode, res.Stdout, res.Stderr)
-	}
+	p.Start(t).OK()
 }
 
 // echoResponse is the JSON shape golden/go/echo's GET / returns.
