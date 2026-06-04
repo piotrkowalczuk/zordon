@@ -730,10 +730,10 @@ func (r *resolver) finishService(st *svcState) error {
 			expr  hcl.Expression
 			field string
 		)
-		switch {
-		case sb.Readiness.HTTP != nil:
+		if sb.Readiness.HTTP != nil {
 			expr, field = sb.Readiness.HTTP.Port, "readiness.http.port"
 		}
+
 		if expr != nil {
 			probePort, err = evalIntExpr(expr, ctx, field)
 			if err != nil {
