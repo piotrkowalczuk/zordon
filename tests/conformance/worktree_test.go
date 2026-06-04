@@ -69,6 +69,66 @@ service "go" "echo" {
 	mustCwdInWorktree(t, echo.Cwd, p, "wt1", "echo")
 }
 
+// TestWorktree_Go_exeOffset is the worktree counterpart of the exe_anchor
+// suite: a worktree service whose build target lives in a SUBDIR
+// (exe != "."). The git worktree must check out at the checkout ROOT
+// (<wtdir>/src/<svc>) while build+run anchor on <root>/<exe>. This
+// regressed when the worktree-add target was taken from the (now
+// exe-anchored) service Dir instead of the checkout root: `zordon start`
+// then tried to add the worktree at <root>/<exe>, colliding with the
+// root that `zordon worktree create` had already registered ("branch
+// already checked out"). The plain TestWorktree_* cases all use exe="."
+// (root == exe dir), so none of them could catch it.
+func TestWorktree_Go_exeOffset(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/repo/cmd/echo")
+	p.GitInit("src/repo")
+
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "echo" {
+  src {
+    path = "./src/repo"
+    exe  = "./cmd/echo"
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`)
+
+	port := mustWorktreeStart(t, p, "wt1", "go", "echo")
+	echo := mustDecodeEcho(t, port)
+	if !strings.HasPrefix(echo.RuntimeVersion, "go1.26") {
+		t.Errorf("runtime_version = %q; want go1.26.x (pinned toolchain)", echo.RuntimeVersion)
+	}
+	// cwd is the exe-anchored dir INSIDE the per-worktree checkout:
+	// <wtdir>/src/echo/cmd/echo — proving the worktree checked out at the
+	// root while build/run anchored on the exe subdir.
+	wantSuffix := filepath.Join(".zordon", "worktrees", "wt1", "src", "echo", "cmd", "echo")
+	if !strings.HasSuffix(echo.Cwd, wantSuffix) {
+		t.Errorf("service cwd = %q; want it to end with %q (exe-anchored within the worktree)", echo.Cwd, wantSuffix)
+	}
+}
+
 func TestWorktree_Rust(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/rust/echo", "src/echo")

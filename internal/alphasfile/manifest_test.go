@@ -89,6 +89,16 @@ service "go" "api" {
 	if api.Runtime.Vars["root"] == api.Runtime.Vars["exe"] {
 		t.Error("fs::src() and fs::exe() must differ when src.exe is set")
 	}
+	// The wire-stable split alpha consumes: Dir is the exe-anchored
+	// build/run cwd, Checkout is the checkout root that `git worktree add`
+	// targets. Conflating them broke worktree services with exe != "."
+	// (see TestWorktree_Go_exeOffset).
+	if got := api.Runtime.Checkout; got != wantRoot {
+		t.Errorf("Runtime.Checkout = %q, want checkout root %q (the worktree-add target)", got, wantRoot)
+	}
+	if got := api.Runtime.Dir; got != wantExe {
+		t.Errorf("Runtime.Dir = %q, want exe-anchored %q (the build/run cwd)", got, wantExe)
+	}
 }
 
 // fs::src() is a SERVICE-scope function. At file scope (top-level dotenv) there

@@ -77,9 +77,10 @@ type RuntimeConfig struct {
 	Sudo      []*SudoStep      `json:"sudo,omitempty"`
 	Provision []*ProvisionStep `json:"provision,omitempty"`
 	Files     []*File          `json:"files,omitempty"`
-	Dir       string           `json:"dir,omitempty"`     // per-invocation source checkout (= fs::src)
-	BinDir    string           `json:"bin_dir,omitempty"` // per-invocation build output (= fs::bin)
-	Print     string           `json:"print,omitempty"`   // extra `zordon status` line (resolved)
+	Dir       string           `json:"dir,omitempty"`      // service working dir = <checkout>/<exe> (= fs::exe / self.dir)
+	Checkout  string           `json:"checkout,omitempty"` // checkout root (= fs::src); the `git worktree add` target
+	BinDir    string           `json:"bin_dir,omitempty"`  // per-invocation build output (= fs::bin)
+	Print     string           `json:"print,omitempty"`    // extra `zordon status` line (resolved)
 	Readiness *probe.Probe     `json:"readiness,omitempty"`
 }
 

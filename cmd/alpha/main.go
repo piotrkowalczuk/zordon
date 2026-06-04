@@ -2697,6 +2697,16 @@ func prepareWorktree(ctx context.Context, svc *alphasfile.Service, name, wtName,
 		if dest == "" {
 			return "", fmt.Errorf("worktree-able service %q has no resolved checkout dir", name)
 		}
+		// The git worktree checks out at the checkout ROOT (= fs::src).
+		// `dest` (= fs::exe / self.dir) is the <root>/<exe> build+run cwd,
+		// a subdir of the root when exe != ".". Adding the worktree at
+		// `dest` would target the wrong path and collide with
+		// `zordon worktree create` (which registers the root) the moment
+		// exe != "." — see TestWorktree_Go_exeOffset.
+		checkout := dest
+		if svc.Runtime != nil && svc.Runtime.Checkout != "" {
+			checkout = svc.Runtime.Checkout
+		}
 		var worktree *source.Worktree
 		if svc.Package.Worktree != nil {
 			worktree = &source.Worktree{Sparse: svc.Package.Worktree.Sparse}
@@ -2714,8 +2724,8 @@ func prepareWorktree(ctx context.Context, svc *alphasfile.Service, name, wtName,
 		// `zordon/<wt>` and the 2nd `git worktree add` would fail with
 		// "branch already checked out". Slashes are valid in ref names.
 		branch := "zordon/" + wtName + "/" + name
-		log.Info("alpha", "prepare %s: worktree -> %s (branch %s)", name, dest, branch)
-		if err := p.AddWorktree(ctx, dest, branch, runner); err != nil {
+		log.Info("alpha", "prepare %s: worktree -> %s (branch %s)", name, checkout, branch)
+		if err := p.AddWorktree(ctx, checkout, branch, runner); err != nil {
 			return "", fmt.Errorf("git worktree: %w", err)
 		}
 		return dest, nil

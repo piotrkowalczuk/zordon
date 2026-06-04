@@ -761,6 +761,7 @@ func (r *resolver) finishService(st *svcState) error {
 		Provision:      provisions,
 		Files:          st.files,
 		Dir:            st.dir,
+		Checkout:       st.dirs.root,
 		BinDir:         r.inv.BinDir(),
 		Print:          printLine,
 	}
