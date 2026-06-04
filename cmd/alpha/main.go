@@ -836,7 +836,9 @@ func (pc *provisionCtx) TerminalFailure() *barrier.Barrier {
 // check/cmd/verify snippets come from the referenced template instead.
 // Reach success/failure terminal, close done. Failure under failfast on
 // a non-detached provision triggers global shutdown.
-func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace time.Duration, stream *safeEncoder, log *zlog.Logger, failfast bool) {
+func runProvision(b *bringup, pc *provisionCtx, parent *serviceCtx) {
+	state, stream, log, failfast := b.state, b.stream, b.log, b.failfast
+	grace := b.cfg.shutdownGrace
 	defer close(pc.done)
 	// Same reasoning as bringupAndSupervise: keep the entry in
 	// state.provisions so other entities that wait on this provision's
@@ -1306,6 +1308,18 @@ type bringupConfig struct {
 	shutdownGrace time.Duration
 }
 
+// bringup bundles the per-configure context every service/provision bringup
+// goroutine threads — shared supervisor state, timings, event stream, logger,
+// and the failfast flag — so the bringup functions don't each carry five loose
+// arguments. Built once in handleConfigure; read-only from the goroutines.
+type bringup struct {
+	state    *alphaState
+	cfg      bringupConfig
+	stream   *safeEncoder
+	log      *zlog.Logger
+	failfast bool
+}
+
 func runAlpha(_ context.Context, rc runConfig) error {
 	if rc.SockPath == "" {
 		return errors.New("--socket is required")
@@ -1567,6 +1581,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		req.Configure.AlphasfilePath, len(services), len(files), failfast)
 
 	stream := newSafeEncoder(enc)
+	b := &bringup{state: state, cfg: cfg, stream: stream, log: log, failfast: failfast}
 	defer stream.Close()
 	// One configure round-trip is the contract with zordon: once we
 	// have emitted EventDone (or EventError), zordon will detach and
@@ -1660,10 +1675,10 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	// only when it must; bringup parallelism is naturally bounded by
 	// the dep graph the user authored.
 	for _, svc := range toBringup {
-		go bringupAndSupervise(svc, serviceCtxs[svc.Name()], state, cfg, stream, log, failfast)
+		go bringupAndSupervise(b, svc, serviceCtxs[svc.Name()])
 	}
 	for _, p := range provs {
-		go runProvision(p.pc, state, p.parent, cfg.shutdownGrace, stream, log, failfast)
+		go runProvision(b, p.pc, p.parent)
 	}
 
 	// Wait for every service to settle (ready ∪ failed). doneBar is the
@@ -1744,7 +1759,8 @@ func implicitRuntimeAfter(svc *alphasfile.Service, state *alphaState) []string {
 // external stop or self-exit → reach stopped or failed (terminal).
 // sc.done closes on return so anyone selecting on it (other bringup
 // goroutines, handleConfigure's outcome wait, shutdownAll) unblocks.
-func bringupAndSupervise(svc *alphasfile.Service, sc *serviceCtx, state *alphaState, cfg bringupConfig, stream *safeEncoder, log *zlog.Logger, failfast bool) {
+func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
+	state, stream, log, failfast := b.state, b.stream, b.log, b.failfast
 	defer close(sc.done)
 	// Note: DO NOT removeService here. Entity entries (and their
 	// closed barriers) must remain in state.services for the rest of
@@ -1899,7 +1915,7 @@ func bringupAndSupervise(svc *alphasfile.Service, sc *serviceCtx, state *alphaSt
 	default:
 	}
 
-	bringupAndSuperviseStart(svc, sc, state, cfg, stream, log, failfast, repoDir, agent)
+	bringupAndSuperviseStart(b, svc, sc, repoDir, agent)
 }
 
 // primaryKeyOf returns the cross-service-shareable key for a primary
@@ -1923,7 +1939,8 @@ func primaryKeyOf(svc *alphasfile.Service) string {
 // races probe vs self-exit, then supervises the running process until
 // external stop or self-exit. Split out so the per-primary lock doesn't
 // have to wrap this much code.
-func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *alphaState, cfg bringupConfig, stream *safeEncoder, log *zlog.Logger, failfast bool, repoDir string, agent bool) {
+func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCtx, repoDir string, agent bool) {
+	state, cfg, stream, log, failfast := b.state, b.cfg, b.stream, b.log, b.failfast
 	name := svc.Name()
 
 	// env precedence (low→high): process env → federation parents'
