@@ -38,7 +38,9 @@ func TestParentWatch_zordonKilledDuringBringup_alphaShutsDown(t *testing.T) {
 	// is at least readyDelay long — comfortably more than the 1-2s we
 	// need to land a kill.
 	const readyDelay = 5 * time.Second
-	const port = 27951
+	// Go-side free port: this test SIGKILLs zordon mid-bringup, so there's
+	// no settled alpha to read the picked port back from.
+	port := zordontest.FreePort(t)
 
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
@@ -192,8 +194,7 @@ func TestParentWatch_zordonCleanExit_alphaSurvives(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27952
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -207,7 +208,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -222,7 +223,7 @@ service "go" "svc1" {
     failure_threshold = 100
   }
 }
-`, port))
+`)
 
 	res := p.Zordon("start",
 		"--timeout", "120s",
@@ -234,6 +235,9 @@ service "go" "svc1" {
 		t.Fatalf("zordon start: exit %d\nstdout: %s\nstderr: %s", res.ExitCode, res.Stdout, res.Stderr)
 	}
 
+	// Alpha keeps running after a clean zordon exit, so read the picked
+	// port back from it before observing the supervised service.
+	port := p.Get(t, "service.go.svc1.vars.port").Int()
 	alphaPID, _ := pidsFromAlphaLog(t, p.AlphaLogPath(), "svc1")
 	t.Logf("zordon detached; alpha pid=%d should keep running", alphaPID)
 

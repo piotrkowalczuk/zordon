@@ -1,10 +1,27 @@
 package zordontest
 
 import (
+	"net"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+// FreePort asks the kernel for an unused TCP port and returns it. Use it
+// when the test must KNOW the port up front and can't read it back from a
+// running alpha — e.g. lifecycle/orphan tests that probe `portServing`
+// while alpha is being killed. There's a tiny window between this call and
+// the service binding, but the kernel hands out a currently-free port, so
+// it can't collide with a peer the way a shared hardcoded literal does.
+func FreePort(t testing.TB) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("FreePort: %v", err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
 
 // Value is a resolved `zordon get` result with typed accessors, so a
 // test reads a port as an int (or a path as a string) without poking at

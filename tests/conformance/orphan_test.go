@@ -48,12 +48,11 @@ func TestOrphan_AlphaDeath_NoSurvivingService(t *testing.T) {
 	cases := []struct {
 		name string
 		sig  syscall.Signal
-		port int
 	}{
-		{"sigkill_oom", syscall.SIGKILL, 27931},
-		{"sigquit_unhandled", syscall.SIGQUIT, 27932},
-		{"sigabrt_crash", syscall.SIGABRT, 27933},
-		{"sigterm_graceful", syscall.SIGTERM, 27934},
+		{"sigkill_oom", syscall.SIGKILL},
+		{"sigquit_unhandled", syscall.SIGQUIT},
+		{"sigabrt_crash", syscall.SIGABRT},
+		{"sigterm_graceful", syscall.SIGTERM},
 	}
 
 	for _, tc := range cases {
@@ -64,6 +63,9 @@ func TestOrphan_AlphaDeath_NoSurvivingService(t *testing.T) {
 			// cleanup instead of failing AssertNoLeftovers.
 			p := zordontest.NewProject(t, zordontest.WithExpectedLeftovers())
 			p.CopyTree("golden/go/echo", "src/svc1")
+			// Go-side free port: this subtest kills alpha, so there's no
+			// settled alpha to read the picked port back from afterward.
+			port := zordontest.FreePort(t)
 			p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -93,7 +95,7 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, tc.port))
+`, port))
 
 			// Pin tommy explicitly so alpha resolves it deterministically
 			// regardless of the suite's install layout.
@@ -112,8 +114,8 @@ service "go" "svc1" {
 			t.Cleanup(func() { dumpAlphaLog(t, p.AlphaLogPath()) })
 
 			// Sanity: the service is up and serving before we kill anything.
-			if !portServing(tc.port, 2*time.Second) {
-				t.Fatalf("service not serving on :%d after start", tc.port)
+			if !portServing(port, 2*time.Second) {
+				t.Fatalf("service not serving on :%d after start", port)
 			}
 
 			alphaPID, groupPID := pidsFromAlphaLog(t, p.AlphaLogPath(), "svc1")
@@ -132,8 +134,8 @@ service "go" "svc1" {
 				if groupGone(groupPID) {
 					// Belt-and-braces: the port must also be dead, proving
 					// it was the real service that went away, not a pid race.
-					if portServing(tc.port, 200*time.Millisecond) {
-						t.Fatalf("group %d reported gone but :%d still serving", groupPID, tc.port)
+					if portServing(port, 200*time.Millisecond) {
+						t.Fatalf("group %d reported gone but :%d still serving", groupPID, port)
 					}
 					return // proven: alpha died ⇒ no orphan
 				}
@@ -169,8 +171,11 @@ func TestOrphan_registryReaperKillsOrphansOnNextStart(t *testing.T) {
 
 	p := zordontest.NewProject(t, zordontest.WithExpectedLeftovers())
 	p.CopyTree("golden/go/echo", "src/svc1")
+	// Same port across both rounds: this test restarts zordon, and a
+	// round-2 re-eval of net::pickport() would pick a DIFFERENT port, so
+	// the orphan-vs-fresh comparison needs one fixed Go-side port.
+	port := zordontest.FreePort(t)
 
-	const port = 27935
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {

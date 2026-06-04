@@ -53,8 +53,7 @@ func TestGoService_srcDefaultBuild_httpReadiness(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27654
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -68,7 +67,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -83,9 +82,10 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, port))
+`)
 
 	mustStart(t, p)
+	port := p.Get(t, "service.go.svc1.vars.port").Int()
 	mustGetEcho(t, port)
 }
 
@@ -98,8 +98,7 @@ func TestGoService_srcExplicitBuildCmd(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27655
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -114,7 +113,7 @@ service "go" "svc1" {
     cmd = ["go", "build", "-o", "${fs::bin()}/svc1", "."]
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -129,9 +128,10 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, port))
+`)
 
 	mustStart(t, p)
+	port := p.Get(t, "service.go.svc1.vars.port").Int()
 	mustGetEcho(t, port)
 }
 
@@ -149,8 +149,7 @@ func TestGoService_noReadinessUsesStabilization(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27656
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -164,18 +163,19 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
   }
 }
-`, port))
+`)
 
 	mustStart(t, p)
 	// Stabilization is ~1s by default; service binds quickly but
 	// zordon doesn't probe, so wait a beat before asserting.
 	time.Sleep(2 * time.Second)
+	port := p.Get(t, "service.go.svc1.vars.port").Int()
 	mustGetEcho(t, port)
 }
 
@@ -187,8 +187,7 @@ func TestGoService_envBlockReachesRuntime(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27660
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -202,7 +201,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   env = {
     GREETING = "hello-from-env-block"
@@ -221,9 +220,10 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, port))
+`)
 
 	mustStart(t, p)
+	port := p.Get(t, "service.go.svc1.vars.port").Int()
 	echo := mustDecodeEcho(t, port)
 	if got := echo.Env["GREETING"]; got != "hello-from-env-block" {
 		t.Errorf("GREETING in service env = %q; want %q", got, "hello-from-env-block")
@@ -238,8 +238,7 @@ func TestGoService_runtimeEnvOverridesBaseEnv(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27661
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -253,7 +252,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   env = {
     LAYER = "base"
@@ -275,9 +274,10 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, port))
+`)
 
 	mustStart(t, p)
+	port := p.Get(t, "service.go.svc1.vars.port").Int()
 	echo := mustDecodeEcho(t, port)
 	if got := echo.Env["LAYER"]; got != "runtime" {
 		t.Errorf("LAYER = %q; want runtime to override base", got)
@@ -296,8 +296,7 @@ func TestGoService_varsInterpolationInCmd(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27662
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -312,7 +311,7 @@ service "go" "svc1" {
   }
 
   vars = {
-    port = %d
+    port = net::pickport()
     tag  = "alpha-bravo"
   }
 
@@ -333,9 +332,10 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, port))
+`)
 
 	mustStart(t, p)
+	port := p.Get(t, "service.go.svc1.vars.port").Int()
 	echo := mustDecodeEcho(t, port)
 	// echo.Argv is os.Args of the spawned process: [<bin>, -addr, ..., -tag, alpha-bravo]
 	joined := strings.Join(echo.Argv, " ")
@@ -357,10 +357,9 @@ func TestGoService_fileBlockMaterialized(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27663
 	// Pin the generated file to a stable relative path so we can
 	// read it back from the test.
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -375,7 +374,7 @@ service "go" "svc1" {
   }
 
   vars = {
-    port = %d
+    port = net::pickport()
     who  = "world"
   }
 
@@ -397,7 +396,7 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, port))
+`)
 
 	mustStart(t, p)
 
@@ -411,6 +410,7 @@ service "go" "svc1" {
 	if err != nil {
 		t.Fatalf("read generated file %s: %v", confPath, err)
 	}
+	port := p.Get(t, "service.go.svc1.vars.port").Int()
 	want := fmt.Sprintf("hello, world on port %d\n", port)
 	if data != want {
 		t.Errorf("generated file body = %q; want %q", data, want)
@@ -429,8 +429,7 @@ func TestGoService_sysenvWhitelistStripsHostVar(t *testing.T) {
 	t.Setenv("HOST_VAR_ALLOWED", "yes-allowed")
 	t.Setenv("HOST_VAR_DENIED", "should-be-stripped")
 
-	const port = 27664
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR", "HOST_VAR_ALLOWED"]
 toolchain {
   go {
@@ -444,7 +443,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -459,9 +458,10 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, port))
+`)
 
 	mustStart(t, p)
+	port := p.Get(t, "service.go.svc1.vars.port").Int()
 	echo := mustDecodeEcho(t, port)
 	if got := echo.Env["HOST_VAR_ALLOWED"]; got != "yes-allowed" {
 		t.Errorf("whitelisted HOST_VAR_ALLOWED = %q; want yes-allowed", got)
@@ -484,8 +484,7 @@ func TestGoService_provisionChainOrdering(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27665
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -499,7 +498,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -523,7 +522,7 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, port))
+`)
 
 	mustStart(t, p)
 	got := p.TestLog()
@@ -546,8 +545,7 @@ func TestGoService_provisionFailureSkipsDependent(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27666
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -561,7 +559,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -576,7 +574,7 @@ service "go" "svc1" {
     }
   }
 }
-`, port))
+`)
 
 	// Failfast will kill the bringup; we expect non-zero exit.
 	p.Start(t, zordontest.StartTimeout(5*time.Minute)).Failed()
@@ -742,8 +740,7 @@ func TestGoService_buildBarrierFiresBeforeRuntime(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/first")
 	p.CopyTree("golden/go/echo", "src/second")
 
-	const portFirst, portSecond = 27670, 27671
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -757,7 +754,7 @@ service "go" "first" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/first", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -779,7 +776,7 @@ service "go" "second" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/second", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -804,7 +801,7 @@ service "go" "second" {
     failure_threshold = 50
   }
 }
-`, portFirst, portSecond))
+`)
 
 	mustStart(t, p)
 	got := p.TestLog()
@@ -851,7 +848,6 @@ func TestGoService_buildFailureBlocksRuntime(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27673
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 
@@ -861,7 +857,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   build {
     cmd = ["sh", "-c", "echo zordon-forced-build-failure 1>&2; exit 7"]
@@ -871,7 +867,7 @@ service "go" "svc1" {
     cmd = ["sh", "-c", %s]
   }
 }
-`, port, "test::log(\"RUNTIME_STARTED_MUST_NOT_HAPPEN\")"))
+`, "test::log(\"RUNTIME_STARTED_MUST_NOT_HAPPEN\")"))
 
 	// Failfast tears the bringup down on the build failure: non-zero
 	// exit is the expected, correct outcome.
@@ -909,8 +905,7 @@ func TestGoService_provisionCwdMatchesServiceSrcDir(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27672
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -925,7 +920,7 @@ service "go" "svc1" {
   }
 
   vars = {
-    port    = %d
+    port    = net::pickport()
     cwdfile = "${fs::tmp()}/cwd.txt"
   }
 
@@ -946,7 +941,7 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, port))
+`)
 
 	mustStart(t, p)
 	cwdFile := p.Get(t, "service.go.svc1.vars.cwdfile").String()
@@ -981,8 +976,7 @@ func TestGoService_latentProvisionInvokedByPeers(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/app")
 	p.CopyTree("golden/go/echo", "src/billing")
 
-	const portK, portA, portB = 27690, 27691, 27692
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -996,7 +990,7 @@ service "go" "kafka" {
     exe = "."
   }
   vars = {
-    port   = %d
+    port   = net::pickport()
     topics = "${fs::tmp()}/topics.txt"
   }
   runtime {
@@ -1021,7 +1015,7 @@ service "go" "app" {
     path = "./src/app"
     exe = "."
   }
-  vars = { port = %d }
+  vars = { port = net::pickport() }
   runtime {
     cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
     provision "topic" {
@@ -1044,7 +1038,7 @@ service "go" "billing" {
     path = "./src/billing"
     exe = "."
   }
-  vars = { port = %d }
+  vars = { port = net::pickport() }
   runtime {
     cmd = ["${fs::bin()}/billing", "-addr", "127.0.0.1:${self.vars.port}"]
     provision "topic" {
@@ -1061,7 +1055,7 @@ service "go" "billing" {
     failure_threshold = 50
   }
 }
-`, portK, portA, portB))
+`)
 
 	mustStart(t, p)
 
@@ -1092,8 +1086,7 @@ func TestGoService_nonLatentProvisionIsAlsoInvokable(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/prov")
 	p.CopyTree("golden/go/echo", "src/cons")
 
-	const portP, portC = 27695, 27696
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -1107,7 +1100,7 @@ service "go" "prov" {
     exe = "."
   }
   vars = {
-    port = %d
+    port = net::pickport()
     f    = "${fs::tmp()}/seeded.txt"
   }
   runtime {
@@ -1131,7 +1124,7 @@ service "go" "cons" {
     path = "./src/cons"
     exe = "."
   }
-  vars = { port = %d }
+  vars = { port = net::pickport() }
   runtime {
     cmd = ["${fs::bin()}/cons", "-addr", "127.0.0.1:${self.vars.port}"]
     provision "seed-mine" {
@@ -1149,7 +1142,7 @@ service "go" "cons" {
     failure_threshold = 50
   }
 }
-`, portP, portC))
+`)
 
 	mustStart(t, p)
 

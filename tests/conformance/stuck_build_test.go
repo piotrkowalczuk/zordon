@@ -24,7 +24,6 @@ package conformance_test
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -42,11 +41,10 @@ func TestStuckBuild_zordonSIGINTReapsAlphaWithinGrace(t *testing.T) {
 	p := zordontest.NewProject(t, zordontest.WithExpectedLeftovers())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27971
 	// Build sleeps 30s while ignoring SIGTERM. trap '' TERM is a bash
 	// idiom for "swallow this signal silently" — exactly the misbehaving
 	// build the supervisor must still be able to reap.
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -61,7 +59,7 @@ service "go" "svc1" {
     cmd = ["/bin/sh", "-c", "trap '' TERM; echo build-running; sleep 30"]
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -76,7 +74,7 @@ service "go" "svc1" {
     failure_threshold = 100
   }
 }
-`, port))
+`)
 
 	binZ := zordonBinaryFromEnvOrPath(t)
 	t.Cleanup(func() { dumpAlphaLog(t, p.AlphaLogPath()) })

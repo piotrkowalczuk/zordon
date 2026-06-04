@@ -51,7 +51,6 @@ func TestRustService_srcDefaultBuild_httpReadiness(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/rust/echo", "src/echo")
 
-	const port = 27700
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -66,7 +65,7 @@ service "rust" "echo" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -81,9 +80,10 @@ service "rust" "echo" {
     failure_threshold = 50
   }
 }
-`, rustVersion, port))
+`, rustVersion))
 
 	mustStart(t, p)
+	port := p.Get(t, "service.rust.echo.vars.port").Int()
 	mustGetRustEcho(t, port)
 }
 
@@ -112,7 +112,6 @@ func TestRustService_srcExplicitBuildCmd(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/rust/echo", "src/echo")
 
-	const port = 27701
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -128,7 +127,7 @@ service "rust" "echo" {
     cmd = ["cargo", "install", "--path", ".", "--root", "${fs::bin()}/..", "--locked", "--force"]
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -143,9 +142,10 @@ service "rust" "echo" {
     failure_threshold = 50
   }
 }
-`, rustVersion, port))
+`, rustVersion))
 
 	mustStart(t, p)
+	port := p.Get(t, "service.rust.echo.vars.port").Int()
 	mustGetRustEcho(t, port)
 }
 
@@ -160,7 +160,6 @@ func TestRustService_noReadinessUsesStabilization(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/rust/echo", "src/echo")
 
-	const port = 27702
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -175,18 +174,19 @@ service "rust" "echo" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
   }
 }
-`, rustVersion, port))
+`, rustVersion))
 
 	mustStart(t, p)
 	// Stabilization is ~1s by default; the listener binds immediately
 	// but zordon doesn't probe, so wait before asserting it's up.
 	time.Sleep(2 * time.Second)
+	port := p.Get(t, "service.rust.echo.vars.port").Int()
 	mustGetRustEcho(t, port)
 }
 
@@ -200,7 +200,6 @@ func TestRustService_featuresReachBuild(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/rust/echo", "src/echo")
 
-	const port = 27703
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -216,7 +215,7 @@ service "rust" "echo" {
   }
   features = ["greeting"]
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -231,9 +230,10 @@ service "rust" "echo" {
     failure_threshold = 50
   }
 }
-`, rustVersion, port))
+`, rustVersion))
 
 	mustStart(t, p)
+	port := p.Get(t, "service.rust.echo.vars.port").Int()
 	mustGetRustEcho(t, port)
 
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -263,7 +263,6 @@ func TestRustService_envBlockReachesRuntime(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/rust/echo", "src/echo")
 
-	const port = 27704
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -278,7 +277,7 @@ service "rust" "echo" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   env = {
     GREETING = "hello-from-env-block"
@@ -297,9 +296,10 @@ service "rust" "echo" {
     failure_threshold = 50
   }
 }
-`, rustVersion, port))
+`, rustVersion))
 
 	mustStart(t, p)
+	port := p.Get(t, "service.rust.echo.vars.port").Int()
 	echo := mustDecodeEcho(t, port)
 	if got := echo.Env["GREETING"]; got != "hello-from-env-block" {
 		t.Errorf("GREETING in service env = %q; want %q", got, "hello-from-env-block")
@@ -315,7 +315,6 @@ func TestRustService_provisionChainOrdering(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/rust/echo", "src/echo")
 
-	const port = 27705
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -330,7 +329,7 @@ service "rust" "echo" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -354,7 +353,7 @@ service "rust" "echo" {
     failure_threshold = 50
   }
 }
-`, rustVersion, port))
+`, rustVersion))
 
 	mustStart(t, p)
 	got := p.TestLog()
@@ -385,7 +384,6 @@ func TestRustService_explicitBuildCmdSurfacesCommandError(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/rust/echo", "src/echo")
 
-	const port = 27706
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -401,13 +399,13 @@ service "rust" "echo" {
     cmd = ["cargo", "--zordon-bogus-flag"]
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["sh", "-c", %s]
   }
 }
-`, rustVersion, port, "test::log(\"RUNTIME_STARTED_MUST_NOT_HAPPEN\")"))
+`, rustVersion, "test::log(\"RUNTIME_STARTED_MUST_NOT_HAPPEN\")"))
 
 	res := p.Zordon("start",
 		"--timeout", "5m",

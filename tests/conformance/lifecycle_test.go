@@ -27,8 +27,7 @@ func TestLifecycle_zordonStop_gracefulShutdown(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27953
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -42,7 +41,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -57,7 +56,7 @@ service "go" "svc1" {
     failure_threshold = 100
   }
 }
-`, port))
+`)
 
 	start := p.Zordon("start",
 		"--timeout", "120s",
@@ -67,6 +66,8 @@ service "go" "svc1" {
 		t.Fatalf("zordon start: exit %d\nstdout: %s\nstderr: %s", start.ExitCode, start.Stdout, start.Stderr)
 	}
 
+	// Capture the picked port while alpha is alive (before we stop it).
+	port := p.Get(t, "service.go.svc1.vars.port").Int()
 	alphaPID, groupPID := pidsFromAlphaLog(t, p.AlphaLogPath(), "svc1")
 	t.Logf("started: alpha=%d group=%d :%d", alphaPID, groupPID, port)
 	if !portServing(port, 1*time.Second) {

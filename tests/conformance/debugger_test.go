@@ -58,7 +58,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = 27800 }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -126,7 +126,7 @@ service "go" "svc1" {
     path = "./src/svc1"
     exe = "."
   }
-  vars = { port = 27803 }
+  vars = { port = net::pickport() }
   arguments = { addr = "127.0.0.1:${self.vars.port}" }
   debugger { enabled = true }
 }
@@ -160,8 +160,7 @@ func TestDebugger_happyPath_wrapsRuntimeAndExposesDAP(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const httpPort = 27810
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -175,7 +174,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   arguments = {
     addr = "127.0.0.1:${self.vars.port}"
@@ -194,9 +193,10 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, httpPort))
+`)
 
 	mustStart(t, p)
+	httpPort := p.Get(t, "service.go.svc1.vars.port").Int()
 	mustGetEcho(t, httpPort)
 
 	// Read back the picked port — the macro defaults to net::pickport
@@ -225,7 +225,6 @@ func TestDebugger_explicitPortPinHonored(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const httpPort = 27811
 	const dapPort = 2347
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
@@ -241,7 +240,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   arguments = {
     addr = "127.0.0.1:${self.vars.port}"
@@ -261,7 +260,7 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, httpPort, dapPort))
+`, dapPort))
 
 	mustStart(t, p)
 	if gotPort := p.Get(t, "service.go.svc1.debugger.port").Int(); gotPort != dapPort {
@@ -282,8 +281,7 @@ func TestDebugger_multipleServicesGetDistinctPorts(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/svc1")
 	p.CopyTree("golden/go/echo", "src/svc2")
 
-	const httpA, httpB = 27812, 27813
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -296,7 +294,7 @@ service "go" "svc1" {
     path = "./src/svc1"
     exe = "."
   }
-  vars = { port = %d }
+  vars = { port = net::pickport() }
   arguments = { addr = "127.0.0.1:${self.vars.port}" }
   debugger { enabled = true }
   readiness {
@@ -314,7 +312,7 @@ service "go" "svc2" {
     path = "./src/svc2"
     exe = "."
   }
-  vars = { port = %d }
+  vars = { port = net::pickport() }
   arguments = { addr = "127.0.0.1:${self.vars.port}" }
   debugger { enabled = true }
   readiness {
@@ -326,7 +324,7 @@ service "go" "svc2" {
     failure_threshold = 50
   }
 }
-`, httpA, httpB))
+`)
 
 	mustStart(t, p)
 	a := p.Get(t, "service.go.svc1.debugger.port").Int()
@@ -360,9 +358,7 @@ func TestDebugger_mcpFalseSuppressesAgentFeature(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const httpPort = 27814
-	const dapPort = 2348 // pinned literal; mcp=false test doesn't care which port, just that it's reachable
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -376,7 +372,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   arguments = {
     addr = "127.0.0.1:${self.vars.port}"
@@ -384,7 +380,6 @@ service "go" "svc1" {
 
   debugger {
     enabled = true
-    port    = %d
     mcp     = false
   }
 
@@ -397,9 +392,10 @@ service "go" "svc1" {
     failure_threshold = 50
   }
 }
-`, httpPort, dapPort))
+`)
 
 	mustStart(t, p)
+	dapPort := p.Get(t, "service.go.svc1.debugger.port").Int()
 
 	// dlv still wrapping: DAP listener answers.
 	if err := dapInitialize(fmt.Sprintf("127.0.0.1:%d", dapPort)); err != nil {
