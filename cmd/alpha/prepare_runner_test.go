@@ -30,7 +30,6 @@ func discardLog(t *testing.T) *zlog.Logger {
 // Happy path: subprocess exits naturally before ctx cancels. The
 // runner returns whatever c.Wait returned and doesn't fire any kill.
 func TestPrepareRunner_normalExitReturnsWaitError(t *testing.T) {
-	t.Parallel()
 	runner := newPrepareRunner("svc1", newSafeEncoder(nil), discardLog(t))
 	cmd := exec.Command("/bin/sh", "-c", "exit 0")
 	if err := runner(context.Background(), cmd); err != nil {
@@ -56,7 +55,6 @@ func TestPrepareRunner_normalExitReturnsWaitError(t *testing.T) {
 // bounded window. Mirrors zordon Ctrl-C landing while alpha is mid
 // `go build` or `cargo install`.
 func TestPrepareRunner_ctxCancelReapsSubprocess(t *testing.T) {
-	t.Parallel()
 	runner := newPrepareRunner("svc1", newSafeEncoder(nil), discardLog(t))
 	cmd := exec.Command("/bin/sh", "-c", "sleep 30")
 
@@ -89,7 +87,6 @@ func TestPrepareRunner_ctxCancelReapsSubprocess(t *testing.T) {
 // trap-then-sleep-forever construct is exactly how a misbehaving
 // build helper could pin alpha pre-fix.
 func TestPrepareRunner_ctxCancelEscalatesToSIGKILL(t *testing.T) {
-	t.Parallel()
 	runner := newPrepareRunner("svc1", newSafeEncoder(nil), discardLog(t))
 	// Bash trap on TERM ⇒ SIGTERM is no-op; only SIGKILL stops this.
 	cmd := exec.Command("/bin/sh", "-c", `trap '' TERM; sleep 30`)
@@ -130,7 +127,6 @@ func TestPrepareRunner_ctxCancelEscalatesToSIGKILL(t *testing.T) {
 // grandchildren). prepareBuild already sets Setpgid itself, but the
 // runner can't trust callers — git subprocesses in source/* don't.
 func TestPrepareRunner_forcesSetpgidPreservingOtherFlags(t *testing.T) {
-	t.Parallel()
 	runner := newPrepareRunner("svc1", newSafeEncoder(nil), discardLog(t))
 	cmd := exec.Command("/bin/sh", "-c", "true")
 	// Pre-existing SysProcAttr with some unrelated flag set, to prove

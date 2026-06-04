@@ -227,6 +227,8 @@ func mustWorktreeStart(t *testing.T, p *zordontest.Project, wt, tc, svc string) 
 			wt, svc, res.ExitCode, res.Stdout, res.Stderr)
 	}
 	wtRel := filepath.Join(".zordon", "worktrees", wt)
+	// Start tears the worktree alpha down from wtRel on cleanup (the
+	// project-root stop can't reach it), so no manual Stop here.
 	p.Start(t, zordontest.StartIn(wtRel)).OK()
 	return p.GetIn(t, wtRel, fmt.Sprintf("service.%s.%s.vars.port", tc, svc)).Int()
 }

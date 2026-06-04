@@ -21,6 +21,7 @@
 package conformance_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1184,22 +1185,57 @@ func mustGetEcho(t *testing.T, port int) {
 	}
 }
 
-func mustDecodeEcho(t *testing.T, port int) echoResponse {
+func mustDecodeEcho(t testing.TB, port int) echoResponse {
 	t.Helper()
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
-	if err != nil {
-		t.Fatalf("GET /: %v", err)
+	// Retry: readiness having passed means the service served alpha's probe,
+	// but the test connects from a different process a beat later — on a
+	// loaded CI runner the accept loop can briefly refuse, or a slow runtime
+	// (rust cold-build) can lag the first external request. A genuinely dead
+	// service stays refused for the whole window, so this masks the race, not
+	// real failures.
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	for {
+		echo, err := tryDecodeEcho(ctx, url)
+		if err == nil {
+			return echo
+		}
+
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for echo to start: %v", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status %d\nbody: %s", resp.StatusCode, body)
-	}
+}
+
+func tryDecodeEcho(ctx context.Context, url string) (echoResponse, error) {
 	var echo echoResponse
-	if err := json.NewDecoder(strings.NewReader(string(body))).Decode(&echo); err != nil {
-		t.Fatalf("decode echo: %v\nbody: %s", err, body)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return echo, err
 	}
-	return echo
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return echo, err
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return echo, err
+	}
+	if res.StatusCode != http.StatusOK {
+		return echo, fmt.Errorf("status %d: %s", res.StatusCode, body)
+	}
+	if err := json.NewDecoder(strings.NewReader(string(body))).Decode(&echo); err != nil {
+		return echo, fmt.Errorf("decode echo: %w (body: %s)", err, body)
+	}
+
+	return echo, nil
 }
 
 // readFile is a thin testing.T-aware wrapper that returns content

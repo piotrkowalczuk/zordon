@@ -1,6 +1,8 @@
 package zordontest
 
 import (
+	"bufio"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +58,29 @@ func (p *Project) Start(t testing.TB, opts ...StartOption) *StartOutcome {
 		fn(&o)
 	}
 
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("Start failed, dumping alpha log %s:", p.AlphaLogPath())
+			if f, err := os.Open(p.AlphaLogPath()); err != nil {
+				// Never t.Fatal in a Cleanup: FailNow's runtime.Goexit
+				// aborts the rest of the cleanup chain.
+				t.Logf("(open alpha log: %v)", err)
+			} else {
+				s := bufio.NewScanner(f)
+				for s.Scan() {
+					t.Log(s.Text())
+				}
+				if err := f.Close(); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+		// Stop the alpha from wherever Start launched it (o.dir): a
+		// worktree-level alpha (StartIn) isn't reachable by the project-root
+		// cleanup, so without this it leaks. Symmetric with Start, so callers
+		// don't hand-roll a Stop. Best-effort, no t.Fatal (we're in Cleanup).
+		_ = p.StopFrom(o.dir)
+	})
 	cmd := p.Zordon("start",
 		"--timeout", o.bringup.String(),
 		"--alpha-log", p.AlphaLogPath(),

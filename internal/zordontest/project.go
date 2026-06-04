@@ -236,6 +236,21 @@ func (p *Project) zordonStopBestEffort() error {
 	return cmd.Run()
 }
 
+// StopFrom runs a best-effort `zordon stop` from relDir (relative to the
+// project root). Use it to tear down a worktree-level alpha that the
+// project-root cleanup can't reach. It takes no testing.TB on purpose: it
+// is meant for t.Cleanup, where t.Fatal/FailNow must never be called
+// (FailNow's runtime.Goexit aborts the remaining cleanup chain). Errors
+// are the caller's to ignore.
+func (p *Project) StopFrom(relDir string) error {
+	cmd := exec.Command(p.binZ, "stop")
+	cmd.Dir = filepath.Join(p.root, relDir)
+	cmd.Env = p.env()
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run()
+}
+
 // env produces the env slice every zordon invocation from this project
 // runs with: filtered host env plus ZORDON_HOME + TMPDIR.
 //
