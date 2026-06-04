@@ -345,6 +345,14 @@ type alphaState struct {
 	// outside zordon (no ZORDON_PARENT_FD).
 	parentW *parentwatch.Watcher
 
+	// bringupDone is the commit point: once alpha decides the first
+	// bringup succeeded (set just before emitting EventDone), the services
+	// are up to stay, so a subsequent parent (zordon) exit is the EXPECTED
+	// clean detach — not a death that should tear them down. Set before
+	// EventDone, checked by the parent-death goroutine, so the detach-exit
+	// can never be misread as "died during bringup".
+	bringupDone atomic.Bool
+
 	// handlerDones: each accepted-conn goroutine appends a fresh
 	// chan struct{} on entry and closes it on exit. drainedCh waits for
 	// them all. Channel-uniform alternative to sync.WaitGroup so it
@@ -1418,6 +1426,12 @@ func runAlpha(_ context.Context, rc runConfig) error {
 	go func() {
 		select {
 		case <-parentW.Died():
+			if state.bringupDone.Load() {
+				// Expected clean detach: alpha already committed to the
+				// bringup succeeding (bringupDone set just before EventDone),
+				// so zordon's exit is the detach handshake, not a death.
+				return
+			}
 			log.Error("alpha", "zordon parent died during bringup; shutting down")
 			state.requestShutdown("parent (zordon) died during bringup")
 		case <-state.shutdownCh:
@@ -1726,6 +1740,11 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		}
 	}
 
+	// Commit point: from here the services are up to stay, so a parent
+	// (zordon) exit is the expected detach, not a death. Set BEFORE EventDone
+	// — zordon exits the instant it reads EventDone, and the death goroutine
+	// reads this flag, so the ordering guarantees the detach can't be misread.
+	state.bringupDone.Store(true)
 	stream.Send(&protocol.Event{Kind: protocol.EventDone})
 	log.Info("alpha", "bringup complete")
 }

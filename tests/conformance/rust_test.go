@@ -183,9 +183,8 @@ service "rust" "echo" {
 `, rustVersion))
 
 	mustStart(t, p)
-	// Stabilization is ~1s by default; the listener binds immediately
-	// but zordon doesn't probe, so wait before asserting it's up.
-	time.Sleep(2 * time.Second)
+	// No readiness block: ready via stabilization, not an HTTP probe, so
+	// the listener may bind a beat after start. mustGetRustEcho polls.
 	port := p.Get(t, "service.rust.echo.vars.port").Int()
 	mustGetRustEcho(t, port)
 }

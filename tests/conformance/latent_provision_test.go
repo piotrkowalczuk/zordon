@@ -117,7 +117,6 @@ service "go" "svc1" {
 			t.Logf("alpha pid %d exited after zordon stop — latent didn't deadlock shutdownAll", alphaPID)
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
 	_ = syscall.Kill(alphaPID, syscall.SIGKILL)
 	t.Fatalf("alpha pid %d still alive 10s after zordon stop — shutdownAll deadlocked on latent provision's never-closed pc.done", alphaPID)

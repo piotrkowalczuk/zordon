@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
 )
@@ -157,7 +156,8 @@ service "nodejs" "echo" {
 `, nodeVersion))
 
 	mustStart(t, p)
-	time.Sleep(2 * time.Second) // ~1s stabilization + slack
+	// No readiness block: ready via stabilization, not an HTTP probe, so
+	// the listener may bind a beat after start. mustGetNodeEcho polls.
 	port := p.Get(t, "service.nodejs.echo.vars.port").Int()
 	mustGetNodeEcho(t, port)
 }

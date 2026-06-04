@@ -173,9 +173,9 @@ service "go" "svc1" {
 `)
 
 	mustStart(t, p)
-	// Stabilization is ~1s by default; service binds quickly but
-	// zordon doesn't probe, so wait a beat before asserting.
-	time.Sleep(2 * time.Second)
+	// No readiness block: zordon marks ready via stabilization (stayed
+	// alive N ms), not an HTTP probe, so the service may bind a beat after
+	// start returns. mustGetEcho polls, so no fixed sleep is needed.
 	port := p.Get(t, "service.go.svc1.vars.port").Int()
 	mustGetEcho(t, port)
 }
