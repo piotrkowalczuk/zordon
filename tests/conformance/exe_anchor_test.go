@@ -33,8 +33,7 @@ func TestExeAnchor_Go(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/cmd/echo")
 
-	const port = 27690
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -48,7 +47,7 @@ service "go" "echo" {
     exe  = "./cmd/echo"
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -63,9 +62,10 @@ service "go" "echo" {
     failure_threshold = 50
   }
 }
-`, port))
+`)
 
 	mustStart(t, p)
+	port := p.Get(t, "service.go.echo.vars.port").Int()
 	echo := mustDecodeEcho(t, port)
 	if !strings.HasPrefix(echo.RuntimeVersion, "go1.26") {
 		t.Errorf("runtime_version = %q; want go1.26.x (pinned toolchain)", echo.RuntimeVersion)
@@ -77,7 +77,6 @@ func TestExeAnchor_Rust(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/rust/echo", "src/cmd/echo")
 
-	const port = 27790
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -92,7 +91,7 @@ service "rust" "echo" {
     exe  = "./cmd/echo"
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -107,9 +106,10 @@ service "rust" "echo" {
     failure_threshold = 50
   }
 }
-`, rustVersion, port))
+`, rustVersion))
 
 	mustStart(t, p)
+	port := p.Get(t, "service.rust.echo.vars.port").Int()
 	echo := mustDecodeEcho(t, port)
 	if !strings.Contains(echo.RuntimeVersion, rustVersion) {
 		t.Errorf("runtime_version = %q; want it to contain pinned rust %s", echo.RuntimeVersion, rustVersion)
@@ -121,7 +121,6 @@ func TestExeAnchor_Nodejs(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/nodejs/echo", "src/cmd/echo")
 
-	const port = 28790
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -136,7 +135,7 @@ service "nodejs" "echo" {
     exe  = "./cmd/echo"
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
   env  = { PORT = "${self.vars.port}" }
 
   readiness {
@@ -148,9 +147,10 @@ service "nodejs" "echo" {
     failure_threshold = 50
   }
 }
-`, nodeVersion, port))
+`, nodeVersion))
 
 	mustStart(t, p)
+	port := p.Get(t, "service.nodejs.echo.vars.port").Int()
 	echo := mustDecodeEcho(t, port)
 	if !strings.HasPrefix(echo.RuntimeVersion, "v22.") {
 		t.Errorf("runtime_version = %q; want v22.x (pinned toolchain)", echo.RuntimeVersion)
