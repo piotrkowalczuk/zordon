@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1646,8 +1647,12 @@ func handleInvoke(req *protocol.Request, state *alphaState, cfg bringupConfig, e
 
 // resolveProvisionArgs validates supplied invocation values against a
 // provision's declared arguments and returns name→string for placeholder
-// substitution. A supplied key with no declaration, or a missing required
-// argument, is an error; an omitted optional argument uses its default (or "").
+// substitution. A supplied key with no declaration, a missing required
+// argument, or a value whose type doesn't match the declaration is an error;
+// an omitted optional argument uses its default (or "").
+//
+// This is the authoritative type check: the MCP input schema is only a hint to
+// the client, and a raw OpInvoke can bypass it entirely.
 func resolveProvisionArgs(decls []*alphasfile.ProvisionArg, supplied map[string]any) (map[string]string, error) {
 	declared := make(map[string]*alphasfile.ProvisionArg, len(decls))
 	for _, d := range decls {
@@ -1661,19 +1666,57 @@ func resolveProvisionArgs(decls []*alphasfile.ProvisionArg, supplied map[string]
 	out := make(map[string]string, len(decls))
 	for _, d := range decls {
 		v, ok := supplied[d.Name]
-		switch {
-		case ok:
-			// use supplied
-		case d.Default != nil:
-			v = d.Default
-		case d.Required:
-			return nil, fmt.Errorf("missing required argument %q", d.Name)
-		default:
-			v = ""
+		if !ok {
+			switch {
+			case d.Default != nil:
+				v = d.Default
+			case d.Required:
+				return nil, fmt.Errorf("missing required argument %q", d.Name)
+			default:
+				out[d.Name] = "" // optional, absent
+				continue
+			}
 		}
-		out[d.Name] = fmt.Sprintf("%v", v)
+		s, err := coerceArg(d, v)
+		if err != nil {
+			return nil, err
+		}
+		out[d.Name] = s
 	}
 	return out, nil
+}
+
+// coerceArg type-checks a value against an argument's declared type and renders
+// it for the shell. JSON numbers decode to float64; eval defaults to int64.
+func coerceArg(d *alphasfile.ProvisionArg, v any) (string, error) {
+	switch d.Type {
+	case "number":
+		switch n := v.(type) {
+		case float64:
+			if i := int64(n); float64(i) == n {
+				return strconv.FormatInt(i, 10), nil
+			}
+			return strconv.FormatFloat(n, 'g', -1, 64), nil
+		case int64:
+			return strconv.FormatInt(n, 10), nil
+		case int:
+			return strconv.Itoa(n), nil
+		default:
+			return "", fmt.Errorf("argument %q must be a number, got %T", d.Name, v)
+		}
+	case "bool":
+		b, ok := v.(bool)
+		if !ok {
+			return "", fmt.Errorf("argument %q must be a bool, got %T", d.Name, v)
+		}
+		return strconv.FormatBool(b), nil
+	default: // string
+		s, ok := v.(string)
+		if !ok {
+			return "", fmt.Errorf("argument %q must be a string, got %T", d.Name, v)
+		}
+		return s, nil
+	}
 }
 
 // substituteArgs replaces each argument's placeholder sentinel in a snippet
