@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
@@ -20,7 +20,7 @@ import (
 // unknown `service.X.Y` ref, a cycle in the DAG, a missing env var —
 // is a fatal error: plan is the "every value bakes down to a constant
 // before we touch the system" preflight, not a partial dump.
-func runPlan(_ context.Context, zordonHome string, testCfg alphasfile.TestConfig) error {
+func runPlan(_ context.Context, w io.Writer, zordonHome string, testCfg alphasfile.TestConfig) error {
 	levels, err := walkChain(zordonHome, func(lv *level) (*protocol.StateInfo, error) {
 		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
 		if err != nil {
@@ -33,14 +33,14 @@ func runPlan(_ context.Context, zordonHome string, testCfg alphasfile.TestConfig
 	}
 	for i, lv := range levels {
 		if i > 0 {
-			fmt.Println()
+			fmt.Fprintln(w)
 		}
 		marker := ""
 		if lv.isInvocation {
 			marker = " (invocation)"
 		}
-		fmt.Printf("# === [%s] %s%s ===\n", lv.inv.FsHash, lv.afPath, marker)
-		if _, err := os.Stdout.Write(renderState(lv.state)); err != nil {
+		fmt.Fprintf(w, "# === [%s] %s%s ===\n", lv.inv.FsHash, lv.afPath, marker)
+		if _, err := w.Write(renderState(lv.state)); err != nil {
 			return err
 		}
 	}

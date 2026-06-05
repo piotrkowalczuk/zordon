@@ -21,12 +21,30 @@ const (
 	OpConfigure Op = "configure"
 	OpState     Op = "state"
 	OpShutdown  Op = "shutdown"
+	OpInvoke    Op = "invoke"
 )
 
 type Request struct {
 	Op        Op             `json:"op"`
 	Configure *ConfigureArgs `json:"configure,omitempty"`
+	Invoke    *InvokeArgs    `json:"invoke,omitempty"`
 	Extra     map[string]any `json:"extra,omitempty"`
+}
+
+// InvokeArgs runs a single provision on demand inside the live alpha. The
+// provision's snippets, parent service env, cwd and toolchain are reused as-is;
+// Env is overlaid on top (highest precedence) so a caller can parametrize a
+// latent template (e.g. TOPIC for kafka's create-topic). The run streams the
+// same Event sequence as Configure and never triggers failfast shutdown — a
+// failed invoke reports failure but leaves alpha running.
+type InvokeArgs struct {
+	// Provision is the canonical id: service.<tc>.<svc>.runtime.provision.<name>.
+	Provision string `json:"provision"`
+	// Args are the provision's declared, typed arguments (placeholder
+	// substitution); Env is the free-form environment overlay. Both reach the
+	// shell, but Args are validated against the provision's `argument` blocks.
+	Args map[string]any    `json:"args,omitempty"`
+	Env  map[string]string `json:"env,omitempty"`
 }
 
 type ConfigureArgs struct {

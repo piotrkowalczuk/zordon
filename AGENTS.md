@@ -17,7 +17,13 @@
   - **When NOT to use (Resource Constraints):** NEVER use `t.Parallel()` if the test is heavily resource-intensive (e.g., allocates massive amounts of memory, monopolizes CPU cores, or requires a large number of DB connections). Running such tests in parallel can exhaust the host's resources (especially on CI runners), leading to OOM kills, timeouts, or connection pool exhaustion.
   - **When NOT to use (State Mutation):** Strictly FORBIDDEN if the test mutates global state, modifies environment variables (`os.Setenv`), or interacts with a shared, unisolated mutable resource.
   - **When NOT to use (Rate Limiting & Throttling):** NEVER use `t.Parallel()` if the test interacts with external APIs, third-party services, or internal systems that enforce strict rate limits. Concurrent execution will easily trigger rate-limit violations (e.g., `HTTP 429`) and cause flaky test failures.
-
+- Use test names like
+  - `Test<TypeName>_<MethodName>_<optionalAdditionalContext>
+  - `Test<TypeName>_<MethodName>
+  - `Test<TypeName>
+  - `Test<FunctionName>_<optionalAdditionalContext>
+  - `Test<FunctionName>
+      
 ### Parametrized Tests
 ```go
 func TestExample(t *testing.T) {

@@ -64,3 +64,4 @@ that.
 - [Getting started](getting-started.md) — install and a first stack
 - [Concepts](concepts.md) — the mental model that makes the rest obvious
 - [Architecture](architecture.md) · [Alphasfile](alphasfile.md) · [Worktrees](worktrees.md) · [Federation](federation.md)
+- [`zordon mcp` reference](reference/mcp.md) · [Run a provision via MCP](how-to/run-a-provision-via-mcp.md) — drive zordon (and its provisions) from an agent over MCP

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -41,6 +42,14 @@ type failure struct {
 	err     string
 }
 
+// commandIO is where the command tree writes. main wires it to the process
+// stdio; the MCP server swaps in buffers to capture a command's output as a
+// tool result instead of letting it leak onto the JSON-RPC stdout channel.
+type commandIO struct {
+	Stdout io.Writer
+	Stderr io.Writer
+}
+
 func main() {
 	// Ignore SIGPIPE on stdout/stderr. Go's default for SIGPIPE on the
 	// std fds is to kill the process — fine for one-shot CLIs, fatal
@@ -52,6 +61,27 @@ func main() {
 	// SIG_IGN for our purposes.
 	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
 
+	rootCmd, agent := buildRootCommand(commandIO{Stdout: os.Stdout, Stderr: os.Stderr})
+
+	err := rootCmd.ParseAndRun(context.Background(), os.Args[1:],
+		ff.WithEnvVarPrefix("ZORDON"))
+	switch {
+	case errors.Is(err, ff.ErrHelp), errors.Is(err, ff.ErrNoExec):
+		fmt.Fprintln(os.Stderr, ffhelp.Command(rootCmd))
+		os.Exit(0)
+	case err != nil:
+		zlog.New(os.Stderr, *agent).Error("zordon", "%v", err)
+		os.Exit(1)
+	}
+}
+
+// buildRootCommand assembles the full ff command tree, wiring every command's
+// output to stdio. It returns the agent flag pointer so main can honor it when
+// formatting a fatal error. The tree is rebuilt per call with fresh flag
+// pointers, so the MCP server can both introspect it (to generate one tool per
+// command) and re-run a single command against capture buffers without sharing
+// parse state with the live process.
+func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	rootFlags := ff.NewFlagSet("zordon")
 	verbose := rootFlags.Bool('v', "verbose", "verbose logging")
 	agent := rootFlags.BoolLong("agent", "machine-friendly output: '<ms-since-start> <src> <LEVEL> <msg>'")
@@ -65,6 +95,10 @@ func main() {
 		Flags: rootFlags,
 	}
 	_ = home // resolved later through zfs.ZordonHome() when needed
+
+	testCfg := func() alphasfile.TestConfig {
+		return alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()}
+	}
 
 	// start
 	startFlags := ff.NewFlagSet("start").SetParent(rootFlags)
@@ -83,10 +117,10 @@ func main() {
 		ShortHelp: "ensure alpha is running and push the Alphasfile config (optional service args bring up just that subset)",
 		Flags:     startFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runStart(ctx, zlog.New(os.Stderr, *agent), *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent,
+			return runStart(ctx, zlog.New(stdio.Stderr, *agent), *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent,
 				parsePicks(args),
 				zfs.ZordonHome(home.Path()),
-				alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
+				testCfg())
 		},
 	}
 
@@ -98,7 +132,7 @@ func main() {
 		ShortHelp: "query the running alpha for its state",
 		Flags:     statusFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runStatus(ctx, zlog.New(os.Stderr, *agent), zfs.ZordonHome(home.Path()), alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
+			return runStatus(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg())
 		},
 	}
 
@@ -110,7 +144,7 @@ func main() {
 		ShortHelp: "ask the running alpha to shut down",
 		Flags:     stopFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runStop(ctx, zlog.New(os.Stderr, *agent), zfs.ZordonHome(home.Path()), alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
+			return runStop(ctx, zlog.New(stdio.Stderr, *agent), zfs.ZordonHome(home.Path()), testCfg())
 		},
 	}
 
@@ -122,7 +156,7 @@ func main() {
 		ShortHelp: "run the idempotent privileged hooks for the whole federation chain",
 		Flags:     sudoFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runSudo(ctx, zlog.New(os.Stderr, *agent), zfs.ZordonHome(home.Path()), alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
+			return runSudo(ctx, zlog.New(stdio.Stderr, *agent), zfs.ZordonHome(home.Path()), testCfg())
 		},
 	}
 
@@ -134,7 +168,7 @@ func main() {
 		ShortHelp: "manage parallel worktrees (isolated state/ports over the same Alphasfile)",
 		Flags:     wtFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runWorktree(ctx, zlog.New(os.Stderr, *agent), args, zfs.ZordonHome(home.Path()))
+			return runWorktree(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, args, zfs.ZordonHome(home.Path()))
 		},
 	}
 
@@ -146,7 +180,7 @@ func main() {
 		ShortHelp: "render the resolved Alphasfile chain with every interpolation baked to a concrete value (errors on the first unresolvable expression)",
 		Flags:     planFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runPlan(ctx, zfs.ZordonHome(home.Path()), alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
+			return runPlan(ctx, stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg())
 		},
 	}
 
@@ -158,22 +192,24 @@ func main() {
 		ShortHelp: "print a resolved value (dotted path or Go template) e.g. service.go.prometheus.vars.address",
 		Flags:     getFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runGet(ctx, args, zfs.ZordonHome(home.Path()), alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()})
+			return runGet(ctx, args, stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg())
 		},
 	}
 
-	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wtCmd, getCmd, planCmd)
-
-	err := rootCmd.ParseAndRun(context.Background(), os.Args[1:],
-		ff.WithEnvVarPrefix("ZORDON"))
-	switch {
-	case errors.Is(err, ff.ErrHelp), errors.Is(err, ff.ErrNoExec):
-		fmt.Fprintln(os.Stderr, ffhelp.Command(rootCmd))
-		os.Exit(0)
-	case err != nil:
-		zlog.New(os.Stderr, *agent).Error("zordon", "%v", err)
-		os.Exit(1)
+	// mcp
+	mcpFlags := ff.NewFlagSet("mcp").SetParent(rootFlags)
+	mcpCmd := &ff.Command{
+		Name:      "mcp",
+		Usage:     "zordon mcp",
+		ShortHelp: "serve an MCP server over stdio: every command plus every provision as a tool",
+		Flags:     mcpFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runMCP(ctx, stdio, zfs.ZordonHome(home.Path()), *agent, testCfg())
+		},
 	}
+
+	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wtCmd, getCmd, planCmd, mcpCmd)
+	return rootCmd, agent
 }
 
 // walkUp climbs from cwd toward / looking for an Alphasfile.
@@ -477,7 +513,7 @@ func readHandshake(r *os.File, readyCh chan<- struct{}, errCh chan<- error, logf
 	errCh <- errors.New("alpha closed handshake without READY")
 }
 
-func runStatus(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg alphasfile.TestConfig) error {
+func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome string, testCfg alphasfile.TestConfig) error {
 	_ = log // status output is structured stdout, not log-style
 
 	// Status reports the whole federation chain, not just the invocation.
@@ -489,30 +525,30 @@ func runStatus(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg
 	anyRunning := false
 	for i, lv := range levels {
 		if i > 0 {
-			fmt.Println()
+			fmt.Fprintln(out)
 		}
 		marker := ""
 		if lv.isInvocation {
 			marker = fmt.Sprintf(" (invocation, worktree=%s)", lv.inv.Worktree)
 		}
-		fmt.Printf("# [%s] %s%s\n", lv.inv.FsHash, lv.afPath, marker)
+		fmt.Fprintf(out, "# [%s] %s%s\n", lv.inv.FsHash, lv.afPath, marker)
 
 		if lv.state == nil {
-			fmt.Println("  alpha: not running")
+			fmt.Fprintln(out, "  alpha: not running")
 			continue
 		}
 		anyRunning = true
 		st := lv.state
-		fmt.Printf("  alpha pid=%d started=%s\n", st.PID, st.StartedAt)
+		fmt.Fprintf(out, "  alpha pid=%d started=%s\n", st.PID, st.StartedAt)
 		if len(st.Services) == 0 {
-			fmt.Println("  services: (none configured yet)")
+			fmt.Fprintln(out, "  services: (none configured yet)")
 			continue
 		}
 		runningByName := make(map[string]protocol.ServiceStatus, len(st.Running))
 		for _, r := range st.Running {
 			runningByName[r.Name] = r
 		}
-		fmt.Printf("  services (%d):\n", len(st.Services))
+		fmt.Fprintf(out, "  services (%d):\n", len(st.Services))
 		for _, s := range st.Services {
 			state := "stopped"
 			if status, ok := runningByName[s.Name()]; ok {
@@ -531,11 +567,11 @@ func runStatus(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg
 				}
 				state = fmt.Sprintf("running pid=%d%s", status.PID, health)
 			}
-			fmt.Printf("    - [%s] %s — %s\n", s.Toolchain, s.Name(), state)
+			fmt.Fprintf(out, "    - [%s] %s — %s\n", s.Toolchain, s.Name(), state)
 			if s.Runtime != nil && s.Runtime.Print != "" {
 				// Plain text: the value is the composed (interpolated)
 				// string; the terminal linkifies any URL itself.
-				fmt.Printf("        %s\n", s.Runtime.Print)
+				fmt.Fprintf(out, "        %s\n", s.Runtime.Print)
 			}
 		}
 	}

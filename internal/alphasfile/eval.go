@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/big"
 	"net"
 	"os/exec"
 	"path/filepath"
@@ -294,6 +295,9 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	if err := r.injectDebuggerTools(toolchain); err != nil {
 		return nil, err
 	}
+	if err := validateProvisionArgRefs(r.resolvedServices); err != nil {
+		return nil, err
+	}
 	return &Alphasfile{
 		CfgHash:   r.cfgHash,
 		Dotenv:    gdot,
@@ -301,6 +305,38 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 		Toolchain: toolchain,
 		SysEnv:    sysEnv,
 	}, nil
+}
+
+// validateProvisionArgRefs rejects a cmd-ref whose target provision declares
+// arguments: the invoker would inherit unsubstituted placeholders (a target's
+// arguments are bound only at its own invoke). Argument-bearing provisions are
+// invoked at runtime, never used as cmd-ref templates. Limited to provisions in
+// this Alphasfile level (cross-federation refs aren't checked here).
+func validateProvisionArgRefs(services []*Service) error {
+	byID := map[string]*ProvisionStep{}
+	for _, s := range services {
+		if s == nil || s.Runtime == nil {
+			continue
+		}
+		sid := serviceID(s.Toolchain, s.Name())
+		for _, p := range s.Runtime.Provision {
+			byID[sid+".runtime.provision."+p.Name] = p
+		}
+	}
+	for _, s := range services {
+		if s == nil || s.Runtime == nil {
+			continue
+		}
+		for _, p := range s.Runtime.Provision {
+			if p.CmdRef == "" {
+				continue
+			}
+			if tgt, ok := byID[p.CmdRef]; ok && len(tgt.Arguments) > 0 {
+				return fmt.Errorf("provision %q: cmd references %q which declares arguments; invoke an argument-bearing provision at runtime, not via cmd-ref", p.Name, p.CmdRef)
+			}
+		}
+	}
+	return nil
 }
 
 const (
@@ -650,13 +686,28 @@ func (r *resolver) finishService(st *svcState) error {
 	if sb.Runtime != nil {
 		for _, pb := range sb.Runtime.Provision {
 			label := "provision." + pb.Name
-			check, err := r.evalStr(pb.Check, self, label+".check", dirs)
+
+			// Declared arguments are parsed first: their names define the
+			// placeholder bindings the snippets evaluate against. `self` is
+			// augmented with this provision's own arguments only, so a
+			// reference to another provision's `.arguments` errors out.
+			pargs, err := r.evalProvisionArgs(pb, self, dirs, label)
+			if err != nil {
+				return err
+			}
+			argNames := make([]string, len(pargs))
+			for i, a := range pargs {
+				argNames[i] = a.Name
+			}
+			selfP := provisionSelfWithArgs(self, pb.Name, argNames)
+
+			check, err := r.evalStr(pb.Check, selfP, label+".check", dirs)
 			if err != nil {
 				return err
 			}
 			// cmd is either an inline shell snippet (string) or a bare
 			// reference to another (latent) provision used as a template.
-			cmdRef, isRef, err := r.provisionRefOf(pb.Cmd, self, dirs)
+			cmdRef, isRef, err := r.provisionRefOf(pb.Cmd, selfP, dirs)
 			if err != nil {
 				return fmt.Errorf("%s.cmd: %w", label, err)
 			}
@@ -666,17 +717,20 @@ func (r *resolver) finishService(st *svcState) error {
 					return fmt.Errorf("%s.cmd: provision cannot reference itself", label)
 				}
 			} else {
-				cmd, err = r.evalStr(pb.Cmd, self, label+".cmd", dirs)
+				cmd, err = r.evalStr(pb.Cmd, selfP, label+".cmd", dirs)
 				if err != nil {
 					return err
 				}
 			}
-			verify, err := r.evalStr(pb.Verify, self, label+".verify", dirs)
+			verify, err := r.evalStr(pb.Verify, selfP, label+".verify", dirs)
 			if err != nil {
 				return err
 			}
 			if isRef && (strings.TrimSpace(check) != "" || strings.TrimSpace(verify) != "") {
 				return fmt.Errorf("%s: check/verify are not allowed when cmd references another provision (the template owns them)", label)
+			}
+			if len(pargs) > 0 && isRef {
+				return fmt.Errorf("%s: `argument` blocks are not allowed when cmd references another provision", label)
 			}
 			var penv map[string]string
 			if pb.Env != nil {
@@ -708,16 +762,21 @@ func (r *resolver) finishService(st *svcState) error {
 			if latent && pb.Detached {
 				return fmt.Errorf("%s: `detached` is meaningless on a latent (`after = never`) provision", label)
 			}
+			if len(pargs) > 0 && !latent {
+				return fmt.Errorf("%s: a provision with `argument` blocks must be latent (`after = never`) — its placeholders are only substituted at invoke", label)
+			}
 			provisions = append(provisions, &ProvisionStep{
-				Name:     pb.Name,
-				Check:    check,
-				Cmd:      cmd,
-				Verify:   verify,
-				Env:      penv,
-				After:    afterClean,
-				Detached: pb.Detached,
-				Latent:   latent,
-				CmdRef:   cmdRef,
+				Name:        pb.Name,
+				Description: pb.Description,
+				Arguments:   pargs,
+				Check:       check,
+				Cmd:         cmd,
+				Verify:      verify,
+				Env:         penv,
+				After:       afterClean,
+				Detached:    pb.Detached,
+				Latent:      latent,
+				CmdRef:      cmdRef,
 			})
 		}
 	}
@@ -1193,6 +1252,89 @@ func copyCtyMap(in map[string]cty.Value) map[string]cty.Value {
 	out := make(map[string]cty.Value, len(in))
 	maps.Copy(out, in)
 	return out
+}
+
+// ArgSentinel is the placeholder a `${self.runtime.provision.<p>.arguments.<a>}`
+// reference resolves to at configure time. NUL-delimited so it can't collide
+// with real shell/HCL text; alpha replaces it with the supplied value at
+// invoke. JSON escapes the NUL bytes, so the sentinel survives the control wire.
+func ArgSentinel(name string) string { return "\x00zarg:" + name + "\x00" }
+
+// provisionSelfWithArgs returns a copy of self where the named provision's node
+// (self.runtime.provision.<provName>) gains an `arguments` object mapping each
+// declared arg name to its placeholder sentinel. Only that one provision's node
+// is augmented, so any reference to another provision's `.arguments` resolves
+// against a node without the attribute and errors. No-op when the provision
+// declares no arguments.
+func provisionSelfWithArgs(self map[string]cty.Value, provName string, argNames []string) map[string]cty.Value {
+	if len(argNames) == 0 {
+		return self
+	}
+	argsObj := make(map[string]cty.Value, len(argNames))
+	for _, n := range argNames {
+		argsObj[n] = cty.StringVal(ArgSentinel(n))
+	}
+	out := copyCtyMap(self)
+	rt := self["runtime"].AsValueMap()
+	provs := rt["provision"].AsValueMap()
+	node := provs[provName].AsValueMap()
+	node["arguments"] = cty.ObjectVal(argsObj)
+	provs[provName] = cty.ObjectVal(node)
+	rt["provision"] = cty.ObjectVal(provs)
+	out["runtime"] = cty.ObjectVal(rt)
+	return out
+}
+
+// evalProvisionArgs parses a provision's `argument` blocks into resolved
+// ProvisionArgs: it defaults and validates the type and evaluates the optional
+// default expression to a concrete value (against the service `self`).
+func (r *resolver) evalProvisionArgs(pb *provisionBlock, self map[string]cty.Value, dirs srcDirs, label string) ([]*ProvisionArg, error) {
+	if len(pb.Argument) == 0 {
+		return nil, nil
+	}
+	out := make([]*ProvisionArg, 0, len(pb.Argument))
+	for _, ab := range pb.Argument {
+		typ := ab.Type
+		if typ == "" {
+			typ = "string"
+		}
+		if typ != "string" && typ != "number" && typ != "bool" {
+			return nil, fmt.Errorf("%s.argument %q: type must be string|number|bool, got %q", label, ab.Name, typ)
+		}
+		var def any
+		if ab.Default != nil {
+			dv, diags := ab.Default.Value(r.ctxWith(self, dirs))
+			if diags.HasErrors() {
+				return nil, fmt.Errorf("%s.argument %q.default: %s", label, ab.Name, diags.Error())
+			}
+			def = ctyScalar(dv)
+		}
+		out = append(out, &ProvisionArg{Name: ab.Name, Type: typ, Required: ab.Required, Default: def, Description: ab.Description})
+	}
+	return out, nil
+}
+
+// ctyScalar projects a scalar cty.Value (string/number/bool) into a Go value
+// for ProvisionArg.Default. Non-scalars and null yield nil.
+func ctyScalar(v cty.Value) any {
+	if v.IsNull() {
+		return nil
+	}
+	switch v.Type() {
+	case cty.String:
+		return v.AsString()
+	case cty.Bool:
+		return v.True()
+	case cty.Number:
+		bf := v.AsBigFloat()
+		if i, acc := bf.Int64(); acc == big.Exact {
+			return i
+		}
+		f, _ := bf.Float64()
+		return f
+	default:
+		return nil
+	}
 }
 
 // mapValToCty projects a Go map[string]any (the evaluated form of vars or

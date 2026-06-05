@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,7 +40,7 @@ func projectRoot() (string, error) {
 // ports and per-service git checkouts (alpha does `git worktree add` for
 // every worktree-able service at start). "main" is the implicit worktree =
 // the project root itself.
-func runWorktree(ctx context.Context, log *zlog.Logger, args []string, zordonHome string) error {
+func runWorktree(ctx context.Context, log *zlog.Logger, out io.Writer, args []string, zordonHome string) error {
 	if len(args) == 0 {
 		return errors.New("usage: zordon worktree <create|list|rm> [name]")
 	}
@@ -54,7 +55,7 @@ func runWorktree(ctx context.Context, log *zlog.Logger, args []string, zordonHom
 		entries, err := zfs.ReadDir(base)
 		if err != nil {
 			if zfs.IsMissingErr(err) {
-				fmt.Println("(no worktrees; 'main' is the project root)")
+				fmt.Fprintln(out, "(no worktrees; 'main' is the project root)")
 				return nil
 			}
 			return err
@@ -66,10 +67,10 @@ func runWorktree(ctx context.Context, log *zlog.Logger, args []string, zordonHom
 			}
 		}
 		sort.Strings(names)
-		fmt.Printf("worktrees of %s:\n", root)
-		fmt.Println("  - main (project root)")
+		fmt.Fprintf(out, "worktrees of %s:\n", root)
+		fmt.Fprintln(out, "  - main (project root)")
 		for _, n := range names {
-			fmt.Printf("  - %s\t%s\n", n, filepath.Join(base, n))
+			fmt.Fprintf(out, "  - %s\t%s\n", n, filepath.Join(base, n))
 		}
 		return nil
 
@@ -97,7 +98,7 @@ func runWorktree(ctx context.Context, log *zlog.Logger, args []string, zordonHom
 		if err := checkoutServices(ctx, log, name, dir, args[2:], zordonHome); err != nil {
 			return err
 		}
-		fmt.Printf("worktree ready. Bring it up with:\n  cd %s && zordon start\n", dir)
+		fmt.Fprintf(out, "worktree ready. Bring it up with:\n  cd %s && zordon start\n", dir)
 		return nil
 
 	case "rm":
