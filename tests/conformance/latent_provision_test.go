@@ -16,16 +16,15 @@
 // the old one's socket is gone but the process is still alive).
 //
 // Reproduction shape:
-//   1. Alphasfile with a normal service plus a latent provision.
-//   2. `zordon start` — bringup completes cleanly (latent doesn't run,
-//      service comes up).
-//   3. `zordon stop` — sends OpShutdown; without the fix alpha hangs
-//      indefinitely in shutdownAll. With the fix alpha exits promptly.
+//  1. Alphasfile with a normal service plus a latent provision.
+//  2. `zordon start` — bringup completes cleanly (latent doesn't run,
+//     service comes up).
+//  3. `zordon stop` — sends OpShutdown; without the fix alpha hangs
+//     indefinitely in shutdownAll. With the fix alpha exits promptly.
 package conformance_test
 
 import (
 	"context"
-	"fmt"
 	"os/exec"
 	"syscall"
 	"testing"
@@ -38,12 +37,11 @@ func TestLatentProvision_shutdownDoesNotDeadlock(t *testing.T) {
 	p := zordontest.NewProject(t, zordontest.WithExpectedLeftovers())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27999
 	// Single service + one latent provision. The latent never runs
 	// (after = never) — it would only be invoked by a peer via
 	// `cmd_ref = create_topic` (none here; we don't need to exercise
 	// the peer path to trigger the deadlock, just the registration).
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -57,7 +55,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -77,7 +75,7 @@ service "go" "svc1" {
     failure_threshold = 100
   }
 }
-`, port))
+`)
 
 	t.Cleanup(func() { dumpAlphaLog(t, p.AlphaLogPath()) })
 
@@ -119,7 +117,6 @@ service "go" "svc1" {
 			t.Logf("alpha pid %d exited after zordon stop — latent didn't deadlock shutdownAll", alphaPID)
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
 	_ = syscall.Kill(alphaPID, syscall.SIGKILL)
 	t.Fatalf("alpha pid %d still alive 10s after zordon stop — shutdownAll deadlocked on latent provision's never-closed pc.done", alphaPID)

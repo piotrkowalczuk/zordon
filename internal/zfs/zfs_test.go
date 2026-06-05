@@ -25,8 +25,8 @@ func TestZordonHome_defaultsToUserHomeZordon(t *testing.T) {
 
 func TestFileDescriptor_setAndValidate(t *testing.T) {
 	cases := map[string]struct {
-		in    string
-		want  int
+		in      string
+		want    int
 		wantErr bool
 	}{
 		"empty":   {"", 0, false},

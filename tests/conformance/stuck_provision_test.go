@@ -19,7 +19,6 @@ package conformance_test
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -36,7 +35,6 @@ func TestStuckProvision_zordonSIGINTReapsAlphaWithinGrace(t *testing.T) {
 	p := zordontest.NewProject(t, zordontest.WithExpectedLeftovers())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27981
 	// The provision traps SIGTERM and sleeps — exactly the misbehaving
 	// shape we want the supervisor to reap anyway. svc1 itself has a
 	// stable trivial build; the readiness probe never gets to run
@@ -46,7 +44,7 @@ func TestStuckProvision_zordonSIGINTReapsAlphaWithinGrace(t *testing.T) {
 	// EventDone until BOTH the service is ready AND non-detached
 	// provisions reached success/failure — so SIGINT lands while the
 	// provision is still in flight, which is the window under test).
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -60,7 +58,7 @@ service "go" "svc1" {
     exe = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -79,7 +77,7 @@ service "go" "svc1" {
     failure_threshold = 100
   }
 }
-`, port))
+`)
 
 	binZ := zordonBinaryFromEnvOrPath(t)
 	t.Cleanup(func() { dumpAlphaLog(t, p.AlphaLogPath()) })

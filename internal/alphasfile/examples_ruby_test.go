@@ -16,11 +16,11 @@ func TestExampleRubyResolves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	iv := &invocation.Invocation{
+	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
 		StateDir: "/repo/examples/ruby/.zordon/worktrees/main",
 	}
-	af, err := Compile("/repo/examples/ruby/Alphasfile", b, iv, nil, TestConfig{})
+	af, err := Compile("/repo/examples/ruby/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

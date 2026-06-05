@@ -87,7 +87,7 @@ type writeLog struct {
 }
 
 func (w *writeLog) Write(p []byte) (int, error) {
-	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(string(p), "\n"), "\n") {
 		if line != "" {
 			w.log.Info(w.src, "%s", line)
 		}
@@ -96,7 +96,6 @@ func (w *writeLog) Write(p []byte) (int, error) {
 }
 
 func logWriter(log *zlog.Logger, src string) io.Writer { return &writeLog{log: log, src: src} }
-
 
 // fsHashFromSocket extracts the fs_hash segment from an alpha socket
 // path of the form `<tmpdir>/zordon-<fsHash>/alpha.sock`. Empty
@@ -247,8 +246,8 @@ type runConfig struct {
 	Home          zfs.DirName             // resolved zordon home (--home → ZORDON_HOME; "" ⇒ ~/.zordon)
 	TommyBin      zfs.DirName             // tommy wrapper override (--tommy-bin → ZORDON_TOMMY_BIN)
 	Worktree      invocation.WorktreeName // which worktree this alpha runs for (--worktree → ZORDON_WORKTREE)
-	ReadyFD       zfs.FileDescriptor // parent handshake fd (--ready-fd → ZORDON_READY_FD; 0 ⇒ no handshake)
-	ParentFD      zfs.FileDescriptor // parent-death pipe fd (--parent-fd → ZORDON_PARENT_FD; 0 ⇒ standalone)
+	ReadyFD       zfs.FileDescriptor      // parent handshake fd (--ready-fd → ZORDON_READY_FD; 0 ⇒ no handshake)
+	ParentFD      zfs.FileDescriptor      // parent-death pipe fd (--parent-fd → ZORDON_PARENT_FD; 0 ⇒ standalone)
 }
 
 func main() {
@@ -305,7 +304,6 @@ func main() {
 	}
 }
 
-
 type alphaState struct {
 	mu             sync.RWMutex
 	startedAt      time.Time
@@ -318,11 +316,11 @@ type alphaState struct {
 	parentDotenv   []string // file-level dotenv paths inherited from federation parents
 	agentMode      bool     // configured via `zordon --agent`: apply agent{} env overlay
 	config         *alphasfile.Alphasfile
-	services       map[string]*serviceCtx    // keyed by service name
-	provisions     map[string]*provisionCtx  // keyed by provision ID ("service.<tc>.<svc>.runtime.provision.<name>")
-	toolchains     map[string]*toolchainCtx  // keyed by lang ("go", "rust", "ruby")
-	readiness      map[string]string         // service name -> readiness state ("probing", "ready", "failed")
-	files          []string                  // absolute paths of file{} outputs to unlink on shutdown
+	services       map[string]*serviceCtx   // keyed by service name
+	provisions     map[string]*provisionCtx // keyed by provision ID ("service.<tc>.<svc>.runtime.provision.<name>")
+	toolchains     map[string]*toolchainCtx // keyed by lang ("go", "rust", "ruby")
+	readiness      map[string]string        // service name -> readiness state ("probing", "ready", "failed")
+	files          []string                 // absolute paths of file{} outputs to unlink on shutdown
 
 	// shutdownCh is closed exactly once to signal whole-alpha shutdown.
 	// Each service supervisor selects on it; the runAlpha main goroutine
@@ -346,6 +344,14 @@ type alphaState struct {
 	// without that close meaning death. Nil when alpha was launched
 	// outside zordon (no ZORDON_PARENT_FD).
 	parentW *parentwatch.Watcher
+
+	// bringupDone is the commit point: once alpha decides the first
+	// bringup succeeded (set just before emitting EventDone), the services
+	// are up to stay, so a subsequent parent (zordon) exit is the EXPECTED
+	// clean detach — not a death that should tear them down. Set before
+	// EventDone, checked by the parent-death goroutine, so the detach-exit
+	// can never be misread as "died during bringup".
+	bringupDone atomic.Bool
 
 	// handlerDones: each accepted-conn goroutine appends a fresh
 	// chan struct{} on entry and closes it on exit. drainedCh waits for
@@ -406,8 +412,8 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 	entityID, state := ref[:at], lifecycle.State(ref[at+1:])
 	// Toolchain ref: `toolchain.<lang>`. Cheapest to check first by
 	// prefix because nothing else starts with it.
-	if strings.HasPrefix(entityID, "toolchain.") {
-		lang := strings.TrimPrefix(entityID, "toolchain.")
+	if after, ok := strings.CutPrefix(entityID, "toolchain."); ok {
+		lang := after
 		s.mu.RLock()
 		tc := s.toolchains[lang]
 		s.mu.RUnlock()
@@ -421,7 +427,7 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 		return &barrierTarget{target: t, fail: tc.TerminalFailure()}, nil
 	}
 	// Provision ref: ends with `.runtime.provision.<name>`.
-	if idx := strings.Index(entityID, ".runtime.provision."); idx >= 0 {
+	if found := strings.Contains(entityID, ".runtime.provision."); found {
 		s.mu.RLock()
 		pc := s.provisions[entityID]
 		s.mu.RUnlock()
@@ -437,8 +443,8 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 	// Service build ref: ends with `.build` (and isn't a provision).
 	// Check before `.runtime` so a future `service.X.build.subblock`
 	// doesn't get misdispatched.
-	if strings.HasSuffix(entityID, ".build") {
-		svcID := strings.TrimSuffix(entityID, ".build")
+	if before, ok := strings.CutSuffix(entityID, ".build"); ok {
+		svcID := before
 		parts := strings.SplitN(svcID, ".", 3)
 		if len(parts) != 3 || parts[0] != "service" {
 			return nil, fmt.Errorf("bad barrier entity ID %q", entityID)
@@ -457,8 +463,8 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 		return &barrierTarget{target: t, fail: sc.BuildTerminalFailure()}, nil
 	}
 	// Service runtime ref: ends with `.runtime` (and isn't a provision).
-	if strings.HasSuffix(entityID, ".runtime") {
-		svcID := strings.TrimSuffix(entityID, ".runtime")
+	if before, ok := strings.CutSuffix(entityID, ".runtime"); ok {
+		svcID := before
 		parts := strings.SplitN(svcID, ".", 3)
 		if len(parts) != 3 || parts[0] != "service" {
 			return nil, fmt.Errorf("bad barrier entity ID %q", entityID)
@@ -838,7 +844,9 @@ func (pc *provisionCtx) TerminalFailure() *barrier.Barrier {
 // check/cmd/verify snippets come from the referenced template instead.
 // Reach success/failure terminal, close done. Failure under failfast on
 // a non-detached provision triggers global shutdown.
-func runProvision(pc *provisionCtx, state *alphaState, parent *serviceCtx, grace time.Duration, stream *safeEncoder, log *zlog.Logger, failfast bool) {
+func runProvision(b *bringup, pc *provisionCtx, parent *serviceCtx) {
+	state, stream, log, failfast := b.state, b.stream, b.log, b.failfast
+	grace := b.cfg.shutdownGrace
 	defer close(pc.done)
 	// Same reasoning as bringupAndSupervise: keep the entry in
 	// state.provisions so other entities that wait on this provision's
@@ -1308,6 +1316,18 @@ type bringupConfig struct {
 	shutdownGrace time.Duration
 }
 
+// bringup bundles the per-configure context every service/provision bringup
+// goroutine threads — shared supervisor state, timings, event stream, logger,
+// and the failfast flag — so the bringup functions don't each carry five loose
+// arguments. Built once in handleConfigure; read-only from the goroutines.
+type bringup struct {
+	state    *alphaState
+	cfg      bringupConfig
+	stream   *safeEncoder
+	log      *zlog.Logger
+	failfast bool
+}
+
 func runAlpha(_ context.Context, rc runConfig) error {
 	if rc.SockPath == "" {
 		return errors.New("--socket is required")
@@ -1406,6 +1426,12 @@ func runAlpha(_ context.Context, rc runConfig) error {
 	go func() {
 		select {
 		case <-parentW.Died():
+			if state.bringupDone.Load() {
+				// Expected clean detach: alpha already committed to the
+				// bringup succeeding (bringupDone set just before EventDone),
+				// so zordon's exit is the detach handshake, not a death.
+				return
+			}
 			log.Error("alpha", "zordon parent died during bringup; shutting down")
 			state.requestShutdown("parent (zordon) died during bringup")
 		case <-state.shutdownCh:
@@ -1569,6 +1595,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		req.Configure.AlphasfilePath, len(services), len(files), failfast)
 
 	stream := newSafeEncoder(enc)
+	b := &bringup{state: state, cfg: cfg, stream: stream, log: log, failfast: failfast}
 	defer stream.Close()
 	// One configure round-trip is the contract with zordon: once we
 	// have emitted EventDone (or EventError), zordon will detach and
@@ -1662,10 +1689,10 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	// only when it must; bringup parallelism is naturally bounded by
 	// the dep graph the user authored.
 	for _, svc := range toBringup {
-		go bringupAndSupervise(svc, serviceCtxs[svc.Name()], state, cfg, stream, log, failfast)
+		go bringupAndSupervise(b, svc, serviceCtxs[svc.Name()])
 	}
 	for _, p := range provs {
-		go runProvision(p.pc, state, p.parent, cfg.shutdownGrace, stream, log, failfast)
+		go runProvision(b, p.pc, p.parent)
 	}
 
 	// Wait for every service to settle (ready ∪ failed). doneBar is the
@@ -1713,6 +1740,11 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		}
 	}
 
+	// Commit point: from here the services are up to stay, so a parent
+	// (zordon) exit is the expected detach, not a death. Set BEFORE EventDone
+	// — zordon exits the instant it reads EventDone, and the death goroutine
+	// reads this flag, so the ordering guarantees the detach can't be misread.
+	state.bringupDone.Store(true)
 	stream.Send(&protocol.Event{Kind: protocol.EventDone})
 	log.Info("alpha", "bringup complete")
 }
@@ -1746,7 +1778,8 @@ func implicitRuntimeAfter(svc *alphasfile.Service, state *alphaState) []string {
 // external stop or self-exit → reach stopped or failed (terminal).
 // sc.done closes on return so anyone selecting on it (other bringup
 // goroutines, handleConfigure's outcome wait, shutdownAll) unblocks.
-func bringupAndSupervise(svc *alphasfile.Service, sc *serviceCtx, state *alphaState, cfg bringupConfig, stream *safeEncoder, log *zlog.Logger, failfast bool) {
+func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
+	state, stream, log, failfast := b.state, b.stream, b.log, b.failfast
 	defer close(sc.done)
 	// Note: DO NOT removeService here. Entity entries (and their
 	// closed barriers) must remain in state.services for the rest of
@@ -1901,7 +1934,7 @@ func bringupAndSupervise(svc *alphasfile.Service, sc *serviceCtx, state *alphaSt
 	default:
 	}
 
-	bringupAndSuperviseStart(svc, sc, state, cfg, stream, log, failfast, repoDir, agent)
+	bringupAndSuperviseStart(b, svc, sc, repoDir, agent)
 }
 
 // primaryKeyOf returns the cross-service-shareable key for a primary
@@ -1925,7 +1958,8 @@ func primaryKeyOf(svc *alphasfile.Service) string {
 // races probe vs self-exit, then supervises the running process until
 // external stop or self-exit. Split out so the per-primary lock doesn't
 // have to wrap this much code.
-func bringupAndSuperviseStart(svc *alphasfile.Service, sc *serviceCtx, state *alphaState, cfg bringupConfig, stream *safeEncoder, log *zlog.Logger, failfast bool, repoDir string, agent bool) {
+func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCtx, repoDir string, agent bool) {
+	state, cfg, stream, log, failfast := b.state, b.cfg, b.stream, b.log, b.failfast
 	name := svc.Name()
 
 	// env precedence (low→high): process env → federation parents'
@@ -2269,7 +2303,7 @@ func streamLines(name, kind string, r io.Reader, stream *safeEncoder, log *zlog.
 // serviceEnv composes a child process env in the precedence documented
 // at the top of this file (lowest → highest):
 //
-//   NewEnvironmentVariablesFromHost(allow) → toolchain → dotenv files → env
+//	NewEnvironmentVariablesFromHost(allow) → toolchain → dotenv files → env
 //
 // Thin wrapper over zenv.EnvironmentVariables.Join / .JoinFile so the
 // spawn sites don't have to spell out the chain four times.
@@ -2682,6 +2716,16 @@ func prepareWorktree(ctx context.Context, svc *alphasfile.Service, name, wtName,
 		if dest == "" {
 			return "", fmt.Errorf("worktree-able service %q has no resolved checkout dir", name)
 		}
+		// The git worktree checks out at the checkout ROOT (= fs::src).
+		// `dest` (= fs::exe / self.dir) is the <root>/<exe> build+run cwd,
+		// a subdir of the root when exe != ".". Adding the worktree at
+		// `dest` would target the wrong path and collide with
+		// `zordon worktree create` (which registers the root) the moment
+		// exe != "." — see TestWorktree_Go_exeOffset.
+		checkout := dest
+		if svc.Runtime != nil && svc.Runtime.Checkout != "" {
+			checkout = svc.Runtime.Checkout
+		}
 		var worktree *source.Worktree
 		if svc.Package.Worktree != nil {
 			worktree = &source.Worktree{Sparse: svc.Package.Worktree.Sparse}
@@ -2699,8 +2743,8 @@ func prepareWorktree(ctx context.Context, svc *alphasfile.Service, name, wtName,
 		// `zordon/<wt>` and the 2nd `git worktree add` would fail with
 		// "branch already checked out". Slashes are valid in ref names.
 		branch := "zordon/" + wtName + "/" + name
-		log.Info("alpha", "prepare %s: worktree -> %s (branch %s)", name, dest, branch)
-		if err := p.AddWorktree(ctx, dest, branch, runner); err != nil {
+		log.Info("alpha", "prepare %s: worktree -> %s (branch %s)", name, checkout, branch)
+		if err := p.AddWorktree(ctx, checkout, branch, runner); err != nil {
 			return "", fmt.Errorf("git worktree: %w", err)
 		}
 		return dest, nil

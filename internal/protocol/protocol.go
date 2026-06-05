@@ -24,9 +24,9 @@ const (
 )
 
 type Request struct {
-	Op        Op                     `json:"op"`
-	Configure *ConfigureArgs         `json:"configure,omitempty"`
-	Extra     map[string]any         `json:"extra,omitempty"`
+	Op        Op             `json:"op"`
+	Configure *ConfigureArgs `json:"configure,omitempty"`
+	Extra     map[string]any `json:"extra,omitempty"`
 }
 
 type ConfigureArgs struct {

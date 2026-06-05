@@ -263,4 +263,3 @@ func writeEntries(path string, entries []Entry) error {
 	}
 	return nil
 }
-

@@ -16,7 +16,7 @@ func TestExampleFederationPrint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	iv := &invocation.Invocation{
+	iv := &invocation.InvocationState{
 		FsHash: "feedface00001111", TmpDir: "/tmp/zordon-feedface00001111",
 		Worktree: invocation.MainWorktree,
 		StateDir: "/repo/examples/federation_macos/project/.zordon/worktrees/main",
@@ -32,7 +32,7 @@ func TestExampleFederationPrint(t *testing.T) {
 		Package: &Package{Toolchain: ToolchainGo, Git: "github.com/caddyserver/caddy"},
 	}})
 
-	af, err := Compile("/repo/examples/federation_macos/project/Alphasfile", b, iv, parent, TestConfig{})
+	af, err := Compile("/repo/examples/federation_macos/project/Alphasfile", b, iv, parent, "", TestConfig{})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

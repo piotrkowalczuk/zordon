@@ -62,7 +62,7 @@ service "go" "serviceC" {
 		t.Fatal(err)
 	}
 
-	inv, err := invocation.New(wtDir, af, nil)
+	inv, err := invocation.NewInvocationState(wtDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ service "go" "serviceC" {
 			inv.Worktree, "feature", wtDir)
 	}
 
-	got, err := Compile(afPath, af, inv, nil, TestConfig{})
+	got, err := Compile(afPath, af, inv, nil, invocation.ConfigHash(af, nil), TestConfig{})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

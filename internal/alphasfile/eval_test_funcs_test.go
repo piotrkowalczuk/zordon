@@ -57,7 +57,7 @@ func TestTestLogFunc_errorsOutsideHarness(t *testing.T) {
 
 // REGRESSION: tags with single quotes must survive — POSIX shell
 // quoting puts the original string inside single quotes, so an inner
-// single quote needs splitting into `'\''`. Without this fix a
+// single quote needs splitting into `'\”`. Without this fix a
 // provision with cmd = test::log("can't do that") would produce
 // invalid shell.
 func TestTestLogFunc_quotesEmbeddedSingleQuotes(t *testing.T) {

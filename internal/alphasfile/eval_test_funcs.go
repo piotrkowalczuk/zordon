@@ -95,7 +95,7 @@ func requireHarness(cfg TestConfig, name string) error {
 // embeds into a `sh -c` snippet as a single literal arg, even when
 // the value contains spaces, dollar signs, backticks, or other
 // special chars. Existing single quotes are split-and-rejoined
-// with `'\''` (the standard POSIX trick).
+// with `'\”` (the standard POSIX trick).
 //
 // Pulled out here rather than imported from a util package because
 // the test:: snippets are the ONLY place in zordon that needs
@@ -104,4 +104,3 @@ func requireHarness(cfg TestConfig, name string) error {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
-

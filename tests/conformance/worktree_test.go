@@ -30,8 +30,7 @@ func TestWorktree_Go(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/echo")
 	p.GitInit("src/echo")
 
-	const port = 27680
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -45,7 +44,7 @@ service "go" "echo" {
     exe  = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -60,14 +59,74 @@ service "go" "echo" {
     failure_threshold = 50
   }
 }
-`, port))
+`)
 
-	mustWorktreeStart(t, p, "wt1", "echo")
+	port := mustWorktreeStart(t, p, "wt1", "go", "echo")
 	echo := mustDecodeEcho(t, port)
 	if !strings.HasPrefix(echo.RuntimeVersion, "go1.26") {
 		t.Errorf("runtime_version = %q; want go1.26.x (pinned toolchain)", echo.RuntimeVersion)
 	}
 	mustCwdInWorktree(t, echo.Cwd, p, "wt1", "echo")
+}
+
+// TestWorktree_Go_exeOffset is the worktree counterpart of the exe_anchor
+// suite: a worktree service whose build target lives in a SUBDIR
+// (exe != "."). The git worktree must check out at the checkout ROOT
+// (<wtdir>/src/<svc>) while build+run anchor on <root>/<exe>. This
+// regressed when the worktree-add target was taken from the (now
+// exe-anchored) service Dir instead of the checkout root: `zordon start`
+// then tried to add the worktree at <root>/<exe>, colliding with the
+// root that `zordon worktree create` had already registered ("branch
+// already checked out"). The plain TestWorktree_* cases all use exe="."
+// (root == exe dir), so none of them could catch it.
+func TestWorktree_Go_exeOffset(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/repo/cmd/echo")
+	p.GitInit("src/repo")
+
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "echo" {
+  src {
+    path = "./src/repo"
+    exe  = "./cmd/echo"
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`)
+
+	port := mustWorktreeStart(t, p, "wt1", "go", "echo")
+	echo := mustDecodeEcho(t, port)
+	if !strings.HasPrefix(echo.RuntimeVersion, "go1.26") {
+		t.Errorf("runtime_version = %q; want go1.26.x (pinned toolchain)", echo.RuntimeVersion)
+	}
+	// cwd is the exe-anchored dir INSIDE the per-worktree checkout:
+	// <wtdir>/src/echo/cmd/echo — proving the worktree checked out at the
+	// root while build/run anchored on the exe subdir.
+	wantSuffix := filepath.Join(".zordon", "worktrees", "wt1", "src", "echo", "cmd", "echo")
+	if !strings.HasSuffix(echo.Cwd, wantSuffix) {
+		t.Errorf("service cwd = %q; want it to end with %q (exe-anchored within the worktree)", echo.Cwd, wantSuffix)
+	}
 }
 
 func TestWorktree_Rust(t *testing.T) {
@@ -76,7 +135,6 @@ func TestWorktree_Rust(t *testing.T) {
 	p.WriteFile("src/echo/.gitignore", "target/\n")
 	p.GitInit("src/echo")
 
-	const port = 27780
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -91,7 +149,7 @@ service "rust" "echo" {
     exe  = "."
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -106,9 +164,9 @@ service "rust" "echo" {
     failure_threshold = 50
   }
 }
-`, rustVersion, port))
+`, rustVersion))
 
-	mustWorktreeStart(t, p, "wt1", "echo")
+	port := mustWorktreeStart(t, p, "wt1", "rust", "echo")
 	echo := mustDecodeEcho(t, port)
 	if !strings.Contains(echo.RuntimeVersion, rustVersion) {
 		t.Errorf("runtime_version = %q; want it to contain pinned rust %s", echo.RuntimeVersion, rustVersion)
@@ -121,7 +179,6 @@ func TestWorktree_Nodejs(t *testing.T) {
 	p.CopyTree("golden/nodejs/echo", "src/echo")
 	p.GitInit("src/echo")
 
-	const port = 28780
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -133,7 +190,7 @@ toolchain {
 service "nodejs" "echo" {
   src { path = "./src/echo" }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
   env  = { PORT = "${self.vars.port}" }
 
   readiness {
@@ -145,9 +202,9 @@ service "nodejs" "echo" {
     failure_threshold = 50
   }
 }
-`, nodeVersion, port))
+`, nodeVersion))
 
-	mustWorktreeStart(t, p, "wt1", "echo")
+	port := mustWorktreeStart(t, p, "wt1", "nodejs", "echo")
 	echo := mustDecodeEcho(t, port)
 	if !strings.HasPrefix(echo.RuntimeVersion, "v22.") {
 		t.Errorf("runtime_version = %q; want v22.x (pinned toolchain)", echo.RuntimeVersion)
@@ -158,8 +215,11 @@ service "nodejs" "echo" {
 // mustWorktreeStart runs `zordon worktree create <wt> <svc>` and then
 // `zordon start` from inside the worktree dir. The two halves are split
 // so a failure in `worktree create` (git-init missing, bad checkout)
-// surfaces with its own error before alpha is involved.
-func mustWorktreeStart(t *testing.T, p *zordontest.Project, wt, svc string) {
+// surfaces with its own error before alpha is involved. Returns the
+// port the service bound: each fixture uses net::pickport(), so the
+// value is read back from the running worktree alpha (get must run from
+// the worktree dir, where that alpha lives) rather than hardcoded.
+func mustWorktreeStart(t *testing.T, p *zordontest.Project, wt, tc, svc string) int {
 	t.Helper()
 	res := p.Zordon("worktree", "create", wt, svc).WithTimeout(5 * time.Minute).Run(t)
 	if res.ExitCode != 0 {
@@ -167,14 +227,10 @@ func mustWorktreeStart(t *testing.T, p *zordontest.Project, wt, svc string) {
 			wt, svc, res.ExitCode, res.Stdout, res.Stderr)
 	}
 	wtRel := filepath.Join(".zordon", "worktrees", wt)
-	res = p.Zordon("start",
-		"--timeout", "15m",
-		"--alpha-log", p.AlphaLogPath(),
-	).WithDir(wtRel).WithTimeout(16 * time.Minute).Run(t)
-	if res.ExitCode != 0 {
-		t.Fatalf("zordon start (worktree %s): exit %d\nstdout: %s\nstderr: %s",
-			wt, res.ExitCode, res.Stdout, res.Stderr)
-	}
+	// Start tears the worktree alpha down from wtRel on cleanup (the
+	// project-root stop can't reach it), so no manual Stop here.
+	p.Start(t, zordontest.StartIn(wtRel)).OK()
+	return p.GetIn(t, wtRel, fmt.Sprintf("service.%s.%s.vars.port", tc, svc)).Int()
 }
 
 // mustCwdInWorktree pins the observable shape of a worktree run: the

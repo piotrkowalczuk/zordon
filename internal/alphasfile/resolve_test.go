@@ -7,22 +7,26 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 )
 
+// testCfgHash is the fixed manifest identity threaded into Compile in tests
+// (cfg::hash() returns it). It lives apart from testInv because CfgHash is no
+// longer a directory fact carried by Invocation.
+const testCfgHash = "00000000cfg00000"
+
 // testInv is a fixed, deterministic invocation so assertions don't depend
 // on $TMPDIR / cwd. Resolution must be pure: no clone, no spawn, no fs.
-func testInv() *invocation.Invocation {
-	return &invocation.Invocation{
+func testInv() *invocation.InvocationState {
+	return &invocation.InvocationState{
 		Dir:      "/proj",
 		Worktree: "main",
 		StateDir: "/proj/.zordon/worktrees/main",
 		FsHash:   "abcd1234ef567890",
-		CfgHash:  "00000000cfg00000",
 		TmpDir:   "/tmp/zordon-abcd1234ef567890",
 	}
 }
 
 func compile(t *testing.T, src string, parent *ParentContext) *Alphasfile {
 	t.Helper()
-	af, err := Compile("test.hcl", []byte(src), testInv(), parent, TestConfig{})
+	af, err := Compile("test.hcl", []byte(src), testInv(), parent, testCfgHash, TestConfig{})
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -157,7 +161,7 @@ service "rust" "x" {
   src { path = "../.." }
   crate { name = "tansu" }
 }
-`), testInv(), nil, TestConfig{})
+`), testInv(), nil, testCfgHash, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), "cannot coexist") {
 		t.Fatalf("want use-only/src exclusivity error, got %v", err)
 	}
@@ -193,7 +197,7 @@ service "go" "x" {
   git { url = "github.com/a/x" }
   src { path = "../checkouts/x" }
 }
-`), testInv(), nil, TestConfig{})
+`), testInv(), nil, testCfgHash, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("want src{path}/git mutual-exclusion error, got %v", err)
 	}
@@ -207,7 +211,7 @@ service "go" "dup" {
 service "go" "dup" {
   git { url = "github.com/a/c" }
 }
-`), testInv(), nil, TestConfig{})
+`), testInv(), nil, testCfgHash, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), "duplicate service") {
 		t.Fatalf("want duplicate error, got %v", err)
 	}
@@ -269,7 +273,7 @@ func TestResolveToolchainFieldMismatch(t *testing.T) {
 service "go" "x" {
   crate { name = "tansu" }
 }
-`), testInv(), nil, TestConfig{})
+`), testInv(), nil, testCfgHash, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), "rust-only") {
 		t.Fatalf("want toolchain/field mismatch error, got %v", err)
 	}
@@ -292,7 +296,7 @@ service "go" "tooling" {
 }
 `
 	afPath := "/tmp/test-resolve-src/proj/Alphasfile"
-	af, err := Compile(afPath, []byte(src), testInv(), nil, TestConfig{})
+	af, err := Compile(afPath, []byte(src), testInv(), nil, testCfgHash, TestConfig{})
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -349,7 +353,7 @@ service "go" "b" {
   vars = { x = service.go.a.vars.x }
 }
 `
-	_, err := Compile("t", []byte(src), testInv(), nil, TestConfig{})
+	_, err := Compile("t", []byte(src), testInv(), nil, testCfgHash, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("want cycle error for vars↔vars mutual ref, got %v", err)
 	}
@@ -443,4 +447,3 @@ service "go" "api" {
 		t.Errorf("seed.After = %v, want [%s]", seed.After, wantSeedAfter)
 	}
 }
-

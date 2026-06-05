@@ -3,6 +3,7 @@ package alphasfile
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os/exec"
 	"path/filepath"
@@ -52,11 +53,11 @@ const provisionRefMarker = ".runtime.provision."
 // so, returns the canonical target provision ID. A normal shell snippet
 // (string, possibly templated) returns ("", false, nil); only genuine
 // evaluation errors propagate.
-func (r *resolver) provisionRefOf(expr hcl.Expression, self map[string]cty.Value) (string, bool, error) {
+func (r *resolver) provisionRefOf(expr hcl.Expression, self map[string]cty.Value, dirs srcDirs) (string, bool, error) {
 	if expr == nil {
 		return "", false, nil
 	}
-	val, diags := expr.Value(r.ctxWith(self))
+	val, diags := expr.Value(r.ctxWith(self, dirs))
 	if diags.HasErrors() {
 		return "", false, fmt.Errorf("%s", diags.Error())
 	}
@@ -79,11 +80,11 @@ func (r *resolver) provisionRefOf(expr hcl.Expression, self map[string]cty.Value
 // Within each service, evaluation goes through a fixed sequence so that
 // `self` can grow incrementally:
 //
-//	1. self_base   = { name, toolchain, dir }
-//	2. eval Vars   → self.vars  = {...}
-//	3. eval Files  → self.file.<name> = { path, body }
-//	4. eval Args   → self.arguments = {...}
-//	5. eval Probe  → readiness port
+//  1. self_base   = { name, toolchain, dir }
+//  2. eval Vars   → self.vars  = {...}
+//  3. eval Files  → self.file.<name> = { path, body }
+//  4. eval Args   → self.arguments = {...}
+//  5. eval Probe  → readiness port
 //
 // Files come before arguments because the common pattern is to generate a
 // config file and pass its path as a flag. Going the other way (file body
@@ -97,7 +98,12 @@ type resolver struct {
 	// subdir (walkUp finds the same Alphasfile either way).
 	afDir string
 	root  *rootBlock
-	inv   *invocation.Invocation
+	inv   *invocation.InvocationState
+	// cfgHash is the manifest identity (sha8 of Alphasfile bytes + parent
+	// ctx), threaded in by the caller because it depends on data the
+	// resolver doesn't hold (raw bytes + serialized parent). It is what
+	// cfg::hash() returns and what the resolved Alphasfile carries.
+	cfgHash string
 
 	// Already-evaluated services, keyed by toolchain then name. Re-projected
 	// into the EvalContext under "service" before each new eval step. May be
@@ -114,9 +120,6 @@ type resolver struct {
 	// names already taken (parent or local); collision is an error.
 	taken map[string]string // "tc/name" → origin ("parent" | "local")
 
-	// checkout dir of the service currently being evaluated (fs::src()).
-	curCheckout string
-
 	// testCfg carries the conformance-harness gating + log path the
 	// test:: HCL functions need; zero value disables them.
 	testCfg TestConfig
@@ -124,7 +127,25 @@ type resolver struct {
 	resolvedServices []*Service
 }
 
-func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *ParentContext, testCfg TestConfig) (*Alphasfile, error) {
+// Plan is a manifest's evaluation order: the prepared resolver, the topo-sorted
+// producer nodes, and the toolchain pins — everything Compute needs to run the
+// eval fold. Building a Plan is the structural pass; a dependency CYCLE surfaces
+// HERE (topoSort), before Compute touches any effectful HCL function.
+type Plan struct {
+	r         *resolver
+	order     []*node
+	states    map[string]*svcState
+	toolchain map[string]*ToolchainConfig
+	parent    *ParentContext
+}
+
+// Plan prepares the manifest for evaluation: seeds the parent namespace,
+// resolves toolchain pins, builds each service's static `self`, and topo-sorts
+// the producer DAG. A real dependency cycle (A.vars→B.vars ∧ B.vars→A.vars) is
+// the hard error here — caught before any effectful eval (net::pickport,
+// src::hash) runs in Compute.
+func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg TestConfig) (*Plan, error) {
+	name, root := m.name, m.root
 	var seed map[string]map[string]cty.Value
 	if parent != nil {
 		seed = parent.byTC
@@ -141,7 +162,8 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 		path:        name,
 		afDir:       filepath.Dir(absPath),
 		root:        root,
-		inv:         inv,
+		inv:         m.inv,
+		cfgHash:     cfgHash,
 		serviceByTC: seed,
 		taken:       map[string]string{},
 		testCfg:     testCfg,
@@ -161,17 +183,15 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 	// services, so ordering this first costs nothing.
 	toolchain := map[string]*ToolchainConfig{}
 	if parent != nil {
-		for k, v := range parent.toolchain {
-			toolchain[k] = v
-		}
+		maps.Copy(toolchain, parent.toolchain)
 	}
 	if root.Toolchain != nil {
 		for lang, sub := range root.Toolchain.byLabel() {
-			envMap, err := r.evalMap(sub.Env, nil, "toolchain."+lang+".env")
+			envMap, err := r.evalMap(sub.Env, nil, "toolchain."+lang+".env", srcDirs{})
 			if err != nil {
 				return nil, err
 			}
-			toolsMap, err := r.evalMap(sub.Tools, nil, "toolchain."+lang+".tools")
+			toolsMap, err := r.evalMap(sub.Tools, nil, "toolchain."+lang+".tools", srcDirs{})
 			if err != nil {
 				return nil, err
 			}
@@ -216,43 +236,52 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 	if err != nil {
 		return nil, err
 	}
-	for _, n := range order {
-		st := states[n.svcID]
+	return &Plan{r: r, order: order, states: states, toolchain: toolchain, parent: parent}, nil
+}
+
+// Compute runs the evaluation the Plan ordered: the producer fold (vars /
+// arguments / env / file in dependency order), then per-service sinks
+// (runtime/build/agent env, dotenv, print, sudo, provisions, readiness, the
+// wire-stable Service), top-level dotenv + sysenv, the debugger-tools
+// post-pass, and assembles the *Alphasfile. This is where the effectful HCL
+// functions (net::pickport, src::hash, os::env) actually fire.
+func (p *Plan) Compute() (*Alphasfile, error) {
+	r := p.r
+	root := r.root
+	for _, n := range p.order {
+		st := p.states[n.svcID]
 		if err := r.evalProducerNode(n, st); err != nil {
 			return nil, fmt.Errorf("%s.%s: %w", n.svcID, producerLabel(n), err)
 		}
 	}
 
-	// Sinks per service: runtime.cmd, build.cmd, build/runtime/agent env,
-	// dotenv, print, sudo, provisions, readiness, wire-stable Service
-	// finalization. Cross-service references in sinks reach into other
-	// services' fully-evaluated producers via r.serviceByTC; intra-
-	// service sinks read the populated st.self. Sink-to-sink references
-	// across services aren't supported (sinks aren't published back to
-	// self/serviceByTC), so sink order doesn't matter.
+	// Sinks per service. Cross-service references in sinks reach into other
+	// services' fully-evaluated producers via r.serviceByTC; sink-to-sink
+	// references across services aren't supported, so sink order doesn't matter.
 	for _, sb := range root.Services {
 		sid := serviceID(sb.Toolchain, sb.Name)
-		if err := r.finishService(states[sid]); err != nil {
+		if err := r.finishService(p.states[sid]); err != nil {
 			return nil, fmt.Errorf("%s: %w", sid, err)
 		}
 	}
 	// File-level dotenv: top-level, no `self`; may use fs::/cfg:: funcs.
-	gdot, err := r.evalStrOrList(root.Dotenv, nil, "dotenv")
+	gdot, err := r.evalStrOrList(root.Dotenv, nil, "dotenv", srcDirs{})
 	if err != nil {
 		return nil, err
 	}
+	toolchain := p.toolchain
 	if len(toolchain) == 0 {
 		toolchain = nil
 	}
 	// SysEnv: parent's accumulated whitelist + this level's own.
 	// Order-preserving union (see mergeSysEnv) so cfg::hash() is stable.
-	localSysEnv, err := r.evalStrList(root.SysEnv, nil, "sysenv")
+	localSysEnv, err := r.evalStrList(root.SysEnv, nil, "sysenv", srcDirs{})
 	if err != nil {
 		return nil, err
 	}
 	var parentSysEnv []string
-	if parent != nil {
-		parentSysEnv = parent.sysenv
+	if p.parent != nil {
+		parentSysEnv = p.parent.sysenv
 	}
 	sysEnv := mergeSysEnv(parentSysEnv, localSysEnv)
 	if len(sysEnv) == 0 {
@@ -266,6 +295,7 @@ func resolve(name string, root *rootBlock, inv *invocation.Invocation, parent *P
 		return nil, err
 	}
 	return &Alphasfile{
+		CfgHash:   r.cfgHash,
 		Dotenv:    gdot,
 		Services:  r.resolvedServices,
 		Toolchain: toolchain,
@@ -310,16 +340,25 @@ func (r *resolver) injectDebuggerTools(toolchain map[string]*ToolchainConfig) er
 // per service in prepareServices, mutated by per-producer eval, and
 // consumed by finishService when assembling the wire-stable Service.
 type svcState struct {
-	sb          *serviceBlock
-	id          string // "service.<tc>.<name>"
-	dir         string
-	self        map[string]cty.Value // grows: name/toolchain/dir/runtime/build → +vars/+env/+args/+file
-	files       []*File
-	fileVals    map[string]cty.Value
-	vars        map[string]any
-	args        map[string]any
-	envMap      map[string]any
-	curCheckout string // value fs::src() returns while this service's expressions evaluate
+	sb       *serviceBlock
+	id       string // "service.<tc>.<name>"
+	dir      string
+	self     map[string]cty.Value // grows: name/toolchain/dir/runtime/build → +vars/+env/+args/+file
+	files    []*File
+	fileVals map[string]cty.Value
+	vars     map[string]any
+	args     map[string]any
+	envMap   map[string]any
+	dirs     srcDirs // source locations the fs:: functions return for this service
+}
+
+// srcDirs carries a service's source locations for the fs:: functions during
+// eval: root is the checkout root (fs::src ≈ src.path), exe is the exe-anchored
+// working dir (fs::exe ≈ src.path + src.exe = self.dir). Zero value = file scope
+// (no service): both "", so fs::src/fs::exe error cleanly.
+type srcDirs struct {
+	root string // checkout root    → fs::src()
+	exe  string // <checkout>/<exe> → fs::exe()
 }
 
 // prepareServices initializes one svcState per service: validates
@@ -421,12 +460,12 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 		self["file"] = cty.EmptyObjectVal
 
 		st := &svcState{
-			sb:          sb,
-			id:          sid,
-			dir:         dir,
-			self:        self,
-			fileVals:    map[string]cty.Value{},
-			curCheckout: dir,
+			sb:       sb,
+			id:       sid,
+			dir:      dir,
+			self:     self,
+			fileVals: map[string]cty.Value{},
+			dirs:     srcDirs{root: checkout, exe: dir},
 		}
 		out[sid] = st
 		r.publishSelf(st)
@@ -449,13 +488,12 @@ func (r *resolver) publishSelf(st *svcState) {
 // place and re-publishes to r.serviceByTC so downstream nodes see the
 // new value.
 func (r *resolver) evalProducerNode(n *node, st *svcState) error {
-	r.curCheckout = st.curCheckout
 	switch n.kind {
 	case kindVars:
 		if st.sb.Vars == nil {
 			return nil
 		}
-		v, err := r.evalMap(st.sb.Vars, st.self, "vars")
+		v, err := r.evalMap(st.sb.Vars, st.self, "vars", st.dirs)
 		if err != nil {
 			return err
 		}
@@ -465,7 +503,7 @@ func (r *resolver) evalProducerNode(n *node, st *svcState) error {
 		if st.sb.Arguments == nil {
 			return nil
 		}
-		a, err := r.evalMap(st.sb.Arguments, st.self, "arguments")
+		a, err := r.evalMap(st.sb.Arguments, st.self, "arguments", st.dirs)
 		if err != nil {
 			return err
 		}
@@ -475,7 +513,7 @@ func (r *resolver) evalProducerNode(n *node, st *svcState) error {
 		if st.sb.Env == nil {
 			return nil
 		}
-		e, err := r.evalMap(st.sb.Env, st.self, "env")
+		e, err := r.evalMap(st.sb.Env, st.self, "env", st.dirs)
 		if err != nil {
 			return err
 		}
@@ -492,7 +530,7 @@ func (r *resolver) evalProducerNode(n *node, st *svcState) error {
 		if fb == nil {
 			return fmt.Errorf("file %q: block lost between parse and eval", n.name)
 		}
-		path, body, err := evalFileExpr(fb, r.ctxWith(st.self))
+		path, body, err := evalFileExpr(fb, r.ctxWith(st.self, st.dirs))
 		if err != nil {
 			return err
 		}
@@ -525,7 +563,7 @@ func producerLabel(n *node) string {
 func (r *resolver) finishService(st *svcState) error {
 	sb := st.sb
 	self := st.self
-	r.curCheckout = st.curCheckout
+	dirs := st.dirs
 
 	// Sinks: consume the fully-populated self; order among them is
 	// irrelevant since nothing reads them back.
@@ -534,14 +572,14 @@ func (r *resolver) finishService(st *svcState) error {
 		err     error
 	)
 	if sb.Runtime != nil && sb.Runtime.Cmd != nil {
-		command, err = r.evalStrList(sb.Runtime.Cmd, self, "runtime.cmd")
+		command, err = r.evalStrList(sb.Runtime.Cmd, self, "runtime.cmd", dirs)
 		if err != nil {
 			return err
 		}
 	}
 	var buildCmd []string
 	if sb.Build != nil && sb.Build.Cmd != nil {
-		buildCmd, err = r.evalStrList(sb.Build.Cmd, self, "build.cmd")
+		buildCmd, err = r.evalStrList(sb.Build.Cmd, self, "build.cmd", dirs)
 		if err != nil {
 			return err
 		}
@@ -550,7 +588,7 @@ func (r *resolver) finishService(st *svcState) error {
 		if expr == nil {
 			return nil, nil
 		}
-		m, e := r.evalMap(expr, self, label)
+		m, e := r.evalMap(expr, self, label, dirs)
 		if e != nil {
 			return nil, e
 		}
@@ -567,7 +605,7 @@ func (r *resolver) finishService(st *svcState) error {
 		if runEnv, err = phaseEnv(sb.Runtime.Env, "runtime.env"); err != nil {
 			return err
 		}
-		runtimeAfter, err = r.evalStrList(sb.Runtime.After, self, "runtime.after")
+		runtimeAfter, err = r.evalStrList(sb.Runtime.After, self, "runtime.after", dirs)
 		if err != nil {
 			return err
 		}
@@ -577,26 +615,26 @@ func (r *resolver) finishService(st *svcState) error {
 			return err
 		}
 	}
-	dotenv, err := r.evalStrOrList(sb.Dotenv, self, "dotenv")
+	dotenv, err := r.evalStrOrList(sb.Dotenv, self, "dotenv", dirs)
 	if err != nil {
 		return err
 	}
-	printLine, err := r.evalStr(sb.Print, self, "print")
+	printLine, err := r.evalStr(sb.Print, self, "print", dirs)
 	if err != nil {
 		return err
 	}
 	// sudo hooks (may reference everything resolved so far).
 	var sudo []*SudoStep
 	for _, sblk := range sb.Sudo {
-		check, err := r.evalStr(sblk.Check, self, "sudo."+sblk.Name+".check")
+		check, err := r.evalStr(sblk.Check, self, "sudo."+sblk.Name+".check", dirs)
 		if err != nil {
 			return err
 		}
-		apply, err := r.evalStr(sblk.Apply, self, "sudo."+sblk.Name+".apply")
+		apply, err := r.evalStr(sblk.Apply, self, "sudo."+sblk.Name+".apply", dirs)
 		if err != nil {
 			return err
 		}
-		verify, err := r.evalStr(sblk.Verify, self, "sudo."+sblk.Name+".verify")
+		verify, err := r.evalStr(sblk.Verify, self, "sudo."+sblk.Name+".verify", dirs)
 		if err != nil {
 			return err
 		}
@@ -612,13 +650,13 @@ func (r *resolver) finishService(st *svcState) error {
 	if sb.Runtime != nil {
 		for _, pb := range sb.Runtime.Provision {
 			label := "provision." + pb.Name
-			check, err := r.evalStr(pb.Check, self, label+".check")
+			check, err := r.evalStr(pb.Check, self, label+".check", dirs)
 			if err != nil {
 				return err
 			}
 			// cmd is either an inline shell snippet (string) or a bare
 			// reference to another (latent) provision used as a template.
-			cmdRef, isRef, err := r.provisionRefOf(pb.Cmd, self)
+			cmdRef, isRef, err := r.provisionRefOf(pb.Cmd, self, dirs)
 			if err != nil {
 				return fmt.Errorf("%s.cmd: %w", label, err)
 			}
@@ -628,12 +666,12 @@ func (r *resolver) finishService(st *svcState) error {
 					return fmt.Errorf("%s.cmd: provision cannot reference itself", label)
 				}
 			} else {
-				cmd, err = r.evalStr(pb.Cmd, self, label+".cmd")
+				cmd, err = r.evalStr(pb.Cmd, self, label+".cmd", dirs)
 				if err != nil {
 					return err
 				}
 			}
-			verify, err := r.evalStr(pb.Verify, self, label+".verify")
+			verify, err := r.evalStr(pb.Verify, self, label+".verify", dirs)
 			if err != nil {
 				return err
 			}
@@ -642,7 +680,7 @@ func (r *resolver) finishService(st *svcState) error {
 			}
 			var penv map[string]string
 			if pb.Env != nil {
-				m, err := r.evalMap(pb.Env, self, label+".env")
+				m, err := r.evalMap(pb.Env, self, label+".env", dirs)
 				if err != nil {
 					return err
 				}
@@ -651,7 +689,7 @@ func (r *resolver) finishService(st *svcState) error {
 			// `after` accepts the bare keyword `never` (a latent
 			// provision: registered but not auto-run) OR a list of
 			// barrier refs — never both.
-			afterList, err := r.evalStrOrList(pb.After, self, label+".after")
+			afterList, err := r.evalStrOrList(pb.After, self, label+".after", dirs)
 			if err != nil {
 				return err
 			}
@@ -687,15 +725,15 @@ func (r *resolver) finishService(st *svcState) error {
 	// Stage 7: readiness port (may reference everything in self).
 	var probePort int
 	if sb.Readiness != nil {
-		ctx := r.ctxWith(self)
+		ctx := r.ctxWith(self, dirs)
 		var (
 			expr  hcl.Expression
 			field string
 		)
-		switch {
-		case sb.Readiness.HTTP != nil:
+		if sb.Readiness.HTTP != nil {
 			expr, field = sb.Readiness.HTTP.Port, "readiness.http.port"
 		}
+
 		if expr != nil {
 			probePort, err = evalIntExpr(expr, ctx, field)
 			if err != nil {
@@ -723,6 +761,7 @@ func (r *resolver) finishService(st *svcState) error {
 		Provision:      provisions,
 		Files:          st.files,
 		Dir:            st.dir,
+		Checkout:       st.dirs.root,
 		BinDir:         r.inv.BinDir(),
 		Print:          printLine,
 	}
@@ -850,7 +889,7 @@ func (r *resolver) finishService(st *svcState) error {
 	var dbg *DebuggerConfig
 	var agent *ServiceAgent
 	if sb.Debugger != nil && sb.Debugger.Enabled {
-		d, a, err := r.evalDebugger(sb, self, command)
+		d, a, err := r.evalDebugger(sb, self, command, dirs)
 		if err != nil {
 			return err
 		}
@@ -899,7 +938,7 @@ func (r *resolver) finishService(st *svcState) error {
 	return nil
 }
 
-func (r *resolver) evalDebugger(sb *serviceBlock, self map[string]cty.Value, command []string) (*DebuggerConfig, *ServiceAgent, error) {
+func (r *resolver) evalDebugger(sb *serviceBlock, self map[string]cty.Value, command []string, dirs srcDirs) (*DebuggerConfig, *ServiceAgent, error) {
 	db := sb.Debugger
 	if sb.Toolchain != ToolchainGo {
 		return nil, nil, fmt.Errorf("service %q: debugger {} is currently only supported on service \"go\" (got %q)", sb.Name, sb.Toolchain)
@@ -923,7 +962,7 @@ func (r *resolver) evalDebugger(sb *serviceBlock, self map[string]cty.Value, com
 	if wrap && len(command) > 0 {
 		return nil, nil, fmt.Errorf("service %q: debugger.enabled = true wraps runtime itself (`dlv exec <binary> -- <args>`), which is incompatible with an explicit `runtime.cmd`. Use `arguments = {…}` for flags, or set `debugger.wrap_runtime = false` to keep your own cmd", sb.Name)
 	}
-	port, err := r.evalDebuggerPort(db.Port, self)
+	port, err := r.evalDebuggerPort(db.Port, self, dirs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("service %q: debugger.port: %w", sb.Name, err)
 	}
@@ -955,9 +994,9 @@ func (r *resolver) evalDebugger(sb *serviceBlock, self map[string]cty.Value, com
 // (`port = os::env("DLV_PORT", "2345")`). When the expression is nil,
 // it falls back to $DLV_PORT then 2345 — matching the default we'd
 // write inline if the macro didn't exist.
-func (r *resolver) evalDebuggerPort(expr hcl.Expression, self map[string]cty.Value) (int, error) {
+func (r *resolver) evalDebuggerPort(expr hcl.Expression, self map[string]cty.Value, dirs srcDirs) (int, error) {
 	if expr != nil {
-		val, diags := expr.Value(r.ctxWith(self))
+		val, diags := expr.Value(r.ctxWith(self, dirs))
 		if diags.HasErrors() {
 			return 0, fmt.Errorf("%s", diags.Error())
 		}
@@ -990,11 +1029,11 @@ func parsePort(s string) (int, error) {
 // evalMap evaluates an HCL expression that should yield a map/object and
 // returns its members as a Go map (for embedding in RuntimeConfig) plus
 // nil-safety. Used for both `vars` and `arguments`.
-func (r *resolver) evalMap(expr hcl.Expression, self map[string]cty.Value, field string) (map[string]any, error) {
+func (r *resolver) evalMap(expr hcl.Expression, self map[string]cty.Value, field string, dirs srcDirs) (map[string]any, error) {
 	if expr == nil {
 		return nil, nil
 	}
-	ctx := r.ctxWith(self)
+	ctx := r.ctxWith(self, dirs)
 	val, diags := expr.Value(ctx)
 	if diags.HasErrors() {
 		return nil, fmt.Errorf("%s: %s", field, diags.Error())
@@ -1012,7 +1051,6 @@ func (r *resolver) evalMap(expr hcl.Expression, self map[string]cty.Value, field
 	}
 	return out, nil
 }
-
 
 func evalFileExpr(fb *fileBlock, ctx *hcl.EvalContext) (string, string, error) {
 	pathVal, diags := fb.Path.Value(ctx)
@@ -1047,12 +1085,12 @@ func evalIntExpr(expr hcl.Expression, ctx *hcl.EvalContext, field string) (int, 
 	return int(i64), nil
 }
 
-	// evalStrList evaluates an expression expected to be a tuple/list of strings
-func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, field string) ([]string, error) {
+// evalStrList evaluates an expression expected to be a tuple/list of strings
+func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, field string, dirs srcDirs) ([]string, error) {
 	if expr == nil {
 		return nil, nil
 	}
-	ctx := r.ctxWith(self)
+	ctx := r.ctxWith(self, dirs)
 	val, diags := expr.Value(ctx)
 	if diags.HasErrors() {
 		return nil, fmt.Errorf("%s: %s", field, diags.Error())
@@ -1082,11 +1120,11 @@ func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, f
 // or a list of strings, always yielding []string. A bare string becomes a
 // one-element slice. Nil/null ⇒ nil. Used by `dotenv`, which accepts both
 // `dotenv = ".env"` and `dotenv = [".env", ".env.local"]`.
-func (r *resolver) evalStrOrList(expr hcl.Expression, self map[string]cty.Value, field string) ([]string, error) {
+func (r *resolver) evalStrOrList(expr hcl.Expression, self map[string]cty.Value, field string, dirs srcDirs) ([]string, error) {
 	if expr == nil {
 		return nil, nil
 	}
-	ctx := r.ctxWith(self)
+	ctx := r.ctxWith(self, dirs)
 	val, diags := expr.Value(ctx)
 	if diags.HasErrors() {
 		return nil, fmt.Errorf("%s: %s", field, diags.Error())
@@ -1097,16 +1135,16 @@ func (r *resolver) evalStrOrList(expr hcl.Expression, self map[string]cty.Value,
 	if val.Type() == cty.String {
 		return []string{val.AsString()}, nil
 	}
-	return r.evalStrList(expr, self, field)
+	return r.evalStrList(expr, self, field, dirs)
 }
 
 // evalStr evaluates an expression expected to be a string (the `sudo`
 // snippet). Nil expression ⇒ "".
-func (r *resolver) evalStr(expr hcl.Expression, self map[string]cty.Value, field string) (string, error) {
+func (r *resolver) evalStr(expr hcl.Expression, self map[string]cty.Value, field string, dirs srcDirs) (string, error) {
 	if expr == nil {
 		return "", nil
 	}
-	ctx := r.ctxWith(self)
+	ctx := r.ctxWith(self, dirs)
 	val, diags := expr.Value(ctx)
 	if diags.HasErrors() {
 		return "", fmt.Errorf("%s: %s", field, diags.Error())
@@ -1123,7 +1161,7 @@ func (r *resolver) evalStr(expr hcl.Expression, self map[string]cty.Value, field
 // ctxWith assembles the EvalContext from the resolver's running state plus
 // the per-service `self` (omitted for non-service evaluation paths, if any
 // are added in the future).
-func (r *resolver) ctxWith(self map[string]cty.Value) *hcl.EvalContext {
+func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalContext {
 	// `never` is the keyword that marks a provision latent
 	// (`after = never`). Defined as a plain string so the bare
 	// identifier resolves; it never matches a real barrier ref ('@').
@@ -1138,20 +1176,22 @@ func (r *resolver) ctxWith(self map[string]cty.Value) *hcl.EvalContext {
 	if len(r.toolchainCty) > 0 {
 		vars["toolchain"] = cty.ObjectVal(copyCtyMap(r.toolchainCty))
 	}
+	// fs::src / src::hash exist only in a SERVICE scope — they read `checkout`,
+	// which the caller passes as the current service's checkout, or "" at file
+	// scope (top-level dotenv/sysenv, toolchain), where they then error clearly
+	// instead of leaking a prior service's stale checkout.
 	if self != nil {
 		vars["self"] = cty.ObjectVal(copyCtyMap(self))
 	}
 	return &hcl.EvalContext{
 		Variables: vars,
-		Functions: r.functions(),
+		Functions: r.functions(dirs),
 	}
 }
 
 func copyCtyMap(in map[string]cty.Value) map[string]cty.Value {
 	out := make(map[string]cty.Value, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -1200,7 +1240,7 @@ func serviceDirOf(s *Service) string {
 
 // --- functions exposed in HCL expressions ---------------------------------
 
-func (r *resolver) functions() map[string]function.Function {
+func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 	str := func(get func() string) function.Function {
 		return function.New(&function.Spec{
 			Type: function.StaticReturnType(cty.String),
@@ -1215,15 +1255,16 @@ func (r *resolver) functions() map[string]function.Function {
 	}
 	return map[string]function.Function{
 		// fs:: namespace — per-invocation filesystem coordinates and identity.
-		"fs::tmp":   str(func() string { return r.inv.TmpDir }),    // generated files
-		"fs::src":   str(func() string { return r.curCheckout }),   // this service's checkout
-		"fs::bin":   str(func() string { return r.inv.BinDir() }),  // build outputs (outside src)
+		"fs::tmp":   str(func() string { return r.inv.TmpDir }),   // generated files
+		"fs::src":   str(func() string { return dirs.root }),      // src.path: checkout root (service scope only)
+		"fs::exe":   str(func() string { return dirs.exe }),       // src.path + src.exe: exe-anchored work dir (= self.dir)
+		"fs::bin":   str(func() string { return r.inv.BinDir() }), // build outputs (outside src)
 		"fs::state": str(func() string { return r.inv.StateDir }), // per-worktree state root (.zordon/worktrees/<wt>)
-		"fs::hash":  r.fsHashFunc(),                                // instance identity (location)
+		"fs::hash":  r.fsHashFunc(),                               // instance identity (location)
 		// cfg:: namespace — manifest identity (Alphasfile bytes + parent ctx).
 		"cfg::hash": r.cfgHashFunc(),
 		// src:: namespace — current service's source code identity.
-		"src::hash": r.srcHashFunc(),
+		"src::hash": r.srcHashFunc(dirs.root),
 
 		"net::pickport": pickPortFunc(),
 		"os::env":       osEnvFunc(),
@@ -1298,10 +1339,10 @@ func (r *resolver) cfgHashFunc() function.Function {
 	return function.New(&function.Spec{
 		Type: function.StaticReturnType(cty.String),
 		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
-			if r.inv == nil || r.inv.CfgHash == "" {
-				return cty.NilVal, errors.New("cfg::hash() called but no invocation configured")
+			if r.cfgHash == "" {
+				return cty.NilVal, errors.New("cfg::hash() called but no manifest identity configured")
 			}
-			return cty.StringVal(r.inv.CfgHash), nil
+			return cty.StringVal(r.cfgHash), nil
 		},
 	})
 }
@@ -1311,11 +1352,11 @@ func (r *resolver) cfgHashFunc() function.Function {
 // worktree) that's `git rev-parse --short HEAD`; otherwise it errors. Use
 // it as a build cache key or a "code generation" stamp — pair with
 // fs::hash() when you also need the location.
-func (r *resolver) srcHashFunc() function.Function {
+func (r *resolver) srcHashFunc(root string) function.Function {
 	return function.New(&function.Spec{
 		Type: function.StaticReturnType(cty.String),
 		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
-			dir := r.curCheckout
+			dir := root
 			if dir == "" {
 				return cty.NilVal, errors.New("src::hash(): no source primary for this service (use-only or no checkout)")
 			}

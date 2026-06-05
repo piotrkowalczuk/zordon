@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -38,23 +37,16 @@ func TestExample_go_delve(t *testing.T) {
 	// go@1.25.6 + first install of dlv + mcp-dap-server + first compile.
 	// Slightly higher than the plain go example because of the extra
 	// `go install` for the macro-injected tools.
-	res := p.Zordon("start",
-		"--timeout", "15m",
-		"--alpha-log", p.AlphaLogPath(),
-	).WithTimeout(16 * time.Minute).Run(t)
-	if res.ExitCode != 0 {
-		t.Fatalf("zordon start: exit %d\nstdout: %s\nstderr: %s",
-			res.ExitCode, res.Stdout, res.Stderr)
-	}
+	p.Start(t).OK()
 
 	// HTTP side: the inferior is actually serving. If the debugger
 	// macro had silently broken the wrap, readiness would have failed
 	// upstream and `zordon start` wouldn't have returned 0 — but assert
 	// the body anyway so a future regression that fakes readiness still
 	// gets caught here.
-	httpPort, err := strconv.Atoi(p.Get("service.go.app.vars.port"))
-	if err != nil || httpPort <= 0 {
-		t.Fatalf("vars.port = %q: %v", p.Get("service.go.app.vars.port"), err)
+	httpPort := p.Get(t, "service.go.app.vars.port").Int()
+	if httpPort <= 0 {
+		t.Fatalf("vars.port = %d; want a valid TCP port", httpPort)
 	}
 	body := httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/", httpPort))
 	if !strings.Contains(body, "go-delve-example ok") {
@@ -65,11 +57,11 @@ func TestExample_go_delve(t *testing.T) {
 	// (default 2345, or $DLV_PORT). Probe it with a single DAP
 	// Initialize request — that proves dlv is speaking DAP, not just
 	// that *something* accepted TCP.
-	dapPort, err := strconv.Atoi(p.Get("service.go.app.debugger.port"))
-	if err != nil || dapPort <= 0 {
-		t.Fatalf("debugger.port = %q: %v", p.Get("service.go.app.debugger.port"), err)
+	dapPort := p.Get(t, "service.go.app.debugger.port").Int()
+	if dapPort <= 0 {
+		t.Fatalf("debugger.port = %d; want a valid TCP port", dapPort)
 	}
-	if got := p.Get("service.go.app.agent.mcp.debug.address"); got != fmt.Sprintf("127.0.0.1:%d", dapPort) {
+	if got := p.Get(t, "service.go.app.agent.mcp.debug.address").String(); got != fmt.Sprintf("127.0.0.1:%d", dapPort) {
 		t.Errorf("agent.mcp.debug.address = %q; want %q", got, fmt.Sprintf("127.0.0.1:%d", dapPort))
 	}
 	if err := dapInitialize(fmt.Sprintf("127.0.0.1:%d", dapPort)); err != nil {

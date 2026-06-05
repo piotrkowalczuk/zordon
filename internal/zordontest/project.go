@@ -121,21 +121,6 @@ func (p *Project) AlphaLogPath() string {
 	return filepath.Join(p.root, "alpha.log")
 }
 
-// Get evaluates a zordon-resolved expression (dotted path or Go
-// template) by shelling out to `zordon get <expr>` and returns the
-// trimmed stdout. Fails the test on non-zero exit — the typical
-// use is to resolve a vars-derived value (port, derived URL, etc.)
-// for an HTTP assertion, and a missing expression is a real bug.
-func (p *Project) Get(expr string) string {
-	p.t.Helper()
-	res := p.Zordon("get", expr).Run(p.t)
-	if res.ExitCode != 0 {
-		p.t.Fatalf("zordon get %q: exit %d\nstdout: %s\nstderr: %s",
-			expr, res.ExitCode, res.Stdout, res.Stderr)
-	}
-	return strings.TrimSpace(res.Stdout)
-}
-
 // CopyTree recursively copies a source directory into the project,
 // preserving file modes. srcRel is relative to the zordon repo root
 // (the location of this test binary's package), so tests can reference
@@ -246,6 +231,21 @@ func (p *Project) zordonStopBestEffort() error {
 	// stop is fast (the slow part is service teardown, which we don't
 	// need to wait for during cleanup — the registry will reap on
 	// next start). Bound it to a few seconds and swallow output.
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run()
+}
+
+// StopFrom runs a best-effort `zordon stop` from relDir (relative to the
+// project root). Use it to tear down a worktree-level alpha that the
+// project-root cleanup can't reach. It takes no testing.TB on purpose: it
+// is meant for t.Cleanup, where t.Fatal/FailNow must never be called
+// (FailNow's runtime.Goexit aborts the remaining cleanup chain). Errors
+// are the caller's to ignore.
+func (p *Project) StopFrom(relDir string) error {
+	cmd := exec.Command(p.binZ, "stop")
+	cmd.Dir = filepath.Join(p.root, relDir)
+	cmd.Env = p.env()
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Run()

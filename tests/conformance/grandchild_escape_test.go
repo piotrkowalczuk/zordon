@@ -18,15 +18,14 @@
 // We exercise the BUILD path specifically (not provision via
 // runShell, which DOES start c.Wait independently and is therefore
 // not vulnerable to this exact deadlock). The build cmd:
-//   1. installs SIGTERM trap so SIGTERM doesn't kill it before grace
-//   2. forks a python that setsid's into a new session and sleeps
-//      120s while holding the inherited stdout/stderr write fds
-//   3. sleeps 30s itself so the cancel race window is open
+//  1. installs SIGTERM trap so SIGTERM doesn't kill it before grace
+//  2. forks a python that setsid's into a new session and sleeps
+//     120s while holding the inherited stdout/stderr write fds
+//  3. sleeps 30s itself so the cancel race window is open
 package conformance_test
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -44,7 +43,6 @@ func TestGrandchildEscape_buildReapsAlphaWithinGrace(t *testing.T) {
 	p := zordontest.NewProject(t, zordontest.WithExpectedLeftovers())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27997
 	// build cmd:
 	//   trap '' TERM        — swallow SIGTERM so we always test the
 	//                          SIGKILL+fd-escape path, not the fast
@@ -56,7 +54,7 @@ func TestGrandchildEscape_buildReapsAlphaWithinGrace(t *testing.T) {
 	//                          the test waiter can SIGINT zordon
 	//   sleep 30            — keeps bash alive so the cancel race
 	//                          actually races a live subprocess
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -71,7 +69,7 @@ service "go" "svc1" {
     cmd = ["/bin/sh", "-c", "trap '' TERM; python3 -c 'import os,time; os.setsid(); time.sleep(120)' & echo build-running; sleep 30"]
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -86,7 +84,7 @@ service "go" "svc1" {
     failure_threshold = 100
   }
 }
-`, port))
+`)
 
 	binZ := zordonBinaryFromEnvOrPath(t)
 	t.Cleanup(func() { dumpAlphaLog(t, p.AlphaLogPath()) })

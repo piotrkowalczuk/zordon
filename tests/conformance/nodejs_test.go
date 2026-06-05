@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
 )
@@ -25,7 +24,6 @@ func TestNodeService_srcDefault_inferredScriptsStart(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/nodejs/echo", "src/echo")
 
-	const port = 28700
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -37,7 +35,7 @@ toolchain {
 service "nodejs" "echo" {
   src { path = "./src/echo" }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
   env  = { PORT = "${self.vars.port}" }
 
   readiness {
@@ -49,9 +47,10 @@ service "nodejs" "echo" {
     failure_threshold = 50
   }
 }
-`, nodeVersion, port))
+`, nodeVersion))
 
 	mustStart(t, p)
+	port := p.Get(t, "service.nodejs.echo.vars.port").Int()
 	mustGetNodeEcho(t, port)
 }
 
@@ -61,7 +60,6 @@ func TestNodeService_srcExplicitBuildCmd(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/nodejs/echo", "src/echo")
 
-	const port = 28702
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -77,7 +75,7 @@ service "nodejs" "echo" {
     cmd = ["true"]
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
   env  = { PORT = "${self.vars.port}" }
 
   readiness {
@@ -89,9 +87,10 @@ service "nodejs" "echo" {
     failure_threshold = 50
   }
 }
-`, nodeVersion, port))
+`, nodeVersion))
 
 	mustStart(t, p)
+	port := p.Get(t, "service.nodejs.echo.vars.port").Int()
 	mustGetNodeEcho(t, port)
 }
 
@@ -102,7 +101,6 @@ func TestNodeService_srcExplicitRuntimeCmd(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/nodejs/echo", "src/echo")
 
-	const port = 28703
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -114,7 +112,7 @@ toolchain {
 service "nodejs" "echo" {
   src { path = "./src/echo" }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["node", "app.js", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -129,9 +127,10 @@ service "nodejs" "echo" {
     failure_threshold = 50
   }
 }
-`, nodeVersion, port))
+`, nodeVersion))
 
 	mustStart(t, p)
+	port := p.Get(t, "service.nodejs.echo.vars.port").Int()
 	mustGetNodeEcho(t, port)
 }
 
@@ -140,7 +139,6 @@ func TestNodeService_noReadinessUsesStabilization(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/nodejs/echo", "src/echo")
 
-	const port = 28704
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -152,13 +150,15 @@ toolchain {
 service "nodejs" "echo" {
   src { path = "./src/echo" }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
   env  = { PORT = "${self.vars.port}" }
 }
-`, nodeVersion, port))
+`, nodeVersion))
 
 	mustStart(t, p)
-	time.Sleep(2 * time.Second) // ~1s stabilization + slack
+	// No readiness block: ready via stabilization, not an HTTP probe, so
+	// the listener may bind a beat after start. mustGetNodeEcho polls.
+	port := p.Get(t, "service.nodejs.echo.vars.port").Int()
 	mustGetNodeEcho(t, port)
 }
 
@@ -168,7 +168,6 @@ func TestNodeService_envBlockReachesRuntime(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/nodejs/echo", "src/echo")
 
-	const port = 28705
 	p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
@@ -180,7 +179,7 @@ toolchain {
 service "nodejs" "echo" {
   src { path = "./src/echo" }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
   env  = {
     PORT     = "${self.vars.port}"
     GREETING = "hello-from-env-block"
@@ -195,9 +194,10 @@ service "nodejs" "echo" {
     failure_threshold = 50
   }
 }
-`, nodeVersion, port))
+`, nodeVersion))
 
 	mustStart(t, p)
+	port := p.Get(t, "service.nodejs.echo.vars.port").Int()
 	echo := mustDecodeEcho(t, port)
 	if got := echo.Env["GREETING"]; got != "hello-from-env-block" {
 		t.Errorf("GREETING in service env = %q; want %q", got, "hello-from-env-block")
@@ -209,20 +209,17 @@ service "nodejs" "echo" {
 // AND that the install actually succeeded (service comes up).
 func TestNodeService_pmDetect_table(t *testing.T) {
 	cases := map[string]struct {
-		port           int
 		goldenDir      string
 		toolchainTools string // body of `tools = { ... }`; "" = no tools block
 		wantBuild      string // install cmd substring in alpha log
 		wantRun        string // runtime cmd substring in alpha log
 	}{
 		"npm-fallback": {
-			port:      28710,
 			goldenDir: "golden/nodejs/echo",
 			wantBuild: "npm install",
 			wantRun:   "npm start",
 		},
 		"npm-ci": {
-			port:      28711,
 			goldenDir: "golden/nodejs/echo-npm-ci",
 			wantBuild: "npm ci",
 			wantRun:   "npm start",
@@ -230,20 +227,17 @@ func TestNodeService_pmDetect_table(t *testing.T) {
 		"pnpm-field": {
 			// pnpm 9.x pinned via packageManager field; 10/11 raise the
 			// Node floor — see internal/tools/corepack_test.go.
-			port:      28712,
 			goldenDir: "golden/nodejs/echo-pnpm",
 			wantBuild: "pnpm install",
 			wantRun:   "pnpm start",
 		},
 		"yarn-field": {
-			port:      28713,
 			goldenDir: "golden/nodejs/echo-yarn",
 			wantBuild: "yarn install",
 			wantRun:   "yarn start",
 		},
 		"bun-field": {
 			// bun isn't shimmed by Corepack; install via mise tools.
-			port:           28714,
 			goldenDir:      "golden/nodejs/echo-bun",
 			toolchainTools: `tools = { bun = "1.1.42" }`,
 			wantBuild:      "bun install",
@@ -255,6 +249,7 @@ func TestNodeService_pmDetect_table(t *testing.T) {
 		t.Run(hint, func(t *testing.T) {
 			p := zordontest.NewProject(t)
 			p.CopyTree(c.goldenDir, "src/echo")
+			port := zordontest.FreePort(t)
 
 			toolsLine := ""
 			if c.toolchainTools != "" {
@@ -283,10 +278,10 @@ service "nodejs" "echo" {
     failure_threshold = 50
   }
 }
-`, nodeVersion, toolsLine, c.port))
+`, nodeVersion, toolsLine, port))
 
 			mustStart(t, p)
-			mustGetNodeEcho(t, c.port)
+			mustGetNodeEcho(t, port)
 
 			log := p.AlphaLog()
 			if !log.Contains(c.wantBuild) {
@@ -303,28 +298,23 @@ service "nodejs" "echo" {
 // per tier so a regression in tier N+1 isn't masked by tier N firing.
 func TestNodeService_runtimeInference_table(t *testing.T) {
 	cases := map[string]struct {
-		port      int
 		goldenDir string
 		wantRun   string // runtime cmd substring in alpha log
 	}{
 		"scripts-start-wins": {
 			// base golden has scripts.start AND main; scripts wins.
-			port:      28720,
 			goldenDir: "golden/nodejs/echo",
 			wantRun:   "npm start",
 		},
 		"main-when-no-scripts-start": {
-			port:      28721,
 			goldenDir: "golden/nodejs/echo-infer-main",
 			wantRun:   "node app.js",
 		},
 		"bin-string-when-no-main": {
-			port:      28722,
 			goldenDir: "golden/nodejs/echo-infer-bin-string",
 			wantRun:   "node ./app.js",
 		},
 		"bin-single-map-when-no-main": {
-			port:      28723,
 			goldenDir: "golden/nodejs/echo-infer-bin-map",
 			wantRun:   "node ./app.js",
 		},
@@ -334,6 +324,7 @@ func TestNodeService_runtimeInference_table(t *testing.T) {
 		t.Run(hint, func(t *testing.T) {
 			p := zordontest.NewProject(t)
 			p.CopyTree(c.goldenDir, "src/echo")
+			port := zordontest.FreePort(t)
 
 			p.WriteFile("Alphasfile", fmt.Sprintf(`
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
@@ -358,10 +349,10 @@ service "nodejs" "echo" {
     failure_threshold = 50
   }
 }
-`, nodeVersion, c.port))
+`, nodeVersion, port))
 
 			mustStart(t, p)
-			mustGetNodeEcho(t, c.port)
+			mustGetNodeEcho(t, port)
 
 			log := p.AlphaLog()
 			if !log.Contains(c.wantRun) {

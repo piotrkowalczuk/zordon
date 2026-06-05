@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-git-quality-gate.sh\"",
+            "if": "Bash(git *)",
+            "timeout": 900,
+            "statusMessage": "pre-git gate: make fmt/lint(+test on push)…"
+          }
+        ]
+      }
+    ]
+  }
+}

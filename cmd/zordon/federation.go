@@ -95,8 +95,9 @@ func discoverChain(zordonHome string) (chain []string, invocationFile string, er
 type level struct {
 	afPath       string
 	isInvocation bool
-	inv          *invocation.Invocation
+	inv          *invocation.InvocationState
 	parentCtx    *alphasfile.ParentContext
+	cfgHash      string              // manifest identity: invocation.ConfigHash(bytes, parentJSON)
 	state        *protocol.StateInfo // nil ⇒ not running
 }
 
@@ -115,7 +116,7 @@ func resolveChain(ctx context.Context, zordonHome string, testCfg alphasfile.Tes
 		if resp, e := control.Roundtrip(ctx, lv.inv.SocketPath(), &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
 			return resp.State, nil
 		}
-		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, testCfg)
+		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
 		if err != nil {
 			return nil, nil //nolint:nilerr // intentional: see comment above
 		}
@@ -146,100 +147,53 @@ func stateFromAlphasfile(af *alphasfile.Alphasfile) *protocol.StateInfo {
 // vs. strict-static); a returned (nil, nil) means "no state for this
 // level" — deeper levels won't see its services as parent context.
 func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, error)) ([]*level, error) {
-	chain, invFile, err := discoverChain(zordonHome)
-	if err != nil {
-		return nil, err
-	}
-	cwd, err := zfs.Getwd()
+	fed, err := NewFederationState(zordonHome)
 	if err != nil {
 		return nil, err
 	}
 
-	var accumulated []*alphasfile.Service
-	accumulatedToolchain := map[string]*alphasfile.ToolchainConfig{}
-	var accumulatedSysEnv []string
-	out := make([]*level, 0, len(chain))
-	for _, afPath := range chain {
-		isInv := afPath == invFile
-		raw, err := zfs.Read(afPath)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", afPath, err)
-		}
-		parentJSON, err := json.Marshal(accumulated)
+	var parents alphasfile.GlobalComputedState
+	out := make([]*level, 0, len(fed.Levels()))
+	for _, cl := range fed.Levels() {
+		parentJSON, err := json.Marshal(parents.Services())
 		if err != nil {
 			return nil, fmt.Errorf("marshal parent ctx: %w", err)
 		}
-		var inv *invocation.Invocation
-		if isInv {
-			inv, err = invocation.New(cwd, raw, parentJSON)
-		} else {
-			inv, err = invocation.NewAt(filepath.Dir(afPath), raw, parentJSON)
+		lv := &level{
+			afPath:       cl.Path(),
+			isInvocation: cl.IsLeaf(),
+			inv:          cl.Invocation(),
+			parentCtx:    parents.ParentContext(),
+			cfgHash:      invocation.ConfigHash(cl.Bytes(), parentJSON),
 		}
-		if err != nil {
-			return nil, err
-		}
-		var pctx *alphasfile.ParentContext
-		if len(accumulated) > 0 || len(accumulatedToolchain) > 0 || len(accumulatedSysEnv) > 0 {
-			pctx = alphasfile.NewParentContext(accumulated).WithToolchain(accumulatedToolchain).WithSysEnv(accumulatedSysEnv)
-		}
-		lv := &level{afPath: afPath, isInvocation: isInv, inv: inv, parentCtx: pctx}
 		st, err := resolve(lv)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", afPath, err)
+			return nil, fmt.Errorf("%s: %w", cl.Path(), err)
 		}
 		lv.state = st
 		out = append(out, lv)
 		if st != nil {
-			accumulated = append(accumulated, st.Services...)
-			for k, v := range st.Toolchain {
-				accumulatedToolchain[k] = v
-			}
-			accumulatedSysEnv = appendUniqueStrings(accumulatedSysEnv, st.SysEnv)
+			parents.Join(adoptedBlock(st))
 		}
 	}
 	return out, nil
 }
 
-// appendUniqueStrings adds entries from extra to dst preserving order of
-// first occurrence. Used to accumulate sysenv whitelists down a federation
-// chain without duplicates (a key wider repeats are no-ops).
-func appendUniqueStrings(dst, extra []string) []string {
-	seen := make(map[string]struct{}, len(dst))
-	for _, s := range dst {
-		seen[s] = struct{}{}
-	}
-	for _, s := range extra {
-		if s == "" {
-			continue
-		}
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		dst = append(dst, s)
-	}
-	return dst
-}
-
 func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent bool, picks []string, zordonHome string, testCfg alphasfile.TestConfig) error {
 	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
 
-	chain, invFile, err := discoverChain(zordonHome)
+	fed, err := NewFederationState(zordonHome)
 	if err != nil {
 		return err
 	}
-	cwd, err := zfs.Getwd()
-	if err != nil {
-		return err
-	}
-	if len(chain) > 1 {
-		log.Info("zordon", "federation chain (%d):", len(chain))
-		for _, p := range chain {
+	if len(fed.Levels()) > 1 {
+		log.Info("zordon", "federation chain (%d):", len(fed.Levels()))
+		for _, lvl := range fed.Levels() {
 			marker := ""
-			if p == invFile {
+			if lvl.IsLeaf() {
 				marker = " (invocation)"
 			}
-			log.Info("zordon", "  - %s%s", p, marker)
+			log.Info("zordon", "  - %s%s", lvl.Path(), marker)
 		}
 	}
 
@@ -252,32 +206,24 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		}
 	}()
 
-	var accumulated []*alphasfile.Service
-	accumulatedToolchain := map[string]*alphasfile.ToolchainConfig{}
-	var accumulatedSysEnv []string
-	var dotenvChain []string // file-level dotenv of every ancestor, root-first
+	cfg := startConfig{
+		alphaBin: alphaBin,
+		alphaLog: alphaLog,
+		timeout:  timeout,
+		failfast: failfast,
+		verbose:  verbose,
+		agent:    agent,
+	}
 
-	for _, afPath := range chain {
-		isInvocation := afPath == invFile
-		parentDotenv := append([]string{}, dotenvChain...)
-
-		raw, err := zfs.Read(afPath)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", afPath, err)
-		}
-		parentJSON, err := json.Marshal(accumulated)
+	var parents alphasfile.GlobalComputedState
+	for _, lvl := range fed.Levels() {
+		inv := lvl.Invocation()
+		parentDotenv := append([]string{}, parents.Dotenv()...)
+		parentJSON, err := json.Marshal(parents.Services())
 		if err != nil {
 			return fmt.Errorf("marshal parent ctx: %w", err)
 		}
-		var inv *invocation.Invocation
-		if isInvocation {
-			inv, err = invocation.New(cwd, raw, parentJSON)
-		} else {
-			inv, err = invocation.NewAt(filepath.Dir(afPath), raw, parentJSON)
-		}
-		if err != nil {
-			return err
-		}
+		cfgHash := invocation.ConfigHash(lvl.Bytes(), parentJSON)
 
 		unlock, err := control.Lock(inv.StateDir)
 		if err != nil {
@@ -285,94 +231,34 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		}
 		unlocks = append(unlocks, unlock)
 
-		sock := inv.SocketPath()
-
-		var parentCtx *alphasfile.ParentContext
-		if len(accumulated) > 0 || len(accumulatedToolchain) > 0 || len(accumulatedSysEnv) > 0 {
-			parentCtx = alphasfile.NewParentContext(accumulated).WithToolchain(accumulatedToolchain).WithSysEnv(accumulatedSysEnv)
-		}
-
-		var st *protocol.StateInfo
-		if resp, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
-			st = resp.State
-		}
-
-		switch {
-		case st != nil && !isInvocation && st.CfgHash == inv.CfgHash:
-			log.Info("zordon", "%s [%s] up-to-date (alpha pid=%d), reusing", afPath, inv.FsHash, st.PID)
-			accumulated = append(accumulated, st.Services...)
-			for k, v := range st.Toolchain {
-				accumulatedToolchain[k] = v
-			}
-			accumulatedSysEnv = appendUniqueStrings(accumulatedSysEnv, st.SysEnv)
-			dotenvChain = append(dotenvChain, st.Dotenv...)
-			continue
-
-		case st != nil:
-			reason := "restart requested"
-			if !isInvocation {
-				reason = "drift detected (config changed since alpha started)"
-			}
-			log.Info("zordon", "%s [%s]: %s, restarting alpha pid=%d", afPath, inv.FsHash, reason, st.PID)
-			if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
-				log.Error("zordon", "shutdown %s: %v", afPath, e)
-			}
-			if err := waitSocketGone(ctx, sock, timeout); err != nil {
-				return fmt.Errorf("%s: waiting for old alpha to exit: %w", afPath, err)
-			}
-		}
-
-		af, err := alphasfile.Open(afPath, inv, parentCtx, testCfg)
+		// resolveLevel carries the multi-agent invariant: the leaf always
+		// recomputes/restarts; a parent is reused unless its config drifted.
+		af, old, reused, err := resolveLevel(ctx, lvl, cfgHash, parents.ParentContext(), testCfg)
 		if err != nil {
-			return fmt.Errorf("%s: %w", afPath, err)
+			return fmt.Errorf("%s: %w", lvl.Path(), err)
+		}
+		if reused {
+			log.Info("zordon", "%s [%s] up-to-date (alpha pid=%d), reusing", lvl.Path(), inv.FsHash, old.PID)
+			parents.Join(adoptedBlock(old))
+			continue
 		}
 
-		if isInvocation && len(picks) > 0 {
+		if lvl.IsLeaf() && len(picks) > 0 {
 			filtered, err := pickServices(af.All(), picks)
 			if err != nil {
-				return fmt.Errorf("%s: %w", afPath, err)
+				return fmt.Errorf("%s: %w", lvl.Path(), err)
 			}
 			log.Info("zordon", "picks=%v → bringing up %d of %d service(s)", picks, len(filtered), len(af.All()))
 			af.Services = filtered
 		}
 
-		levelLog := inv.AlphaLogPath()
-		if isInvocation && alphaLog != "" {
-			levelLog = alphaLog
+		if err := reconcileAlpha(ctx, lvl, af, old, parentDotenv, cfg, log); err != nil {
+			return err
 		}
-		if err := zfs.EnsureSharedDir(filepath.Dir(levelLog)); err != nil {
-			return fmt.Errorf("mkdir state dir: %w", err)
-		}
-		// The socket lives in inv.TmpDir ($TMPDIR/zordon-<FsHash>); alpha
-		// can't bind into a missing directory.
-		if err := zfs.EnsureSharedDir(inv.TmpDir); err != nil {
-			return fmt.Errorf("mkdir tmp dir: %w", err)
-		}
-
-		ctxLevel, cancel := context.WithTimeout(ctx, timeout)
-		if err := spawnAlpha(alphaBin, levelLog, sock, timeout, verbose, log, inv.Env); err != nil {
-			cancel()
-			return fmt.Errorf("%s: %w", afPath, err)
-		}
-		if err := control.WaitListening(ctxLevel, sock); err != nil {
-			cancel()
-			return fmt.Errorf("%s: waiting for alpha socket: %w", afPath, err)
-		}
-		if err := pushConfigure(ctxLevel, log, sock, afPath, inv.FsHash, inv.CfgHash, parentDotenv, af, failfast, agent); err != nil {
-			cancel()
-			return fmt.Errorf("%s: %w", afPath, err)
-		}
-		cancel()
-		dotenvChain = append(dotenvChain, af.Dotenv...)
 
 		// Privileged hooks are NOT run here — `zordon start` stays
 		// non-interactive. Run `zordon sudo` to apply them across the chain.
-
-		accumulated = append(accumulated, af.All()...)
-		for k, v := range af.Toolchain {
-			accumulatedToolchain[k] = v
-		}
-		accumulatedSysEnv = appendUniqueStrings(accumulatedSysEnv, af.SysEnv)
+		parents.Join(af.Block())
 	}
 	return nil
 }

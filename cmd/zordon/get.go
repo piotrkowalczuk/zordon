@@ -1,11 +1,11 @@
 package main
 
 import (
-	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"sort"
 	"strconv"
 	"strings"
@@ -164,7 +164,7 @@ func resolveExpr(root map[string]any, expr string) (string, error) {
 func walkPath(root any, path string) (any, error) {
 	cur := root
 	var seen []string
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		if seg == "" {
 			return nil, fmt.Errorf("empty path segment in %q", path)
 		}

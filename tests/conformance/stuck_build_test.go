@@ -1,20 +1,20 @@
 // End-to-end reproduction of the "alpha hangs because build can't be
 // cancelled" bug. Pinned scenario:
 //
-//   1. service has an explicit build cmd that traps SIGTERM and sleeps
-//      for ~30s — mirrors the real-world failure mode (a `set -euo
-//      pipefail; xargs -P` block, a heavy `cargo install`, a misbehaving
-//      build helper).
-//   2. zordon spawns alpha, alpha logs "prepare svc1: build (...)",
-//      i.e. the build subprocess is running.
-//   3. test SIGINTs zordon. parentwatch in alpha fires, requestShutdown
-//      closes shutdownCh, state.shutdownAll requests stop on every
-//      service, sc.done is supposed to close.
-//   4. assertion: alpha process is gone within shutdownGrace + small
-//      slack (~5s total). Without the fix shipped in this PR, alpha
-//      would block in bringupAndSupervise → prepareBuild → c.Wait()
-//      until the trap-then-sleep finishes (~30s), and a follow-up
-//      `zordon start` would happily spawn a second alpha on top.
+//  1. service has an explicit build cmd that traps SIGTERM and sleeps
+//     for ~30s — mirrors the real-world failure mode (a `set -euo
+//     pipefail; xargs -P` block, a heavy `cargo install`, a misbehaving
+//     build helper).
+//  2. zordon spawns alpha, alpha logs "prepare svc1: build (...)",
+//     i.e. the build subprocess is running.
+//  3. test SIGINTs zordon. parentwatch in alpha fires, requestShutdown
+//     closes shutdownCh, state.shutdownAll requests stop on every
+//     service, sc.done is supposed to close.
+//  4. assertion: alpha process is gone within shutdownGrace + small
+//     slack (~5s total). Without the fix shipped in this PR, alpha
+//     would block in bringupAndSupervise → prepareBuild → c.Wait()
+//     until the trap-then-sleep finishes (~30s), and a follow-up
+//     `zordon start` would happily spawn a second alpha on top.
 //
 // The trap-then-sleep is the load-bearing detail: a build that exits
 // on SIGTERM would mask the bug because c.Wait would return naturally
@@ -24,7 +24,6 @@ package conformance_test
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -42,11 +41,10 @@ func TestStuckBuild_zordonSIGINTReapsAlphaWithinGrace(t *testing.T) {
 	p := zordontest.NewProject(t, zordontest.WithExpectedLeftovers())
 	p.CopyTree("golden/go/echo", "src/svc1")
 
-	const port = 27971
 	// Build sleeps 30s while ignoring SIGTERM. trap '' TERM is a bash
 	// idiom for "swallow this signal silently" — exactly the misbehaving
 	// build the supervisor must still be able to reap.
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
+	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 toolchain {
   go {
@@ -61,7 +59,7 @@ service "go" "svc1" {
     cmd = ["/bin/sh", "-c", "trap '' TERM; echo build-running; sleep 30"]
   }
 
-  vars = { port = %d }
+  vars = { port = net::pickport() }
 
   runtime {
     cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
@@ -76,7 +74,7 @@ service "go" "svc1" {
     failure_threshold = 100
   }
 }
-`, port))
+`)
 
 	binZ := zordonBinaryFromEnvOrPath(t)
 	t.Cleanup(func() { dumpAlphaLog(t, p.AlphaLogPath()) })

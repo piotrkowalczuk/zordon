@@ -15,7 +15,7 @@ func parsePicks(args []string) []string {
 	seen := map[string]struct{}{}
 	var out []string
 	for _, a := range args {
-		for _, tok := range strings.Split(a, ",") {
+		for tok := range strings.SplitSeq(a, ",") {
 			name := strings.TrimSpace(tok)
 			if name == "" {
 				continue

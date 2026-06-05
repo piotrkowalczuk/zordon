@@ -10,10 +10,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
 )
@@ -38,22 +36,14 @@ func TestExample_go(t *testing.T) {
 	// + mise install go@1.25.6 + first compile of the example. ~10
 	// minutes peak on a beefy laptop; CI numbers should land near
 	// it. Subsequent runs reuse <repo>/.zordon and finish in seconds.
-	res := p.Zordon("start",
-		"--timeout", "15m",
-		"--alpha-log", p.AlphaLogPath(),
-	).WithTimeout(16 * time.Minute).Run(t)
-	if res.ExitCode != 0 {
-		t.Fatalf("zordon start: exit %d\nstdout: %s\nstderr: %s",
-			res.ExitCode, res.Stdout, res.Stderr)
-	}
+	p.Start(t).OK()
 
 	// Port resolved from Alphasfile's `vars = { port = net::pickport() }`
 	// via zordon's public expression evaluator — no ps-grep, no
 	// log scraping.
-	portStr := p.Get("service.go.app.vars.port")
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port <= 0 {
-		t.Fatalf("port = %q: %v", portStr, err)
+	port := p.Get(t, "service.go.app.vars.port").Int()
+	if port <= 0 {
+		t.Fatalf("port = %d; want a valid TCP port", port)
 	}
 
 	body := httpGet(t, fmt.Sprintf("http://127.0.0.1:%d/", port))

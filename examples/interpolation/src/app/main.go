@@ -12,7 +12,9 @@ import (
 )
 
 // Tag is overridden at build time via:
-//   go build -ldflags "-X main.Tag=<src::hash>" ...
+//
+//	go build -ldflags "-X main.Tag=<src::hash>" ...
+//
 // which the Alphasfile's `build` interpolation sets — proving `build` is
 // itself interpolated.
 var Tag = "unset"

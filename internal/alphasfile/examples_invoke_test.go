@@ -30,12 +30,12 @@ func TestExampleInvokeResolves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	iv := &invocation.Invocation{
+	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
 		Worktree: invocation.MainWorktree,
 		StateDir: "/repo/examples/invoke/.zordon/worktrees/main",
 	}
-	af, err := Compile("/repo/examples/invoke/Alphasfile", b, iv, nil, TestConfig{})
+	af, err := Compile("/repo/examples/invoke/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
