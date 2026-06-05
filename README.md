@@ -20,6 +20,7 @@ Full docs: **<https://piotrkowalczuk.github.io/zordon/>**
 - [Dynamic configuration](docs/dynamic-config.md) — the DAG, helpers, `self`, cross-service refs
 - [Worktrees](docs/worktrees.md) — parallel, isolated copies of the whole stack
 - [Federation](docs/federation.md) — chained Alphasfiles, shared infra, `zordon sudo`
+- [MCP server](docs/reference/mcp.md) — drive zordon (and its provisions) from an agent over MCP
 
 ## Installation
 
@@ -42,6 +43,29 @@ zordon worktree create x  # a parallel, isolated copy of the stack
 ```
 
 See the [docs](https://piotrkowalczuk.github.io/zordon/) for everything else.
+
+## Use with Claude (MCP)
+
+`zordon mcp` runs an [MCP](https://modelcontextprotocol.io) server over stdio.
+It exposes every zordon command — and every provision — as a tool, so an agent can drive your stack and run provisions on demand.
+
+The MCP **client launches the server**; you don't run `zordon mcp` yourself.
+With Claude Code, register it from your project directory:
+
+```sh
+claude mcp add zordon -- zordon mcp
+```
+
+Or add it to your client's MCP config (e.g. `.mcp.json`):
+
+```json
+{ "mcpServers": { "zordon": { "command": "zordon", "args": ["mcp"] } } }
+```
+
+The server resolves the chain from its working directory, so launch the client from the project tree (or pass `-e ZORDON_HOME=…`).
+Provisions run inside the live `alpha`, so `zordon start` first — or let the agent call the `start` tool.
+
+See the [`zordon mcp` reference](docs/reference/mcp.md) and [how-to](docs/how-to/run-a-provision-via-mcp.md).
 
 ## License
 
