@@ -394,12 +394,35 @@ type SudoStep struct {
 //	"<name>"                                local provision in the same service
 //	"service.<tc>.<svc>.ready"              wait for another service ready
 //	"service.<tc>.<svc>.provision.<name>"   wait for another provision
+//
+// ProvisionArg is one declared input of a provision. Type drives the MCP tool
+// field's JSON-schema type and the coercion alpha applies to the supplied
+// value; Default (a concrete value resolved at eval) is used when the caller
+// omits it; a Required argument with no value is an invocation error.
+type ProvisionArg struct {
+	Name        string `json:"name"`
+	Type        string `json:"type,omitempty"` // string|number|bool (default string)
+	Required    bool   `json:"required,omitempty"`
+	Default     any    `json:"default,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
 type ProvisionStep struct {
-	Name   string                    `json:"name"`
-	Check  string                    `json:"check,omitempty"`
-	Cmd    string                    `json:"cmd"`
-	Verify string                    `json:"verify,omitempty"`
-	Env    zenv.EnvironmentVariables `json:"env,omitempty"`
+	Name string `json:"name"`
+	// Description is the author's free-text summary of what this provision
+	// does. Optional; surfaced as the MCP tool description (see `zordon mcp`)
+	// so an agent listing provisions sees intent, not just the shell snippet.
+	Description string `json:"description,omitempty"`
+	// Arguments are typed inputs supplied at invocation time (e.g. via an MCP
+	// tool call), declared with `argument "<name>" { ... }`. Referenced in the
+	// snippets as `${self.runtime.provision.<name>.arguments.<arg>}`; at
+	// configure each such reference resolves to a placeholder, substituted by
+	// alpha at invoke. A provision with arguments must be latent.
+	Arguments []*ProvisionArg           `json:"arguments,omitempty"`
+	Check     string                    `json:"check,omitempty"`
+	Cmd       string                    `json:"cmd"`
+	Verify    string                    `json:"verify,omitempty"`
+	Env       zenv.EnvironmentVariables `json:"env,omitempty"`
 	// After holds the resolved barrier refs ("service.go.db@ready",
 	// "service.go.api.runtime.provision.create-tables@success", ...).
 	// alpha parses these at bringup and selects on (target, terminal-
@@ -630,13 +653,26 @@ type runtimeBlock struct {
 // order service evaluation accordingly. detached=true means bringup
 // doesn't wait for this provision's success before sending EventDone.
 type provisionBlock struct {
-	Name     string         `hcl:"name,label"`
-	Check    hcl.Expression `hcl:"check,optional"`
-	Cmd      hcl.Expression `hcl:"cmd"`
-	Verify   hcl.Expression `hcl:"verify,optional"`
-	Env      hcl.Expression `hcl:"env,optional"`
-	After    hcl.Expression `hcl:"after,optional"`
-	Detached bool           `hcl:"detached,optional"`
+	Name        string           `hcl:"name,label"`
+	Description string           `hcl:"description,optional"`
+	Argument    []*argumentBlock `hcl:"argument,block"`
+	Check       hcl.Expression   `hcl:"check,optional"`
+	Cmd         hcl.Expression   `hcl:"cmd"`
+	Verify      hcl.Expression   `hcl:"verify,optional"`
+	Env         hcl.Expression   `hcl:"env,optional"`
+	After       hcl.Expression   `hcl:"after,optional"`
+	Detached    bool             `hcl:"detached,optional"`
+}
+
+// argumentBlock declares one typed input of a provision (`argument "<name>" {
+// ... }`). Default is an expression (resolved at eval, so it may reference
+// vars/functions); type defaults to "string".
+type argumentBlock struct {
+	Name        string         `hcl:"name,label"`
+	Type        string         `hcl:"type,optional"`
+	Required    bool           `hcl:"required,optional"`
+	Default     hcl.Expression `hcl:"default,optional"`
+	Description string         `hcl:"description,optional"`
 }
 
 // agentBlock overlays `env` on top of build AND runtime, but only when

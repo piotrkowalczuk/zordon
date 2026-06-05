@@ -1542,9 +1542,150 @@ func handleConn(conn net.Conn, state *alphaState, cfg bringupConfig, log *zlog.L
 		log.Info("alpha", "shutdown op received")
 		state.requestShutdown("control socket: shutdown op received")
 		_ = enc.Write(&protocol.Response{OK: true})
+	case protocol.OpInvoke:
+		_ = conn.SetDeadline(time.Time{})
+		handleInvoke(&req, state, cfg, enc, log)
 	default:
 		_ = enc.Write(&protocol.Response{Error: fmt.Sprintf("unknown op: %q", req.Op)})
 	}
+}
+
+// handleInvoke runs one already-registered provision on demand, inside the
+// live alpha, and streams the same Event sequence as Configure. It reuses the
+// CmdRef template path: a synthetic provisionCtx points its CmdRef at the
+// target so runProvision pulls the target's resolved check/cmd/verify snippets,
+// while env (the target's own overlaid with the caller's overrides), cwd,
+// toolchain and barriers stay the target service's.
+//
+// The per-invoke bringup carries failfast=false: a failed invoke reaches the
+// `failure` terminal and reports EventError, but never calls requestShutdown —
+// that is the "run a provision like a script without killing alpha" contract.
+// Shutdown still reaches an in-flight invoke: runProvision selects on
+// state.shutdownCh, and this handler runs in a registered handleConn goroutine
+// that shutdownAll drains.
+func handleInvoke(req *protocol.Request, state *alphaState, cfg bringupConfig, enc *protocol.Encoder, log *zlog.Logger) {
+	stream := newSafeEncoder(enc)
+	defer stream.Close()
+
+	if req.Invoke == nil || req.Invoke.Provision == "" {
+		stream.Send(&protocol.Event{Kind: protocol.EventError, Error: "invoke: missing provision id"})
+		return
+	}
+	id := req.Invoke.Provision
+
+	state.mu.RLock()
+	target := state.provisions[id]
+	var parent *serviceCtx
+	if target != nil {
+		for _, sc := range state.services {
+			if "service."+sc.toolchain+"."+sc.name == target.serviceID {
+				parent = sc
+				break
+			}
+		}
+	}
+	state.mu.RUnlock()
+
+	if target == nil {
+		stream.Send(&protocol.Event{Kind: protocol.EventError, Error: fmt.Sprintf("invoke: unknown provision %q", id)})
+		return
+	}
+	if parent == nil {
+		stream.Send(&protocol.Event{Kind: protocol.EventError, Error: fmt.Sprintf("invoke: service for %q is not running; run `zordon start`", id)})
+		return
+	}
+
+	// Effective snippets: an invoker provision (CmdRef) runs its template's
+	// snippets; everything else runs its own. Resolved once here so we can
+	// substitute argument placeholders into concrete strings.
+	check, cmd, verify := target.step.Check, target.step.Cmd, target.step.Verify
+	if target.step.CmdRef != "" {
+		state.mu.RLock()
+		tpl := state.provisions[target.step.CmdRef]
+		state.mu.RUnlock()
+		if tpl == nil {
+			stream.Send(&protocol.Event{Kind: protocol.EventError, Error: fmt.Sprintf("invoke %s: cmd-ref target %q not found", id, target.step.CmdRef)})
+			return
+		}
+		check, cmd, verify = tpl.step.Check, tpl.step.Cmd, tpl.step.Verify
+	}
+
+	// Validate the supplied arguments against the declared set and substitute
+	// their placeholders. Arg-bearing provisions are never CmdRef invokers
+	// (rejected at eval), so the declarations always belong to `target`.
+	subst, err := resolveProvisionArgs(target.step.Arguments, req.Invoke.Args)
+	if err != nil {
+		stream.Send(&protocol.Event{Kind: protocol.EventError, Error: fmt.Sprintf("invoke %s: %v", id, err)})
+		return
+	}
+	check = substituteArgs(check, subst)
+	cmd = substituteArgs(cmd, subst)
+	verify = substituteArgs(verify, subst)
+
+	// Synthetic step: concrete snippets, no `after` (fires now), the target's
+	// declared env overlaid by the caller's.
+	step := &alphasfile.ProvisionStep{
+		Name:   target.step.Name + "@invoke",
+		Check:  check,
+		Cmd:    cmd,
+		Verify: verify,
+		Env:    target.step.Env.Join(zenv.EnvironmentVariables(req.Invoke.Env)),
+	}
+	pc := newProvisionCtx(target.serviceID, step)
+
+	log.Info("alpha", "invoke %s (args=%d, env=%d override(s))", id, len(req.Invoke.Args), len(req.Invoke.Env))
+	b := &bringup{state: state, cfg: cfg, stream: stream, log: log, failfast: false}
+	runProvision(b, pc, parent)
+
+	if pc.lifecycle.Reached("success") {
+		stream.Send(&protocol.Event{Kind: protocol.EventDone})
+		return
+	}
+	stream.Send(&protocol.Event{Kind: protocol.EventError, Error: fmt.Sprintf("invoke %s: provision failed", id)})
+}
+
+// resolveProvisionArgs validates supplied invocation values against a
+// provision's declared arguments and returns name→string for placeholder
+// substitution. A supplied key with no declaration, or a missing required
+// argument, is an error; an omitted optional argument uses its default (or "").
+func resolveProvisionArgs(decls []*alphasfile.ProvisionArg, supplied map[string]any) (map[string]string, error) {
+	declared := make(map[string]*alphasfile.ProvisionArg, len(decls))
+	for _, d := range decls {
+		declared[d.Name] = d
+	}
+	for k := range supplied {
+		if _, ok := declared[k]; !ok {
+			return nil, fmt.Errorf("unknown argument %q", k)
+		}
+	}
+	out := make(map[string]string, len(decls))
+	for _, d := range decls {
+		v, ok := supplied[d.Name]
+		switch {
+		case ok:
+			// use supplied
+		case d.Default != nil:
+			v = d.Default
+		case d.Required:
+			return nil, fmt.Errorf("missing required argument %q", d.Name)
+		default:
+			v = ""
+		}
+		out[d.Name] = fmt.Sprintf("%v", v)
+	}
+	return out, nil
+}
+
+// substituteArgs replaces each argument's placeholder sentinel in a snippet
+// with its resolved value.
+func substituteArgs(snippet string, subst map[string]string) string {
+	if snippet == "" || len(subst) == 0 {
+		return snippet
+	}
+	for name, val := range subst {
+		snippet = strings.ReplaceAll(snippet, alphasfile.ArgSentinel(name), val)
+	}
+	return snippet
 }
 
 func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig, enc *protocol.Encoder, log *zlog.Logger) {

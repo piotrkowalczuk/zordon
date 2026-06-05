@@ -1,0 +1,81 @@
+# examples/mcp — exposing zordon over MCP (`zordon mcp`).
+#
+# `zordon mcp` serves an MCP server over stdio with two tool families:
+#   - one tool per zordon subcommand (start/status/get/…), generated from
+#     the same command tree the CLI uses;
+#   - one tool per provision below, runnable on demand.
+#
+# Provisions invoked over MCP run INSIDE the live alpha (reusing its env,
+# barriers and process groups); a failed invoke is reported but never shuts
+# alpha down. The latent `seed-data` is the headline case: it never auto-runs,
+# an agent invokes it with its own KEY.
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  go {
+    version = "1.26.4"
+  }
+}
+
+service "go" "app" {
+  src {
+    path = "../.."
+    exe  = "./examples/mcp/src/app"
+  }
+
+  vars = {
+    port = net::pickport()
+    # Shared marker file the provisions write to. Baked to a concrete path at
+    # eval time; the test reads it back via `zordon get service.go.app.vars.seed`.
+    seed = "${fs::tmp()}/mcp-seed.txt"
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    # Latent (`after = never`): never auto-runs. An agent invokes it on demand
+    # over MCP. `key` is a declared, typed argument — it shows up as a required
+    # field on the MCP tool and is interpolated into the snippet via its full
+    # path; alpha substitutes the supplied value at invoke time.
+    provision "seed-data" {
+      description = "Write the seed marker file from the `key` argument (run on demand over MCP)"
+      after       = never
+      argument "key" {
+        type        = "string"
+        required    = true
+        description = "value written to the seed marker file"
+      }
+      cmd = "echo ${self.runtime.provision.seed-data.arguments.key} > ${self.vars.seed}"
+    }
+
+    # Auto-run, idempotent: `check` short-circuits `cmd` once the marker exists,
+    # so re-invoking it over MCP is a no-op success.
+    provision "init-state" {
+      check = "test -f ${self.vars.seed}.init"
+      cmd   = "touch ${self.vars.seed}.init"
+    }
+
+    # Latent failure case: proves a failed invoke reports an error WITHOUT
+    # tearing alpha down (failfast does not apply to on-demand invokes).
+    provision "boom" {
+      after = never
+      cmd   = "echo boom && exit 1"
+    }
+
+    # Latent slow case: lets the test invoke, then `zordon stop` mid-flight and
+    # confirm the invoke aborts cleanly with no orphaned process group.
+    provision "slow" {
+      after = never
+      cmd   = "/bin/sleep 30"
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

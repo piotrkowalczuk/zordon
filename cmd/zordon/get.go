@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
 	"text/template"
 
+	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 )
 
@@ -23,7 +24,7 @@ import (
 //
 // (anything containing "{{" is treated as a template). Scalars print
 // raw; maps/slices print as compact JSON so the output is scriptable.
-func runGet(ctx context.Context, args []string, zordonHome string, testCfg alphasfile.TestConfig) error {
+func runGet(ctx context.Context, args []string, w io.Writer, zordonHome string, testCfg alphasfile.TestConfig) error {
 	if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
 		return errors.New("usage: zordon get <expr>  (e.g. service.go.prometheus.vars.address)")
 	}
@@ -36,7 +37,7 @@ func runGet(ctx context.Context, args []string, zordonHome string, testCfg alpha
 	if err != nil {
 		return err
 	}
-	fmt.Println(out)
+	fmt.Fprintln(w, out)
 	return nil
 }
 
