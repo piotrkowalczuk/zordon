@@ -65,6 +65,9 @@ Or add it to your client's MCP config (e.g. `.mcp.json`):
 The server resolves the chain from its working directory, so launch the client from the project tree (or pass `-e ZORDON_HOME=…`).
 Provisions run inside the live `alpha`, so `zordon start` first — or let the agent call the `start` tool.
 
+The server advertises its purpose to the agent via MCP `instructions` (when to reach for these tools), so it should pick them up on its own.
+To nudge it harder in a zordon-managed repo, add a line to your `CLAUDE.md` (or `AGENTS.md`): *"this project's local stack is managed by zordon — use the `zordon` MCP tools to bring it up, inspect it, and run provisions."*
+
 See the [`zordon mcp` reference](docs/reference/mcp.md) and [how-to](docs/how-to/run-a-provision-via-mcp.md).
 
 ## License
