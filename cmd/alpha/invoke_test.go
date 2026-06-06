@@ -42,8 +42,9 @@ func TestResolveProvisionArgs(t *testing.T) {
 		}
 	})
 
-	t.Run("numeric value stringified", func(t *testing.T) {
-		got, err := resolveProvisionArgs(decls, map[string]any{"key": "a", "n": 7})
+	t.Run("json number coerced to int form", func(t *testing.T) {
+		// MCP/JSON decodes numbers as float64.
+		got, err := resolveProvisionArgs(decls, map[string]any{"key": "a", "n": float64(7)})
 		if err != nil {
 			t.Fatalf("unexpected: %v", err)
 		}
@@ -51,6 +52,58 @@ func TestResolveProvisionArgs(t *testing.T) {
 			t.Errorf("n = %q; want \"7\"", got["n"])
 		}
 	})
+
+	t.Run("type mismatch rejected", func(t *testing.T) {
+		mismatches := map[string]map[string]any{
+			"string for number": {"key": "a", "n": "not-a-number"},
+			"number for string": {"key": 5},
+			"string for bool":   {"key": "a", "flag": "true"},
+		}
+		bools := []*alphasfile.ProvisionArg{
+			{Name: "key", Type: "string", Required: true},
+			{Name: "n", Type: "number", Default: int64(3)},
+			{Name: "flag", Type: "bool"},
+		}
+		for name, in := range mismatches {
+			t.Run(name, func(t *testing.T) {
+				if _, err := resolveProvisionArgs(bools, in); err == nil || !strings.Contains(err.Error(), "must be a") {
+					t.Fatalf("want type error, got %v", err)
+				}
+			})
+		}
+	})
+}
+
+func TestCoerceArg(t *testing.T) {
+	cases := map[string]struct {
+		typ     string
+		in      any
+		want    string
+		wantErr bool
+	}{
+		"number float integral": {"number", float64(3), "3", false},
+		"number float decimal":  {"number", float64(3.5), "3.5", false},
+		"number int64 default":  {"number", int64(8), "8", false},
+		"number from string":    {"number", "x", "", true},
+		"bool true":             {"bool", true, "true", false},
+		"bool from string":      {"bool", "true", "", true},
+		"string ok":             {"string", "hi", "hi", false},
+		"string from number":    {"string", float64(1), "", true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, err := coerceArg(&alphasfile.ProvisionArg{Name: "a", Type: c.typ}, c.in)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got %q", got)
+				}
+				return
+			}
+			if err != nil || got != c.want {
+				t.Fatalf("coerceArg(%s,%v) = %q,%v; want %q,nil", c.typ, c.in, got, err, c.want)
+			}
+		})
+	}
 }
 
 func TestSubstituteArgs(t *testing.T) {

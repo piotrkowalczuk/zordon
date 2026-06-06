@@ -40,6 +40,12 @@ func TestExample_mcp(t *testing.T) {
 	cs, stderr := connectMCP(ctx, t, p)
 	defer cs.Close()
 
+	// (0) The server advertises instructions (the "when to use zordon" signal
+	// the client injects into the agent's context).
+	if init := cs.InitializeResult(); init == nil || !strings.Contains(init.Instructions, "Alphasfile") {
+		t.Errorf("server instructions missing or unscoped: %+v", init)
+	}
+
 	// (1,2) tools/list: every command (except `mcp` itself) and every provision.
 	tools := listTools(ctx, t, cs)
 	for _, want := range []string{"start", "status", "stop", "get", "plan", "worktree", "sudo"} {

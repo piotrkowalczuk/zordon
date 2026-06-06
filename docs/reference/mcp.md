@@ -10,6 +10,14 @@ The server speaks newline-delimited JSON-RPC 2.0 over stdin/stdout (the standard
 Diagnostics go to stderr; stdout carries only the protocol.
 Launch it the way an MCP client launches any local server — as a subprocess whose stdin/stdout it owns.
 
+## Discoverability
+
+The agent decides when to use these tools from three signals (it is the model's judgement — there is no hard routing):
+
+- **Server `instructions`** — at `initialize` the server returns an `instructions` string (MCP's server-purpose field) that the client injects into the agent's context: what zordon is and when to reach for it, scoped so it is ignored where there is no `Alphasfile`.
+- **Per-tool descriptions** — each tool carries a description (a command's help; a provision's resolved `cmd`, flags, and the no-kill-alpha note).
+- **Project context** — for Claude Code, a line in `CLAUDE.md`/`AGENTS.md` ("this project's stack is managed by zordon — use the `zordon` MCP tools") is the strongest nudge.
+
 ## Tool families
 
 The server registers two kinds of tools. Call `tools/list` to discover them.

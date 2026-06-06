@@ -39,9 +39,24 @@ type commandToolInput struct {
 //     dials that level's alpha and runs the provision in-process via OpInvoke,
 //     so it reuses alpha's barriers/env/process-groups and a failure never
 //     shuts alpha down.
+//
+// serverInstructions is surfaced to the client at `initialize` (MCP's
+// instructions field) and injected into the agent's context. It is the
+// top-level "what is this server for, and when should I reach for it" signal —
+// scoped so the agent uses these tools for the local stack and ignores them
+// elsewhere.
+const serverInstructions = `zordon manages this project's local development stack — the databases, brokers, and services declared in an Alphasfile.
+
+Use these tools when the task involves that stack: bring it up or down (start, stop), see what is running and on which ports (status, get), render the resolved config (plan), or run a provision on demand (the provision__* tools — one-off setup such as seeding, migrations, or topic creation). Provisions run inside the already-running supervisor and never tear it down; a failed provision is reported but leaves the stack running.
+
+Prefer these tools over shelling out to ` + "`zordon`" + ` in the terminal — they return structured results and run provisions in the live supervisor. If the working directory has no Alphasfile, this project is not zordon-managed and these tools do not apply.`
+
 func runMCP(ctx context.Context, stdio commandIO, zordonHome string, agent bool, testCfg alphasfile.TestConfig) error {
 	log := zlog.New(stdio.Stderr, agent)
-	srv := mcp.NewServer(&mcp.Implementation{Name: "zordon", Version: "0.1.0"}, nil)
+	srv := mcp.NewServer(
+		&mcp.Implementation{Name: "zordon", Title: "Zordon", Version: "0.1.0"},
+		&mcp.ServerOptions{Instructions: serverInstructions},
+	)
 
 	registerCommandTools(srv, zordonHome, agent, testCfg)
 	registerProvisionTools(ctx, srv, log, zordonHome, testCfg)

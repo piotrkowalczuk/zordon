@@ -23,7 +23,7 @@
   - `Test<TypeName>
   - `Test<FunctionName>_<optionalAdditionalContext>
   - `Test<FunctionName>
-      
+      `
 ### Parametrized Tests
 ```go
 func TestExample(t *testing.T) {
