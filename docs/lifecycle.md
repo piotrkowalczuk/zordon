@@ -95,6 +95,10 @@ from the Configure payload, so on reconfigure `alpha` treats those as
 `zordon start` with no picks brings the rest back up. Unknown picks
 fail before contacting alpha and list the available service names.
 
+`zordon plan <svc> [...]` accepts the same picks and renders exactly
+that subset statically — a preflight of "just what I'm about to start"
+without spawning alpha. Parents still render in full.
+
 ## `zordon sudo`
 
 Out-of-band, never during `start`. Walks the chain, reads each running

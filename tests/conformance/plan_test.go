@@ -141,6 +141,79 @@ service "go" "app" {
 	}
 }
 
+func TestPlan_subsetRendersOnlyPickedServicesPlusDeps(t *testing.T) {
+	p := zordontest.NewProject(t)
+
+	// Three services at the invocation level:
+	//   - db   (no deps)
+	//   - app  (after db.runtime ready → pulls db in transitively)
+	//   - lone (unrelated)
+	// `zordon plan app` must render db + app and OMIT lone — the exact
+	// subset `zordon start app` would bring up.
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "TMPDIR"]
+
+service "go" "db" {
+  package = "example.com/db@v0.0.0"
+
+  vars = {
+    port = net::pickport()
+  }
+}
+
+service "go" "app" {
+  package = "example.com/app@v0.0.0"
+
+  runtime {
+    after = [service.go.db.runtime.ready]
+  }
+}
+
+service "go" "lone" {
+  package = "example.com/lone@v0.0.0"
+}
+`)
+
+	res := p.Zordon("plan", "app").Run(t)
+	if res.ExitCode != 0 {
+		t.Fatalf("zordon plan app: exit %d\nstdout: %s\nstderr: %s",
+			res.ExitCode, res.Stdout, res.Stderr)
+	}
+	out := res.Stdout
+
+	if !strings.Contains(out, `service "go" "app"`) {
+		t.Errorf("picked service `app` missing from plan output\n%s", out)
+	}
+	if !strings.Contains(out, `service "go" "db"`) {
+		t.Errorf("transitive dep `db` (app's runtime.after) must be pulled into the subset\n%s", out)
+	}
+	if strings.Contains(out, `service "go" "lone"`) {
+		t.Errorf("unpicked service `lone` must NOT appear in a subset plan\n%s", out)
+	}
+}
+
+func TestPlan_unknownPickIsError(t *testing.T) {
+	p := zordontest.NewProject(t)
+
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "TMPDIR"]
+
+service "go" "app" {
+  package = "example.com/app@v0.0.0"
+}
+`)
+
+	res := p.Zordon("plan", "nope").Run(t)
+	if res.ExitCode == 0 {
+		t.Fatalf("zordon plan nope unexpectedly succeeded\nstdout: %s\nstderr: %s",
+			res.Stdout, res.Stderr)
+	}
+	combined := res.Stdout + res.Stderr
+	if !strings.Contains(combined, "nope") || !strings.Contains(combined, "available") {
+		t.Errorf("error should name the unknown pick and list available services; got:\n%s", combined)
+	}
+}
+
 func TestPlan_errorsOnUnresolvableReference(t *testing.T) {
 	p := zordontest.NewProject(t)
 

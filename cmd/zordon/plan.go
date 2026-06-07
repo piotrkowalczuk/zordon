@@ -20,13 +20,27 @@ import (
 // unknown `service.X.Y` ref, a cycle in the DAG, a missing env var —
 // is a fatal error: plan is the "every value bakes down to a constant
 // before we touch the system" preflight, not a partial dump.
-func runPlan(_ context.Context, w io.Writer, zordonHome string, testCfg alphasfile.TestConfig) error {
+//
+// picks subsets the invocation (leaf) level exactly as `zordon start`
+// does — the named services plus their transitive `after` deps — so a
+// preflight of "just the subset I'm about to start" renders the same
+// service set start would bring up. Parents are always rendered whole
+// (they are shared context, not what you're starting).
+func runPlan(_ context.Context, w io.Writer, zordonHome string, picks []string, testCfg alphasfile.TestConfig) error {
 	levels, err := walkChain(zordonHome, func(lv *level) (*protocol.StateInfo, error) {
 		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
 		if err != nil {
 			return nil, err
 		}
-		return stateFromAlphasfile(af), nil
+		st := stateFromAlphasfile(af)
+		if lv.isInvocation && len(picks) > 0 {
+			filtered, err := pickServices(af.All(), picks)
+			if err != nil {
+				return nil, err
+			}
+			st.Services = filtered
+		}
+		return st, nil
 	})
 	if err != nil {
 		return err

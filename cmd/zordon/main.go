@@ -176,11 +176,11 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	planFlags := ff.NewFlagSet("plan").SetParent(rootFlags)
 	planCmd := &ff.Command{
 		Name:      "plan",
-		Usage:     "zordon plan",
-		ShortHelp: "render the resolved Alphasfile chain with every interpolation baked to a concrete value (errors on the first unresolvable expression)",
+		Usage:     "zordon plan [service ...]",
+		ShortHelp: "render the resolved Alphasfile chain with every interpolation baked to a concrete value (optional service args render just that subset of the invocation level); errors on the first unresolvable expression",
 		Flags:     planFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runPlan(ctx, stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg())
+			return runPlan(ctx, stdio.Stdout, zfs.ZordonHome(home.Path()), parsePicks(args), testCfg())
 		},
 	}
 

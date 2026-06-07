@@ -2,14 +2,14 @@
 #
 # Pre-git quality gate for Claude Code (PreToolUse / Bash matcher).
 #
-# Runs the project's checks before a commit or push reaches git, and
-# aborts the git command (exit 2) the moment one fails:
+# Before a commit or push reaches git, run the project's checks and
+# abort the git command (exit 2) the moment one fails:
 #
-#   git commit  ->  make fmt + make lint
-#   git push    ->  make fmt + make lint + make test
+#   git commit  ->  make lint + make test
+#   git push    ->  make lint + make test
 #
-# `make test` is heavy (race build + serial conformance suite), so it
-# only runs before a push, not on every commit.
+# Formatting is handled separately, on every Go edit
+# (post-edit-gofmt.sh), so it is not repeated here.
 #
 # Claude passes the Bash command it is about to run as JSON on stdin;
 # this script self-filters, so it also fires for git buried in a
@@ -30,16 +30,12 @@ git_sub() {
 		"(^|[^[:alnum:]_./-])git[[:space:]]+(-[A-Za-z][^[:space:]]*[[:space:]]+([^-][^[:space:]]*[[:space:]]+)?)*$1([[:space:]]|\$)"
 }
 
-run_fmt_lint=0
-run_test=0
-git_sub commit && run_fmt_lint=1
-git_sub push && { run_fmt_lint=1; run_test=1; }
+op=
+git_sub commit && op=commit
+git_sub push && op=push
 
 # Neither commit nor push -> not our business, let it through.
-[ "$run_fmt_lint" -eq 1 ] || exit 0
-
-op=commit
-[ "$run_test" -eq 1 ] && op=push
+[ -n "$op" ] || exit 0
 
 # Run one make target; on failure, explain to Claude (stderr is fed
 # back on exit 2) and abort the git command.
@@ -51,9 +47,9 @@ gate() {
 	fi
 }
 
-gate fmt
+# lint first (cheap, fails fast), then the heavy race+conformance suite.
 gate lint
-[ "$run_test" -eq 1 ] && gate test
+gate test
 
 printf '\npre-git gate: all checks passed -- allowing git %s.\n' "$op" >&2
 exit 0
