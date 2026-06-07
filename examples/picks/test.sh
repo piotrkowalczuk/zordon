@@ -48,3 +48,16 @@ case "$plan" in
 	*'service "go" "worker"'*) fail "worker must not appear in a subset plan";;
 	*) pass "worker omitted from subset plan";;
 esac
+
+# Same subset via the env channel (ZORDON_SERVICES) instead of argv —
+# the only way a caller that controls env but not argv (e.g. a Claude
+# Code hook) can inject picks. Subshell-exported so it reaches the
+# binary and doesn't leak to later steps.
+info "ZORDON_SERVICES=web zordon plan   (env-injected subset)"
+plan="$(export ZORDON_SERVICES=web; zordon plan 2>&1)" || fail "plan via ZORDON_SERVICES failed"
+assert_contains "$plan" 'service "go" "web"' "env-selected web rendered"
+assert_contains "$plan" 'service "go" "api"' "env-selected web pulls in api"
+case "$plan" in
+	*'service "go" "worker"'*) fail "worker must not appear in an env-selected subset";;
+	*) pass "worker omitted from env-selected subset";;
+esac

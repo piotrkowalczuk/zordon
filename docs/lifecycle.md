@@ -99,6 +99,12 @@ fail before contacting alpha and list the available service names.
 that subset statically — a preflight of "just what I'm about to start"
 without spawning alpha. Parents still render in full.
 
+The selection can equally come from the `--services` flag or the
+`ZORDON_SERVICES` env var (comma- or space-separated), merged with any
+positional args. The env var is the only channel for injecting a subset
+where you control the environment but not argv — e.g. from a Claude Code
+hook driving `zordon`.
+
 ## `zordon sudo`
 
 Out-of-band, never during `start`. Walks the chain, reads each running

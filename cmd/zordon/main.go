@@ -111,14 +111,15 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	// mutation, also makes `--help` print "(default: true)" so users
 	// know they need `--failfast=false` to opt out.
 	startFailfast := startFlags.BoolLongDefault("failfast", true, "abort bringup and shut down alpha on first service failure")
+	startServices := startFlags.StringLong("services", "", "services to bring up, comma/space-separated (env: ZORDON_SERVICES); merged with any positional [service ...] args")
 	startCmd := &ff.Command{
 		Name:      "start",
 		Usage:     "zordon start [FLAGS] [service ...]",
-		ShortHelp: "ensure alpha is running and push the Alphasfile config (optional service args bring up just that subset)",
+		ShortHelp: "ensure alpha is running and push the Alphasfile config (--services/ZORDON_SERVICES or positional args bring up just that subset)",
 		Flags:     startFlags,
 		Exec: func(ctx context.Context, args []string) error {
 			return runStart(ctx, zlog.New(stdio.Stderr, *agent), *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent,
-				parsePicks(args),
+				parsePicks(append(strings.Fields(*startServices), args...)),
 				zfs.ZordonHome(home.Path()),
 				testCfg())
 		},
@@ -174,13 +175,14 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 
 	// plan
 	planFlags := ff.NewFlagSet("plan").SetParent(rootFlags)
+	planServices := planFlags.StringLong("services", "", "services to render, comma/space-separated (env: ZORDON_SERVICES); merged with any positional [service ...] args")
 	planCmd := &ff.Command{
 		Name:      "plan",
-		Usage:     "zordon plan [service ...]",
-		ShortHelp: "render the resolved Alphasfile chain with every interpolation baked to a concrete value (optional service args render just that subset of the invocation level); errors on the first unresolvable expression",
+		Usage:     "zordon plan [FLAGS] [service ...]",
+		ShortHelp: "render the resolved Alphasfile chain with every interpolation baked to a concrete value (--services/ZORDON_SERVICES or positional args render just that subset of the invocation level); errors on the first unresolvable expression",
 		Flags:     planFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runPlan(ctx, stdio.Stdout, zfs.ZordonHome(home.Path()), parsePicks(args), testCfg())
+			return runPlan(ctx, stdio.Stdout, zfs.ZordonHome(home.Path()), parsePicks(append(strings.Fields(*planServices), args...)), testCfg())
 		},
 	}
 

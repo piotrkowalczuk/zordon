@@ -192,6 +192,55 @@ service "go" "lone" {
 	}
 }
 
+func TestPlan_subsetViaServicesEnvVar(t *testing.T) {
+	// The env channel a Claude Code hook (or any caller that controls
+	// env but not argv) uses: no positional args, the subset comes
+	// purely from ZORDON_SERVICES, which ff maps to the --services flag.
+	// Same db/app/lone graph as the positional case.
+	p := zordontest.NewProject(t)
+
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "TMPDIR"]
+
+service "go" "db" {
+  package = "example.com/db@v0.0.0"
+
+  vars = {
+    port = net::pickport()
+  }
+}
+
+service "go" "app" {
+  package = "example.com/app@v0.0.0"
+
+  runtime {
+    after = [service.go.db.runtime.ready]
+  }
+}
+
+service "go" "lone" {
+  package = "example.com/lone@v0.0.0"
+}
+`)
+
+	res := p.Zordon("plan").WithEnv("ZORDON_SERVICES", "app").Run(t)
+	if res.ExitCode != 0 {
+		t.Fatalf("zordon plan (ZORDON_SERVICES=app): exit %d\nstdout: %s\nstderr: %s",
+			res.ExitCode, res.Stdout, res.Stderr)
+	}
+	out := res.Stdout
+
+	if !strings.Contains(out, `service "go" "app"`) {
+		t.Errorf("ZORDON_SERVICES=app must render app\n%s", out)
+	}
+	if !strings.Contains(out, `service "go" "db"`) {
+		t.Errorf("ZORDON_SERVICES=app must pull in db (app's after dep)\n%s", out)
+	}
+	if strings.Contains(out, `service "go" "lone"`) {
+		t.Errorf("ZORDON_SERVICES=app must not render unpicked lone\n%s", out)
+	}
+}
+
 func TestPlan_unknownPickIsError(t *testing.T) {
 	p := zordontest.NewProject(t)
 

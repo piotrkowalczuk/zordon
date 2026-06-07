@@ -32,6 +32,7 @@ is free); `alpha` keeps the stack running in the background until
 
 ```
 zordon --agent              machine-friendly log format ('<ms> <src> <LEVEL> <msg>')
+zordon start --services a,b bring up just a,b (+ deps); env: ZORDON_SERVICES, same as positional args
 zordon start --failfast     abort bringup and shut down on first failure (default on)
 zordon start --alpha-log P  where alpha appends its own log
 zordon start --timeout 60s  max wait for alpha to come up & finish bringup
