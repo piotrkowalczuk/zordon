@@ -13,6 +13,9 @@ tmp
 examples/.zordon
 bin
 .venv
+# generated MkDocs site (make gen / CI docs build)
+_site
+site
 *.out
 alpha.log
 /app

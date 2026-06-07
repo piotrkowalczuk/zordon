@@ -36,3 +36,15 @@ if out="$(zordon start --agent --alpha-log "$ALPHA_LOG" nope 2>&1)"; then
 fi
 assert_contains "$out" "unknown service" "unknown-pick error"
 assert_contains "$out" "api" "error lists available services"
+
+# `zordon plan <service>` subsets statically the same way start does:
+# a preflight render of web + its after-dep api, with worker omitted —
+# no alpha needed.
+info "zordon plan web          (expect: web + api rendered, worker omitted)"
+plan="$(zordon plan web 2>&1)" || fail "plan failed"
+assert_contains "$plan" 'service "go" "web"' "plan renders picked web"
+assert_contains "$plan" 'service "go" "api"' "plan pulls in api via after"
+case "$plan" in
+	*'service "go" "worker"'*) fail "worker must not appear in a subset plan";;
+	*) pass "worker omitted from subset plan";;
+esac

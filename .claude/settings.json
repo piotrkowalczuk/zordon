@@ -1,5 +1,18 @@
 {
   "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/post-edit-gofmt.sh\"",
+            "timeout": 180,
+            "statusMessage": "post-edit gate: make fmt…"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
@@ -9,7 +22,7 @@
             "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-git-quality-gate.sh\"",
             "if": "Bash(git *)",
             "timeout": 900,
-            "statusMessage": "pre-git gate: make fmt/lint(+test on push)…"
+            "statusMessage": "pre-git gate: make lint + test…"
           }
         ]
       }
