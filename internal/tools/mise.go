@@ -196,6 +196,34 @@ func MiseEnv(binPath, dataDir, tool, version string, logOut io.Writer) (map[stri
 	return env, nil
 }
 
+// EnsurePackage installs a `pkg` service's native package via mise
+// (`mise install <name>@<version>`). name is the mise tool ref:
+// backend-qualified (e.g. "aqua:etcd-io/etcd") or a bare name that
+// mise's registry resolves to a backend (redis → vfox→asdf). Idempotent
+// — mise no-ops when the version is already present under dataDir.
+// Download/compile progress goes to logOut (some backends build from
+// source on first install). Callers hold the per-(name, version)
+// Acquire lock, since the install writes under dataDir.
+func EnsurePackage(binPath, dataDir, name, version string, buildEnv zenv.EnvironmentVariables, logOut io.Writer) error {
+	spec := name + "@" + version
+	cmd := exec.Command(binPath, "install", spec)
+	// buildEnv (the pkg service's `build { env }`) overlays the install
+	// environment — configure flags / build vars a source-compiled
+	// backend needs, e.g. POSTGRES_EXTRA_CONFIGURE_OPTIONS=--without-icu
+	// or PKG_CONFIG_PATH. Appended last so it wins over the host env.
+	env := isolatedEnv(dataDir, binPath)
+	for k, v := range buildEnv {
+		env = append(env, k+"="+v)
+	}
+	cmd.Env = env
+	cmd.Stdout = logOut
+	cmd.Stderr = logOut
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("mise install %s (data dir %s): %w", spec, dataDir, err)
+	}
+	return nil
+}
+
 // EnsureTools installs the requested language-native tools into the
 // pinned interpreter's tool world. Each version of a toolchain (Ruby
 // 3.0.7 vs Ruby 3.3.10) has its own gem/pip/cargo registry, so these
@@ -274,5 +302,13 @@ func toolInstallCmd(binPath, toolchain, version, name, ver string) (*exec.Cmd, e
 // Acquire so the same locked critical section covers both installing
 // tools and reading env (which itself may auto-install the version).
 func Acquire(dataDir, tool, version string) (release func(), err error) {
-	return zfs.AcquireLock(filepath.Join(dataDir, "locks"), tool+"-"+version)
+	return zfs.AcquireLock(filepath.Join(dataDir, "locks"), sanitizeForPath(tool)+"-"+version)
+}
+
+// sanitizeForPath makes a mise tool ref safe as a single filesystem path
+// component: a backend-qualified pkg ref like "aqua:etcd-io/etcd" carries
+// ':' and '/' that would otherwise nest into a non-existent directory or
+// break a lock-file path. Language refs (go/rust/...) are unchanged.
+func sanitizeForPath(s string) string {
+	return strings.NewReplacer("/", "-", ":", "-").Replace(s)
 }

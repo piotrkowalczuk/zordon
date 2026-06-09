@@ -3,6 +3,7 @@ package probe
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -245,5 +246,62 @@ func TestProbe_Wait_contextCancel(t *testing.T) {
 	err := <-errCh
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled error, got %v", err)
+	}
+}
+
+func TestProbe_Wait_tcpSuccess(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+
+	p := &Probe{
+		TCP:              &TCPAction{Host: "127.0.0.1", Port: port},
+		Period:           10 * time.Millisecond,
+		Timeout:          100 * time.Millisecond,
+		FailureThreshold: 1,
+		SuccessThreshold: 2,
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := p.Wait(ctx, nil); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+}
+
+func TestProbe_Wait_tcpFailure(t *testing.T) {
+	// Listen then close to obtain a port nothing is accepting on, so the
+	// dial gets connection-refused.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+	ln.Close()
+
+	p := &Probe{
+		TCP:              &TCPAction{Port: port}, // default host 127.0.0.1
+		Period:           5 * time.Millisecond,
+		Timeout:          100 * time.Millisecond,
+		FailureThreshold: 3,
+		SuccessThreshold: 1,
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := p.Wait(ctx, nil); err == nil {
+		t.Fatal("expected failure on closed port, got nil")
 	}
 }

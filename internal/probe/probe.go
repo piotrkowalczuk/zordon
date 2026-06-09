@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 type Probe struct {
 	HTTP *HTTPAction `json:"http,omitempty"`
 	Exec *ExecAction `json:"exec,omitempty"`
+	TCP  *TCPAction  `json:"tcp,omitempty"`
 
 	InitialDelay     time.Duration `json:"initial_delay,omitempty"`
 	Period           time.Duration `json:"period,omitempty"`
@@ -43,6 +45,14 @@ type HTTPAction struct {
 type ExecAction struct {
 	Command []string          `json:"command"`
 	Env     map[string]string `json:"env,omitempty"`
+}
+
+// TCPAction is the "can I open a TCP connection?" probe — the readiness
+// signal for services that speak no HTTP (databases, brokers): a
+// successful dial to host:port means the listener is accepting.
+type TCPAction struct {
+	Port int    `json:"port"`
+	Host string `json:"host,omitempty"` // default 127.0.0.1
 }
 
 // Defaults match k8s.
@@ -88,7 +98,7 @@ func (p *Probe) Wait(ctx context.Context, report func(ok bool, reason string)) e
 	if p == nil {
 		return errors.New("nil probe")
 	}
-	if p.HTTP == nil && p.Exec == nil {
+	if p.HTTP == nil && p.Exec == nil && p.TCP == nil {
 		return errors.New("no probe action configured")
 	}
 
@@ -153,7 +163,28 @@ func (p *Probe) try(ctx context.Context, timeout time.Duration) (bool, string) {
 	case p.Exec != nil:
 		return p.tryExec(ctx, timeout)
 	}
+	if p.TCP != nil {
+		return p.tryTCP(ctx, timeout)
+	}
 	return false, "no action"
+}
+
+func (p *Probe) tryTCP(ctx context.Context, timeout time.Duration) (bool, string) {
+	host := p.TCP.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", p.TCP.Port))
+
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(cctx, "tcp", addr)
+	if err != nil {
+		return false, err.Error()
+	}
+	_ = conn.Close()
+	return true, "TCP " + addr
 }
 
 func (p *Probe) tryHTTP(ctx context.Context, timeout time.Duration) (bool, string) {

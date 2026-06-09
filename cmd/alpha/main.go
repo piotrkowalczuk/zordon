@@ -540,9 +540,19 @@ type toolchainCtx struct {
 	userEnv zenv.EnvironmentVariables
 	// tools is the name→version map of language-native tools to
 	// install into this pinned interpreter (bundler@2.5.3, dlv@..., etc).
-	tools     map[string]string
-	lifecycle *lifecycle.Instance
-	doneBar   *barrier.Barrier // Any(ready, failed)
+	tools map[string]string
+	// isPkg marks a per-service `pkg` entity: the install verb is
+	// `mise install <name>@<version>` (EnsurePackage) rather than the
+	// language EnsureTools, and lang holds the mise tool ref (e.g.
+	// "redis" / "aqua:etcd-io/etcd").
+	isPkg bool
+	// installEnv (pkg only): the service's `build { env }` overlaid onto
+	// the `mise install` — configure flags / build vars a source-compiled
+	// backend needs (e.g. POSTGRES_EXTRA_CONFIGURE_OPTIONS). NOT applied
+	// to the run env.
+	installEnv zenv.EnvironmentVariables
+	lifecycle  *lifecycle.Instance
+	doneBar    *barrier.Barrier // Any(ready, failed)
 }
 
 func newToolchainCtx(lang, version string, toolsMap map[string]string, userEnv zenv.EnvironmentVariables) *toolchainCtx {
@@ -616,7 +626,15 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
 	// binaries land under `installs/<lang>/<version>/lib/.../gems/...`
 	// only after gem install runs.
 	envWriter := logWriter(log, "mise-tool")
-	if err := tools.EnsureTools(bin, dataDir, tc.lang, tc.version, tc.tools, envWriter); err != nil {
+	if tc.isPkg {
+		// pkg: install the package itself (mise install <tool>@<ver>);
+		// there are no language-native tools to layer in.
+		if err := tools.EnsurePackage(bin, dataDir, tc.lang, tc.version, tc.installEnv, envWriter); err != nil {
+			log.Error("alpha", "package %s: install: %v", tc.lang, err)
+			tc.lifecycle.Reach("failed")
+			return
+		}
+	} else if err := tools.EnsureTools(bin, dataDir, tc.lang, tc.version, tc.tools, envWriter); err != nil {
 		log.Error("alpha", "toolchain %s: ensure tools: %v", tc.lang, err)
 		tc.lifecycle.Reach("failed")
 		return
@@ -926,7 +944,14 @@ func runProvision(b *bringup, pc *provisionCtx, parent *serviceCtx) {
 		}
 	}
 	state.mu.RUnlock()
-	tcEnv, err := toolchainEnv(parent.toolchain, state, log)
+	// A pkg service's toolchain entity is keyed by its mise tool name, not
+	// the "pkg" label — route through toolchainKey so an initdb/seed
+	// provision sees the package's bin (initdb, psql, …) on PATH.
+	tcKey := parent.toolchain
+	if parentSvc != nil {
+		tcKey = toolchainKey(parentSvc)
+	}
+	tcEnv, err := toolchainEnv(tcKey, state, log)
 	if err != nil {
 		log.Error("alpha", "provision[%s]: toolchain: %v", pc.id, err)
 		pc.lifecycle.Reach("failure")
@@ -1791,6 +1816,30 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		go bringupToolchain(tc, state.zordonHome, log)
 	}
 
+	// pkg services: each declares a native package (redis/postgres/…)
+	// materialized by mise. Keyed by the mise tool name so peers sharing
+	// a package share one install + one barrier. Same bringup goroutine
+	// as language toolchains (EnsureMise → install → MiseEnv → ready);
+	// gated into each pkg service via the implicit toolchain.<tool>@ready
+	// dep (see implicitRuntimeAfter / toolchainKey).
+	pkgSeen := map[string]bool{}
+	for _, svc := range services {
+		if svc.Toolchain != alphasfile.ToolchainPkg || svc.Pkg == nil {
+			continue
+		}
+		if pkgSeen[svc.Pkg.Name] {
+			continue
+		}
+		pkgSeen[svc.Pkg.Name] = true
+		tc := newToolchainCtx(svc.Pkg.Name, svc.Pkg.Version, nil, nil)
+		tc.isPkg = true
+		if svc.Runtime != nil {
+			tc.installEnv = svc.Runtime.BuildEnv
+		}
+		state.addToolchain(tc)
+		go bringupToolchain(tc, state.zordonHome, log)
+	}
+
 	// Pre-allocate every entity FIRST so cross-refs in `after` resolve
 	// the moment we spawn goroutines. Each ctx exposes its barriers
 	// immediately even though cmd hasn't been started yet — the bringup
@@ -1921,13 +1970,26 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 // (build cmd, runtime cmd, provision shells) layers tc.env onto its
 // cmd.Env via applyToolchainEnv — and that env can only be cached once
 // `mise install` + `gem install bundler` etc. have completed.
+// toolchainKey is the state.toolchains map key (and barrier-ref segment)
+// for a service's materialized toolchain. Language services key by their
+// toolchain label; a pkg service keys by its mise tool name, so peers
+// sharing a package share one install and one `toolchain.<tool>@ready`
+// barrier.
+func toolchainKey(svc *alphasfile.Service) string {
+	if svc.Toolchain == alphasfile.ToolchainPkg && svc.Pkg != nil {
+		return svc.Pkg.Name
+	}
+	return svc.Toolchain
+}
+
 func implicitRuntimeAfter(svc *alphasfile.Service, state *alphaState) []string {
 	var deps []string
+	key := toolchainKey(svc)
 	state.mu.RLock()
-	_, pinned := state.toolchains[svc.Toolchain]
+	_, pinned := state.toolchains[key]
 	state.mu.RUnlock()
 	if pinned {
-		deps = append(deps, "toolchain."+svc.Toolchain+"@ready")
+		deps = append(deps, "toolchain."+key+"@ready")
 	}
 	if svc.Runtime != nil {
 		deps = append(deps, svc.Runtime.After...)
@@ -2144,7 +2206,7 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 	// (PATH/GOROOT/GEM_PATH/...) the service runs under. Dotenv +
 	// service.env / phase env layer over them inside buildCmd. Blocks
 	// until the toolchain entity reaches ready (no-op when none).
-	tcEnv, err := toolchainEnv(svc.Toolchain, state, log)
+	tcEnv, err := toolchainEnv(toolchainKey(svc), state, log)
 	if err != nil {
 		log.Error("alpha", "toolchain %s: %v", name, err)
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "toolchain: " + err.Error()})
@@ -2973,7 +3035,7 @@ func prepareBuild(ctx context.Context, svc *alphasfile.Service, name, dest strin
 	// the runtime is what keeps build artifacts (vendor dirs,
 	// generated code) ABI-compatible with the runtime that
 	// consumes them.
-	tcEnv, err := toolchainEnv(svc.Toolchain, state, log)
+	tcEnv, err := toolchainEnv(toolchainKey(svc), state, log)
 	if err != nil {
 		return fmt.Errorf("build toolchain: %w", err)
 	}

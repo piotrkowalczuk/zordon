@@ -296,6 +296,68 @@ service "go" "app" {
 	}
 }
 
+func TestPlan_rendersPkgService(t *testing.T) {
+	p := zordontest.NewProject(t)
+
+	// pkg services resolve statically like any other — `plan` neither
+	// installs the package nor spawns alpha. The package coordinate
+	// renders back as an object and the TCP readiness block round-trips.
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "TMPDIR"]
+
+service "pkg" "redis" {
+  package = { name = "redis", version = "7.2.5" }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["redis-server", "--port", "${self.vars.port}"]
+  }
+
+  readiness {
+    tcp { port = self.vars.port }
+  }
+}
+`)
+
+	res := p.Zordon("plan").Run(t)
+	if res.ExitCode != 0 {
+		t.Fatalf("zordon plan: exit %d\nstdout: %s\nstderr: %s", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	out := res.Stdout
+
+	for _, want := range []string{
+		`service "pkg" "redis"`,
+		"package = {",
+		"tcp {",
+		"redis-server",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("plan output missing %q\n----- output -----\n%s\n-----", want, out)
+		}
+	}
+	// hclwrite aligns `=` (e.g. `name    = "redis"`), so match with a
+	// whitespace-tolerant regex rather than an exact substring.
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`name\s*=\s*"redis"`),
+		regexp.MustCompile(`version\s*=\s*"7\.2\.5"`),
+	} {
+		if !re.MatchString(out) {
+			t.Errorf("plan output missing /%s/\n----- output -----\n%s\n-----", re, out)
+		}
+	}
+	// Interpolation tokens must all be gone (picked port baked in).
+	for _, forbidden := range []string{"${", "net::", "self."} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("plan output still contains unresolved token %q\n%s", forbidden, out)
+		}
+	}
+	// Plan is static — must not spawn alpha (no install attempted).
+	if alphaLogWritten(p.AlphaLogPath()) {
+		t.Errorf("zordon plan wrote %s; plan must not spawn alpha", p.AlphaLogPath())
+	}
+}
+
 func TestPlan_chainRendersRootFirstWithHeaders(t *testing.T) {
 	// A federation chain: parent Alphasfile one dir up + child
 	// Alphasfile in the project dir. `plan` walks root → leaf, emits

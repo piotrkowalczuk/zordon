@@ -35,6 +35,14 @@ const (
 	// the install path uses directly; this constant is the zordon-side
 	// identifier (block label + service label).
 	ToolchainNode = "nodejs"
+	// ToolchainPkg is "pkg": a native package (redis/postgres/etcd/…)
+	// installed via mise and run as a normal supervised process. Unlike
+	// the language toolchains it has no source build — `package` is a
+	// registry coordinate (a mise tool ref) and `runtime.cmd` is the run
+	// command. Lives in the same per-service mise-materialization path as
+	// the language toolchains, so tommy/pgid/registry supervise it like
+	// any other child process.
+	ToolchainPkg = "pkg"
 )
 
 // --- wire-stable types (JSON over the control socket) ---------------------
@@ -119,11 +127,24 @@ type Worktree struct {
 }
 
 type Service struct {
-	Toolchain string          `json:"toolchain"`
-	Runtime   *RuntimeConfig  `json:"runtime"`
-	Package   *Package        `json:"package,omitempty"`
-	Debugger  *DebuggerConfig `json:"debugger,omitempty"`
-	Agent     *ServiceAgent   `json:"agent,omitempty"`
+	Toolchain string         `json:"toolchain"`
+	Runtime   *RuntimeConfig `json:"runtime"`
+	Package   *Package       `json:"package,omitempty"`
+	// Pkg is set instead of Package for `pkg` services: a mise coordinate
+	// with no source build. Mutually exclusive with Package.
+	Pkg      *PkgSpec        `json:"pkg,omitempty"`
+	Debugger *DebuggerConfig `json:"debugger,omitempty"`
+	Agent    *ServiceAgent   `json:"agent,omitempty"`
+}
+
+// PkgSpec is the resolved mise coordinate for a `pkg` service. Name is
+// the mise tool ref, optionally backend-qualified (e.g. "redis" or
+// "aqua:etcd-io/etcd"); Version pins it. alpha materializes it via
+// `mise install <Name>@<Version>` and runs Runtime.Command under the
+// package's mise env — there is no source build.
+type PkgSpec struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
 }
 
 type ServiceAgent struct {
@@ -346,6 +367,9 @@ var toolchainDefaultsFor = map[string]toolchainDefaults{
 	ToolchainRust: {TTY: false},
 	ToolchainRuby: {TTY: true},
 	ToolchainNode: {TTY: true},
+	// pkg: the package binary (redis-server / postgres / …) writes
+	// startup logs line-by-line to stderr; no PTY needed.
+	ToolchainPkg: {TTY: false},
 }
 
 // Flags renders RuntimeConfig.Arguments into argv flags. Format follows
@@ -589,12 +613,16 @@ type serviceBlock struct {
 	// src/git block XOR top-level `package` (go install <pkg@ver>).
 	// `bin` / `features` are rust-only artifact knobs and apply to all
 	// source modes.
-	Src      *srcBlock   `hcl:"src,block"`
-	Git      *gitBlock   `hcl:"git,block"`
-	Crate    *crateBlock `hcl:"crate,block"`
-	Package  string      `hcl:"package,optional"`  // go use-only: `go install <package>` (incl. @version)
-	Bin      string      `hcl:"bin,optional"`      // rust: cargo --bin target
-	Features []string    `hcl:"features,optional"` // rust: cargo --features (applies to crate-install AND worktree build)
+	Src   *srcBlock   `hcl:"src,block"`
+	Git   *gitBlock   `hcl:"git,block"`
+	Crate *crateBlock `hcl:"crate,block"`
+	// Package is polymorphic: a string (go use-only `pkg@ver`) or, for the
+	// `pkg` toolchain, a string (`name@ver` / `backend:name@ver`) or an
+	// object `{ name, backend?, version }`. Decoded as an expression so one
+	// field serves both; eval interprets it by cty type.
+	Package  hcl.Expression `hcl:"package,optional"`
+	Bin      string         `hcl:"bin,optional"`      // rust: cargo --bin target
+	Features []string       `hcl:"features,optional"` // rust: cargo --features (applies to crate-install AND worktree build)
 
 	// dynamic (interpolated; order resolved by intra-service dependency DAG)
 	Vars      hcl.Expression `hcl:"vars,optional"`
@@ -764,6 +792,7 @@ type logBlock struct {
 type probeSpec struct {
 	HTTP             *httpActionSpec `hcl:"http,block"`
 	Exec             *execActionSpec `hcl:"exec,block"`
+	TCP              *tcpActionSpec  `hcl:"tcp,block"`
 	InitialDelay     string          `hcl:"initial_delay,optional"`
 	Period           string          `hcl:"period,optional"`
 	Timeout          string          `hcl:"timeout,optional"`
@@ -785,6 +814,11 @@ type httpActionSpec struct {
 type execActionSpec struct {
 	Command hcl.Expression `hcl:"command"`
 	Env     hcl.Expression `hcl:"env,optional"`
+}
+
+type tcpActionSpec struct {
+	Port hcl.Expression `hcl:"port"`
+	Host string         `hcl:"host,optional"`
 }
 
 type fileBlock struct {
@@ -1104,11 +1138,17 @@ func anyToCty(v any) cty.Value {
 }
 
 func compileProbe(ps *probeSpec, port int, execCmd []string, execEnv map[string]string) (*probe.Probe, error) {
+	n := 0
+	for _, set := range []bool{ps.HTTP != nil, ps.TCP != nil, ps.Exec != nil} {
+		if set {
+			n++
+		}
+	}
 	switch {
-	case ps.HTTP != nil && ps.Exec != nil:
-		return nil, fmt.Errorf("choose either http or exec, not both")
-	case ps.HTTP == nil && ps.Exec == nil:
-		return nil, fmt.Errorf("requires an http or exec action")
+	case n > 1:
+		return nil, fmt.Errorf("readiness: choose a single action (http, tcp, or exec), not both")
+	case n == 0:
+		return nil, fmt.Errorf("readiness: requires an http or exec action")
 	}
 	p := &probe.Probe{
 		FailureThreshold: ps.FailureThreshold,
@@ -1129,6 +1169,12 @@ func compileProbe(ps *probeSpec, port int, execCmd []string, execEnv map[string]
 		p.Exec = &probe.ExecAction{
 			Command: execCmd,
 			Env:     execEnv,
+		}
+	}
+	if ps.TCP != nil {
+		p.TCP = &probe.TCPAction{
+			Port: port,
+			Host: ps.TCP.Host,
 		}
 	}
 	parse := func(field, raw string) (time.Duration, error) {
