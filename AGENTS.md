@@ -11,6 +11,7 @@
 
 ## Testing
 
+- Keep private helpers under the actual tests.
 - **Deliberate use of `t.Parallel()`:**
   - Do not blindly apply `t.Parallel()` to every test function.
   - **When to use:** Use it for I/O-bound tests, long-polling, simulated network delays, or moderate blocking operations that would otherwise bottleneck the test suite without consuming excessive hardware resources.

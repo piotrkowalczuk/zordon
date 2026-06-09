@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,6 +24,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/barrier"
 	"github.com/piotrkowalczuk/zordon/internal/control"
+	"github.com/piotrkowalczuk/zordon/internal/daemon"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/lifecycle"
 	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
@@ -337,22 +337,12 @@ type alphaState struct {
 	shutdownOnce   sync.Once
 	shutdownReason string
 
-	// parentW watches the pipe zordon holds open for us; closed when
-	// zordon dies (kernel-closed write end ⇒ EOF on our read end).
-	// Stopped after the first configure round-trip finishes, because
-	// that is the point at which zordon is allowed to detach cleanly:
-	// EventDone has been emitted, zordon will exit (closing the pipe)
-	// without that close meaning death. Nil when alpha was launched
-	// outside zordon (no ZORDON_PARENT_FD).
-	parentW *parentwatch.Watcher
-
-	// bringupDone is the commit point: once alpha decides the first
-	// bringup succeeded (set just before emitting EventDone), the services
-	// are up to stay, so a subsequent parent (zordon) exit is the EXPECTED
-	// clean detach — not a death that should tear them down. Set before
-	// EventDone, checked by the parent-death goroutine, so the detach-exit
-	// can never be misread as "died during bringup".
-	bringupDone atomic.Bool
+	// life binds alpha's lifetime to zordon (the spawner) until the commit
+	// point: a zordon death before then ends alpha via the daemon.
+	// handleConfigure calls life.Release() the instant the first bringup
+	// succeeds — BEFORE EventDone — so zordon's clean exit afterward is
+	// ignored. Nil when alpha was launched standalone (no ZORDON_PARENT_FD).
+	life *daemon.Lifeline
 
 	// handlerDones: each accepted-conn goroutine appends a fresh
 	// chan struct{} on entry and closes it on exit. drainedCh waits for
@@ -1329,41 +1319,45 @@ type bringup struct {
 	failfast bool
 }
 
-func runAlpha(_ context.Context, rc runConfig) error {
+func runAlpha(ctx context.Context, rc runConfig) error {
 	if rc.SockPath == "" {
 		return errors.New("--socket is required")
 	}
-	sockPath := rc.SockPath
-	logPath := rc.LogFile
-	zordonHome := rc.Home.Path()
-	stabilization := rc.Stabilization
-	shutdownGrace := rc.ShutdownGrace
 
-	// Drain SIGPIPE before anything else writes to stderr. Once zordon
-	// (our spawner) dies, the stderr it inherited to us has no reader;
-	// Go's default is to kill us on EPIPE — which would happen BEFORE
-	// the parent-death watcher gets a chance to drive a graceful
-	// shutdown. parentwatch.IgnoreSIGPIPE turns those writes into
-	// harmless EPIPE errors.
-	parentwatch.IgnoreSIGPIPE()
-
-	// Arm the parent-death watch BEFORE we open any file: an early
-	// OpenFile could otherwise be assigned the very fd zordon passed
-	// to us, and parentwatch would then attach to the wrong file.
-	// Watch claims the fd via os.NewFile (and marks it close-on-exec)
-	// right here, so any subsequent open gets a higher number.
-	//
-	// The reaction goroutine cannot run yet — alphaState isn't built —
-	// so we just capture the watcher and wire it in below.
-	parentW, err := parentwatch.Watch(rc.ParentFD,
-		parentwatch.WithErrorLog(func(err error) {
-			fmt.Fprintf(os.Stderr, "alpha: parentwatch: %v\n", err)
-		}))
-	if err != nil {
-		return fmt.Errorf("parentwatch: %w", err)
+	// Bind alpha's life to zordon (the spawner) until the commit point; a
+	// standalone alpha (no ZORDON_PARENT_FD) runs Forever. The Lifeline is also
+	// handed to serveAlpha so handleConfigure can Release it the instant the
+	// first bringup commits. daemon.Run arms it (claiming the parent fd via
+	// parentwatch) BEFORE serveAlpha opens any file — preserving the invariant
+	// that an early open can't be assigned the very fd zordon passed us.
+	var until daemon.Until = daemon.Forever()
+	var life *daemon.Lifeline
+	if rc.ParentFD.IsSet() {
+		life = daemon.AsLongAsAlive(rc.ParentFD)
+		until = life
 	}
 
-	logF, err := zfs.OpenAppendLog(logPath)
+	// alpha ends on SIGTERM/SIGINT (the daemon default) — its prior signal
+	// surface. A parent death or terminal signal cancels serveAlpha's context,
+	// which drives the ordered shutdown. SIGPIPE is drained inside daemon.Run.
+	// serveAlpha returns nil after an ordered shutdown (any koniec) and an error
+	// only on a startup failure (socket bind, log open) — pass it straight through.
+	return daemon.New().Run(ctx, func(ctx context.Context) error {
+		return serveAlpha(ctx, rc, life)
+	}, until)
+}
+
+// serveAlpha is the daemon body: bind the control socket, signal readiness,
+// accept configure/invoke/state/shutdown connections, and on koniec — parent
+// death / terminal signal (via ctx) or an internal requestShutdown — run the
+// ordered shutdown. It assumes daemon.Run already armed the parent-death watch,
+// so the first file it opens cannot collide with zordon's inherited fd.
+func serveAlpha(ctx context.Context, rc runConfig, life *daemon.Lifeline) error {
+	sockPath := rc.SockPath
+	zordonHome := rc.Home.Path()
+	cfg := bringupConfig{stabilization: rc.Stabilization, shutdownGrace: rc.ShutdownGrace}
+
+	logF, err := zfs.OpenAppendLog(rc.LogFile)
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
 	}
@@ -1372,15 +1366,13 @@ func runAlpha(_ context.Context, rc runConfig) error {
 	log := zlog.New(logF, false)
 	log.Info("alpha", "starting pid=%d socket=%s", os.Getpid(), sockPath)
 
-	// Reap orphans from a previous alpha for THIS fs_hash before
-	// binding the control socket: a service binary from the prior
-	// run holding a TCP port would make a fresh bind fail otherwise.
-	// fsHash is derived from the socket path (sockPath looks like
-	// $TMPDIR/zordon-<fsHash>/alpha.sock — the segment between
-	// "zordon-" and the next path separator is the identifier).
+	// Reap orphans from a previous alpha for THIS fs_hash before binding the
+	// control socket: a service binary from the prior run holding a TCP port
+	// would make a fresh bind fail otherwise. fsHash is derived from the socket
+	// path ($TMPDIR/zordon-<fsHash>/alpha.sock).
 	fsHash := fsHashFromSocket(sockPath)
 	if zordonHome != "" && fsHash != "" {
-		if err := registry.ReapByFsHash(zordonHome, fsHash, shutdownGrace, log); err != nil {
+		if err := registry.ReapByFsHash(zordonHome, fsHash, cfg.shutdownGrace, log); err != nil {
 			log.Error("alpha", "registry reap: %v", err)
 		}
 	}
@@ -1406,45 +1398,16 @@ func runAlpha(_ context.Context, rc runConfig) error {
 		tommyBin:   tommyBin,
 		worktree:   rc.Worktree.Name(),
 		shutdownCh: make(chan struct{}),
+		life:       life,
 	}
-	cfg := bringupConfig{stabilization: stabilization, shutdownGrace: shutdownGrace}
 
-	// Park the watcher on state so handleConfigure can drop it after
-	// the configure round-trip completes. We deliberately KEEP the
-	// watch armed across the listener-up + bringup window: signalReady
-	// only means "alpha is listening", not "zordon may detach". zordon
-	// blocks in pushConfigure until EventDone (or EventError), so if
-	// it dies anywhere in that window we want graceful shutdown here.
-	state.parentW = parentW
-
-	// Wire parent-death into the shutdown channel. Two cases:
-	//   - parentW is nil ⇒ no ZORDON_PARENT_FD in env (alpha launched
-	//     standalone). Died() returns nil; the goroutine only exits via
-	//     shutdownCh.
-	//   - parentW.Died() fires before Stop is called ⇒ zordon died
-	//     during bringup; trigger the same shutdown path as a SIGTERM
-	//     or control-socket OpShutdown.
-	go func() {
-		select {
-		case <-parentW.Died():
-			if state.bringupDone.Load() {
-				// Expected clean detach: alpha already committed to the
-				// bringup succeeding (bringupDone set just before EventDone),
-				// so zordon's exit is the detach handshake, not a death.
-				return
-			}
-			log.Error("alpha", "zordon parent died during bringup; shutting down")
-			state.requestShutdown("parent (zordon) died during bringup")
-		case <-state.shutdownCh:
-		}
-	}()
-
+	// signalReady means only "alpha is listening", NOT "zordon may detach":
+	// zordon blocks in pushConfigure until EventDone, and the Lifeline stays
+	// armed across that window (released by handleConfigure on commit), so a
+	// zordon death there still shuts us down.
 	if err := signalReady(rc.ReadyFD.Int()); err != nil {
 		log.Error("alpha", "ready signal: %v", err)
 	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	acceptDone := make(chan struct{})
 	go func() {
@@ -1452,29 +1415,45 @@ func runAlpha(_ context.Context, rc runConfig) error {
 		close(acceptDone)
 	}()
 
+	// Wait for the daemon to declare koniec (parent death / terminal signal →
+	// ctx) or an internal shutdown request (control-socket OpShutdown, failfast,
+	// readiness failure). Either way mirror it into requestShutdown so the
+	// bringup goroutines (which select on shutdownCh) unblock. life.Fired()
+	// distinguishes a parent death — the conformance contract requires the
+	// "zordon parent died" log line on that path and its ABSENCE on a clean exit.
 	select {
-	case sig := <-sigCh:
-		log.Info("alpha", "received %s, shutting down children", sig)
-		state.requestShutdown(fmt.Sprintf("signal: %s received by alpha", sig))
+	case <-ctx.Done():
+		if life != nil && life.Fired() {
+			log.Error("alpha", "zordon parent died during bringup; shutting down")
+			state.requestShutdown("parent (zordon) died during bringup")
+		} else {
+			reason := "terminal signal"
+			if c := context.Cause(ctx); c != nil {
+				reason = c.Error()
+			}
+			log.Info("alpha", "received %s, shutting down children", reason)
+			state.requestShutdown(reason)
+		}
 	case <-state.shutdownCh:
-		log.Info("alpha", "shutdown requested via control socket")
+		log.Info("alpha", "shutdown requested: %s", state.shutdownReason)
 	}
-	// Ordered shutdown so the conn that triggered shutdown can flush its
-	// final EventError/EventDone and close cleanly:
+
+	// Ordered shutdown so the conn that triggered shutdown can flush its final
+	// EventError/EventDone and close cleanly:
 	//   1. close listener  -> no new connections accepted
 	//   2. wait acceptLoop -> in-flight registerHandler() calls observed
 	//   3. shutdownAll     -> close stopCh / wait done for every service
 	//   4. drain handlers  -> defer conn.Close() in handleConn fires before
-	//                         exit, so zordon sees the final event then EOF.
-	//                         Bounded by shutdownGrace so a hung handler
-	//                         (zordon stopped reading) can't pin alpha.
+	//                         exit, so zordon sees the final event then EOF;
+	//                         bounded by shutdownGrace so a hung handler can't
+	//                         pin alpha.
 	_ = ln.Close()
 	<-acceptDone
 	state.shutdownAll(log)
 	select {
 	case <-state.drainedCh():
-	case <-time.After(shutdownGrace):
-		log.Error("alpha", "handlers did not drain within %s, exiting anyway", shutdownGrace)
+	case <-time.After(cfg.shutdownGrace):
+		log.Error("alpha", "handlers did not drain within %s, exiting anyway", cfg.shutdownGrace)
 	}
 	return nil
 }
@@ -1781,12 +1760,6 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	stream := newSafeEncoder(enc)
 	b := &bringup{state: state, cfg: cfg, stream: stream, log: log, failfast: failfast}
 	defer stream.Close()
-	// One configure round-trip is the contract with zordon: once we
-	// have emitted EventDone (or EventError), zordon will detach and
-	// exit, closing its end of the parent-watch pipe. Dropping the
-	// watch here turns that kernel-closed write end from "false-
-	// positive death" into a harmless no-op.
-	defer state.parentW.Stop()
 
 	if err := materializeFiles(files, state, log); err != nil {
 		log.Error("alpha", "materialize files: %v", err)
@@ -1924,11 +1897,14 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		}
 	}
 
-	// Commit point: from here the services are up to stay, so a parent
-	// (zordon) exit is the expected detach, not a death. Set BEFORE EventDone
-	// — zordon exits the instant it reads EventDone, and the death goroutine
-	// reads this flag, so the ordering guarantees the detach can't be misread.
-	state.bringupDone.Store(true)
+	// Commit point: the first bringup succeeded, so alpha is now committed to
+	// staying up. Release the zordon Lifeline BEFORE EventDone — zordon exits
+	// the instant it reads EventDone, and Release (Watcher.Stop sets its guard
+	// before closing the fd) guarantees that the subsequent pipe close can't be
+	// misread as a death. life is nil for a standalone alpha.
+	if state.life != nil {
+		state.life.Release()
+	}
 	stream.Send(&protocol.Event{Kind: protocol.EventDone})
 	log.Info("alpha", "bringup complete")
 }
