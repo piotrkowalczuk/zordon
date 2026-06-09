@@ -10,7 +10,7 @@ import (
 
 // Pinpoints TODO "ENV nie jest wstrzykiwane do procesu": does buildCmd put
 // the resolved env { } map onto exec.Cmd.Env?
-func TestBuildCmdInjectsEnv(t *testing.T) {
+func TestBuildCmd_injectsEnv(t *testing.T) {
 	svc := &alphasfile.Service{
 		Toolchain: alphasfile.ToolchainGo,
 		Runtime: &alphasfile.RuntimeConfig{
@@ -42,7 +42,7 @@ func TestBuildCmdInjectsEnv(t *testing.T) {
 // flags — same as every other buildCmd branch (nodejs, built-bin,
 // default). Without this, `runtime { cmd = [...], arguments = {...} }`
 // silently drops the arguments.
-func TestBuildCmdExplicitCmdAppendsArguments(t *testing.T) {
+func TestBuildCmd_explicitCmdAppendsArguments(t *testing.T) {
 	svc := &alphasfile.Service{
 		Toolchain: alphasfile.ToolchainGo,
 		Runtime: &alphasfile.RuntimeConfig{
@@ -129,7 +129,7 @@ func TestServiceEnv_explicitOverlay(t *testing.T) {
 
 // Phase env: runtime{} overlays the base env{}; agent{} overlays on top
 // only when alpha runs in --agent mode. Build env stays separate.
-func TestPhaseEnvPrecedence(t *testing.T) {
+func TestPhaseEnv_precedence(t *testing.T) {
 	svc := &alphasfile.Service{
 		Toolchain: alphasfile.ToolchainGo,
 		Runtime: &alphasfile.RuntimeConfig{

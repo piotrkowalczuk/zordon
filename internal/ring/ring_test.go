@@ -14,7 +14,7 @@ func TestNew_zeroCapPanics(t *testing.T) {
 	_ = New(0)
 }
 
-func TestEmpty(t *testing.T) {
+func TestBuffer_empty(t *testing.T) {
 	b := New(3)
 	if b.Len() != 0 {
 		t.Fatalf("Len=%d, want 0", b.Len())
@@ -24,7 +24,7 @@ func TestEmpty(t *testing.T) {
 	}
 }
 
-func TestFillUnderCapacity(t *testing.T) {
+func TestBuffer_fillUnderCapacity(t *testing.T) {
 	b := New(5)
 	b.Push("a")
 	b.Push("b")
@@ -38,7 +38,7 @@ func TestFillUnderCapacity(t *testing.T) {
 	}
 }
 
-func TestExactlyFull(t *testing.T) {
+func TestBuffer_exactlyFull(t *testing.T) {
 	b := New(3)
 	b.Push("a")
 	b.Push("b")
@@ -49,7 +49,7 @@ func TestExactlyFull(t *testing.T) {
 	}
 }
 
-func TestOverflowDropsOldest(t *testing.T) {
+func TestBuffer_overflowDropsOldest(t *testing.T) {
 	b := New(3)
 	b.Push("a")
 	b.Push("b")
@@ -65,7 +65,7 @@ func TestOverflowDropsOldest(t *testing.T) {
 	}
 }
 
-func TestMultipleWrapsKeepsLastCap(t *testing.T) {
+func TestBuffer_multipleWrapsKeepsLastCap(t *testing.T) {
 	b := New(3)
 	for i := range 100 {
 		b.Push(string(rune('a' + (i % 26))))
@@ -82,7 +82,7 @@ func TestMultipleWrapsKeepsLastCap(t *testing.T) {
 	}
 }
 
-func TestDumpIsCopy(t *testing.T) {
+func TestBuffer_Dump_isCopy(t *testing.T) {
 	b := New(3)
 	b.Push("a")
 	b.Push("b")
@@ -95,7 +95,7 @@ func TestDumpIsCopy(t *testing.T) {
 	}
 }
 
-func TestCap(t *testing.T) {
+func TestBuffer_Cap(t *testing.T) {
 	if c := New(7).Cap(); c != 7 {
 		t.Fatalf("Cap=%d, want 7", c)
 	}

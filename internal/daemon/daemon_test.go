@@ -30,7 +30,7 @@ func (f *fakeUntil) arm(cancel context.CancelCauseFunc) (func(), error) {
 	return func() { close(f.disarmed) }, nil
 }
 
-func TestDaemon_Run_BodyReturns(t *testing.T) {
+func TestDaemon_Run_bodyReturns(t *testing.T) {
 	t.Run("error", func(t *testing.T) {
 		want := errors.New("boom")
 		err := New().Run(context.Background(), func(context.Context) error { return want }, Forever())
@@ -46,7 +46,7 @@ func TestDaemon_Run_BodyReturns(t *testing.T) {
 	})
 }
 
-func TestDaemon_Run_ContextCancel(t *testing.T) {
+func TestDaemon_Run_contextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(50 * time.Millisecond)
@@ -66,7 +66,7 @@ func TestDaemon_Run_ContextCancel(t *testing.T) {
 	}
 }
 
-func TestDaemon_Run_UntilFired(t *testing.T) {
+func TestDaemon_Run_untilFired(t *testing.T) {
 	u := &fakeUntil{reason: "parent gone (test)", delay: 50 * time.Millisecond, disarmed: make(chan struct{})}
 	var cause error
 	err := New().Run(context.Background(), func(ctx context.Context) error {
@@ -87,7 +87,7 @@ func TestDaemon_Run_UntilFired(t *testing.T) {
 	}
 }
 
-func TestDaemon_Run_Signal(t *testing.T) {
+func TestDaemon_Run_signal(t *testing.T) {
 	var cause error
 	err := New().Run(context.Background(), func(ctx context.Context) error {
 		// Run armed signal.Notify before calling us, so the signal lands on its
@@ -105,7 +105,7 @@ func TestDaemon_Run_Signal(t *testing.T) {
 	}
 }
 
-func TestLifeline_AsLongAsAlive_PipeEOF(t *testing.T) {
+func TestLifeline_firesOnPipeEOF(t *testing.T) {
 	w, fd := pipeFD(t)
 	life := AsLongAsAlive(fd)
 	go func() {
@@ -129,7 +129,7 @@ func TestLifeline_AsLongAsAlive_PipeEOF(t *testing.T) {
 	}
 }
 
-func TestLifeline_Release_Disarms(t *testing.T) {
+func TestLifeline_Release_disarms(t *testing.T) {
 	w, fd := pipeFD(t)
 	defer w.Close()
 	life := AsLongAsAlive(fd)
@@ -201,7 +201,7 @@ func TestProcess_Wait(t *testing.T) {
 	}
 }
 
-func TestReapGroup_ExitsOnSIGTERM(t *testing.T) {
+func TestReapGroup_exitsOnSIGTERM(t *testing.T) {
 	// `exec sleep`: the process BECOMES sleep (no sh wrapper to defer the
 	// signal), the single-process shape a real service has — SIGTERM (SIG_DFL)
 	// ends it directly.
@@ -215,7 +215,7 @@ func TestReapGroup_ExitsOnSIGTERM(t *testing.T) {
 	}
 }
 
-func TestReapGroup_EscalatesToSIGKILL(t *testing.T) {
+func TestReapGroup_escalatesToSIGKILL(t *testing.T) {
 	// Ignores SIGTERM (trap) and never lets a child relay it; only SIGKILL ends it.
 	pgid, exited := spawnGroup(t, `trap "" TERM; echo READY; while :; do sleep 0.2; done`)
 	grace := 300 * time.Millisecond

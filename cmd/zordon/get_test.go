@@ -25,7 +25,7 @@ func tree() map[string]any {
 	return buildTree([]*level{lv})
 }
 
-func TestGetResolveExpr(t *testing.T) {
+func TestResolveExpr(t *testing.T) {
 	root := tree()
 	cases := []struct{ expr, want string }{
 		{"service.go.prometheus.vars.address", "127.0.0.1:9090"},
@@ -50,7 +50,7 @@ func TestGetResolveExpr(t *testing.T) {
 	}
 }
 
-func TestGetResolveErrors(t *testing.T) {
+func TestResolveExpr_errors(t *testing.T) {
 	root := tree()
 	for _, expr := range []string{
 		"service.go.nope.vars.x",            // unknown service
@@ -65,7 +65,7 @@ func TestGetResolveErrors(t *testing.T) {
 	}
 }
 
-func TestGetErrorListsAvailableKeys(t *testing.T) {
+func TestResolveExpr_errorListsAvailableKeys(t *testing.T) {
 	_, err := resolveExpr(tree(), "service.go.prometheus.vars.nope")
 	if err == nil || !strings.Contains(err.Error(), "address") {
 		t.Fatalf("error should list available keys, got: %v", err)
