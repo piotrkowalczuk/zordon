@@ -150,6 +150,81 @@ service "go" "svc1" {
 	}
 }
 
+// TestOrphan_AlphaAlive_ServiceSurvives is the dual of
+// TestOrphan_AlphaDeath_NoSurvivingService, and closes its blind spot. That
+// test only asserts the wrapped group is gone AFTER alpha is killed — never
+// that it SURVIVES while alpha is alive. So a broken tommy that reaps the
+// service for the wrong reason (e.g. a stray CommandContext timeout that fires
+// regardless of the spawner) still passes it: the group is "gone after alpha
+// death" only coincidentally. Here alpha is left ALIVE, and the wrapped service
+// must keep running — tommy must reap ONLY on the spawner's death, never on its
+// own.
+func TestOrphan_AlphaAlive_ServiceSurvives(t *testing.T) {
+	tommyBin := buildTommy(t)
+
+	// alpha keeps running past `zordon start`, so the harness's cleanup-time
+	// `zordon stop` is the right teardown (no WithExpectedLeftovers).
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+	port := zordontest.FreePort(t)
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
+
+  vars = { port = %d }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, port))
+
+	res := p.Zordon("start",
+		"--timeout", "15m",
+		"--alpha-log", p.AlphaLogPath(),
+	).WithEnv("ZORDON_TOMMY_BIN", tommyBin).
+		WithTimeout(16 * time.Minute).Run(t)
+	if res.ExitCode != 0 {
+		t.Fatalf("zordon start: exit %d\nstdout: %s\nstderr: %s", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	t.Cleanup(func() { dumpAlphaLog(t, p.AlphaLogPath()) })
+
+	_, groupPID := pidsFromAlphaLog(t, p.AlphaLogPath(), "svc1")
+
+	// alpha is deliberately LEFT ALIVE. Over a window comfortably longer than
+	// any plausible premature-reap timer, the wrapped group AND its port must
+	// stay up.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if groupGone(groupPID) {
+			t.Fatalf("wrapped service group %d reaped while alpha is alive", groupPID)
+		}
+		if !portServing(port, 200*time.Millisecond) {
+			t.Fatalf(":%d stopped serving while alpha is alive — tommy over-reaped the service", port)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // TestOrphan_registryReaperKillsOrphansOnNextStart proves the
 // safety-net that backs the parent-watch + tommy story: if SIGKILLed
 // alpha leaves a service group running (no cleanup, no deregister),

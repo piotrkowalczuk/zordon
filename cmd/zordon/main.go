@@ -161,17 +161,47 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		},
 	}
 
-	// worktree
+	// worktree (parent + nested create/list/rm as full ff subcommands — not a
+	// hand-rolled args switch — so each gets ff's own parsing, usage and -h).
 	wtFlags := ff.NewFlagSet("worktree").SetParent(rootFlags)
 	wtCmd := &ff.Command{
 		Name:      "worktree",
-		Usage:     "zordon worktree <create|list|rm> [name]",
+		Usage:     "zordon worktree <create|list|rm> [args]",
 		ShortHelp: "manage parallel worktrees (isolated state/ports over the same Alphasfile)",
 		Flags:     wtFlags,
+		// No Exec: bare `zordon worktree` prints help listing the subcommands.
+	}
+	wtCreateFlags := ff.NewFlagSet("create").SetParent(wtFlags)
+	wtCreateCmd := &ff.Command{
+		Name:      "create",
+		Usage:     "zordon worktree create <name> [service[@rev] ...]",
+		ShortHelp: "create a worktree and check out its worktree-able services",
+		Flags:     wtCreateFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runWorktree(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, args, zfs.ZordonHome(home.Path()))
+			return runWorktreeCreate(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, args, zfs.ZordonHome(home.Path()))
 		},
 	}
+	wtListFlags := ff.NewFlagSet("list").SetParent(wtFlags)
+	wtListCmd := &ff.Command{
+		Name:      "list",
+		Usage:     "zordon worktree list",
+		ShortHelp: "list the worktrees of the current project",
+		Flags:     wtListFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runWorktreeList(stdio.Stdout)
+		},
+	}
+	wtRmFlags := ff.NewFlagSet("rm").SetParent(wtFlags)
+	wtRmCmd := &ff.Command{
+		Name:      "rm",
+		Usage:     "zordon worktree rm <name>",
+		ShortHelp: "remove a worktree directory",
+		Flags:     wtRmFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runWorktreeRm(zlog.New(stdio.Stderr, *agent), args)
+		},
+	}
+	wtCmd.Subcommands = []*ff.Command{wtCreateCmd, wtListCmd, wtRmCmd}
 
 	// plan
 	planFlags := ff.NewFlagSet("plan").SetParent(rootFlags)
