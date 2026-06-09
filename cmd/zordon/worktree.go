@@ -33,97 +33,104 @@ func projectRoot() (string, error) {
 	return filepath.Dir(abs), nil
 }
 
-// runWorktree implements `zordon worktree <create|list|rm> [name]`.
-//
 // A worktree is just a directory <root>/.zordon/worktrees/<name>/. Running
 // `zordon start` from inside it gives that name its own state dir, hash,
 // ports and per-service git checkouts (alpha does `git worktree add` for
 // every worktree-able service at start). "main" is the implicit worktree =
 // the project root itself.
-func runWorktree(ctx context.Context, log *zlog.Logger, out io.Writer, args []string, zordonHome string) error {
-	if len(args) == 0 {
-		return errors.New("usage: zordon worktree <create|list|rm> [name]")
+//
+// worktreeBase returns the project root and its worktrees directory, the
+// shared setup every worktree subcommand needs.
+func worktreeBase() (root, base string, err error) {
+	root, err = projectRoot()
+	if err != nil {
+		return "", "", err
 	}
-	root, err := projectRoot()
+	return root, filepath.Join(root, ".zordon", "worktrees"), nil
+}
+
+func runWorktreeList(out io.Writer) error {
+	root, base, err := worktreeBase()
 	if err != nil {
 		return err
 	}
-	base := filepath.Join(root, ".zordon", "worktrees")
-
-	switch args[0] {
-	case "list":
-		entries, err := zfs.ReadDir(base)
-		if err != nil {
-			if zfs.IsMissingErr(err) {
-				fmt.Fprintln(out, "(no worktrees; 'main' is the project root)")
-				return nil
-			}
-			return err
+	entries, err := zfs.ReadDir(base)
+	if err != nil {
+		if zfs.IsMissingErr(err) {
+			fmt.Fprintln(out, "(no worktrees; 'main' is the project root)")
+			return nil
 		}
-		var names []string
-		for _, e := range entries {
-			if e.IsDir() && e.Name() != invocation.MainWorktree {
-				names = append(names, e.Name())
-			}
-		}
-		sort.Strings(names)
-		fmt.Fprintf(out, "worktrees of %s:\n", root)
-		fmt.Fprintln(out, "  - main (project root)")
-		for _, n := range names {
-			fmt.Fprintf(out, "  - %s\t%s\n", n, filepath.Join(base, n))
-		}
-		return nil
-
-	case "create":
-		if len(args) < 2 {
-			return errors.New("usage: zordon worktree create <name> [service[@rev] ...]")
-		}
-		name := args[1]
-		if name == invocation.MainWorktree {
-			return errors.New(`"main" is the project root; just run zordon start there`)
-		}
-		dir := filepath.Join(base, name)
-		if zfs.Exists(dir) {
-			return fmt.Errorf("worktree %q already exists at %s", name, dir)
-		}
-		if err := zfs.EnsureSharedDir(dir); err != nil {
-			return err
-		}
-		log.Info("zordon", "created worktree %q", name)
-
-		// Materialize source checkouts. With no service args, every
-		// worktree-able service gets a working tree (so the whole project
-		// is editable in this worktree); pass names (optionally svc@rev)
-		// to scope it down.
-		if err := checkoutServices(ctx, log, name, dir, args[2:], zordonHome); err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "worktree ready. Bring it up with:\n  cd %s && zordon start\n", dir)
-		return nil
-
-	case "rm":
-		if len(args) < 2 {
-			return errors.New("usage: zordon worktree rm <name>")
-		}
-		name := args[1]
-		if name == invocation.MainWorktree {
-			return errors.New(`refusing to remove "main" (the project root)`)
-		}
-		dir := filepath.Join(base, name)
-		if !zfs.Exists(dir) {
-			return fmt.Errorf("no such worktree %q", name)
-		}
-		log.Warn("zordon", "removing worktree %q (run `zordon stop` from inside first if its alpha is up)", name)
-		if err := zfs.RemoveTree(dir); err != nil {
-			return err
-		}
-		log.Info("zordon", "removed %s", dir)
-		log.Info("zordon", "note: run `git worktree prune` in affected primaries to drop stale registrations")
-		return nil
-
-	default:
-		return fmt.Errorf("unknown worktree subcommand %q (create|list|rm)", args[0])
+		return err
 	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && e.Name() != invocation.MainWorktree {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	fmt.Fprintf(out, "worktrees of %s:\n", root)
+	fmt.Fprintln(out, "  - main (project root)")
+	for _, n := range names {
+		fmt.Fprintf(out, "  - %s\t%s\n", n, filepath.Join(base, n))
+	}
+	return nil
+}
+
+func runWorktreeCreate(ctx context.Context, log *zlog.Logger, out io.Writer, args []string, zordonHome string) error {
+	if len(args) < 1 {
+		return errors.New("usage: zordon worktree create <name> [service[@rev] ...]")
+	}
+	name := args[0]
+	if name == invocation.MainWorktree {
+		return errors.New(`"main" is the project root; just run zordon start there`)
+	}
+	_, base, err := worktreeBase()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(base, name)
+	if zfs.Exists(dir) {
+		return fmt.Errorf("worktree %q already exists at %s", name, dir)
+	}
+	if err := zfs.EnsureSharedDir(dir); err != nil {
+		return err
+	}
+	log.Info("zordon", "created worktree %q", name)
+
+	// Materialize source checkouts. With no service args, every worktree-able
+	// service gets a working tree (so the whole project is editable in this
+	// worktree); pass names (optionally svc@rev) to scope it down.
+	if err := checkoutServices(ctx, log, name, dir, args[1:], zordonHome); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "worktree ready. Bring it up with:\n  cd %s && zordon start\n", dir)
+	return nil
+}
+
+func runWorktreeRm(log *zlog.Logger, args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: zordon worktree rm <name>")
+	}
+	name := args[0]
+	if name == invocation.MainWorktree {
+		return errors.New(`refusing to remove "main" (the project root)`)
+	}
+	_, base, err := worktreeBase()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(base, name)
+	if !zfs.Exists(dir) {
+		return fmt.Errorf("no such worktree %q", name)
+	}
+	log.Warn("zordon", "removing worktree %q (run `zordon stop` from inside first if its alpha is up)", name)
+	if err := zfs.RemoveTree(dir); err != nil {
+		return err
+	}
+	log.Info("zordon", "removed %s", dir)
+	log.Info("zordon", "note: run `git worktree prune` in affected primaries to drop stale registrations")
+	return nil
 }
 
 // checkoutServices materializes a git worktree under
