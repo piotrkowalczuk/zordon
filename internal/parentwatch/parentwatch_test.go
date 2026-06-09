@@ -34,7 +34,7 @@ func inheritPipeFd(t *testing.T) (childFD zfs.FileDescriptor, write *os.File) {
 	return zfs.FileDescriptor(dup), w
 }
 
-func TestAttachAssignsSequentialFds(t *testing.T) {
+func TestAttach_assignsSequentialFds(t *testing.T) {
 	r1, w1, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
@@ -69,7 +69,7 @@ func TestAttachAssignsSequentialFds(t *testing.T) {
 	}
 }
 
-func TestWatchZeroFdReturnsNil(t *testing.T) {
+func TestWatch_zeroFdReturnsNil(t *testing.T) {
 	w, err := Watch(0)
 	if err != nil {
 		t.Fatalf("Watch: %v", err)
@@ -86,13 +86,13 @@ func TestWatchZeroFdReturnsNil(t *testing.T) {
 	w.Stop() // must not panic
 }
 
-func TestWatchBadFd(t *testing.T) {
+func TestWatch_badFd(t *testing.T) {
 	if _, err := Watch(zfs.FileDescriptor(2)); err == nil {
 		t.Fatalf("expected error on fd<3")
 	}
 }
 
-func TestWatchFiresOnEOF(t *testing.T) {
+func TestWatch_firesOnEOF(t *testing.T) {
 	fd, write := inheritPipeFd(t)
 	w, err := Watch(fd)
 	if err != nil {
@@ -119,7 +119,7 @@ func TestWatchFiresOnEOF(t *testing.T) {
 	w.Stop() // must be safe after death
 }
 
-func TestWatchStopWinsRace(t *testing.T) {
+func TestWatcher_Stop_winsRace(t *testing.T) {
 	fd, write := inheritPipeFd(t)
 	w, err := Watch(fd)
 	if err != nil {
@@ -138,7 +138,7 @@ func TestWatchStopWinsRace(t *testing.T) {
 	}
 }
 
-func TestWatchStopIdempotent(t *testing.T) {
+func TestWatcher_Stop_idempotent(t *testing.T) {
 	fd, _ := inheritPipeFd(t)
 	w, err := Watch(fd)
 	if err != nil {
@@ -149,7 +149,7 @@ func TestWatchStopIdempotent(t *testing.T) {
 	w.Stop()
 }
 
-func TestWatchErrorLogReceivesNonEOF(t *testing.T) {
+func TestWatch_errorLogReceivesNonEOF(t *testing.T) {
 	// We force a non-EOF error by closing the fd from underneath the
 	// goroutine's Read. The simplest hammer: install a watcher then
 	// Close() the file in a way Stop() didn't authorize.
@@ -177,7 +177,7 @@ func TestWatchErrorLogReceivesNonEOF(t *testing.T) {
 	}
 }
 
-func TestWatchForeverFiresOnEOF(t *testing.T) {
+func TestWatchForever_firesOnEOF(t *testing.T) {
 	fd, write := inheritPipeFd(t)
 	gone, err := WatchForever(fd, WithPollInterval(time.Hour))
 	if err != nil {
@@ -191,7 +191,7 @@ func TestWatchForeverFiresOnEOF(t *testing.T) {
 	}
 }
 
-func TestWatchForeverZeroFdUsesPollOnly(t *testing.T) {
+func TestWatchForever_zeroFdUsesPollOnly(t *testing.T) {
 	// Poll fast; original ppid is whatever ran us. Without a real
 	// parent change we just verify WatchForever doesn't error out and
 	// doesn't fire immediately.
@@ -206,7 +206,7 @@ func TestWatchForeverZeroFdUsesPollOnly(t *testing.T) {
 	}
 }
 
-func TestWatchForeverBadFd(t *testing.T) {
+func TestWatchForever_badFd(t *testing.T) {
 	if _, err := WatchForever(zfs.FileDescriptor(2)); err == nil {
 		t.Fatalf("expected error on fd<3")
 	}
@@ -214,7 +214,7 @@ func TestWatchForeverBadFd(t *testing.T) {
 
 // Sanity: the EOF-fired Died() should be observable from many
 // readers — closed channel semantics — without any extra coordination.
-func TestDiedIsBroadcastable(t *testing.T) {
+func TestWatcher_Died_isBroadcastable(t *testing.T) {
 	fd, write := inheritPipeFd(t)
 	w, err := Watch(fd)
 	if err != nil {
@@ -230,7 +230,7 @@ func TestDiedIsBroadcastable(t *testing.T) {
 	}
 }
 
-func TestIgnoreSIGPIPEDoesNotKillProcess(t *testing.T) {
+func TestIgnoreSIGPIPE_doesNotKillProcess(t *testing.T) {
 	IgnoreSIGPIPE()
 	// Hard to assert non-death without forking. We at least exercise
 	// the call path and make sure the runtime accepts repeated Notify
@@ -239,7 +239,7 @@ func TestIgnoreSIGPIPEDoesNotKillProcess(t *testing.T) {
 }
 
 // Compile-time sanity: nil *Watcher must accept all methods.
-func TestNilWatcherMethods(t *testing.T) {
+func TestWatcher_nilMethods(t *testing.T) {
 	var w *Watcher
 	if ch := w.Died(); ch != nil {
 		t.Fatalf("nil watcher Died()=%v, want nil", ch)
@@ -249,7 +249,7 @@ func TestNilWatcherMethods(t *testing.T) {
 
 // Defensive: an EOF that fires before any goroutine has selected on
 // Died() should still latch — closing channels is sticky.
-func TestEOFLatchesBeforeSelect(t *testing.T) {
+func TestWatcher_Died_latchesBeforeSelect(t *testing.T) {
 	fd, write := inheritPipeFd(t)
 	w, err := Watch(fd)
 	if err != nil {
@@ -268,7 +268,7 @@ func TestEOFLatchesBeforeSelect(t *testing.T) {
 // Cross-check: a non-EOF Read error (we simulate by closing the
 // underlying file from outside Stop) should be reported via errorLog
 // AND fire Died.
-func TestNonEOFReadError(t *testing.T) {
+func TestWatch_nonEOFReadError(t *testing.T) {
 	fd, _ := inheritPipeFd(t)
 	var lastErr atomic.Value
 	w, err := Watch(fd, WithErrorLog(func(err error) { lastErr.Store(err) }))
