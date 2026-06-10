@@ -376,6 +376,36 @@ func ServiceCwd(checkout, exe string) string {
 	return filepath.Clean(filepath.Join(checkout, exe))
 }
 
+// Resolver computes the on-disk paths that depend on a single zordon
+// run's context — the directory it was invoked from and that run's
+// FsHash. It is the intended single home for every derived path in
+// zordon: as call sites stop hand-rolling filepath.Join's, their
+// methods move here so exactly one place knows the layout.
+//
+// Either field may be "" when the caller doesn't have it (alpha, for
+// instance, recovers only the hash from its socket path). Each method
+// documents which fields it relies on.
+type Resolver struct {
+	dir  string
+	hash string
+}
+
+// NewResolver builds a Resolver for the run rooted at dir with FsHash
+// hash.
+func NewResolver(dir, hash string) Resolver { return Resolver{dir: dir, hash: hash} }
+
+// AlphaLogFile resolves where a leaf alpha logs. A non-empty override
+// (the operator's explicit path) is returned unchanged; otherwise it
+// falls back to a stable, easy-to-tail file in the system temp dir,
+// namespaced by FsHash so runs from different workspaces never clobber
+// one shared alpha.log. The fallback relies on hash.
+func (r Resolver) AlphaLogFile(override string) string {
+	if override != "" {
+		return override
+	}
+	return filepath.Join(SystemTempDir(), "alpha-"+r.hash+".log")
+}
+
 // Copy streams src into dst with 0o600. Used for moving build
 // artifacts into invocation bin dirs without going through `cp` and
 // without inheriting an in-tree mode.
