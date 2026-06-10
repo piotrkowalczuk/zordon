@@ -122,6 +122,97 @@ func TestProbe_Wait_httpTimeout(t *testing.T) {
 	}
 }
 
+func TestProbe_Check_exec(t *testing.T) {
+	cases := map[string]struct {
+		action  *ExecAction
+		timeout time.Duration
+		wantErr bool
+	}{
+		"exit zero is ready": {
+			action:  &ExecAction{Command: []string{"sh", "-c", "exit 0"}},
+			wantErr: false,
+		},
+		"non-zero exit is unready": {
+			action:  &ExecAction{Command: []string{"sh", "-c", "echo nope >&2; exit 1"}},
+			wantErr: true,
+		},
+		"env overlay reaches the command": {
+			action: &ExecAction{
+				Command: []string{"sh", "-c", `test "$ZORDON_PROBE" = ready`},
+				Env:     map[string]string{"ZORDON_PROBE": "ready"},
+			},
+			wantErr: false,
+		},
+		"missing env fails the command": {
+			action:  &ExecAction{Command: []string{"sh", "-c", `test "$ZORDON_PROBE" = ready`}},
+			wantErr: true,
+		},
+		"slow command trips the timeout": {
+			action:  &ExecAction{Command: []string{"sh", "-c", "sleep 5"}},
+			timeout: 50 * time.Millisecond,
+			wantErr: true,
+		},
+		"empty command is unready": {
+			action:  &ExecAction{},
+			wantErr: true,
+		},
+	}
+
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			t.Parallel()
+			p := &Probe{Exec: c.action, Timeout: c.timeout}
+			err := p.Check(t.Context())
+			if c.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !c.wantErr && err != nil {
+				t.Fatalf("expected nil error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestProbe_Wait_execSuccess(t *testing.T) {
+	p := &Probe{
+		Exec:             &ExecAction{Command: []string{"sh", "-c", "exit 0"}},
+		Period:           10 * time.Millisecond,
+		FailureThreshold: 1,
+		SuccessThreshold: 2,
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	count := 0
+	err := p.Wait(ctx, func(ok bool, _ string) {
+		if ok {
+			count++
+		}
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 successful attempts, got %d", count)
+	}
+}
+
+func TestProbe_Wait_execFailure(t *testing.T) {
+	p := &Probe{
+		Exec:             &ExecAction{Command: []string{"sh", "-c", "exit 3"}},
+		Period:           10 * time.Millisecond,
+		FailureThreshold: 2,
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	if err := p.Wait(ctx, nil); err == nil {
+		t.Fatal("expected error after failures, got nil")
+	}
+}
+
 func TestProbe_Wait_contextCancel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

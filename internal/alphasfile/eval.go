@@ -781,22 +781,31 @@ func (r *resolver) finishService(st *svcState) error {
 		}
 	}
 
-	// Stage 7: readiness port (may reference everything in self).
-	var probePort int
+	// Stage 7: readiness action (may reference everything in self).
+	var (
+		probePort    int
+		probeExecCmd []string
+		probeExecEnv map[string]string
+	)
 	if sb.Readiness != nil {
-		ctx := r.ctxWith(self, dirs)
-		var (
-			expr  hcl.Expression
-			field string
-		)
 		if sb.Readiness.HTTP != nil {
-			expr, field = sb.Readiness.HTTP.Port, "readiness.http.port"
-		}
-
-		if expr != nil {
-			probePort, err = evalIntExpr(expr, ctx, field)
+			ctx := r.ctxWith(self, dirs)
+			probePort, err = evalIntExpr(sb.Readiness.HTTP.Port, ctx, "readiness.http.port")
 			if err != nil {
 				return err
+			}
+		}
+		if sb.Readiness.Exec != nil {
+			probeExecCmd, err = r.evalStrList(sb.Readiness.Exec.Command, self, "readiness.exec.command", dirs)
+			if err != nil {
+				return err
+			}
+			if sb.Readiness.Exec.Env != nil {
+				m, err := r.evalMap(sb.Readiness.Exec.Env, self, "readiness.exec.env", dirs)
+				if err != nil {
+					return err
+				}
+				probeExecEnv = toStringMap(m)
 			}
 		}
 	}
@@ -838,7 +847,7 @@ func (r *resolver) finishService(st *svcState) error {
 		rt.Log.TTY = &def
 	}
 	if sb.Readiness != nil {
-		p, err := compileProbe(sb.Readiness, probePort)
+		p, err := compileProbe(sb.Readiness, probePort, probeExecCmd, probeExecEnv)
 		if err != nil {
 			return fmt.Errorf("readiness: %w", err)
 		}

@@ -1,0 +1,42 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+# examples/readiness_exec — readiness gated on a CLI command instead of an
+# HTTP poll. alpha runs the `command` argv; exit 0 means ready, any non-zero
+# exit (up to failure_threshold) keeps the service in `probing`.
+#
+# The canonical use is a database client that ships its own readiness check —
+# e.g. Postgres:
+#
+#   readiness {
+#     exec {
+#       command = ["pg_isready", "-h", "127.0.0.1", "-p", "${self.vars.port}"]
+#       env     = { PGUSER = "zordon" }
+#     }
+#   }
+#
+# This example reuses the go echo service and probes it with `curl` so it runs
+# without any extra tooling. `command` is interpolated like every other sink,
+# and `env` overlays the probe process environment (here carrying the resolved
+# port through to the shell).
+
+service "go" "app" {
+  src {
+    path = "../.."
+    exe  = "./examples/go/src/app"
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    exec {
+      command = ["sh", "-c", "curl -fsS http://127.0.0.1:$PORT/ >/dev/null"]
+      env     = { PORT = "${self.vars.port}" }
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

@@ -148,8 +148,12 @@ independent of the **process/dotenv** chain documented in
 
 ### Readiness probes
 
-A `readiness { http { ... } }` block makes alpha mark a service ready only
-once its HTTP endpoint replies with 2xx/3xx.
+A `readiness` block makes alpha mark a service ready only once a probe passes.
+The block carries exactly one action — either `http` or `exec` — plus the
+shared timing knobs (`initial_delay`, `period`, `timeout`, `failure_threshold`,
+`success_threshold`).
+
+The `http` action polls an endpoint and treats a 2xx/3xx reply as ready.
 
 ```hcl
 readiness {
@@ -164,6 +168,24 @@ readiness {
   timeout           = "1s"
   failure_threshold = 30
   success_threshold = 1
+}
+```
+
+The `exec` action runs a CLI command and treats exit code 0 as ready — the
+readiness equivalent of a Kubernetes exec probe.
+Use it when the service ships its own readiness check, e.g. Postgres' `pg_isready`.
+`command` is the argv (no implicit shell; use `["sh", "-c", "..."]` for one)
+and is interpolated, so it can reference `self.vars` and peers.
+`env` overlays the probe process environment.
+
+```hcl
+readiness {
+  exec {
+    command = ["pg_isready", "-h", "127.0.0.1", "-p", "${self.vars.port}"]
+    env     = { PGUSER = "zordon" }   # optional, overlays the inherited env
+  }
+  period            = "200ms"
+  failure_threshold = 30
 }
 ```
 
