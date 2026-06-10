@@ -103,7 +103,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	// start
 	startFlags := ff.NewFlagSet("start").SetParent(rootFlags)
 	startAlphaBin := startFlags.StringLong("alpha", "alpha", "alpha binary (name on $PATH or absolute path)")
-	startAlphaLog := startFlags.StringLong("alpha-log", "/tmp/alpha.log", "log file for alpha")
+	startAlphaLog := startFlags.StringLong("alpha-log", "", "log file for alpha (default: <tmpdir>/alpha-<workspace-hash>.log)")
 	startTimeout := startFlags.DurationLong("timeout", 30*time.Second, "max wait for alpha to become ready")
 	// Failfast defaults to true (the safe stance for local dev: surface
 	// the first failure rather than letting other services flap behind

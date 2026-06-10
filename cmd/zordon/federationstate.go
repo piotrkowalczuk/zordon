@@ -165,8 +165,8 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 	}
 
 	levelLog := inv.AlphaLogPath()
-	if lvl.IsLeaf() && cfg.alphaLog != "" {
-		levelLog = cfg.alphaLog
+	if lvl.IsLeaf() {
+		levelLog = zfs.NewResolver(inv.Dir, inv.FsHash).AlphaLogFile(cfg.alphaLog)
 	}
 	if err := zfs.EnsureSharedDir(filepath.Dir(levelLog)); err != nil {
 		return fmt.Errorf("mkdir state dir: %w", err)

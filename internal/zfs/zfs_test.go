@@ -68,3 +68,25 @@ func TestDirName_setTrimsWhitespace(t *testing.T) {
 		t.Errorf("DirName=%q; want trimmed", d.Path())
 	}
 }
+
+func TestResolver_AlphaLogFile_overrideWins(t *testing.T) {
+	got := NewResolver("/ws/a", "deadbeefcafef00d").AlphaLogFile("/explicit/alpha.log")
+	if got != "/explicit/alpha.log" {
+		t.Errorf("AlphaLogFile(override) = %q; want the explicit path to win", got)
+	}
+}
+
+func TestResolver_AlphaLogFile_fallbackIsHashNamespaced(t *testing.T) {
+	a := NewResolver("/ws/a", "deadbeefcafef00d").AlphaLogFile("")
+	want := filepath.Join(SystemTempDir(), "alpha-deadbeefcafef00d.log")
+	if a != want {
+		t.Errorf("AlphaLogFile(\"\") = %q; want %q", a, want)
+	}
+
+	// Different workspaces (different FsHash) must not collide on one
+	// shared alpha.log — that's the whole point of the hash in the name.
+	b := NewResolver("/ws/b", "0123456789abcdef").AlphaLogFile("")
+	if a == b {
+		t.Errorf("two workspaces share default alpha log %q — hash not in the name", a)
+	}
+}
