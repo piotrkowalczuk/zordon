@@ -125,17 +125,24 @@ func renderService(body *hclwrite.Body, s *alphasfile.Service) {
 	if rt.Color != "" {
 		sb.SetAttributeValue("color", cty.StringVal(rt.Color))
 	}
-	if rt.DoubleDash {
-		sb.SetAttributeValue("doubleDash", cty.BoolVal(true))
-	}
-	if rt.SpaceSeparated {
-		sb.SetAttributeValue("space_separated", cty.BoolVal(true))
-	}
 	if len(rt.Vars) > 0 {
 		sb.SetAttributeValue("vars", mapAnyVal(rt.Vars))
 	}
-	if len(rt.Arguments) > 0 {
-		sb.SetAttributeValue("arguments", mapAnyVal(rt.Arguments))
+	hasOpts := rt.Options != nil && (rt.Options.Prefix != nil || rt.Options.Separator != nil)
+	if len(rt.Arguments) > 0 || hasOpts {
+		ab := sb.AppendNewBlock("arguments", nil).Body()
+		if len(rt.Arguments) > 0 {
+			ab.SetAttributeValue("values", groupsToCty(rt.Arguments))
+		}
+		if hasOpts {
+			ob := ab.AppendNewBlock("options", nil).Body()
+			if rt.Options.Prefix != nil {
+				ob.SetAttributeValue("prefix", cty.StringVal(*rt.Options.Prefix))
+			}
+			if rt.Options.Separator != nil {
+				ob.SetAttributeValue("separator", cty.StringVal(*rt.Options.Separator))
+			}
+		}
 	}
 	if len(rt.Env) > 0 {
 		sb.SetAttributeValue("env", mapStringStringVal(rt.Env))
@@ -399,6 +406,19 @@ func mapAnyVal(m map[string]any) cty.Value {
 	out := make(map[string]cty.Value, len(m))
 	for k, v := range m {
 		out[k] = anyToCty(v)
+	}
+	return cty.ObjectVal(out)
+}
+
+// groupsToCty renders resolved argument groups (name → flag map) as a
+// cty object-of-objects for the plan's `arguments { values = {…} }` block.
+func groupsToCty(groups map[string]map[string]any) cty.Value {
+	if len(groups) == 0 {
+		return cty.EmptyObjectVal
+	}
+	out := make(map[string]cty.Value, len(groups))
+	for name, flags := range groups {
+		out[name] = mapAnyVal(flags)
 	}
 	return cty.ObjectVal(out)
 }

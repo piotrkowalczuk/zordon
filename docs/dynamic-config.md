@@ -56,7 +56,7 @@ of the service:
 3. `self.vars` — populated after `vars = { ... }` is evaluated.
 4. `self.file.<name>` — `{ path, body }` of each nested `file` block,
    added as they're evaluated.
-5. `self.arguments` — populated after `arguments = { ... }`.
+5. `self.arguments.values.<group>` — populated after `arguments { values = { <group> = { ... } } }`.
 
 The `readiness.http.port` expression runs last, so it sees all of the above.
 
@@ -211,7 +211,6 @@ service "go" "prometheus" {
     tag = "v3.11.3"
   }
   src { exe = "./cmd/prometheus" }
-  doubleDash = true
 
   vars = {
     port = net::pickport()
@@ -226,9 +225,16 @@ service "go" "prometheus" {
     EOT
   }
 
-  arguments = {
-    "config.file"        = self.file.config.path
-    "web.listen-address" = ":${self.vars.port}"
+  arguments {
+    values = {
+      main = {
+        "config.file"        = self.file.config.path
+        "web.listen-address" = ":${self.vars.port}"
+      }
+    }
+    options {
+      prefix = "--"
+    }
   }
 
   readiness {

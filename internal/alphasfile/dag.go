@@ -107,7 +107,11 @@ func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph
 			g.deps[id] = map[string]struct{}{}
 		}
 		add(kindVars, "", s.Vars)
-		add(kindArguments, "", s.Arguments)
+		var argVals hcl.Expression
+		if s.Arguments != nil {
+			argVals = s.Arguments.Values
+		}
+		add(kindArguments, "", argVals)
 		add(kindEnv, "", s.Env)
 		for _, fb := range s.Files {
 			add(kindFile, fb.Name, fb.Path, fb.Body)

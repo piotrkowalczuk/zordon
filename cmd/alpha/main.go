@@ -2590,7 +2590,10 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent
 	switch {
 	case svc.Runtime != nil && len(svc.Runtime.Command) > 0:
 		// Explicit argv (subcommand-driven binaries / built artifacts).
-		argv := append(append([]string{}, svc.Runtime.Command...), svc.Flags()...)
+		// With an explicit cmd there is no auto-append — argument groups
+		// are placed inline via tpl::render::flags at eval time, so the
+		// command is already complete.
+		argv := append([]string{}, svc.Runtime.Command...)
 		cmd = exec.Command(argv[0], argv[1:]...)
 	case svc.Toolchain == alphasfile.ToolchainNode:
 		// Node has no single-binary build artifact; with no explicit

@@ -11,11 +11,15 @@ service "go" "nats-server" {
     http   = net::pickport()
   }
 
-  arguments = {
-    D = false
-    V = false
-    p = self.vars.client
-    m = self.vars.http
+  arguments {
+    values = {
+      main = {
+        D = false
+        V = false
+        p = self.vars.client
+        m = self.vars.http
+      }
+    }
   }
 }
 
@@ -24,15 +28,21 @@ service "rust" "tansu" {
     name     = "tansu"
     features = ["dynostore"]
   }
-  doubleDash = true
 
   vars = {
     kafka = net::pickport()
   }
 
-  arguments = {
-    listener-url            = "tcp://127.0.0.1:${self.vars.kafka}"
-    advertised-listener-url = "tcp://127.0.0.1:${self.vars.kafka}"
+  arguments {
+    values = {
+      main = {
+        listener-url            = "tcp://127.0.0.1:${self.vars.kafka}"
+        advertised-listener-url = "tcp://127.0.0.1:${self.vars.kafka}"
+      }
+    }
+    options {
+      prefix = "--"
+    }
   }
 }
 
@@ -42,17 +52,23 @@ service "go" "prometheus" {
     tag = "v3.11.3"
   }
   src { exe = "./cmd/prometheus" }
-  doubleDash = true
 
   vars = {
     port = net::pickport()
   }
 
-  arguments = {
-    "config.file"        = self.file.config.path
-    "log.format"         = "json"
-    "web.listen-address" = ":${self.vars.port}"
-    "storage.tsdb.path"  = "${fs::tmp()}/prometheus-data"
+  arguments {
+    values = {
+      main = {
+        "config.file"        = self.file.config.path
+        "log.format"         = "json"
+        "web.listen-address" = ":${self.vars.port}"
+        "storage.tsdb.path"  = "${fs::tmp()}/prometheus-data"
+      }
+    }
+    options {
+      prefix = "--"
+    }
   }
 
   file "config" {

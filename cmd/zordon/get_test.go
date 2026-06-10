@@ -15,7 +15,7 @@ func tree() map[string]any {
 			Runtime: &alphasfile.RuntimeConfig{
 				Name:      "prometheus",
 				Vars:      map[string]any{"address": "127.0.0.1:9090", "port": float64(9090)},
-				Arguments: map[string]any{"log.format": "json"},
+				Arguments: map[string]map[string]any{"main": {"log.format": "json"}},
 				Command:   []string{"prometheus", "--config.file=x"},
 				Dir:       "/repo",
 			},
@@ -35,7 +35,7 @@ func TestResolveExpr(t *testing.T) {
 		{"service.go.prometheus.ready", "true"},
 		{"service.go.prometheus.toolchain", "go"},
 		{"{{ .service.go.prometheus.vars.address }}", "127.0.0.1:9090"},
-		{`{{ index .service.go.prometheus.arguments "log.format" }}`, "json"},
+		{`{{ index .service.go.prometheus.arguments.main "log.format" }}`, "json"},
 		{"{{ json .service.go.prometheus.command }}", `["prometheus","--config.file=x"]`},
 	}
 	for _, c := range cases {
