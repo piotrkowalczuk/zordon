@@ -70,7 +70,11 @@ defaults — keep the manifest small.
   fresh `git worktree`. `branch` / `tag` / `rev` pin the revision.
 - **`src { path = "/path" }`** — local checkout used in place (no
   clone, edit→start loop). Relative paths resolve against the
-  **Alphasfile's directory**.
+  **Alphasfile's directory**. `path` is interpolated, so it can be
+  derived from the host environment, e.g.
+  `src { path = "${os::env("MONOREPO")}/services/api" }`. Outside a live
+  invocation (`zordon worktree`) only host-level helpers like `os::env`
+  are available; `fs::`/`cfg::`/`self.*` need a running instance.
 - **`src { exe = "..." }`** — the build target subdir (Go: the main
   package), relative to the source root. Default `.`. Can ride
   alongside `git { }` (subdir within the cloned worktree) **or**

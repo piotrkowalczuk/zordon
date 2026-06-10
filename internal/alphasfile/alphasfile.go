@@ -202,10 +202,18 @@ func ParseServices(path string) ([]*ServiceMeta, error) {
 	out := make([]*ServiceMeta, 0, len(root.Services))
 	for _, sb := range root.Services {
 		pkg := &Package{Toolchain: sb.Toolchain}
-		if sb.Crate != nil && (sb.Git != nil || (sb.Src != nil && sb.Src.Path != "")) {
+		srcPath := ""
+		if sb.Src != nil {
+			p, err := evalStaticSrcPath(sb.Src)
+			if err != nil {
+				return nil, fmt.Errorf("service %q: %w", sb.Name, err)
+			}
+			srcPath = p
+		}
+		if sb.Crate != nil && (sb.Git != nil || srcPath != "") {
 			return nil, fmt.Errorf("service %q: crate {} cannot coexist with src{path}/git", sb.Name)
 		}
-		if sb.Git != nil && sb.Src != nil && sb.Src.Path != "" {
+		if sb.Git != nil && srcPath != "" {
 			return nil, fmt.Errorf("service %q: src{path} and git{} are mutually exclusive (src can only carry exe alongside git)", sb.Name)
 		}
 		if sb.Git != nil {
@@ -215,7 +223,7 @@ func ParseServices(path string) ([]*ServiceMeta, error) {
 			pkg.Rev = sb.Git.Rev
 		}
 		if sb.Src != nil {
-			pkg.Src = resolveSrcDir(base, sb.Src.Path)
+			pkg.Src = resolveSrcDir(base, srcPath)
 			pkg.Exe = sb.Src.Exe
 		}
 		if sb.Crate != nil {
@@ -710,9 +718,16 @@ type gitBlock struct {
 // zordon uses in place. Alongside `git { }` it carries only `exe`,
 // the subdir within the cloned worktree to build. `path` is therefore
 // optional, but at least one of `path`/`exe` must be set.
+//
+// `path` is an interpolated expression so it can derive the checkout
+// location from the host environment, e.g.
+// `path = "${os::env("MONOREPO")}/services/api"`. In the eval pass the
+// full function set is available; the parse-only path (ParseServices,
+// used by `zordon worktree`) exposes only the host-level helpers
+// (os::env) — invocation/identity namespaces error there.
 type srcBlock struct {
-	Path string `hcl:"path,optional"`
-	Exe  string `hcl:"exe,optional"`
+	Path hcl.Expression `hcl:"path,optional"`
+	Exe  string         `hcl:"exe,optional"`
 }
 
 // crateBlock is the rust use-only primary: `cargo install <name>`.

@@ -386,6 +386,7 @@ type svcState struct {
 	args     map[string]any
 	envMap   map[string]any
 	dirs     srcDirs // source locations the fs:: functions return for this service
+	srcPath  string  // evaluated src{path} (local checkout); empty when no src{path}
 }
 
 // srcDirs carries a service's source locations for the fs:: functions during
@@ -441,7 +442,14 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 			gitURL = sb.Git.URL
 		}
 		if sb.Src != nil {
-			srcPath = sb.Src.Path
+			// Empty srcDirs: src{path} is the input that *defines* the
+			// checkout, so fs::src()/fs::exe() aren't available to it yet
+			// (they'd error cleanly). os:: and cross-service refs work.
+			p, err := r.evalStr(sb.Src.Path, nil, "src.path", srcDirs{})
+			if err != nil {
+				return nil, fmt.Errorf("service %q: %w", sb.Name, err)
+			}
+			srcPath = p
 			srcExeFromSB = sb.Src.Exe
 		}
 		switch {
@@ -502,6 +510,7 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 			self:     self,
 			fileVals: map[string]cty.Value{},
 			dirs:     srcDirs{root: checkout, exe: dir},
+			srcPath:  srcPath,
 		}
 		out[sid] = st
 		r.publishSelf(st)
@@ -919,7 +928,7 @@ func (r *resolver) finishService(st *svcState) error {
 		srcRev = sb.Git.Rev
 	}
 	if sb.Src != nil {
-		srcLocalPath = sb.Src.Path
+		srcLocalPath = st.srcPath
 		srcExe = sb.Src.Exe
 	}
 	switch {
@@ -1419,6 +1428,32 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 		"test::log":  testLogFunc(r.testCfg),
 		"test::fail": testFailFunc(r.testCfg),
 	}
+}
+
+// evalStaticSrcPath evaluates a src{path} expression without a live
+// invocation — the parse-only context ParseServices (and `zordon
+// worktree`) runs in. Only host-level helpers (os::env) are available;
+// invocation/identity namespaces (fs::, cfg::, src::, net::, self.*)
+// are absent, so referencing them is a clear eval error rather than a
+// silent empty string. Returns "" when src{path} is absent.
+func evalStaticSrcPath(src *srcBlock) (string, error) {
+	if src.Path == nil {
+		return "", nil
+	}
+	ctx := &hcl.EvalContext{Functions: map[string]function.Function{
+		"os::env": osEnvFunc(),
+	}}
+	val, diags := src.Path.Value(ctx)
+	if diags.HasErrors() {
+		return "", fmt.Errorf("src.path: %s", diags.Error())
+	}
+	if val.IsNull() {
+		return "", nil
+	}
+	if val.Type() != cty.String {
+		return "", fmt.Errorf("src.path must be a string, got %s", val.Type().FriendlyName())
+	}
+	return val.AsString(), nil
 }
 
 // osEnvFunc reads a host environment variable at evaluation time (in the

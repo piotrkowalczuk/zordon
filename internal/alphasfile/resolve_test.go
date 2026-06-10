@@ -1,6 +1,8 @@
 package alphasfile
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -304,6 +306,71 @@ service "go" "tooling" {
 	want := "/tmp/test-resolve-src/tools"
 	if got != want {
 		t.Errorf("src resolved to %q; want %q (relative to Alphasfile dir, not CWD)", got, want)
+	}
+}
+
+// src{path} is an interpolated expression: host-env helpers like
+// os::env let the checkout location be derived at eval time. An
+// absolute env value stays absolute through resolveSrcDir.
+func TestResolveSrcPathUsesFunctions(t *testing.T) {
+	t.Setenv("ZORDON_SRC_ROOT", "/tmp/monorepo")
+	src := `
+service "go" "api" {
+  src { path = "${os::env("ZORDON_SRC_ROOT")}/services/api" }
+}
+`
+	af := compile(t, src, nil)
+	got := svcByName(af, "api").Package.Src
+	want := "/tmp/monorepo/services/api"
+	if got != want {
+		t.Errorf("src.path with os::env resolved to %q; want %q", got, want)
+	}
+}
+
+// The parse-only path (ParseServices, used by `zordon worktree`)
+// resolves src{path} too, with the host-level function set available.
+func TestParseServicesSrcPathUsesFunctions(t *testing.T) {
+	t.Setenv("ZORDON_SRC_ROOT", "/tmp/monorepo")
+	dir := t.TempDir()
+	afPath := filepath.Join(dir, "Alphasfile")
+	body := `
+service "go" "api" {
+  src { path = "${os::env("ZORDON_SRC_ROOT")}/services/api" }
+}
+`
+	if err := os.WriteFile(afPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metas, err := ParseServices(afPath)
+	if err != nil {
+		t.Fatalf("ParseServices: %v", err)
+	}
+	if len(metas) != 1 {
+		t.Fatalf("want 1 service, got %d", len(metas))
+	}
+	got := metas[0].Package.Src
+	want := "/tmp/monorepo/services/api"
+	if got != want {
+		t.Errorf("ParseServices src.path with os::env resolved to %q; want %q", got, want)
+	}
+}
+
+// Invocation/identity namespaces (fs::, cfg::, ...) need a live run and
+// are absent in the parse-only context: referencing one in src{path} is
+// a clear error, not a silent empty checkout.
+func TestParseServicesSrcPathRejectsInvocationFunc(t *testing.T) {
+	dir := t.TempDir()
+	afPath := filepath.Join(dir, "Alphasfile")
+	body := `
+service "go" "api" {
+  src { path = "${fs::tmp()}/api" }
+}
+`
+	if err := os.WriteFile(afPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseServices(afPath); err == nil {
+		t.Fatal("want error for invocation-only function in parse-only src.path, got nil")
 	}
 }
 
