@@ -11,12 +11,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
 
 type Probe struct {
 	HTTP *HTTPAction `json:"http,omitempty"`
+	Exec *ExecAction `json:"exec,omitempty"`
 
 	InitialDelay     time.Duration `json:"initial_delay,omitempty"`
 	Period           time.Duration `json:"period,omitempty"`
@@ -30,6 +34,15 @@ type HTTPAction struct {
 	Port   int    `json:"port"`
 	Host   string `json:"host,omitempty"`
 	Scheme string `json:"scheme,omitempty"` // "http" (default) or "https"
+}
+
+// ExecAction runs a command and treats exit code 0 as ready — the readiness
+// equivalent of a Kubernetes exec probe. Command is the argv (no implicit
+// shell; use ["sh","-c","..."] when you need one). Env overlays the probe's
+// inherited environment so e.g. pg_isready can be pointed at the right host.
+type ExecAction struct {
+	Command []string          `json:"command"`
+	Env     map[string]string `json:"env,omitempty"`
 }
 
 // Defaults match k8s.
@@ -75,7 +88,7 @@ func (p *Probe) Wait(ctx context.Context, report func(ok bool, reason string)) e
 	if p == nil {
 		return errors.New("nil probe")
 	}
-	if p.HTTP == nil {
+	if p.HTTP == nil && p.Exec == nil {
 		return errors.New("no probe action configured")
 	}
 
@@ -134,8 +147,11 @@ func (p *Probe) Check(ctx context.Context) error {
 }
 
 func (p *Probe) try(ctx context.Context, timeout time.Duration) (bool, string) {
-	if p.HTTP != nil {
+	switch {
+	case p.HTTP != nil:
 		return p.tryHTTP(ctx, timeout)
+	case p.Exec != nil:
+		return p.tryExec(ctx, timeout)
 	}
 	return false, "no action"
 }
@@ -176,4 +192,46 @@ func (p *Probe) tryHTTP(ctx context.Context, timeout time.Duration) (bool, strin
 		return true, fmt.Sprintf("HTTP %d", resp.StatusCode)
 	}
 	return false, fmt.Sprintf("HTTP %d", resp.StatusCode)
+}
+
+func (p *Probe) tryExec(ctx context.Context, timeout time.Duration) (bool, string) {
+	e := p.Exec
+	if len(e.Command) == 0 {
+		return false, "empty command"
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(cctx, e.Command[0], e.Command[1:]...)
+	if len(e.Env) > 0 {
+		cmd.Env = append(os.Environ(), envPairs(e.Env)...)
+	}
+
+	out, err := cmd.CombinedOutput()
+	if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+		return false, fmt.Sprintf("timeout after %s", timeout)
+	}
+	if err != nil {
+		if reason := strings.TrimSpace(string(out)); reason != "" {
+			return false, fmt.Sprintf("%s: %s", err, reason)
+		}
+		return false, err.Error()
+	}
+	return true, "exit 0"
+}
+
+// envPairs renders a map as a sorted slice of KEY=VALUE strings. Sorting keeps
+// the spawned environment deterministic (and the rendered plan stable).
+func envPairs(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(env))
+	for _, k := range keys {
+		pairs = append(pairs, k+"="+env[k])
+	}
+	return pairs
 }

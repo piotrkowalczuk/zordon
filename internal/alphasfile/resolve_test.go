@@ -514,3 +514,94 @@ service "go" "api" {
 		t.Errorf("seed.After = %v, want [%s]", seed.After, wantSeedAfter)
 	}
 }
+
+func TestResolveReadinessExec(t *testing.T) {
+	src := `
+service "go" "db" {
+  git { url = "github.com/acme/db" }
+  vars = { port = 5432 }
+  runtime { cmd = ["./db"] }
+  readiness {
+    exec {
+      command = ["pg_isready", "-h", "127.0.0.1", "-p", "${self.vars.port}"]
+      env     = { PGUSER = "zordon" }
+    }
+    period            = "200ms"
+    failure_threshold = 30
+  }
+}
+`
+	af := compile(t, src, nil)
+	db := svcByName(af, "db")
+	if db == nil {
+		t.Fatal("service db not resolved")
+	}
+	p := db.Runtime.Readiness
+	if p == nil || p.Exec == nil {
+		t.Fatal("readiness exec action not resolved")
+	}
+	want := []string{"pg_isready", "-h", "127.0.0.1", "-p", "5432"}
+	if len(p.Exec.Command) != len(want) {
+		t.Fatalf("command = %v, want %v", p.Exec.Command, want)
+	}
+	for i := range want {
+		if p.Exec.Command[i] != want[i] {
+			t.Fatalf("command = %v, want %v", p.Exec.Command, want)
+		}
+	}
+	if p.Exec.Env["PGUSER"] != "zordon" {
+		t.Errorf("exec.env PGUSER = %q, want zordon", p.Exec.Env["PGUSER"])
+	}
+	if p.HTTP != nil {
+		t.Errorf("exec probe should not carry an http action")
+	}
+	if p.FailureThreshold != 30 {
+		t.Errorf("failure_threshold = %d, want 30", p.FailureThreshold)
+	}
+}
+
+func TestResolveReadinessActionErrors(t *testing.T) {
+	cases := map[string]struct {
+		readiness string
+		wantErr   string
+	}{
+		"both http and exec": {
+			readiness: `readiness {
+    http { port = 8080 }
+    exec { command = ["true"] }
+  }`,
+			wantErr: "not both",
+		},
+		"neither http nor exec": {
+			readiness: `readiness { period = "1s" }`,
+			wantErr:   "requires an http or exec action",
+		},
+		"empty exec command": {
+			readiness: `readiness {
+    exec {
+      command = []
+    }
+  }`,
+			wantErr: "must not be empty",
+		},
+	}
+
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			src := `
+service "go" "db" {
+  git { url = "github.com/acme/db" }
+  runtime { cmd = ["./db"] }
+  ` + c.readiness + `
+}
+`
+			_, err := Compile("test.hcl", []byte(src), testInv(), nil, testCfgHash, TestConfig{})
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", c.wantErr)
+			}
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("error = %q, want substring %q", err.Error(), c.wantErr)
+			}
+		})
+	}
+}

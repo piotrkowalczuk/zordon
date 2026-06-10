@@ -331,6 +331,13 @@ func renderReadiness(sb *hclwrite.Body, p *probe.Probe) {
 			hb.SetAttributeValue("scheme", cty.StringVal(p.HTTP.Scheme))
 		}
 	}
+	if p.Exec != nil {
+		eb := rb.AppendNewBlock("exec", nil).Body()
+		eb.SetAttributeValue("command", stringListVal(p.Exec.Command))
+		if len(p.Exec.Env) > 0 {
+			eb.SetAttributeValue("env", mapStringStringVal(p.Exec.Env))
+		}
+	}
 	if p.InitialDelay != 0 {
 		rb.SetAttributeValue("initial_delay", cty.StringVal(p.InitialDelay.String()))
 	}

@@ -763,6 +763,7 @@ type logBlock struct {
 
 type probeSpec struct {
 	HTTP             *httpActionSpec `hcl:"http,block"`
+	Exec             *execActionSpec `hcl:"exec,block"`
 	InitialDelay     string          `hcl:"initial_delay,optional"`
 	Period           string          `hcl:"period,optional"`
 	Timeout          string          `hcl:"timeout,optional"`
@@ -775,6 +776,15 @@ type httpActionSpec struct {
 	Port   hcl.Expression `hcl:"port"`
 	Host   string         `hcl:"host,optional"`
 	Scheme string         `hcl:"scheme,optional"`
+}
+
+// execActionSpec is the CLI readiness action: `command` is the argv (no
+// implicit shell) and is interpolated, so it can reference self.vars and
+// peers — e.g. command = ["pg_isready", "-h", "127.0.0.1", "-p",
+// "${self.vars.port}"]. `env` overlays the probe process environment.
+type execActionSpec struct {
+	Command hcl.Expression `hcl:"command"`
+	Env     hcl.Expression `hcl:"env,optional"`
 }
 
 type fileBlock struct {
@@ -1093,7 +1103,13 @@ func anyToCty(v any) cty.Value {
 	return cty.StringVal(fmt.Sprintf("%v", v))
 }
 
-func compileProbe(ps *probeSpec, port int) (*probe.Probe, error) {
+func compileProbe(ps *probeSpec, port int, execCmd []string, execEnv map[string]string) (*probe.Probe, error) {
+	switch {
+	case ps.HTTP != nil && ps.Exec != nil:
+		return nil, fmt.Errorf("choose either http or exec, not both")
+	case ps.HTTP == nil && ps.Exec == nil:
+		return nil, fmt.Errorf("requires an http or exec action")
+	}
 	p := &probe.Probe{
 		FailureThreshold: ps.FailureThreshold,
 		SuccessThreshold: ps.SuccessThreshold,
@@ -1104,6 +1120,15 @@ func compileProbe(ps *probeSpec, port int) (*probe.Probe, error) {
 			Port:   port,
 			Host:   ps.HTTP.Host,
 			Scheme: ps.HTTP.Scheme,
+		}
+	}
+	if ps.Exec != nil {
+		if len(execCmd) == 0 {
+			return nil, fmt.Errorf("exec.command must not be empty")
+		}
+		p.Exec = &probe.ExecAction{
+			Command: execCmd,
+			Env:     execEnv,
 		}
 	}
 	parse := func(field, raw string) (time.Duration, error) {
