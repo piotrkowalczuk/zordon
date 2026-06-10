@@ -260,7 +260,7 @@ func main() {
 	}
 
 	runFlags := ff.NewFlagSet("run").SetParent(rootFlags)
-	logFile := runFlags.StringLong("log-file", "/tmp/alpha.log", "path for log output")
+	logFile := runFlags.StringLong("log-file", "", "path for log output (default: <tmpdir>/alpha-<workspace-hash>.log)")
 	sockPath := runFlags.StringLong("socket", "", "control socket path (required; usually injected by zordon)")
 	stabilization := runFlags.DurationLong("stabilization", 1*time.Second, "how long a service must stay alive after spawn to be considered ready")
 	shutdownGrace := runFlags.DurationLong("shutdown-grace", 2*time.Second, "time given to children to exit on SIGTERM before SIGKILL")
@@ -1357,7 +1357,12 @@ func serveAlpha(ctx context.Context, rc runConfig, life *daemon.Lifeline) error 
 	zordonHome := rc.Home.Path()
 	cfg := bringupConfig{stabilization: rc.Stabilization, shutdownGrace: rc.ShutdownGrace}
 
-	logF, err := zfs.OpenAppendLog(rc.LogFile)
+	// fsHash is the filesystem-location identity, recovered from the socket
+	// path ($TMPDIR/zordon-<fsHash>/alpha.sock). Needed both for the default
+	// log path and for the orphan reap below.
+	fsHash := fsHashFromSocket(sockPath)
+
+	logF, err := zfs.OpenAppendLog(zfs.NewResolver("", fsHash).AlphaLogFile(rc.LogFile))
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
 	}
@@ -1368,9 +1373,7 @@ func serveAlpha(ctx context.Context, rc runConfig, life *daemon.Lifeline) error 
 
 	// Reap orphans from a previous alpha for THIS fs_hash before binding the
 	// control socket: a service binary from the prior run holding a TCP port
-	// would make a fresh bind fail otherwise. fsHash is derived from the socket
-	// path ($TMPDIR/zordon-<fsHash>/alpha.sock).
-	fsHash := fsHashFromSocket(sockPath)
+	// would make a fresh bind fail otherwise.
 	if zordonHome != "" && fsHash != "" {
 		if err := registry.ReapByFsHash(zordonHome, fsHash, cfg.shutdownGrace, log); err != nil {
 			log.Error("alpha", "registry reap: %v", err)
