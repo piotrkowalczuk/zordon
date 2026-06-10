@@ -115,6 +115,12 @@ func renderService(body *hclwrite.Body, s *alphasfile.Service) {
 	if s.Package != nil {
 		renderSource(sb, s.Package)
 	}
+	if s.Pkg != nil {
+		sb.SetAttributeValue("package", mapStringStringVal(map[string]string{
+			"name":    s.Pkg.Name,
+			"version": s.Pkg.Version,
+		}))
+	}
 
 	if rt.Color != "" {
 		sb.SetAttributeValue("color", cty.StringVal(rt.Color))
@@ -336,6 +342,13 @@ func renderReadiness(sb *hclwrite.Body, p *probe.Probe) {
 		eb.SetAttributeValue("command", stringListVal(p.Exec.Command))
 		if len(p.Exec.Env) > 0 {
 			eb.SetAttributeValue("env", mapStringStringVal(p.Exec.Env))
+		}
+	}
+	if p.TCP != nil {
+		tb := rb.AppendNewBlock("tcp", nil).Body()
+		tb.SetAttributeValue("port", cty.NumberIntVal(int64(p.TCP.Port)))
+		if p.TCP.Host != "" {
+			tb.SetAttributeValue("host", cty.StringVal(p.TCP.Host))
 		}
 	}
 	if p.InitialDelay != 0 {

@@ -1,0 +1,67 @@
+# examples/pkg — native packages (redis, postgres) installed by mise and
+# run as ordinary supervised processes. No source build, no container:
+# `package` is a mise coordinate, `runtime.cmd` is the run command, and
+# readiness is a TCP connect (databases/brokers don't speak HTTP).
+#
+# Because the package runs as a normal child of the supervisor, the same
+# tommy/pgid/registry machinery reaps it — no daemon, no orphan window.
+#
+# First start may take a while: mise builds redis/postgres from source
+# (vfox/asdf backends). Subsequent starts reuse the install.
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+service "pkg" "redis" {
+  # bare name → mise registry picks the backend (redis → vfox→asdf).
+  # An explicit backend would be: package = { name = "redis", backend = "asdf", version = "7.4.1" }
+  package = { name = "redis", version = "7.4.1" }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    # --save "" disables RDB snapshots — an ephemeral dev cache.
+    cmd = ["redis-server", "--port", "${self.vars.port}", "--save", ""]
+  }
+
+  readiness {
+    tcp { port = self.vars.port }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "pkg" "postgres" {
+  # asdf backend + --without-icu so postgres builds without pkg-config/ICU
+  # (the default vfox backend forces ICU and needs a system pkg-config).
+  # build{env} is injected straight into `mise install`.
+  package = "asdf:mise-plugins/mise-postgres@16.4"
+
+  build {
+    env = { POSTGRES_EXTRA_CONFIGURE_OPTIONS = "--without-icu" }
+  }
+
+  vars = {
+    port = net::pickport()
+    data = "${fs::tmp()}/pgdata"
+  }
+
+  runtime {
+    # The service's own cmd waits for initdb to finish — without this,
+    # postgres would race cluster creation. `check` skips the cmd when
+    # the cluster already exists (idempotent restart).
+    after = [self.runtime.provision.initdb.success]
+
+    provision "initdb" {
+      check = "test -f ${self.vars.data}/PG_VERSION"
+      cmd   = "initdb -D ${self.vars.data} -U postgres --auth=trust"
+    }
+
+    # -k puts the unix socket in the data dir (no /var/run perms needed).
+    cmd = ["postgres", "-D", "${self.vars.data}", "-p", "${self.vars.port}", "-k", "${self.vars.data}"]
+  }
+
+  readiness {
+    tcp { port = self.vars.port }
+    period            = "200ms"
+    failure_threshold = 100
+  }
+}

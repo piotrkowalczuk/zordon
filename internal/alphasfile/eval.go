@@ -797,9 +797,20 @@ func (r *resolver) finishService(st *svcState) error {
 		probeExecEnv map[string]string
 	)
 	if sb.Readiness != nil {
-		if sb.Readiness.HTTP != nil {
-			ctx := r.ctxWith(self, dirs)
-			probePort, err = evalIntExpr(sb.Readiness.HTTP.Port, ctx, "readiness.http.port")
+		ctx := r.ctxWith(self, dirs)
+		var (
+			expr  hcl.Expression
+			field string
+		)
+		switch {
+		case sb.Readiness.HTTP != nil:
+			expr, field = sb.Readiness.HTTP.Port, "readiness.http.port"
+		case sb.Readiness.TCP != nil:
+			expr, field = sb.Readiness.TCP.Port, "readiness.tcp.port"
+		}
+
+		if expr != nil {
+			probePort, err = evalIntExpr(expr, ctx, field)
 			if err != nil {
 				return err
 			}
@@ -864,9 +875,44 @@ func (r *resolver) finishService(st *svcState) error {
 	}
 
 	switch sb.Toolchain {
-	case ToolchainGo, ToolchainRust, ToolchainRuby, ToolchainNode:
+	case ToolchainGo, ToolchainRust, ToolchainRuby, ToolchainNode, ToolchainPkg:
 	default:
-		return fmt.Errorf("unknown toolchain %q (want go|rust|ruby|nodejs)", sb.Toolchain)
+		return fmt.Errorf("unknown toolchain %q (want go|rust|ruby|nodejs|pkg)", sb.Toolchain)
+	}
+
+	// `package` is polymorphic — a string (go) or a string/object (pkg).
+	// Evaluate it once; nil means absent.
+	pkgC, err := r.evalPackage(sb.Package, self, dirs, "package")
+	if err != nil {
+		return err
+	}
+
+	// pkg: a mise-materialized native package with no source build —
+	// resolved entirely here, sharing none of the src/git/crate plumbing.
+	if sb.Toolchain == ToolchainPkg {
+		if sb.Src != nil || sb.Git != nil || sb.Crate != nil || sb.Bin != "" || len(sb.Features) > 0 {
+			return fmt.Errorf("service %q: pkg has no source build — drop src/git/crate/bin/features", sb.Name)
+		}
+		if sb.Debugger != nil && sb.Debugger.Enabled {
+			return fmt.Errorf("service %q: debugger {} is not supported on pkg services", sb.Name)
+		}
+		if len(command) == 0 {
+			return fmt.Errorf("service %q: pkg requires runtime { cmd = [...] } (no entrypoint inference)", sb.Name)
+		}
+		if pkgC == nil {
+			return fmt.Errorf("service %q: pkg requires a `package` coordinate", sb.Name)
+		}
+		pname, pversion, perr := pkgC.miseSpec()
+		if perr != nil {
+			return fmt.Errorf("service %q: %w", sb.Name, perr)
+		}
+		svc := &Service{
+			Toolchain: ToolchainPkg,
+			Runtime:   rt,
+			Pkg:       &PkgSpec{Name: pname, Version: pversion},
+		}
+		r.resolvedServices = append(r.resolvedServices, svc)
+		return nil
 	}
 	// Use-only: the install coordinate comes from `crate {}` (rust) or
 	// `package` (go). Cross-toolchain mixing is a mistake.
@@ -881,9 +927,14 @@ func (r *resolver) finishService(st *svcState) error {
 		if len(sb.Features) > 0 {
 			return fmt.Errorf("service %q is go but declares `features` (rust-only)", sb.Name)
 		}
-		install = strings.TrimSpace(sb.Package)
+		if pkgC != nil {
+			if pkgC.isObj {
+				return fmt.Errorf("service %q: go `package` must be a string (got an object)", sb.Name)
+			}
+			install = pkgC.raw
+		}
 	case ToolchainRust:
-		if sb.Package != "" {
+		if pkgC != nil {
 			return fmt.Errorf("service %q is rust but declares a top-level `package` field (go-only)", sb.Name)
 		}
 		features = sb.Features
@@ -918,7 +969,7 @@ func (r *resolver) finishService(st *svcState) error {
 			}
 		}
 	default:
-		if sb.Package != "" || sb.Crate != nil {
+		if pkgC != nil || sb.Crate != nil {
 			return fmt.Errorf("service %q: %s has no use-only mode", sb.Name, sb.Toolchain)
 		}
 		if len(sb.Features) > 0 {
@@ -1127,6 +1178,95 @@ func (r *resolver) evalMap(expr hcl.Expression, self map[string]cty.Value, field
 		out[k] = ctyToAny(v)
 	}
 	return out, nil
+}
+
+// pkgCoord is the parsed `package` field: either a string (verbatim in
+// raw) or an object { name, backend?, version }.
+type pkgCoord struct {
+	raw     string
+	name    string
+	backend string
+	version string
+	isObj   bool
+}
+
+// evalPackage evaluates the polymorphic `package` expression. Returns nil
+// when the field is absent/null. A string yields raw; an object yields
+// name/backend/version (unknown keys are rejected).
+func (r *resolver) evalPackage(expr hcl.Expression, self map[string]cty.Value, dirs srcDirs, field string) (*pkgCoord, error) {
+	if expr == nil {
+		return nil, nil
+	}
+	ctx := r.ctxWith(self, dirs)
+	val, diags := expr.Value(ctx)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("%s: %s", field, diags.Error())
+	}
+	if val.IsNull() {
+		return nil, nil
+	}
+	t := val.Type()
+	switch {
+	case t == cty.String:
+		return &pkgCoord{raw: strings.TrimSpace(val.AsString())}, nil
+	case t.IsObjectType() || t.IsMapType():
+		c := &pkgCoord{isObj: true}
+		m := val.AsValueMap()
+		for k := range m {
+			switch k {
+			case "name", "backend", "version":
+			default:
+				return nil, fmt.Errorf("%s: unknown key %q (want name, backend, version)", field, k)
+			}
+		}
+		get := func(k string) (string, error) {
+			v, ok := m[k]
+			if !ok || v.IsNull() {
+				return "", nil
+			}
+			if v.Type() != cty.String {
+				return "", fmt.Errorf("%s.%s must be a string, got %s", field, k, v.Type().FriendlyName())
+			}
+			return strings.TrimSpace(v.AsString()), nil
+		}
+		var err error
+		if c.name, err = get("name"); err != nil {
+			return nil, err
+		}
+		if c.backend, err = get("backend"); err != nil {
+			return nil, err
+		}
+		if c.version, err = get("version"); err != nil {
+			return nil, err
+		}
+		return c, nil
+	default:
+		return nil, fmt.Errorf("%s must be a string or { name, backend?, version } object, got %s", field, t.FriendlyName())
+	}
+}
+
+// miseSpec resolves the coordinate to a mise tool ref (optionally
+// backend-qualified, e.g. "aqua:etcd-io/etcd") and a pinned version.
+// name and version are both required.
+func (c *pkgCoord) miseSpec() (name, version string, err error) {
+	if c.isObj {
+		if c.name == "" {
+			return "", "", fmt.Errorf("package { name } is required")
+		}
+		if c.version == "" {
+			return "", "", fmt.Errorf("package { version } is required")
+		}
+		name = c.name
+		if c.backend != "" {
+			name = c.backend + ":" + c.name
+		}
+		return name, c.version, nil
+	}
+	at := strings.LastIndex(c.raw, "@")
+	if at <= 0 || at == len(c.raw)-1 {
+		return "", "", fmt.Errorf("package %q must include a version (e.g. name@version)", c.raw)
+	}
+	return c.raw[:at], c.raw[at+1:], nil
 }
 
 func evalFileExpr(fb *fileBlock, ctx *hcl.EvalContext) (string, string, error) {
