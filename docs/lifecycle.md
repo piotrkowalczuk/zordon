@@ -42,9 +42,9 @@ For each service in `Configure` order:
    (temp + rename).
 4. **Start** the process (`runtime { cmd }` if given, else the built
    binary), cwd = the checkout, environment composed (see below).
-5. **Readiness** — a `readiness { http {…} }` probe gates READY;
-   without one, "alive for `--stabilization`" (default `1s`) counts as
-   ready.
+5. **Readiness** — a `readiness` probe (`http {…}` or `exec {…}`) gates
+   READY; without one, "alive for `--stabilization`" (default `1s`) counts
+   as ready.
 6. Stdout/stderr stream back to `zordon` as events. On `--failfast`
    (default on) a failed bringup aborts the rest and shuts the level
    down.
