@@ -383,7 +383,7 @@ type svcState struct {
 	files    []*File
 	fileVals map[string]cty.Value
 	vars     map[string]any
-	args     map[string]any
+	args     map[string]map[string]any
 	envMap   map[string]any
 	dirs     srcDirs // source locations the fs:: functions return for this service
 	srcPath  string  // evaluated src{path} (local checkout); empty when no src{path}
@@ -545,15 +545,15 @@ func (r *resolver) evalProducerNode(n *node, st *svcState) error {
 		st.vars = v
 		st.self["vars"] = mapValToCty(v)
 	case kindArguments:
-		if st.sb.Arguments == nil {
+		if st.sb.Arguments == nil || st.sb.Arguments.Values == nil {
 			return nil
 		}
-		a, err := r.evalMap(st.sb.Arguments, st.self, "arguments", st.dirs)
+		groups, err := r.evalArgGroups(st.sb.Arguments.Values, st.self, st.dirs, st.sb.Name)
 		if err != nil {
 			return err
 		}
-		st.args = a
-		st.self["arguments"] = mapValToCty(a)
+		st.args = groups
+		st.self["arguments"] = argsSelfCty(groups)
 	case kindEnv:
 		if st.sb.Env == nil {
 			return nil
@@ -616,8 +616,12 @@ func (r *resolver) finishService(st *svcState) error {
 		command []string
 		err     error
 	)
+	argOpts, err := resolveArgOptions(sb)
+	if err != nil {
+		return err
+	}
 	if sb.Runtime != nil && sb.Runtime.Cmd != nil {
-		command, err = r.evalStrList(sb.Runtime.Cmd, self, "runtime.cmd", dirs)
+		command, err = r.evalCmd(sb.Runtime.Cmd, self, dirs, st.args, argOpts, sb.Toolchain)
 		if err != nil {
 			return err
 		}
@@ -832,26 +836,25 @@ func (r *resolver) finishService(st *svcState) error {
 
 	// Build the wire-stable Service and runtime config.
 	rt := &RuntimeConfig{
-		Name:           sb.Name,
-		Color:          sb.Color,
-		DoubleDash:     sb.DoubleDash,
-		SpaceSeparated: sb.SpaceSeparated,
-		Vars:           st.vars,
-		Arguments:      st.args,
-		Env:            toStringMap(st.envMap),
-		BuildEnv:       buildEnv,
-		RunEnv:         runEnv,
-		AgentEnv:       agentEnv,
-		Dotenv:         dotenv,
-		Command:        command,
-		After:          runtimeAfter,
-		Sudo:           sudo,
-		Provision:      provisions,
-		Files:          st.files,
-		Dir:            st.dir,
-		Checkout:       st.dirs.root,
-		BinDir:         r.inv.BinDir(),
-		Print:          printLine,
+		Name:      sb.Name,
+		Color:     sb.Color,
+		Options:   argOpts,
+		Vars:      st.vars,
+		Arguments: st.args,
+		Env:       toStringMap(st.envMap),
+		BuildEnv:  buildEnv,
+		RunEnv:    runEnv,
+		AgentEnv:  agentEnv,
+		Dotenv:    dotenv,
+		Command:   command,
+		After:     runtimeAfter,
+		Sudo:      sudo,
+		Provision: provisions,
+		Files:     st.files,
+		Dir:       st.dir,
+		Checkout:  st.dirs.root,
+		BinDir:    r.inv.BinDir(),
+		Print:     printLine,
 	}
 	// Resolve per-toolchain defaults so the wire-stable Service is fully
 	// populated — alpha can read rt.Log.TTY without knowing what
@@ -1088,7 +1091,7 @@ func (r *resolver) evalDebugger(sb *serviceBlock, self map[string]cty.Value, com
 		logFlag = *db.Log
 	}
 	if wrap && len(command) > 0 {
-		return nil, nil, fmt.Errorf("service %q: debugger.enabled = true wraps runtime itself (`dlv exec <binary> -- <args>`), which is incompatible with an explicit `runtime.cmd`. Use `arguments = {…}` for flags, or set `debugger.wrap_runtime = false` to keep your own cmd", sb.Name)
+		return nil, nil, fmt.Errorf("service %q: debugger.enabled = true wraps runtime itself (`dlv exec <binary> -- <args>`), which is incompatible with an explicit `runtime.cmd`. Use `arguments { values = {…} }` for flags, or set `debugger.wrap_runtime = false` to keep your own cmd", sb.Name)
 	}
 	port, err := r.evalDebuggerPort(db.Port, self, dirs)
 	if err != nil {
@@ -1178,6 +1181,40 @@ func (r *resolver) evalMap(expr hcl.Expression, self map[string]cty.Value, field
 		out[k] = ctyToAny(v)
 	}
 	return out, nil
+}
+
+// evalArgGroups resolves `arguments { values = {…} }` into named groups
+// (group name → flag→value map). Each top-level entry must be an object
+// (a group); each flag value must be a scalar. This is the two-level shape
+// Flags() and tpl::render::flags render from.
+func (r *resolver) evalArgGroups(expr hcl.Expression, self map[string]cty.Value, dirs srcDirs, svc string) (map[string]map[string]any, error) {
+	ctx := r.ctxWith(self, dirs)
+	val, diags := expr.Value(ctx)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("arguments.values: %s", diags.Error())
+	}
+	if val.IsNull() {
+		return nil, nil
+	}
+	if t := val.Type(); !t.IsObjectType() && !t.IsMapType() {
+		return nil, fmt.Errorf("service %q: arguments.values must be an object of named groups, got %s", svc, t.FriendlyName())
+	}
+	groups := map[string]map[string]any{}
+	for name, gv := range val.AsValueMap() {
+		gt := gv.Type()
+		if gv.IsNull() || (!gt.IsObjectType() && !gt.IsMapType()) {
+			return nil, fmt.Errorf("service %q: arguments.values.%s must be a group (object of flags), got %s", svc, name, gt.FriendlyName())
+		}
+		flags := map[string]any{}
+		for fk, fv := range gv.AsValueMap() {
+			if ft := fv.Type(); ft.IsObjectType() || ft.IsMapType() || ft.IsTupleType() || ft.IsListType() {
+				return nil, fmt.Errorf("service %q: arguments.values.%s.%s must be a scalar flag value, got %s", svc, name, fk, ft.FriendlyName())
+			}
+			flags[fk] = ctyToAny(fv)
+		}
+		groups[name] = flags
+	}
+	return groups, nil
 }
 
 // pkgCoord is the parsed `package` field: either a string (verbatim in
@@ -1331,6 +1368,79 @@ func (r *resolver) evalStrList(expr hcl.Expression, self map[string]cty.Value, f
 		}
 	}
 	return out, nil
+}
+
+// evalCmd evaluates runtime.cmd. Beyond ctxWith it exposes
+// tpl::render::flags("<group>"), bound to this service's resolved argument
+// groups + options, and flattens one level so a rendered group's tokens
+// splice into the argv in place (program <globals> sub <sub-flags>).
+func (r *resolver) evalCmd(expr hcl.Expression, self map[string]cty.Value, dirs srcDirs, groups map[string]map[string]any, opts *ArgOptions, toolchain string) ([]string, error) {
+	if expr == nil {
+		return nil, nil
+	}
+	ctx := r.ctxWith(self, dirs)
+	ctx.Functions["tpl::render::flags"] = renderFlagsFunc(groups, opts, toolchain)
+	val, diags := expr.Value(ctx)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("runtime.cmd: %s", diags.Error())
+	}
+	if val.IsNull() {
+		return nil, nil
+	}
+	if t := val.Type(); !t.IsTupleType() && !t.IsListType() {
+		return nil, fmt.Errorf("runtime.cmd must be a list, got %s", t.FriendlyName())
+	}
+	var out []string
+	for _, ev := range val.AsValueSlice() {
+		et := ev.Type()
+		switch {
+		case et == cty.String:
+			out = append(out, ev.AsString())
+		case et == cty.Number || et == cty.Bool:
+			out = append(out, fmt.Sprintf("%v", ctyToAny(ev)))
+		case et.IsTupleType() || et.IsListType():
+			for _, sub := range ev.AsValueSlice() {
+				if sub.Type() != cty.String {
+					return nil, fmt.Errorf("runtime.cmd: a spliced list (tpl::render::flags) must contain strings, got %s", sub.Type().FriendlyName())
+				}
+				out = append(out, sub.AsString())
+			}
+		default:
+			return nil, fmt.Errorf("runtime.cmd elements must be strings or string lists, got %s", et.FriendlyName())
+		}
+	}
+	return out, nil
+}
+
+// renderFlagsFunc backs tpl::render::flags("<group>"): it renders one named
+// argument group of the current service into argv tokens, honoring the
+// service's options (and Ruby's forced space). Unknown group ⇒ error.
+func renderFlagsFunc(groups map[string]map[string]any, opts *ArgOptions, toolchain string) function.Function {
+	return function.New(&function.Spec{
+		Params: []function.Parameter{{Name: "group", Type: cty.String}},
+		Type:   function.StaticReturnType(cty.List(cty.String)),
+		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
+			name := args[0].AsString()
+			grp, ok := groups[name]
+			if !ok {
+				defined := make([]string, 0, len(groups))
+				for k := range groups {
+					defined = append(defined, k)
+				}
+				sort.Strings(defined)
+				return cty.NilVal, fmt.Errorf("tpl::render::flags(%q): no such argument group; defined: %s", name, strings.Join(defined, ", "))
+			}
+			toks := renderFlags(grp, opts, toolchain)
+			if len(toks) == 0 {
+				return cty.ListValEmpty(cty.String), nil
+			}
+			vals := make([]cty.Value, len(toks))
+			for i, t := range toks {
+				vals[i] = cty.StringVal(t)
+			}
+			return cty.ListVal(vals), nil
+		},
+	})
 }
 
 // evalStrOrList evaluates an expression that may be either a single string
@@ -1525,6 +1635,16 @@ func mapValToCty(args map[string]any) cty.Value {
 		out[k] = anyToCty(args[k])
 	}
 	return cty.ObjectVal(out)
+}
+
+// argsSelfCty exposes resolved argument groups under self.arguments.values,
+// so self.arguments.values.<group>.<flag> resolves to a concrete value.
+func argsSelfCty(groups map[string]map[string]any) cty.Value {
+	valuesObj := make(map[string]cty.Value, len(groups))
+	for name, flags := range groups {
+		valuesObj[name] = mapValToCty(flags)
+	}
+	return cty.ObjectVal(map[string]cty.Value{"values": cty.ObjectVal(valuesObj)})
 }
 
 // serviceDirOf returns the resolved per-invocation checkout dir of an

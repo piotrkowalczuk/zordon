@@ -127,7 +127,7 @@ service "go" "svc1" {
     exe = "."
   }
   vars = { port = net::pickport() }
-  arguments = { addr = "127.0.0.1:${self.vars.port}" }
+  arguments { values = { main = { addr = "127.0.0.1:${self.vars.port}" } } }
   debugger { enabled = true }
 }
 `)
@@ -176,8 +176,12 @@ service "go" "svc1" {
 
   vars = { port = net::pickport() }
 
-  arguments = {
-    addr = "127.0.0.1:${self.vars.port}"
+  arguments {
+    values = {
+      main = {
+        addr = "127.0.0.1:${self.vars.port}"
+      }
+    }
   }
 
   debugger {
@@ -242,8 +246,12 @@ service "go" "svc1" {
 
   vars = { port = net::pickport() }
 
-  arguments = {
-    addr = "127.0.0.1:${self.vars.port}"
+  arguments {
+    values = {
+      main = {
+        addr = "127.0.0.1:${self.vars.port}"
+      }
+    }
   }
 
   debugger {
@@ -295,7 +303,7 @@ service "go" "svc1" {
     exe = "."
   }
   vars = { port = net::pickport() }
-  arguments = { addr = "127.0.0.1:${self.vars.port}" }
+  arguments { values = { main = { addr = "127.0.0.1:${self.vars.port}" } } }
   debugger { enabled = true }
   readiness {
     http {
@@ -313,7 +321,7 @@ service "go" "svc2" {
     exe = "."
   }
   vars = { port = net::pickport() }
-  arguments = { addr = "127.0.0.1:${self.vars.port}" }
+  arguments { values = { main = { addr = "127.0.0.1:${self.vars.port}" } } }
   debugger { enabled = true }
   readiness {
     http {
@@ -374,8 +382,12 @@ service "go" "svc1" {
 
   vars = { port = net::pickport() }
 
-  arguments = {
-    addr = "127.0.0.1:${self.vars.port}"
+  arguments {
+    values = {
+      main = {
+        addr = "127.0.0.1:${self.vars.port}"
+      }
+    }
   }
 
   debugger {

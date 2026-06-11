@@ -7,8 +7,10 @@ service "go" "prometheus" {
     tag = "v3.11.3"
   }
   src { exe = "./cmd/prometheus" }   # main package, relative to the repo root
-  doubleDash = true
-  arguments = { "config.file" = "prometheus.yml" }
+  arguments {
+    values = { main = { "config.file" = "prometheus.yml" } }
+    options { prefix = "--" }
+  }
   readiness { http { path = "/-/ready" port = 9020 } }
 }
 ```

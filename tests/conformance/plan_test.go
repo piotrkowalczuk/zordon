@@ -55,8 +55,12 @@ service "go" "db" {
     port = net::pickport()
   }
 
-  arguments = {
-    listen = "127.0.0.1:${self.vars.port}"
+  arguments {
+    values = {
+      main = {
+        listen = "127.0.0.1:${self.vars.port}"
+      }
+    }
   }
 }
 
@@ -73,9 +77,13 @@ service "go" "app" {
     TMP_DIR = fs::tmp()
   }
 
-  arguments = {
-    addr = "127.0.0.1:${self.vars.port}"
-    db   = self.vars.db_addr
+  arguments {
+    values = {
+      main = {
+        addr = "127.0.0.1:${self.vars.port}"
+        db   = self.vars.db_addr
+      }
+    }
   }
 }
 `)
@@ -434,5 +442,76 @@ service "go" "child" {
 	if !strings.Contains(out[childIdx:], wantEndpoint) {
 		t.Errorf("expected %q in child block (cross-level ref not resolved)\n%s",
 			wantEndpoint, out[childIdx:])
+	}
+}
+
+// Named argument groups + tpl::render::flags: plan re-renders the grouped
+// `values` and `options` blocks, AND resolves runtime.cmd with each
+// referenced group rendered and spliced (flattened) into the argv in place —
+// the `program <globals> sub <sub-flags>` shape. Retired forms never reappear.
+func TestPlan_rendersArgumentGroupsAndSplicesCmd(t *testing.T) {
+	p := zordontest.NewProject(t)
+
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "TMPDIR"]
+
+service "go" "gateway" {
+  package = "example.com/gw@v0.0.0"
+  vars = { port = net::pickport() }
+  arguments {
+    values = {
+      global = { debug = true }
+      serve  = { addr = "127.0.0.1:${self.vars.port}" }
+    }
+    options {
+      prefix = "--"
+    }
+  }
+  runtime {
+    cmd = ["gw", tpl::render::flags("global"), "serve", tpl::render::flags("serve")]
+  }
+}
+`)
+
+	res := p.Zordon("plan").Run(t)
+	if res.ExitCode != 0 {
+		t.Fatalf("zordon plan: exit %d\nstderr: %s", res.ExitCode, res.Stderr)
+	}
+	out := res.Stdout
+
+	// Grouped values + options round-trip back as blocks.
+	for _, want := range []string{"arguments {", "values = {", "global", "serve", "options {", `"--"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("plan output missing %q\n----- output -----\n%s", want, out)
+		}
+	}
+
+	// The cmd has both groups rendered and spliced in declaration order:
+	// gw → --debug=true → serve → --addr=127.0.0.1:<port>. Extract the
+	// resolved port to anchor the addr flag.
+	portRE := regexp.MustCompile(`(?m)^\s*port\s*=\s*(\d+)\s*$`)
+	m := portRE.FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("no resolved port in plan output\n%s", out)
+	}
+	wantSeq := []string{`"gw"`, `"--debug=true"`, `"serve"`, `"--addr=127.0.0.1:` + m[1] + `"`}
+	last := -1
+	for _, tok := range wantSeq {
+		i := strings.Index(out, tok)
+		if i < 0 {
+			t.Errorf("plan cmd missing token %q\n----- output -----\n%s", tok, out)
+			continue
+		}
+		if i <= last {
+			t.Errorf("plan cmd token %q out of order (splice/flatten broken)\n----- output -----\n%s", tok, out)
+		}
+		last = i
+	}
+
+	// No raw function calls, no interpolation, no retired forms survive.
+	for _, gone := range []string{"tpl::render::flags", "${", "arguments = {", "doubleDash", "space_separated"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("plan output still contains %q\n----- output -----\n%s", gone, out)
+		}
 	}
 }

@@ -27,8 +27,12 @@ service "go" "app" {
 
   # No `runtime { cmd = … }` — debugger.wrap_runtime synthesizes it.
   # An explicit cmd is rejected at validation time.
-  arguments = {
-    addr = "127.0.0.1:${self.vars.port}"
+  arguments {
+    values = {
+      main = {
+        addr = "127.0.0.1:${self.vars.port}"
+      }
+    }
   }
 
   debugger {

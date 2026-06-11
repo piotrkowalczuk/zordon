@@ -13,9 +13,13 @@ service "go" "nats-server" {
     # exe defaults to "." (main package at repo root)
   }
 
-  arguments = {
-    p = 9010
-    m = 9011
+  arguments {
+    values = {
+      main = {
+        p = 9010
+        m = 9011
+      }
+    }
   }
 }
 
@@ -32,12 +36,18 @@ service "go" "prometheus" {
     tag = "v3.11.3"
   }
   src { exe = "./cmd/prometheus" }   # main package, relative to the repo root
-  doubleDash = true
 
-  arguments = {
-    "config.file"        = "prometheus.yml"
-    "log.format"         = "json"
-    "web.listen-address" = ":9020"
+  arguments {
+    values = {
+      main = {
+        "config.file"        = "prometheus.yml"
+        "log.format"         = "json"
+        "web.listen-address" = ":9020"
+      }
+    }
+    options {
+      prefix = "--"
+    }
   }
 
   readiness {
@@ -99,9 +109,56 @@ This is what makes parallel **worktrees** possible — see
 
 ### Flags / arguments
 
-`arguments` is a map of flag name → value. By default flags are rendered
-`-key=value` (Go-style); set `doubleDash = true` for `--key=value`, and
-`space_separated = true` for `-key value` (Ruby is always space-separated).
+`arguments` is a block with two parts:
+
+- **`values = { … }`** — **named groups**, each a flag name → value map
+  (interpolated; joins the dependency DAG). A value is reachable as
+  `self.arguments.values.<group>.<key>`. Most services need a single group
+  (call it whatever, e.g. `main`); subcommand-driven tools split flags into
+  several (e.g. `global`, `serve`).
+- **`options { … }`** — how groups render into argv. Two knobs, each an enum
+  that matches a real CLI convention:
+  - **`prefix`** — `"-"` (default, Go-style) · `"--"` (GNU long) · `"/"`
+    (Windows) · `"+"` · `""` (none).
+  - **`separator`** — `"="` (default) · `" "` (space → two argv elements,
+    `--flag value`) · `":"` (Windows, `/flag:value`) · `""` (glued,
+    `-O2`). Ruby always separates by space regardless of this setting.
+
+```hcl
+arguments {
+  values = {
+    main = {
+      "config.file"        = "prometheus.yml"
+      "web.listen-address" = ":9020"
+    }
+  }
+  options {
+    prefix = "--"          # → --config.file=prometheus.yml
+  }
+}
+```
+
+**Placement.** With **no `runtime.cmd`**, every group is rendered and
+appended after the binary (groups in name order, keys sorted within each —
+deterministic). With an **explicit `runtime.cmd`** nothing is auto-appended;
+you place each group yourself with `tpl::render::flags("<group>")`, whose
+rendered tokens are spliced (flattened) into the argv in place. That covers
+the `program <globals> subcommand <sub-flags>` shape:
+
+```hcl
+arguments {
+  values = {
+    global = { debug = true }
+    serve  = { config = self.file.c.path }
+  }
+  options { prefix = "--" }
+}
+runtime {
+  cmd = ["caddy", tpl::render::flags("global"), "run", tpl::render::flags("serve")]
+}
+# → caddy --debug=true run --config=/…
+```
+
 Quote keys that contain dots: `"config.file" = "..."` — bare dotted keys
 parse as nested objects in HCL2.
 
@@ -241,8 +298,12 @@ service "go" "app" {
   # No `runtime { cmd = … }` — the macro synthesizes it, and an
   # explicit cmd is rejected at validation time (use `arguments` for
   # flags, or set `wrap_runtime = false` to keep your own cmd).
-  arguments = {
-    addr = "127.0.0.1:${self.vars.port}"
+  arguments {
+    values = {
+      main = {
+        addr = "127.0.0.1:${self.vars.port}"
+      }
+    }
   }
 
   debugger {
@@ -278,7 +339,7 @@ Validation errors raised at Alphasfile parse time:
 
 - `enabled = true` + explicit `runtime { cmd = … }` (and
   `wrap_runtime = true`) — the macro can't apply if the user already
-  wrote a cmd. Use `arguments = {…}` or set `wrap_runtime = false`.
+  wrote a cmd. Use `arguments { values = {…} }` or set `wrap_runtime = false`.
 - `enabled = true` on a non-Go service — only `service "go"` is
   supported today; other toolchains will follow.
 

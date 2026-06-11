@@ -12,6 +12,7 @@ import (
 	"maps"
 	"math/big"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -58,15 +59,29 @@ type LogConfig struct {
 	TTY *bool `json:"tty,omitempty"`
 }
 
+// ArgOptions is the argv-formatting policy for a service's arguments — how
+// each argument group is rendered into flags (renderFlags), whether via the
+// no-cmd auto-append (Service.Flags) or tpl::render::flags in runtime.cmd.
+// nil pointers fall back to the Go-flag defaults (prefix "-", separator "=").
+type ArgOptions struct {
+	// Prefix: "-" (default) | "--" | "/" | "+" | "" — the dash style.
+	Prefix *string `json:"prefix,omitempty"`
+	// Separator: "=" (default) | " " | ":" | "" — between flag and value.
+	// " " emits two argv elements; anything else glues into one.
+	Separator *string `json:"separator,omitempty"`
+}
+
 type RuntimeConfig struct {
-	Name           string                    `json:"name"`
-	Color          string                    `json:"color,omitempty"`
-	Log            *LogConfig                `json:"log,omitempty"`
-	DoubleDash     bool                      `json:"double_dash,omitempty"`
-	SpaceSeparated bool                      `json:"space_separated,omitempty"`
-	Vars           map[string]any            `json:"vars,omitempty"`
-	Arguments      map[string]any            `json:"arguments,omitempty"`
-	Env            zenv.EnvironmentVariables `json:"env,omitempty"` // explicit env (overrides dotenv)
+	Name  string         `json:"name"`
+	Color string         `json:"color,omitempty"`
+	Log   *LogConfig     `json:"log,omitempty"`
+	Vars  map[string]any `json:"vars,omitempty"`
+	// Arguments is the resolved `arguments { values = {…} }`: named groups,
+	// each a flag→value map. self.arguments.values.<group>.<key> reaches a
+	// value; tpl::render::flags("<group>") renders one group into argv.
+	Arguments map[string]map[string]any `json:"arguments,omitempty"`
+	Options   *ArgOptions               `json:"options,omitempty"` // `arguments { options {…} }` — argv formatting policy
+	Env       zenv.EnvironmentVariables `json:"env,omitempty"`     // explicit env (overrides dotenv)
 	// Phase-scoped env. BuildEnv is injected only while zordon builds the
 	// service (go build / cargo install / bundle); RunEnv only into the
 	// running process; AgentEnv is an override layer applied on top (for
@@ -372,25 +387,57 @@ var toolchainDefaultsFor = map[string]toolchainDefaults{
 	ToolchainPkg: {TTY: false},
 }
 
-// Flags renders RuntimeConfig.Arguments into argv flags. Format follows
-// DoubleDash / SpaceSeparated; Ruby is always space-separated.
+// renderFlags turns one argument group (flag name → value) into argv tokens.
+// Prefix/separator follow opts (defaults "-" / "="); Ruby always separates
+// flag and value by space. A " " separator emits two argv elements; any
+// other separator glues prefix+flag+sep+value into one. Keys are sorted so
+// the argv is deterministic.
+func renderFlags(group map[string]any, opts *ArgOptions, toolchain string) []string {
+	prefix, sep := "-", "="
+	if opts != nil {
+		if opts.Prefix != nil {
+			prefix = *opts.Prefix
+		}
+		if opts.Separator != nil {
+			sep = *opts.Separator
+		}
+	}
+	if toolchain == ToolchainRuby {
+		sep = " "
+	}
+	keys := make([]string, 0, len(group))
+	for k := range group {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, 2*len(keys))
+	for _, flag := range keys {
+		value := group[flag]
+		if sep == " " {
+			out = append(out, prefix+flag, fmt.Sprintf("%v", value))
+		} else {
+			out = append(out, fmt.Sprintf("%s%s%s%v", prefix, flag, sep, value))
+		}
+	}
+	return out
+}
+
+// Flags is the auto-append argv for a service with no explicit runtime.cmd:
+// every argument group, rendered (renderFlags) and concatenated in
+// group-name order. When runtime.cmd is set the caller places groups itself
+// via tpl::render::flags and this is not used.
 func (s *Service) Flags() []string {
 	if s.Runtime == nil {
 		return nil
 	}
-	spaceSep := s.Runtime.SpaceSeparated || s.Toolchain == ToolchainRuby
-	out := make([]string, 0, 2*len(s.Runtime.Arguments))
-	for flag, value := range s.Runtime.Arguments {
-		switch {
-		case spaceSep && s.Runtime.DoubleDash:
-			out = append(out, fmt.Sprintf("--%s", flag), fmt.Sprintf("%v", value))
-		case spaceSep:
-			out = append(out, fmt.Sprintf("-%s", flag), fmt.Sprintf("%v", value))
-		case s.Runtime.DoubleDash:
-			out = append(out, fmt.Sprintf("--%s=%v", flag, value))
-		default:
-			out = append(out, fmt.Sprintf("-%s=%v", flag, value))
-		}
+	names := make([]string, 0, len(s.Runtime.Arguments))
+	for n := range s.Runtime.Arguments {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var out []string
+	for _, n := range names {
+		out = append(out, renderFlags(s.Runtime.Arguments[n], s.Runtime.Options, s.Toolchain)...)
 	}
 	return out
 }
@@ -602,10 +649,8 @@ type serviceBlock struct {
 	Name      string `hcl:"name,label"`
 
 	// static fields
-	Color          string    `hcl:"color,optional"`
-	Log            *logBlock `hcl:"log,block"`
-	DoubleDash     bool      `hcl:"doubleDash,optional"`
-	SpaceSeparated bool      `hcl:"space_separated,optional"`
+	Color string    `hcl:"color,optional"`
+	Log   *logBlock `hcl:"log,block"`
 
 	// Source: exactly one of `src { ... }` (local checkout, no clone),
 	// `git { ... }` (remote — zordon clones), or `crate { ... }` (rust
@@ -625,10 +670,13 @@ type serviceBlock struct {
 	Features []string       `hcl:"features,optional"` // rust: cargo --features (applies to crate-install AND worktree build)
 
 	// dynamic (interpolated; order resolved by intra-service dependency DAG)
-	Vars      hcl.Expression `hcl:"vars,optional"`
-	Arguments hcl.Expression `hcl:"arguments,optional"`
-	Env       hcl.Expression `hcl:"env,optional"`
-	Dotenv    hcl.Expression `hcl:"dotenv,optional"`
+	Vars hcl.Expression `hcl:"vars,optional"`
+	// Arguments is a block: `values = {…}` (dynamic; joins the DAG) plus an
+	// optional `options {…}` argv-formatting policy. The values map is what
+	// `self.arguments.<key>` resolves to.
+	Arguments *argumentsBlock `hcl:"arguments,block"`
+	Env       hcl.Expression  `hcl:"env,optional"`
+	Dotenv    hcl.Expression  `hcl:"dotenv,optional"`
 	// Print is an extra line shown per service in `zordon status` —
 	// interpolated, so e.g. a Go service can surface its live endpoint:
 	// print = "http://127.0.0.1:${self.vars.port}/". URLs are emitted as
@@ -789,6 +837,38 @@ type logBlock struct {
 	TTY    *bool  `hcl:"tty,optional"`
 }
 
+type argumentsBlock struct {
+	Values  hcl.Expression `hcl:"values,optional"` // dynamic; joins the DAG
+	Options *argOptions    `hcl:"options,block"`
+}
+
+type argOptions struct {
+	Prefix    *string `hcl:"prefix,optional"`
+	Separator *string `hcl:"separator,optional"`
+}
+
+var (
+	allowedArgPrefixes   = map[string]bool{"-": true, "--": true, "/": true, "+": true, "": true}
+	allowedArgSeparators = map[string]bool{"=": true, " ": true, ":": true, "": true}
+)
+
+// resolveArgOptions validates the `arguments { options {…} }` policy and
+// lifts it into the wire-stable *ArgOptions. A nil block or nil options
+// yields nil, and Flags() falls back to the defaults "-" / "=".
+func resolveArgOptions(sb *serviceBlock) (*ArgOptions, error) {
+	if sb.Arguments == nil || sb.Arguments.Options == nil {
+		return nil, nil
+	}
+	o := sb.Arguments.Options
+	if o.Prefix != nil && !allowedArgPrefixes[*o.Prefix] {
+		return nil, fmt.Errorf("service %q: arguments.options.prefix %q is invalid (allowed: \"-\", \"--\", \"/\", \"+\", \"\")", sb.Name, *o.Prefix)
+	}
+	if o.Separator != nil && !allowedArgSeparators[*o.Separator] {
+		return nil, fmt.Errorf("service %q: arguments.options.separator %q is invalid (allowed: \"=\", \" \", \":\", \"\")", sb.Name, *o.Separator)
+	}
+	return &ArgOptions{Prefix: o.Prefix, Separator: o.Separator}, nil
+}
+
 type probeSpec struct {
 	HTTP             *httpActionSpec `hcl:"http,block"`
 	Exec             *execActionSpec `hcl:"exec,block"`
@@ -914,7 +994,7 @@ func NewParentContext(services []*Service) *ParentContext {
 			"toolchain": cty.StringVal(tc),
 			"dir":       cty.StringVal(serviceDirOf(s)),
 			"vars":      mapValToCty(s.Runtime.Vars),
-			"arguments": mapValToCty(s.Runtime.Arguments),
+			"arguments": argsSelfCty(s.Runtime.Arguments),
 		}
 		files := map[string]cty.Value{}
 		for _, f := range s.Runtime.Files {

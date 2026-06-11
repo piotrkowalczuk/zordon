@@ -38,18 +38,19 @@ func TestBuildCmd_injectsEnv(t *testing.T) {
 	}
 }
 
-// Explicit runtime.cmd must still receive runtime.arguments appended as
-// flags — same as every other buildCmd branch (nodejs, built-bin,
-// default). Without this, `runtime { cmd = [...], arguments = {...} }`
-// silently drops the arguments.
-func TestBuildCmd_explicitCmdAppendsArguments(t *testing.T) {
+// An explicit runtime.cmd is used verbatim — argument groups are NOT
+// auto-appended (the user places them inline via tpl::render::flags at eval
+// time, so by buildCmd the argv is already complete). Auto-append happens
+// only on the no-explicit-cmd branches (nodejs, built-bin, default).
+func TestBuildCmd_explicitCmdDoesNotAutoAppend(t *testing.T) {
+	doubleDash := "--"
 	svc := &alphasfile.Service{
 		Toolchain: alphasfile.ToolchainGo,
 		Runtime: &alphasfile.RuntimeConfig{
-			Name:       "app",
-			Command:    []string{"/bin/echo", "hi"},
-			Arguments:  map[string]any{"addr": "127.0.0.1:9000"},
-			DoubleDash: true,
+			Name:      "app",
+			Command:   []string{"/bin/echo", "hi"},
+			Arguments: map[string]map[string]any{"main": {"addr": "127.0.0.1:9000"}},
+			Options:   &alphasfile.ArgOptions{Prefix: &doubleDash},
 		},
 		Package: &alphasfile.Package{Toolchain: alphasfile.ToolchainGo, Src: "/tmp/x"},
 	}
@@ -57,9 +58,9 @@ func TestBuildCmd_explicitCmdAppendsArguments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/bin/echo", "hi", "--addr=127.0.0.1:9000"}
+	want := []string{"/bin/echo", "hi"}
 	if !slices.Equal(cmd.Args, want) {
-		t.Fatalf("argv = %v, want %v", cmd.Args, want)
+		t.Fatalf("argv = %v, want %v (explicit cmd must not auto-append groups)", cmd.Args, want)
 	}
 }
 

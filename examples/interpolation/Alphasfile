@@ -41,8 +41,12 @@ service "go" "api" {
     exe = "./examples/interpolation/src/app"
   }
 
-  arguments = {
-    "config.file" = self.file.conf.path
+  arguments {
+    values = {
+      main = {
+        "config.file" = self.file.conf.path
+      }
+    }
   }
 
   vars = {
