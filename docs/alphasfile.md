@@ -2,8 +2,9 @@
 
 The `Alphasfile` is a single HCL2 document. Each service is a two-label
 block: `service "<toolchain>" "<name>" { ... }`. Toolchain is `go`,
-`rust`, `ruby`, or `nodejs` — they differ in how the binary is built
-and run.
+`rust`, `ruby`, `nodejs`, or `pkg` — they differ in how the binary is
+sourced, built, and run (`pkg` runs a prebuilt native package via mise
+rather than building anything; see [Package services](services/pkg.md)).
 
 ```hcl
 service "go" "nats-server" {
@@ -210,7 +211,7 @@ independent of the **process/dotenv** chain documented in
 ### Readiness probes
 
 A `readiness` block makes alpha mark a service ready only once a probe passes.
-The block carries exactly one action — either `http` or `exec` — plus the
+The block carries exactly one action — `http`, `exec`, or `tcp` — plus the
 shared timing knobs (`initial_delay`, `period`, `timeout`, `failure_threshold`,
 `success_threshold`).
 
@@ -245,6 +246,19 @@ readiness {
     command = ["pg_isready", "-h", "127.0.0.1", "-p", "${self.vars.port}"]
     env     = { PGUSER = "zordon" }   # optional, overlays the inherited env
   }
+  period            = "200ms"
+  failure_threshold = 30
+}
+```
+
+The `tcp` action dials a port and treats a successful connection as ready —
+for databases and brokers that don't speak HTTP. It takes a `port` (and
+optional `host`, default `127.0.0.1`); see
+[Package services](services/pkg.md#readiness-tcp) for a worked example.
+
+```hcl
+readiness {
+  tcp { port = self.vars.port }
   period            = "200ms"
   failure_threshold = 30
 }

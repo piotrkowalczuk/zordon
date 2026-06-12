@@ -17,8 +17,9 @@ arguments / readiness probe that consume them.
   if you need to reuse it.
 - `fs::tmp()` — a per-invocation scratch dir under `$TMPDIR/zordon-<fs::hash>/`
   for generated files. Stable within one evaluation.
-- `fs::src()` — the calling service's source checkout (its per-invocation
-  `git worktree`). Same as `self.dir`.
+- `fs::src()` — the calling service's source checkout root (its
+  per-invocation `git worktree`). `self.dir` is the same path anchored at
+  the `exe` subdir, so the two coincide only when no `exe` is set.
 - `fs::bin()` — the per-invocation build-output dir, deliberately
   **outside** the source checkout so building never dirties a `src`
   primary's worktree. The default Go build drops `<name>` here; reference
@@ -196,7 +197,7 @@ After a service is fully evaluated, the same data is exposed under
 `service.<toolchain>.<name>` for downstream services:
 
 - `service.go.foo.vars.<key>`
-- `service.go.foo.arguments["<key>"]`
+- `service.go.foo.arguments.values.<group>.<key>`
 - `service.go.foo.file.<name>.path`
 - `service.go.foo.dir`
 
@@ -267,8 +268,8 @@ are the resolved runtime config: `vars`, `arguments`, `env`, `command`,
 `dir`, `bin_dir`, `print`, plus live `pid`/`ready`/`running`.
 
 ```sh
-zordon get service.go.prometheus.vars.address      # 127.0.0.1:9090
-zordon get service.go.prometheus.command.0         # prometheus
+zordon get service.go.prometheus.vars.port         # 9020
+zordon get service.go.prometheus.command.0         # /…/bin/prometheus
 zordon get service.go.prometheus.ready             # true
 ```
 

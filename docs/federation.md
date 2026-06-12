@@ -45,11 +45,11 @@ service "go" "coredns" {
   vars = { dns = net::pickport() }
   # …
   sudo "resolver" {
-    check  = "grep -qxF 'port ${self.vars.dns}' /etc/resolver/zordon.com 2>/dev/null"
+    check  = "grep -qxF 'port ${self.vars.dns}' /etc/resolver/test 2>/dev/null"
     apply  = <<-EOT
-      mkdir -p /etc/resolver && printf 'nameserver 127.0.0.1\nport ${self.vars.dns}\n' > /etc/resolver/zordon.com
+      mkdir -p /etc/resolver && printf 'nameserver 127.0.0.1\nport ${self.vars.dns}\n' > /etc/resolver/test
     EOT
-    verify = "grep -qxF 'port ${self.vars.dns}' /etc/resolver/zordon.com"
+    verify = "grep -qxF 'port ${self.vars.dns}' /etc/resolver/test"
   }
 }
 ```
@@ -101,10 +101,10 @@ must be unique across the whole chain (a collision is an error).
 
 This is how a project wires itself into shared infra without hardcoding
 anything, and without any per-app glue code. From
-[examples/federation](https://github.com/piotrkowalczuk/zordon/tree/master/examples/federation):
+[examples/federation_macos](https://github.com/piotrkowalczuk/zordon/tree/main/examples/federation_macos):
 
 ```hcl
-# examples/federation/Alphasfile  (the root: caddy + coredns)
+# examples/federation_macos/Alphasfile  (the root: caddy + coredns)
 service "go" "caddy" {
   git {
     url = "github.com/caddyserver/caddy"
@@ -119,11 +119,13 @@ service "go" "caddy" {
     path = "${fs::tmp()}/Caddyfile"
     body = "…  import ${self.vars.config_dir}/*.caddy"
   }
-  cmd = ["${fs::bin()}/caddy", "run", "--config", self.file.caddyfile.path,
-         "--adapter", "caddyfile", "--watch"]
+  runtime {
+    cmd = ["${fs::bin()}/caddy", "run", "--config", self.file.caddyfile.path,
+           "--adapter", "caddyfile", "--watch"]
+  }
 }
 
-# examples/federation/project/Alphasfile  (the project)
+# examples/federation_macos/project/Alphasfile  (the project)
 service "go" "prometheus" {
   git {
     url = "github.com/prometheus/prometheus"
@@ -136,7 +138,7 @@ service "go" "prometheus" {
   file "caddy_vhost" {
     path = "${service.go.caddy.vars.config_dir}/prometheus.caddy"
     body = <<-EOT
-      http://prometheus.local.zordon.com:${service.go.caddy.vars.http} {
+      http://prometheus.${fs::hash()}.test:${service.go.caddy.vars.http} {
       	reverse_proxy 127.0.0.1:${self.vars.port}
       }
     EOT
@@ -148,8 +150,8 @@ service "go" "prometheus" {
 The project never talks to Caddy. It just writes a `*.caddy` fragment
 into the directory Caddy `--watch`es (discovered through the chain as
 `service.go.caddy.vars.config_dir`); Caddy hot-reloads and
-`prometheus.local.zordon.com` starts proxying. `zordon start` from
-`examples/federation/project` ensures Caddy + CoreDNS are up one level
+`prometheus.<hash>.test` starts proxying. `zordon start` from
+`examples/federation_macos/project` ensures Caddy + CoreDNS are up one level
 up, then brings the project up with the parent's resolved port and
 config dir injected — a complete loop with zero hardcoded ports and zero
 registration code. (Prometheus is a stand-in for any OSS Go web app;

@@ -60,11 +60,11 @@ One `alpha` per chain level, long-lived. It:
 ## Control protocol
 
 Newline-delimited JSON over the unix socket
-(`internal/protocol`): a `Request` (`Configure` / `State` / `Stop`),
-then either a single `Response` or a streamed sequence of `Event`s
-(log lines, `ServiceStart`, `ServiceReady`, `ServiceFail`, `Done`,
-`Error`). `Configure` carries the fully-resolved `Alphasfile`, the
-config hash, and the federation parents' file-level dotenv paths.
+(`internal/protocol`): a `Request` (`Configure` / `State` / `Shutdown` /
+`Invoke`), then either a single `Response` or a streamed sequence of
+`Event`s (log lines, `ServiceStart`, `ServiceReady`, `ServiceFail`,
+`Done`, `Error`). `Configure` carries the fully-resolved `Alphasfile`,
+the config hash, and the federation parents' file-level dotenv paths.
 
 ## On-disk layout
 
@@ -73,13 +73,14 @@ Per invocation:
 ```
 <projectRoot>/.zordon/worktrees/<worktree>/
   ├── start.lock          # flock guarding this level
-  ├── alpha.log           # alpha's own log
   ├── src/<service>/      # per-service git worktree (fs::src)
   ├── bin/                # build outputs           (fs::bin)
   └── cache/rust/target/  # shared CARGO_TARGET_DIR (incremental)
 
-$TMPDIR/zordon-<hash>/
-  └── alpha.sock          # control socket; also fs::tmp() scratch
+$TMPDIR/
+  ├── zordon-<hash>/
+  │   └── alpha.sock      # control socket; the dir is fs::tmp() scratch
+  └── alpha-<hash>.log    # the leaf alpha's own log (--alpha-log overrides)
 ```
 
 `fs::bin()` is deliberately outside `src/` so building never dirties a
