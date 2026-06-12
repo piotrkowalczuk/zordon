@@ -6,13 +6,14 @@
 go install github.com/piotrkowalczuk/zordon/cmd/...@latest
 ```
 
-This installs both `zordon` and `alpha` into your `$GOBIN` (or
-`$GOPATH/bin`). Make sure that directory is on your `$PATH`.
+This installs `zordon`, `alpha`, and the `tommy` reaper (alpha finds it
+as a sibling) into your `$GOBIN` (or `$GOPATH/bin`). Make sure that
+directory is on your `$PATH`.
 
 ## A first stack
 
 Create an `Alphasfile` in your project root — start from the
-[simple example](https://github.com/piotrkowalczuk/zordon/blob/master/examples/simple/Alphasfile)
+[simple example](https://github.com/piotrkowalczuk/zordon/blob/main/examples/simple/Alphasfile)
 — then:
 
 ```sh

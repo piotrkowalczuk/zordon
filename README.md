@@ -28,8 +28,9 @@ Full docs: **<https://piotrkowalczuk.github.io/zordon/>**
 go install github.com/piotrkowalczuk/zordon/cmd/...@latest
 ```
 
-Installs `zordon` and `alpha` into your `$GOBIN` (or `$GOPATH/bin`) —
-make sure that directory is on your `$PATH`.
+Installs `zordon`, `alpha`, and the `tommy` reaper (alpha finds it as a
+sibling) into your `$GOBIN` (or `$GOPATH/bin`) — make sure that
+directory is on your `$PATH`.
 
 ## Quick start
 

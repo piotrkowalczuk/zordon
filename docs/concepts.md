@@ -79,10 +79,11 @@ contained; everything the rest of the system touches is the same shape.
 
 Expressions are not strings. `net::pickport()`, `fs::tmp()`,
 `fs::hash()`, `cfg::hash()`, `src::hash()`, `os::env()` are
-**functions evaluated during resolution** —
-some have identity (a port is drawn once and reused everywhere it's
-referenced), some are pure coordinates of the invocation. They turn a
-static document into a description that adapts to *this* run.
+**functions evaluated during resolution** — some draw a fresh value on
+every call (`net::pickport()` returns a new free port each time, so you
+store it in `vars` to reuse one), some are stable coordinates of the
+invocation (`fs::hash()`, `fs::tmp()`, … are fixed for the run). They
+turn a static document into a description that adapts to *this* run.
 
 Because values reference each other, order is not the file's order — it
 is a **graph**. Inside a service `vars`, each `file`, `arguments`,

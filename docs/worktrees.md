@@ -62,17 +62,20 @@ service "go" "example" {
     path = "../.."                            # primary = the repo this file is in
     exe  = "./examples/worktree/src/example"  # build target, repo-root-relative
   }
+  vars = { port = net::pickport() }
   worktree {
     sparse = ["examples/worktree/src/example"]
   }
-  cmd = ["${fs::bin()}/example", "-addr", "127.0.0.1:${self.vars.port}"]
+  runtime {
+    cmd = ["${fs::bin()}/example", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
 }
 ```
 
 The checkout then holds only that subtree — plus the repo's **top-level
 files** (`go.mod`, `go.sum`, …). That's inherent to git cone mode and
 desirable: `go.mod` at the module root is needed to build anyway. See
-[examples/worktree](https://github.com/piotrkowalczuk/zordon/tree/master/examples/worktree).
+[examples/worktree](https://github.com/piotrkowalczuk/zordon/tree/main/examples/worktree).
 
 Main use case: an AI agent gets a sandbox next to the developer's stack;
 derivatives: parallel experiments, A/B-testing two revisions. For async

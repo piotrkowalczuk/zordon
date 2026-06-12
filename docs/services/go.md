@@ -30,23 +30,25 @@ root). Set it when the binary lives elsewhere, e.g. `./cmd/foo`.
 
 ## Build & run
 
-The default build, run with cwd = the per-invocation checkout:
+The default build runs with cwd = the service's working dir
+(`<checkout>/<exe>`, the exe-anchor — the checkout root when `exe` is
+unset or `.`), building the package there:
 
 ```sh
-go build -o "<fs::bin>/<service-name>" <exe|.>
+go build -o "<fs::bin>/<service-name>" .
 ```
 
 The artifact lands in `fs::bin()` — outside the source checkout, so a
 `src` primary's working tree is never dirtied. With no `runtime { cmd }`,
-zordon runs `<fs::bin>/<service-name>` (cwd = checkout, so relative
-paths like `config.file = "prometheus.yml"` resolve against the
-source). Set `runtime { cmd = [...] }` only when you need an explicit
-argv (subcommands, custom flags); reference the binary as
-`${fs::bin()}/<name>`.
+zordon runs `<fs::bin>/<service-name>` from that same working dir, so
+relative paths in flags (e.g. `config.file = "prometheus.yml"`) resolve
+against `<checkout>/<exe>`. Set `runtime { cmd = [...] }` only when you
+need an explicit argv (subcommands, custom flags); reference the binary
+as `${fs::bin()}/<name>`.
 
 Override the whole step with `build { cmd = [...] }` (argv, interpolated,
-cwd = checkout) if the default doesn't fit (codegen, ldflags, etc.) —
-wrap in `sh -lc` when you need shell expansion:
+same `<checkout>/<exe>` cwd) if the default doesn't fit (codegen,
+ldflags, etc.) — wrap in `sh -lc` when you need shell expansion:
 
 ```hcl
 build {

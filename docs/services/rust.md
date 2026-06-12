@@ -48,11 +48,14 @@ service "rust" "app" {
   — runs `cargo install <name>` with the cargo CLI source flags.
   `version` is mutually exclusive with `git`. `branch`/`tag`/`rev` are
   only valid with `git`. Cargo manages the fetch — no zordon worktree.
-- **`git { url, src, branch, tag, rev, exe }`** — a checkout zordon
-  owns. `url` clones a remote; `src` points at an existing local
-  directory (in-place mode, no clone). `branch`/`tag`/`rev` pin a
-  remote checkout. `exe` is the workspace subdir holding the build
-  target (`""`/`.` = repo root). Builds via `cargo install --path`.
+- **`git { url, branch, tag, rev }`** — a remote checkout zordon owns:
+  `url` clones it, `branch`/`tag`/`rev` pin the revision. Builds via
+  `cargo install --path`.
+- **`src { path, exe }`** — a local checkout used in place (no clone).
+  `path` points at an existing directory (relative paths resolve
+  against the Alphasfile's dir); `exe` is the workspace subdir holding
+  the build target (`""`/`.` = repo root). An `exe`-only `src { }` block
+  rides alongside `git { }` to pick a workspace member within the clone.
 
 Every Rust service compiles; there is no prebuilt-`$PATH` path.
 
@@ -75,8 +78,8 @@ CARGO_TARGET_DIR=<cache> cargo install "<name>" --root <stateDir> \
   [--version …] [--git … [--branch|--tag|--rev …]] \
   [--index …] [--registry …] [--features …] [--bin …] --locked
 
-# git/src worktree (cwd = checkout; --force so code changes are picked up)
-CARGO_TARGET_DIR=<cache> cargo install --path "<exe|.>" --root <stateDir> \
+# git/src worktree (cwd = <checkout>/<exe>; --force so code changes are picked up)
+CARGO_TARGET_DIR=<cache> cargo install --path . --root <stateDir> \
   [--features …] [--bin …] --locked --force
 ```
 

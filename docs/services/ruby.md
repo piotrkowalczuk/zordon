@@ -25,8 +25,12 @@ revision; relative `src` resolves against the Alphasfile's directory.
 The default "build" is dependency install in the checkout:
 
 ```sh
-bundle install --path vendor/bundle
+bundle config set --local path vendor/bundle && bundle install
 ```
+
+(`--path` was removed in Bundler 2.x, so the path is written to the
+per-checkout `.bundle/config` first — which also lets `bundle exec` find
+the gems at runtime.)
 
 Ruby has no single binary, so the run command is **not** inferred —
 give an explicit `runtime { cmd = [...] }` (e.g. `bundle exec ...`,
