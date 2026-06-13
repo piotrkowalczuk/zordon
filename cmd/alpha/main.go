@@ -968,15 +968,30 @@ func runProvision(b *bringup, pc *provisionCtx, parent *serviceCtx) {
 	pc.lifecycle.Reach("running")
 	log.Info("alpha", "provision[%s]: running", pc.id)
 
-	// fs::service::bin(...) sentinels resolve here — in snippets (so a
-	// `${fs::service::bin(...)}/pg_dump` cmd works) and, below, in env
-	// values. resolveSvcBin blocks until the referenced toolchain is
-	// installed, so a provision reaching for another service's binary
-	// should still gate on it with `after` when it also needs it running.
-	resolveBin := func(serviceID string) []string { return resolveSvcBin(serviceID, state, log) }
-	checkSnippet = alphasfile.SubstituteServiceBins(checkSnippet, resolveBin)
-	cmdSnippet = alphasfile.SubstituteServiceBins(cmdSnippet, resolveBin)
-	verifySnippet = alphasfile.SubstituteServiceBins(verifySnippet, resolveBin)
+	// fs::service::bin / fs::toolchain::bin sentinels resolve here — in
+	// snippets (so a `${fs::service::bin(...)}/pg_dump` cmd works) and,
+	// below, in env values. Both block until the referenced toolchain is
+	// installed, so a provision reaching for another service's binary should
+	// still gate on it with `after` when it also needs it running.
+	resolveBin := func(kind, ref string) []string {
+		switch kind {
+		case "svc":
+			return resolveSvcBin(ref, state, log)
+		case "tc":
+			dirs, err := toolchainBinPaths(ref, state, log)
+			if err != nil {
+				log.Error("alpha", "fs::toolchain::bin %s: %v", ref, err)
+				return nil
+			}
+			return dirs
+		default:
+			log.Error("alpha", "provision[%s]: unknown bin ref kind %q", pc.id, kind)
+			return nil
+		}
+	}
+	checkSnippet = alphasfile.SubstituteBins(checkSnippet, resolveBin)
+	cmdSnippet = alphasfile.SubstituteBins(cmdSnippet, resolveBin)
+	verifySnippet = alphasfile.SubstituteBins(verifySnippet, resolveBin)
 
 	// Per-provision env precedence (low → high):
 	//   sysenv-filtered process env
@@ -1037,7 +1052,7 @@ func runProvision(b *bringup, pc *provisionCtx, parent *serviceCtx) {
 	// still overlay verbatim.
 	base := zenv.FromHost(sysenv).Join(tcEnv, parentEnv)
 	for k, v := range pc.step.Env {
-		v = alphasfile.SubstituteServiceBins(v, resolveBin)
+		v = alphasfile.SubstituteBins(v, resolveBin)
 		if op, args, ok := alphasfile.ParseEnvOp(v); ok {
 			switch op {
 			case "prepend":

@@ -10,6 +10,10 @@
 #
 # First start builds postgres + redis from source via mise (slow once, cached
 # after).
+#
+# Sibling: fs::toolchain::bin(toolchain.<lang>) does the same for a TOOLCHAIN's
+# tool world (e.g. a Go `go install` tool used from a Ruby project), where
+# there's no service to reference. Same env::prepend usage.
 sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 service "pkg" "postgres" {

@@ -43,8 +43,8 @@ func TestExampleServiceBinResolves(t *testing.T) {
 	// PATH carries a prepend directive; substituting the postgres svcbin
 	// sentinel (stand-in resolver) and parsing yields the dir as the sole
 	// prepend arg — the same chain alpha runs at provision time.
-	resolved := SubstituteServiceBins(backup.Env["PATH"], func(id string) []string {
-		if id == serviceID("pkg", "postgres") {
+	resolved := SubstituteBins(backup.Env["PATH"], func(kind, ref string) []string {
+		if kind == "svc" && ref == serviceID("pkg", "postgres") {
 			return []string{"/install/postgres/bin"}
 		}
 		return nil
