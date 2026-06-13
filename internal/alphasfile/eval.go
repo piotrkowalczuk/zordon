@@ -1528,6 +1528,63 @@ func copyCtyMap(in map[string]cty.Value) map[string]cty.Value {
 // invoke. JSON escapes the NUL bytes, so the sentinel survives the control wire.
 func ArgSentinel(name string) string { return "\x00zarg:" + name + "\x00" }
 
+// SvcBinSentinel is the placeholder fs::service::bin(<ref>) resolves to at
+// configure time: a NUL-delimited token naming the referenced service id
+// (e.g. "service.pkg.postgres"). alpha replaces it with that service's
+// resolved bin dir at provision-run time — the bin dir is only known once
+// mise has installed the toolchain, so it can't be a concrete eval value.
+// Exactly the ArgSentinel shape: a NUL-framed token, swapped via a
+// substitution pass (SubstituteServiceBins).
+func SvcBinSentinel(serviceID string) string { return "\x00zsvcbin:" + serviceID + "\x00" }
+
+const envOpPrefix = "\x00zenvop:"
+
+// EnvOpSentinel is the placeholder env::prepend / env::append resolve to: a
+// NUL-framed directive "op\x00dir1\x00dir2…" describing a PATH-style list
+// mutation alpha applies to the already-assembled value at provision-run
+// time (prepend/append the dirs to the var named by the env map key). args
+// may be SvcBinSentinels — those are swapped to real dirs by
+// SubstituteServiceBins BEFORE ParseEnvOp runs, so the directive only ever
+// gets split once its dirs are NUL-free.
+func EnvOpSentinel(op string, args []string) string {
+	return envOpPrefix + op + "\x00" + strings.Join(args, "\x00") + "\x00"
+}
+
+// ParseEnvOp recovers an env-op directive produced by EnvOpSentinel. ok is
+// false for any value that isn't one (a plain env value), so callers treat
+// non-directive entries as ordinary overlays. Must run AFTER
+// SubstituteServiceBins — split assumes the dirs carry no NUL.
+func ParseEnvOp(value string) (op string, args []string, ok bool) {
+	if !strings.HasPrefix(value, envOpPrefix) || !strings.HasSuffix(value, "\x00") {
+		return "", nil, false
+	}
+	parts := strings.Split(value[len(envOpPrefix):len(value)-1], "\x00")
+	return parts[0], parts[1:], true
+}
+
+// SubstituteServiceBins replaces every SvcBinSentinel in s with the dirs
+// resolve returns for that service id, joined by the path-list separator.
+// Mirrors substituteArgs: a plain string pass run over snippets and env
+// values before they reach a shell or ParseEnvOp. resolve returning no dirs
+// drops the token (the binary then falls back to whatever PATH already has).
+func SubstituteServiceBins(s string, resolve func(serviceID string) []string) string {
+	const pre = "\x00zsvcbin:"
+	for {
+		i := strings.Index(s, pre)
+		if i < 0 {
+			return s
+		}
+		rest := s[i+len(pre):]
+		j := strings.IndexByte(rest, 0)
+		if j < 0 {
+			return s // malformed (unterminated token); leave the rest as-is
+		}
+		token := s[i : i+len(pre)+j+1]
+		dirs := strings.Join(resolve(rest[:j]), string(zfs.PathListSeparator))
+		s = strings.Replace(s, token, dirs, 1)
+	}
+}
+
 // provisionSelfWithArgs returns a copy of self where the named provision's node
 // (self.runtime.provision.<provName>) gains an `arguments` object mapping each
 // declared arg name to its placeholder sentinel. Only that one provision's node
@@ -1689,6 +1746,15 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 		"net::pickport": pickPortFunc(),
 		"os::env":       osEnvFunc(),
 
+		// fs::service::bin(<ref>) — a service's executable dir, named by a
+		// data leaf (self or service.<tc>.<name>); env::prepend/append put
+		// dirs onto a PATH-style var. All three resolve at provision-run
+		// time via deferred sentinels (the dirs aren't known until mise has
+		// installed the toolchain).
+		"fs::service::bin": svcBinFunc(),
+		"env::prepend":     envOpFunc("prepend"),
+		"env::append":      envOpFunc("append"),
+
 		// test:: namespace — observation/control primitives for the
 		// conformance harness. Available only when zordon runs with
 		// $ZORDON_TEST_HARNESS=1 (set by the harness on every spawn);
@@ -1728,6 +1794,53 @@ func evalStaticSrcPath(src *srcBlock) (string, error) {
 // osEnvFunc reads a host environment variable at evaluation time (in the
 // zordon process, so it sees your shell env). os::env("NAME") errors if
 // NAME is unset; os::env("NAME", "default") returns the default instead.
+// svcBinFunc implements fs::service::bin(<ref>). The arg is a service data
+// leaf — `self` or `service.<tc>.<name>` — which is an object carrying name
+// and toolchain. We validate that shape (mirroring provisionRefOf) and emit
+// a SvcBinSentinel naming the service id; alpha resolves it to the bin dir
+// at provision-run time. A non-existent service ref fails earlier in HCL's
+// own traversal ("Unsupported attribute"), so it never reaches here.
+func svcBinFunc() function.Function {
+	return function.New(&function.Spec{
+		Params: []function.Parameter{{Name: "service", Type: cty.DynamicPseudoType}},
+		Type:   function.StaticReturnType(cty.String),
+		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
+			v := args[0]
+			t := v.Type()
+			if v.IsNull() || !t.IsObjectType() || !t.HasAttribute("name") || !t.HasAttribute("toolchain") {
+				return cty.NilVal, fmt.Errorf("fs::service::bin: expected a service reference (self or service.<tc>.<name>), got %s", t.FriendlyName())
+			}
+			tc, name := v.GetAttr("toolchain"), v.GetAttr("name")
+			if tc.Type() != cty.String || name.Type() != cty.String {
+				return cty.NilVal, errors.New("fs::service::bin: service reference has a non-string name/toolchain")
+			}
+			return cty.StringVal(SvcBinSentinel(serviceID(tc.AsString(), name.AsString()))), nil
+		},
+	})
+}
+
+// envOpFunc implements env::prepend / env::append. Variadic string args are
+// the dirs (literals or fs::service::bin sentinels) to layer onto the
+// PATH-style var named by the env map key — applied at provision-run time
+// against the already-assembled value (see EnvOpSentinel / ParseEnvOp).
+func envOpFunc(op string) function.Function {
+	return function.New(&function.Spec{
+		Params:   []function.Parameter{{Name: "dir", Type: cty.String}},
+		VarParam: &function.Parameter{Name: "dirs", Type: cty.String},
+		Type:     function.StaticReturnType(cty.String),
+		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
+			dirs := make([]string, 0, len(args))
+			for _, a := range args {
+				if a.IsNull() {
+					return cty.NilVal, fmt.Errorf("env::%s: arguments must be non-null strings", op)
+				}
+				dirs = append(dirs, a.AsString())
+			}
+			return cty.StringVal(EnvOpSentinel(op, dirs)), nil
+		},
+	})
+}
+
 func osEnvFunc() function.Function {
 	return function.New(&function.Spec{
 		Params: []function.Parameter{{Name: "name", Type: cty.String}},

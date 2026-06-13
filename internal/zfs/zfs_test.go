@@ -90,3 +90,70 @@ func TestResolver_AlphaLogFile_fallbackIsHashNamespaced(t *testing.T) {
 		t.Errorf("two workspaces share default alpha log %q — hash not in the name", a)
 	}
 }
+
+func TestResolver_ToolBinDirs(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	cases := map[string]struct {
+		fullPATH string
+		basePATH string
+		want     []string
+	}{
+		"single prepended dir": {
+			"/dd/installs/pg/bin" + sep + "/zordon/bin" + sep + "/usr/bin",
+			"/zordon/bin" + sep + "/usr/bin",
+			[]string{"/dd/installs/pg/bin"},
+		},
+		"multiple leading dirs": {
+			"/pg/bin" + sep + "/pg/lib/bin" + sep + "/zordon/bin",
+			"/zordon/bin",
+			[]string{"/pg/bin", "/pg/lib/bin"},
+		},
+		"shared dir in base excluded": {
+			"/pg/bin" + sep + "/zordon/bin" + sep + "/usr/bin",
+			"/zordon/bin" + sep + "/usr/bin",
+			[]string{"/pg/bin"},
+		},
+		"empty delta": {
+			"/zordon/bin" + sep + "/usr/bin",
+			"/zordon/bin" + sep + "/usr/bin",
+			nil,
+		},
+		"empty base returns all": {
+			"/a" + sep + "/b",
+			"",
+			[]string{"/a", "/b"},
+		},
+		"base dir mid-list stops the walk": {
+			"/new" + sep + "/usr/bin" + sep + "/other-new",
+			"/usr/bin",
+			[]string{"/new"},
+		},
+		"empty full path": {
+			"",
+			"/usr/bin",
+			nil,
+		},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			got := NewResolver("", "").ForToolchain(c.fullPATH, c.basePATH).ToolBinDirs()
+			if len(got) != len(c.want) {
+				t.Fatalf("got %v, want %v", got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("got %v, want %v", got, c.want)
+				}
+			}
+		})
+	}
+}
+
+func TestResolver_ToolBinDirs_panicsWhenUnscoped(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic when ToolBinDirs is called without ForToolchain")
+		}
+	}()
+	_ = NewResolver("/ws", "abc").ToolBinDirs()
+}

@@ -79,6 +79,57 @@ func toolchainEnv(toolchainLang string, state *alphaState, log *zlog.Logger) (ma
 	return tc.env.Join(tc.userEnv), nil
 }
 
+// toolchainBinPaths blocks until the toolchain entity for key reaches ready
+// (or terminal failure), then returns the bin dir(s) it contributes — the
+// `mise env` delta cached on the toolchainCtx. nil when the language/pkg
+// isn't pinned. The fs::service::bin counterpart to toolchainEnv: a
+// provision in service A reaching for service B's binaries waits here for
+// B's toolchain install, the same way toolchainEnv gates A's own.
+func toolchainBinPaths(key string, state *alphaState, log *zlog.Logger) ([]string, error) {
+	_ = log
+	state.mu.RLock()
+	tc := state.toolchains[key]
+	state.mu.RUnlock()
+	if tc == nil {
+		return nil, nil
+	}
+	select {
+	case <-tc.lifecycle.Barrier("ready").Wait():
+	case <-tc.lifecycle.Barrier(alphasfile.ToolchainTerminalFailure).Wait():
+		return nil, fmt.Errorf("toolchain %s@%s: install failed (see earlier `toolchain` log lines)", tc.lang, tc.version)
+	}
+	return tc.binPaths, nil
+}
+
+// resolveSvcBin maps a fs::service::bin id (e.g. "service.pkg.postgres") to
+// that service's toolchain bin dir(s). Unknown service or unpinned
+// toolchain → nil (the binary then falls back to whatever PATH already
+// provides); a toolchain that failed to install is logged and treated as
+// nil. The id shape matches alphasfile's serviceID: service.<toolchain>.<name>.
+func resolveSvcBin(serviceID string, state *alphaState, log *zlog.Logger) []string {
+	state.mu.RLock()
+	var svc *alphasfile.Service
+	if state.config != nil {
+		for _, s := range state.config.All() {
+			if "service."+s.Toolchain+"."+s.Name() == serviceID {
+				svc = s
+				break
+			}
+		}
+	}
+	state.mu.RUnlock()
+	if svc == nil {
+		log.Error("alpha", "fs::service::bin: unknown service %q", serviceID)
+		return nil
+	}
+	dirs, err := toolchainBinPaths(toolchainKey(svc), state, log)
+	if err != nil {
+		log.Error("alpha", "fs::service::bin %s: %v", serviceID, err)
+		return nil
+	}
+	return dirs
+}
+
 // logWriter adapts a zlog.Logger as an io.Writer so subprocess output
 // (mise install / cargo install progress) lands in alpha's log under
 // a recognizable source tag.
@@ -535,6 +586,10 @@ type toolchainCtx struct {
 	// before Reach("ready"). Read only after waiting on the ready
 	// barrier — the write happens-before that close.
 	env zenv.EnvironmentVariables
+	// binPaths is the bin dir(s) this toolchain prepends to PATH (the
+	// `mise env` delta). Set with env, before Reach("ready") — same
+	// happens-before. fs::service::bin resolves to these.
+	binPaths []string
 	// userEnv is the Alphasfile-declared overlay (`toolchain { <lang>
 	// { env = {...} } }`). Set at allocation; never mutated.
 	userEnv zenv.EnvironmentVariables
@@ -639,7 +694,7 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
 		tc.lifecycle.Reach("failed")
 		return
 	}
-	env, err := tools.MiseEnv(bin, dataDir, tc.lang, tc.version, logWriter(log, "mise"))
+	env, binDirs, err := tools.MiseEnvWithBinDirs(bin, dataDir, tc.lang, tc.version, logWriter(log, "mise"))
 	if err != nil {
 		log.Error("alpha", "toolchain %s: mise env: %v", tc.lang, err)
 		tc.lifecycle.Reach("failed")
@@ -661,6 +716,7 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
 	}
 
 	tc.env = env
+	tc.binPaths = binDirs
 	tc.lifecycle.Reach("ready")
 	log.Info("alpha", "toolchain %s@%s: ready", tc.lang, tc.version)
 }
@@ -912,6 +968,16 @@ func runProvision(b *bringup, pc *provisionCtx, parent *serviceCtx) {
 	pc.lifecycle.Reach("running")
 	log.Info("alpha", "provision[%s]: running", pc.id)
 
+	// fs::service::bin(...) sentinels resolve here — in snippets (so a
+	// `${fs::service::bin(...)}/pg_dump` cmd works) and, below, in env
+	// values. resolveSvcBin blocks until the referenced toolchain is
+	// installed, so a provision reaching for another service's binary
+	// should still gate on it with `after` when it also needs it running.
+	resolveBin := func(serviceID string) []string { return resolveSvcBin(serviceID, state, log) }
+	checkSnippet = alphasfile.SubstituteServiceBins(checkSnippet, resolveBin)
+	cmdSnippet = alphasfile.SubstituteServiceBins(cmdSnippet, resolveBin)
+	verifySnippet = alphasfile.SubstituteServiceBins(verifySnippet, resolveBin)
+
 	// Per-provision env precedence (low → high):
 	//   sysenv-filtered process env
 	//   toolchain env (mise + PostMiseEnv + toolchain.<lang>.env)
@@ -964,7 +1030,28 @@ func runProvision(b *bringup, pc *provisionCtx, parent *serviceCtx) {
 	if parentSvc != nil {
 		parentEnv = phaseEnv(parentSvc, parentSvc.Runtime.RunEnv, agentMode)
 	}
-	env := zenv.FromHost(sysenv).Join(tcEnv, parentEnv, pc.step.Env).Slice()
+	// pc.step.Env entries may carry env::prepend / env::append directives
+	// (after svcbin substitution) instead of plain values; those mutate the
+	// PATH-style var named by the key against the already-assembled base,
+	// rather than replacing it the way a Join overlay would. Plain entries
+	// still overlay verbatim.
+	base := zenv.FromHost(sysenv).Join(tcEnv, parentEnv)
+	for k, v := range pc.step.Env {
+		v = alphasfile.SubstituteServiceBins(v, resolveBin)
+		if op, args, ok := alphasfile.ParseEnvOp(v); ok {
+			switch op {
+			case "prepend":
+				base = base.PrependPath(k, args)
+			case "append":
+				base = base.AppendPath(k, args)
+			default:
+				log.Error("alpha", "provision[%s]: unknown env op %q on %s", pc.id, op, k)
+			}
+			continue
+		}
+		base[k] = v
+	}
+	env := base.Slice()
 	cwd := provisionCwd(parentSvc, alphasfileDir)
 
 	// Stream labels are just the phase — the canonical entity ID is

@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 func TestEnvironmentVariables_Join_laterWinsOnCollision(t *testing.T) {
@@ -102,5 +104,59 @@ func TestLookup(t *testing.T) {
 	}
 	if _, ok := Lookup("ZENVTEST_UNSET_XYZ"); ok {
 		t.Errorf("Lookup on unset key should be ok=false")
+	}
+}
+
+func TestEnvironmentVariables_PrependPath(t *testing.T) {
+	sep := string(zfs.PathListSeparator)
+	cases := map[string]struct {
+		base EnvironmentVariables
+		key  string
+		dirs []string
+		want string
+	}{
+		"empty dirs is a no-op":      {EnvironmentVariables{"PATH": "/usr/bin"}, "PATH", nil, "/usr/bin"},
+		"absent key set to dirs":     {EnvironmentVariables{}, "PATH", []string{"/pg/bin"}, "/pg/bin"},
+		"empty value set to dirs":    {EnvironmentVariables{"PATH": ""}, "PATH", []string{"/pg/bin"}, "/pg/bin"},
+		"prepended before existing":  {EnvironmentVariables{"PATH": "/usr/bin"}, "PATH", []string{"/pg/bin"}, "/pg/bin" + sep + "/usr/bin"},
+		"multiple dirs keep order":   {EnvironmentVariables{"PATH": "/usr/bin"}, "PATH", []string{"/pg/bin", "/redis/bin"}, "/pg/bin" + sep + "/redis/bin" + sep + "/usr/bin"},
+		"dedup and drop empty entry": {EnvironmentVariables{"PATH": "/usr/bin"}, "PATH", []string{"/pg/bin", "", "/pg/bin"}, "/pg/bin" + sep + "/usr/bin"},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			if got := c.base.PrependPath(c.key, c.dirs); got[c.key] != c.want {
+				t.Errorf("got %q, want %q", got[c.key], c.want)
+			}
+		})
+	}
+}
+
+func TestEnvironmentVariables_AppendPath(t *testing.T) {
+	sep := string(zfs.PathListSeparator)
+	cases := map[string]struct {
+		base EnvironmentVariables
+		key  string
+		dirs []string
+		want string
+	}{
+		"empty dirs is a no-op":    {EnvironmentVariables{"PATH": "/usr/bin"}, "PATH", nil, "/usr/bin"},
+		"absent key set to dirs":   {EnvironmentVariables{}, "PATH", []string{"/pg/bin"}, "/pg/bin"},
+		"appended after existing":  {EnvironmentVariables{"PATH": "/usr/bin"}, "PATH", []string{"/pg/bin"}, "/usr/bin" + sep + "/pg/bin"},
+		"multiple dirs keep order": {EnvironmentVariables{"PATH": "/usr/bin"}, "PATH", []string{"/pg/bin", "/redis/bin"}, "/usr/bin" + sep + "/pg/bin" + sep + "/redis/bin"},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			if got := c.base.AppendPath(c.key, c.dirs); got[c.key] != c.want {
+				t.Errorf("got %q, want %q", got[c.key], c.want)
+			}
+		})
+	}
+}
+
+func TestEnvironmentVariables_PrependPath_doesNotMutateReceiver(t *testing.T) {
+	base := EnvironmentVariables{"PATH": "/usr/bin"}
+	_ = base.PrependPath("PATH", []string{"/pg/bin"})
+	if base["PATH"] != "/usr/bin" {
+		t.Errorf("PrependPath mutated receiver: %q", base["PATH"])
 	}
 }

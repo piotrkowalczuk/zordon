@@ -1,0 +1,75 @@
+# examples/service_bin — a provision reaching for a binary that ships with a
+# DIFFERENT service's mise package.
+#
+# `pg_dump` is built together with postgres and lives in postgres's mise
+# install bin dir — nowhere on redis's PATH. redis's `backup` provision finds
+# it with fs::service::bin(service.pkg.postgres) (the dir) + env::prepend (put
+# it on PATH). Inside postgres itself no such helper is needed: its own
+# provisions already get its bin on PATH (see initdb below). This is purely
+# the cross-service case.
+#
+# First start builds postgres + redis from source via mise (slow once, cached
+# after).
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+service "pkg" "postgres" {
+  package = "asdf:mise-plugins/mise-postgres@16.4"
+
+  build {
+    env = { POSTGRES_EXTRA_CONFIGURE_OPTIONS = "--without-icu" }
+  }
+
+  vars = {
+    port = net::pickport()
+    data = "${fs::tmp()}/pgdata"
+  }
+
+  runtime {
+    after = [self.runtime.provision.initdb.success]
+
+    # initdb is postgres's OWN binary — already on PATH, no helper needed.
+    provision "initdb" {
+      check = "test -f ${self.vars.data}/PG_VERSION"
+      cmd   = "initdb -D ${self.vars.data} -U postgres --auth=trust"
+    }
+
+    cmd = ["postgres", "-D", "${self.vars.data}", "-p", "${self.vars.port}", "-k", "${self.vars.data}"]
+  }
+
+  readiness {
+    tcp { port = self.vars.port }
+    period            = "200ms"
+    failure_threshold = 100
+  }
+}
+
+service "pkg" "redis" {
+  package = { name = "redis", version = "7.4.1" }
+
+  vars = {
+    port = net::pickport()
+    dump = "${fs::state()}/dump.sql"
+  }
+
+  runtime {
+    # redis only comes up once the backup ran — proving the cross-service
+    # binary was found and executed before the data store started.
+    after = [self.runtime.provision.backup.success]
+
+    provision "backup" {
+      # gate on postgres actually accepting connections, not just installed.
+      after = [service.pkg.postgres.runtime.ready]
+      # pg_dump belongs to postgres's toolchain — pull its bin dir onto PATH.
+      env   = { PATH = env::prepend(fs::service::bin(service.pkg.postgres)) }
+      cmd   = "pg_dump -h 127.0.0.1 -p ${service.pkg.postgres.vars.port} -U postgres postgres > ${self.vars.dump}"
+    }
+
+    cmd = ["redis-server", "--port", "${self.vars.port}", "--save", ""]
+  }
+
+  readiness {
+    tcp { port = self.vars.port }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

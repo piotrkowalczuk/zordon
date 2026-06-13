@@ -181,19 +181,43 @@ func isolatedEnv(dataDir, miseBin string) []string {
 // must hold the per-(tool, version) lock from Acquire — auto-install
 // races otherwise.
 func MiseEnv(binPath, dataDir, tool, version string, logOut io.Writer) (map[string]string, error) {
+	env, _, err := MiseEnvWithBinDirs(binPath, dataDir, tool, version, logOut)
+	return env, err
+}
+
+// MiseEnvWithBinDirs is MiseEnv plus the bin directories mise prepends to
+// PATH for this tool: the leading PATH entries the resolved env adds over the
+// base env we hand mise (isolatedEnv). Those are exactly the dirs holding the
+// tool's executables — e.g. postgres's bin with pg_dump/initdb — which alpha
+// layers onto a *different* service's PATH so a provision can find a binary
+// that ships with another service's package. Same locking contract as MiseEnv.
+func MiseEnvWithBinDirs(binPath, dataDir, tool, version string, logOut io.Writer) (map[string]string, []string, error) {
 	spec := miseToolName(tool) + "@" + version
+	base := isolatedEnv(dataDir, binPath)
 	cmd := exec.Command(binPath, "env", "--json", spec)
-	cmd.Env = isolatedEnv(dataDir, binPath)
+	cmd.Env = base
 	cmd.Stderr = logOut
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("mise env %s (data dir %s): %w", spec, dataDir, err)
+		return nil, nil, fmt.Errorf("mise env %s (data dir %s): %w", spec, dataDir, err)
 	}
 	env := map[string]string{}
 	if err := json.Unmarshal(out, &env); err != nil {
-		return nil, fmt.Errorf("decode mise env %s: %w", spec, err)
+		return nil, nil, fmt.Errorf("decode mise env %s: %w", spec, err)
 	}
-	return env, nil
+	basePATH := ""
+	for _, kv := range base {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			basePATH = v
+			break
+		}
+	}
+	// The bin-dir delta is layout knowledge, so it lives on zfs.Resolver
+	// (zordon's single home for derived paths). isolatedEnv is the only
+	// place that knows the base PATH mise saw; we scope a resolver to this
+	// toolchain's resolved/base PATHs and let it answer.
+	dirs := zfs.NewResolver("", "").ForToolchain(env["PATH"], basePATH).ToolBinDirs()
+	return env, dirs, nil
 }
 
 // EnsurePackage installs a `pkg` service's native package via mise

@@ -57,6 +57,46 @@ func (e EnvironmentVariables) Join(others ...EnvironmentVariables) EnvironmentVa
 	return out
 }
 
+// PrependPath returns a copy of the receiver with dirs prepended (highest
+// priority first) to the PATH-style list variable named by key, joined with
+// the OS path-list separator. dirs are de-duplicated preserving first
+// occurrence; empty dirs returns an unchanged copy. The receiver is not
+// mutated.
+//
+// This is the surgical alternative to Join for list variables: Join's blunt
+// map overlay would replace the whole PATH, dropping the layers below it.
+// PrependPath keeps the already-assembled value and only stacks dirs on top —
+// e.g. layering a second toolchain's bin dir onto a service's own PATH.
+func (e EnvironmentVariables) PrependPath(key string, dirs []string) EnvironmentVariables {
+	return e.pathJoin(key, dirs, true)
+}
+
+// AppendPath is PrependPath's mirror: dirs go after the existing value
+// (lowest priority). Same de-dup and non-mutation contract.
+func (e EnvironmentVariables) AppendPath(key string, dirs []string) EnvironmentVariables {
+	return e.pathJoin(key, dirs, false)
+}
+
+func (e EnvironmentVariables) pathJoin(key string, dirs []string, prepend bool) EnvironmentVariables {
+	out := make(EnvironmentVariables, len(e))
+	maps.Copy(out, e)
+	uniq := dedupStrings(dirs)
+	if len(uniq) == 0 {
+		return out
+	}
+	sep := string(zfs.PathListSeparator)
+	added := strings.Join(uniq, sep)
+	switch cur := out[key]; {
+	case cur == "":
+		out[key] = added
+	case prepend:
+		out[key] = added + sep + cur
+	default:
+		out[key] = cur + sep + added
+	}
+	return out
+}
+
 // JoinFile parses each path as a KEY=VAL dotenv file and overlays its
 // entries on top of the receiver (later paths win on collision). The
 // receiver is not mutated.
@@ -168,4 +208,22 @@ func UserHomeDir() (string, error) {
 		return "", fmt.Errorf("zenv: user home dir: %w", err)
 	}
 	return h, nil
+}
+
+// dedupStrings returns s with empty entries dropped and later duplicates
+// removed, preserving the first occurrence's order.
+func dedupStrings(s []string) []string {
+	seen := make(map[string]struct{}, len(s))
+	out := make([]string, 0, len(s))
+	for _, v := range s {
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }
