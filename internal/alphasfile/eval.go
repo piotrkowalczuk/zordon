@@ -1528,6 +1528,66 @@ func copyCtyMap(in map[string]cty.Value) map[string]cty.Value {
 // invoke. JSON escapes the NUL bytes, so the sentinel survives the control wire.
 func ArgSentinel(name string) string { return "\x00zarg:" + name + "\x00" }
 
+// BinSentinel is the placeholder fs::service::bin / fs::toolchain::bin resolve
+// to at configure time: a NUL-framed token "<kind>:<ref>" where kind is "svc"
+// (ref = a service id, e.g. "service.pkg.postgres") or "tc" (ref = a toolchain
+// key, e.g. "go"). alpha swaps it for the resolved bin dir at provision-run
+// time — the dir is only known once mise has installed the toolchain, so it
+// can't be a concrete eval value. Same NUL framing as ArgSentinel; neither
+// kind nor ref carries ':' so "<kind>:<ref>" splits unambiguously.
+func BinSentinel(kind, ref string) string { return "\x00zbin:" + kind + ":" + ref + "\x00" }
+
+const envOpPrefix = "\x00zenvop:"
+
+// EnvOpSentinel is the placeholder env::prepend / env::append resolve to: a
+// NUL-framed directive "op\x00dir1\x00dir2…" describing a PATH-style list
+// mutation alpha applies to the already-assembled value at provision-run
+// time (prepend/append the dirs to the var named by the env map key). args
+// may be BinSentinels — those are swapped to real dirs by SubstituteBins
+// BEFORE ParseEnvOp runs, so the directive only ever gets split once its dirs
+// are NUL-free.
+func EnvOpSentinel(op string, args []string) string {
+	return envOpPrefix + op + "\x00" + strings.Join(args, "\x00") + "\x00"
+}
+
+// ParseEnvOp recovers an env-op directive produced by EnvOpSentinel. ok is
+// false for any value that isn't one (a plain env value), so callers treat
+// non-directive entries as ordinary overlays. Must run AFTER SubstituteBins —
+// split assumes the dirs carry no NUL.
+func ParseEnvOp(value string) (op string, args []string, ok bool) {
+	if !strings.HasPrefix(value, envOpPrefix) || !strings.HasSuffix(value, "\x00") {
+		return "", nil, false
+	}
+	parts := strings.Split(value[len(envOpPrefix):len(value)-1], "\x00")
+	return parts[0], parts[1:], true
+}
+
+// SubstituteBins replaces every BinSentinel in s with the dirs resolve returns
+// for (kind, ref), joined by the path-list separator. Mirrors substituteArgs:
+// a plain string pass over snippets and env values before they reach a shell
+// or ParseEnvOp. resolve returning no dirs drops the token (the binary then
+// falls back to whatever PATH already has).
+func SubstituteBins(s string, resolve func(kind, ref string) []string) string {
+	const pre = "\x00zbin:"
+	for {
+		i := strings.Index(s, pre)
+		if i < 0 {
+			return s
+		}
+		rest := s[i+len(pre):]
+		j := strings.IndexByte(rest, 0)
+		if j < 0 {
+			return s // malformed (unterminated token); leave the rest as-is
+		}
+		token := s[i : i+len(pre)+j+1]
+		var dirs string
+		if kind, ref, ok := strings.Cut(rest[:j], ":"); ok {
+			dirs = strings.Join(resolve(kind, ref), string(zfs.PathListSeparator))
+		}
+		s = strings.Replace(s, token, dirs, 1)
+	}
+}
+
 // provisionSelfWithArgs returns a copy of self where the named provision's node
 // (self.runtime.provision.<provName>) gains an `arguments` object mapping each
 // declared arg name to its placeholder sentinel. Only that one provision's node
@@ -1689,6 +1749,18 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 		"net::pickport": pickPortFunc(),
 		"os::env":       osEnvFunc(),
 
+		// Cross-toolchain binary access, all resolved at provision-run time
+		// via deferred sentinels (dirs aren't known until mise installs):
+		//   fs::service::bin(service.<tc>.<name>) — a service's package bins
+		//     (the handle for pkg, which has no standalone toolchain ref).
+		//   fs::toolchain::bin(toolchain.<lang>) — a toolchain's bin/tool
+		//     world (e.g. a Go `go install` tool used from a Ruby project).
+		//   env::prepend/append put dirs onto a PATH-style var.
+		"fs::service::bin":   svcBinFunc(),
+		"fs::toolchain::bin": tcBinFunc(),
+		"env::prepend":       envOpFunc("prepend"),
+		"env::append":        envOpFunc("append"),
+
 		// test:: namespace — observation/control primitives for the
 		// conformance harness. Available only when zordon runs with
 		// $ZORDON_TEST_HARNESS=1 (set by the harness on every spawn);
@@ -1725,9 +1797,87 @@ func evalStaticSrcPath(src *srcBlock) (string, error) {
 	return val.AsString(), nil
 }
 
+// svcBinFunc implements fs::service::bin(<ref>). The arg is a service data
+// leaf — `self` or `service.<tc>.<name>` — an object carrying name and
+// toolchain. We validate that shape (mirroring provisionRefOf) and emit a
+// "svc" BinSentinel naming the service id; alpha resolves it to the bin dir
+// at provision-run time. A non-existent service ref fails earlier in HCL's
+// own traversal ("Unsupported attribute"), so it never reaches here.
+func svcBinFunc() function.Function {
+	return function.New(&function.Spec{
+		Params: []function.Parameter{{Name: "service", Type: cty.DynamicPseudoType}},
+		Type:   function.StaticReturnType(cty.String),
+		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
+			v := args[0]
+			t := v.Type()
+			if v.IsNull() || !t.IsObjectType() || !t.HasAttribute("name") || !t.HasAttribute("toolchain") {
+				return cty.NilVal, fmt.Errorf("fs::service::bin: expected a service reference (self or service.<tc>.<name>), got %s", t.FriendlyName())
+			}
+			tc, name := v.GetAttr("toolchain"), v.GetAttr("name")
+			if tc.Type() != cty.String || name.Type() != cty.String {
+				return cty.NilVal, errors.New("fs::service::bin: service reference has a non-string name/toolchain")
+			}
+			return cty.StringVal(BinSentinel("svc", serviceID(tc.AsString(), name.AsString()))), nil
+		},
+	})
+}
+
+// tcBinFunc implements fs::toolchain::bin(toolchain.<lang>). The arg is a
+// toolchain ref — an object whose barrier attrs (e.g. "ready") read
+// "toolchain.<key>@<state>". We recover <key> and emit a "tc" BinSentinel;
+// alpha resolves it to that toolchain's bin dir(s) at provision-run time.
+// This is the handle for a tool installed into a toolchain's world (e.g. a
+// Go `go install` tool) that no service references.
+func tcBinFunc() function.Function {
+	return function.New(&function.Spec{
+		Params: []function.Parameter{{Name: "toolchain", Type: cty.DynamicPseudoType}},
+		Type:   function.StaticReturnType(cty.String),
+		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
+			v := args[0]
+			t := v.Type()
+			if v.IsNull() || !t.IsObjectType() || !t.HasAttribute("ready") {
+				return cty.NilVal, fmt.Errorf("fs::toolchain::bin: expected a toolchain reference (toolchain.<lang>), got %s", t.FriendlyName())
+			}
+			ready := v.GetAttr("ready")
+			if ready.Type() != cty.String {
+				return cty.NilVal, errors.New("fs::toolchain::bin: malformed toolchain reference")
+			}
+			id, _, _ := strings.Cut(ready.AsString(), "@") // "toolchain.<key>"
+			key, ok := strings.CutPrefix(id, "toolchain.")
+			if !ok || key == "" {
+				return cty.NilVal, fmt.Errorf("fs::toolchain::bin: not a toolchain reference: %q", ready.AsString())
+			}
+			return cty.StringVal(BinSentinel("tc", key)), nil
+		},
+	})
+}
+
 // osEnvFunc reads a host environment variable at evaluation time (in the
 // zordon process, so it sees your shell env). os::env("NAME") errors if
 // NAME is unset; os::env("NAME", "default") returns the default instead.
+
+// envOpFunc implements env::prepend / env::append. Variadic string args are
+// the dirs (literals or fs::service::bin sentinels) to layer onto the
+// PATH-style var named by the env map key — applied at provision-run time
+// against the already-assembled value (see EnvOpSentinel / ParseEnvOp).
+func envOpFunc(op string) function.Function {
+	return function.New(&function.Spec{
+		Params:   []function.Parameter{{Name: "dir", Type: cty.String}},
+		VarParam: &function.Parameter{Name: "dirs", Type: cty.String},
+		Type:     function.StaticReturnType(cty.String),
+		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
+			dirs := make([]string, 0, len(args))
+			for _, a := range args {
+				if a.IsNull() {
+					return cty.NilVal, fmt.Errorf("env::%s: arguments must be non-null strings", op)
+				}
+				dirs = append(dirs, a.AsString())
+			}
+			return cty.StringVal(EnvOpSentinel(op, dirs)), nil
+		},
+	})
+}
+
 func osEnvFunc() function.Function {
 	return function.New(&function.Spec{
 		Params: []function.Parameter{{Name: "name", Type: cty.String}},

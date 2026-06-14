@@ -43,6 +43,7 @@ nav:
   - Federation: federation.md
   - How-to:
       - Run a provision via MCP: how-to/run-a-provision-via-mcp.md
+      - Use a binary from another service: how-to/use-a-binary-from-another-service.md
   - Reference:
       - zordon mcp: reference/mcp.md
 

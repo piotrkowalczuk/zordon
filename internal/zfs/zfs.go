@@ -385,14 +385,36 @@ func ServiceCwd(checkout, exe string) string {
 // Either field may be "" when the caller doesn't have it (alpha, for
 // instance, recovers only the hash from its socket path). Each method
 // documents which fields it relies on.
+//
+// A Resolver narrows by refinement: ForToolchain returns a clone carrying
+// extra scope (the toolchain's resolved env), and scope-specific queries
+// (ToolBinDirs) read that state instead of taking it as arguments. Because
+// every field is a value type, the value receiver IS the clone — refinement
+// needs no copy machinery.
 type Resolver struct {
 	dir  string
 	hash string
+	// toolchain scope, set by ForToolchain; tcScoped guards the queries
+	// that require it. Empty/false on an unrefined Resolver.
+	tcScoped       bool
+	tcResolvedPATH string
+	tcBasePATH     string
 }
 
 // NewResolver builds a Resolver for the run rooted at dir with FsHash
 // hash.
 func NewResolver(dir, hash string) Resolver { return Resolver{dir: dir, hash: hash} }
+
+// ForToolchain returns a clone scoped to a toolchain whose `mise env`
+// produced resolvedPATH, layered over basePATH (the PATH handed to mise).
+// The clone is what ToolBinDirs reads. Value receiver → the original is
+// untouched and no deep-copy is needed (every field is a value type).
+func (r Resolver) ForToolchain(resolvedPATH, basePATH string) Resolver {
+	r.tcScoped = true
+	r.tcResolvedPATH = resolvedPATH
+	r.tcBasePATH = basePATH
+	return r
+}
 
 // AlphaLogFile resolves where a leaf alpha logs. A non-empty override
 // (the operator's explicit path) is returned unchanged; otherwise it
@@ -404,6 +426,43 @@ func (r Resolver) AlphaLogFile(override string) string {
 		return override
 	}
 	return filepath.Join(SystemTempDir(), "alpha-"+r.hash+".log")
+}
+
+// ToolBinDirs returns the bin dir(s) the scoped toolchain contributes: the
+// leading entries of its resolved PATH not present in the base PATH,
+// stopping at the first entry that is. `mise env` prepends a tool's bin
+// dir(s) to the PATH it is handed, so the genuinely-new dirs are a
+// contiguous leading prefix; a shared dir already in the base (e.g. the
+// zordon mise bin dir) is therefore excluded.
+//
+// Panics if the resolver isn't toolchain-scoped: calling it without
+// ForToolchain is API misuse (a programmer error), not a runtime condition
+// (AGENTS.md). The scope rather than arguments is what makes the two PATHs
+// impossible to swap at the call site.
+func (r Resolver) ToolBinDirs() []string {
+	if !r.tcScoped {
+		panic("zfs: Resolver.ToolBinDirs requires a toolchain scope — call ForToolchain first")
+	}
+	if r.tcResolvedPATH == "" {
+		return nil
+	}
+	baseSet := make(map[string]struct{})
+	for _, d := range filepath.SplitList(r.tcBasePATH) {
+		if d != "" {
+			baseSet[d] = struct{}{}
+		}
+	}
+	var out []string
+	for _, d := range filepath.SplitList(r.tcResolvedPATH) {
+		if d == "" {
+			continue
+		}
+		if _, ok := baseSet[d]; ok {
+			break
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // Copy streams src into dst with 0o600. Used for moving build
