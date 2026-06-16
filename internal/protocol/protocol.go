@@ -22,6 +22,13 @@ const (
 	OpState     Op = "state"
 	OpShutdown  Op = "shutdown"
 	OpInvoke    Op = "invoke"
+	// OpClean runs each provision's `clean` teardown snippet against a
+	// stopped stack. It reuses Request.Configure as its payload (the
+	// resolved Alphasfile + paths): alpha materializes toolchains and
+	// rebuilds service env without spawning the services, then runs the
+	// clean snippets in reverse order. Streams the same Event sequence as
+	// Configure and never triggers failfast shutdown.
+	OpClean Op = "clean"
 )
 
 type Request struct {

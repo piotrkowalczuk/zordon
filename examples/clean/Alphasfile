@@ -1,0 +1,53 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+# examples/clean — teardown snippets. A provision's `cmd` sets something
+# up at bringup; its `clean` undoes it. `zordon clean` runs the clean
+# snippets against a STOPPED stack (so does `zordon stop --clean`), while
+# a plain `zordon stop` leaves them in place.
+#
+# Clean runs each provision's snippet in REVERSE declaration order — the
+# inverse of bringup — so later setup is torn down before what it built
+# on. It does NOT start the services: it reuses each service's resolved
+# env / toolchain / cwd, then runs the clean snippets.
+#
+# All shell snippets use universally-available unix tools (mkdir, touch,
+# rm). Paths come from ${fs::state()} (the per-invocation state dir),
+# baked to an absolute path at eval time — no runtime env needed.
+
+service "go" "app" {
+  src {
+    path = "../.."
+  }
+
+  vars = { port = net::pickport() }
+
+  build {
+    cmd = ["go", "build", "-o", "${fs::bin()}/app", "./examples/go/src/app"]
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    # Idempotent setup at bringup. `clean` is the matching teardown:
+    # `zordon clean` removes the marker dir this provision created.
+    provision "seed" {
+      cmd   = "mkdir -p ${fs::state()}/data && touch ${fs::state()}/data/seeded"
+      clean = "rm -rf ${fs::state()}/data"
+    }
+
+    # A second provision whose teardown removes its own marker. Because
+    # clean runs in reverse order, this one is torn down before `seed`.
+    provision "register" {
+      cmd   = "touch ${fs::state()}/registered"
+      clean = "rm -f ${fs::state()}/registered"
+      after = [self.runtime.provision.seed.success]
+    }
+  }
+
+  readiness {
+    http {
+      port = self.vars.port
+      path = "/"
+    }
+  }
+}

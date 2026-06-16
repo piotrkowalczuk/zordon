@@ -139,13 +139,25 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 
 	// stop
 	stopFlags := ff.NewFlagSet("stop").SetParent(rootFlags)
+	stopClean := stopFlags.BoolLong("clean", "after the stack is down, run each provision's clean teardown snippet (= zordon stop → zordon clean)")
+	stopAlphaBin := stopFlags.StringLong("alpha", "alpha", "alpha binary used for the --clean phase (name on $PATH or absolute path)")
+	stopAlphaLog := stopFlags.StringLong("alpha-log", "", "log file for the transient alpha during --clean (default: <tmpdir>/alpha-<workspace-hash>.log)")
+	stopTimeout := stopFlags.DurationLong("timeout", 30*time.Second, "max wait for the stack to stop and the transient alpha to become ready during --clean")
 	stopCmd := &ff.Command{
 		Name:      "stop",
-		Usage:     "zordon stop",
-		ShortHelp: "ask the running alpha to shut down",
+		Usage:     "zordon stop [--clean]",
+		ShortHelp: "ask the running alpha to shut down (--clean also runs each provision's clean snippet once the stack is down)",
 		Flags:     stopFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runStop(ctx, zlog.New(stdio.Stderr, *agent), zfs.ZordonHome(home.Path()), testCfg())
+			log := zlog.New(stdio.Stderr, *agent)
+			zordonHome := zfs.ZordonHome(home.Path())
+			if err := runStop(ctx, log, zordonHome, testCfg()); err != nil {
+				return err
+			}
+			if *stopClean {
+				return runClean(ctx, log, *stopAlphaBin, *stopAlphaLog, *stopTimeout, *verbose, *agent, true, zordonHome, testCfg())
+			}
+			return nil
 		},
 	}
 
@@ -240,7 +252,22 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		},
 	}
 
-	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wtCmd, getCmd, planCmd, mcpCmd)
+	// clean
+	cleanFlags := ff.NewFlagSet("clean").SetParent(rootFlags)
+	cleanAlphaBin := cleanFlags.StringLong("alpha", "alpha", "alpha binary (name on $PATH or absolute path)")
+	cleanAlphaLog := cleanFlags.StringLong("alpha-log", "", "log file for the transient alpha (default: <tmpdir>/alpha-<workspace-hash>.log)")
+	cleanTimeout := cleanFlags.DurationLong("timeout", 30*time.Second, "max wait for the transient alpha to become ready")
+	cleanCmd := &ff.Command{
+		Name:      "clean",
+		Usage:     "zordon clean [FLAGS]",
+		ShortHelp: "run each provision's clean teardown snippet for the invocation level; the stack must be stopped first (or use zordon stop --clean)",
+		Flags:     cleanFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runClean(ctx, zlog.New(stdio.Stderr, *agent), *cleanAlphaBin, *cleanAlphaLog, *cleanTimeout, *verbose, *agent, false, zfs.ZordonHome(home.Path()), testCfg())
+		},
+	}
+
+	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wtCmd, getCmd, planCmd, cleanCmd, mcpCmd)
 	return rootCmd, agent
 }
 
@@ -369,6 +396,58 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 			return finish(fmt.Errorf("alpha: %s", ev.Error))
 		default:
 			log.Info("zordon", "alpha sent unknown event kind=%q", ev.Kind)
+		}
+	}
+}
+
+// pushClean sends OpClean to a freshly-spawned transient alpha and streams
+// its teardown output. Simpler than pushConfigure: clean never starts
+// services, so there are no per-service ready/fail events or failure
+// summary — just log lines until EventDone (success) or EventError.
+func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, af *alphasfile.Alphasfile, agent bool) error {
+	conn, err := control.Dial(sock, 1*time.Second)
+	if err != nil {
+		return fmt.Errorf("dial: %w", err)
+	}
+	defer conn.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	}
+
+	enc := protocol.NewEncoder(conn)
+	dec := protocol.NewDecoder(conn)
+
+	if err := enc.Write(&protocol.Request{
+		Op: protocol.OpClean,
+		Configure: &protocol.ConfigureArgs{
+			AlphasfilePath: afPath,
+			Alphasfile:     af,
+			Agent:          agent,
+			FsHash:         fsHash,
+			CfgHash:        cfgHash,
+			ParentDotenv:   parentDotenv,
+		},
+	}); err != nil {
+		return fmt.Errorf("send clean: %w", err)
+	}
+	_ = conn.SetDeadline(time.Time{})
+	log.Info("zordon", "clean requested (%d services), streaming", len(af.All()))
+
+	for {
+		var ev protocol.Event
+		if err := dec.Read(&ev); err != nil {
+			return fmt.Errorf("recv event: %w", err)
+		}
+		switch ev.Kind {
+		case protocol.EventLog:
+			log.Service(ev.Service, ev.Stream, ev.Line)
+		case protocol.EventDone:
+			log.Info("zordon", "clean complete")
+			return nil
+		case protocol.EventError:
+			return fmt.Errorf("alpha: %s", ev.Error)
+		default:
+			// clean emits only log/done/error; ignore anything else.
 		}
 	}
 }

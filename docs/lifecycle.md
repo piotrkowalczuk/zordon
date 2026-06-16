@@ -120,3 +120,25 @@ Stops **only the invocation level** (parents are shared infra). `alpha`
 SIGTERMs every child, waits the grace period, SIGKILLs stragglers, then
 unlinks the generated files and exits. `zordon status` reports the
 whole chain regardless.
+
+`zordon stop --clean` is sugar for `zordon stop` followed by `zordon clean`:
+it brings the stack down, waits for it to actually exit, then runs the
+teardown snippets (see below).
+
+## `zordon clean`
+
+Runs each provision's [`clean`](dynamic-config.md#provision-teardown-clean)
+teardown snippet for the **invocation level** — the inverse of the side
+effects bringup created (drop a database, delete a topic, remove generated
+files). Like `zordon stop`, shared parent levels are left untouched.
+
+Clean operates on a **stopped** stack. A still-running stack is refused
+(`zordon stop` first, or use `zordon stop --clean`). Under the hood it spawns
+a transient `alpha` that materializes toolchains and rebuilds each service's
+env/cwd **without starting the services**, runs the `clean` snippets in
+**reverse declaration order** (teardown is the inverse of bringup), then shuts
+that `alpha` down. A failed clean is reported but does not abort the rest.
+
+Provisions without a `clean` snippet are skipped. Snippets that reference a
+provision's invoke-time `arguments` are run as-is — there is no per-invoke
+argument context during a batch clean.

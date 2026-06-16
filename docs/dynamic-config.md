@@ -183,13 +183,32 @@ The invoker runs the provider's resolved `check`/`cmd`/`verify` snippets
 under its **own** barrier (`service.go.app.runtime.provision.topic@success`)
 and **own** env/cwd. N consumers each get an independent run with their
 own parameters. The invoking provision must not set `check`/`verify`
-(the template owns them).
+(the template owns them) — but it **may** set its own `clean` (the teardown
+reflects what *this* invoker did, not the template).
 
 `after = never` on the target is **optional**. Without it, the provision
 still auto-runs for its own service (immediately, or per its own
 `after`) *and* is invokable by peers. `after = never` simply means
 "expose this action but don't auto-run it for me" — useful when only
 consumers should ever trigger it.
+
+### Provision teardown (`clean`)
+
+A provision may declare a `clean` snippet — the teardown that undoes what
+its `cmd` set up. It is interpolated in the same scope as `cmd`/`verify`
+(it can read `self.vars`, `${fs::state()}`, and the same functions):
+
+```hcl
+provision "seed" {
+  cmd   = "createdb ${self.vars.name} && psql ${self.vars.name} < seed.sql"
+  clean = "dropdb ${self.vars.name}"
+}
+```
+
+`clean` snippets are run **only** by [`zordon clean`](lifecycle.md#zordon-clean)
+(and `zordon stop --clean`), against a stopped stack, in reverse declaration
+order. A plain `zordon stop` never runs them. Provisions without a `clean`
+are skipped. A future release may add a service-level `clean`.
 
 ### Cross-service references
 

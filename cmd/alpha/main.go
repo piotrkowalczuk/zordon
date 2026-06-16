@@ -1655,6 +1655,9 @@ func handleConn(conn net.Conn, state *alphaState, cfg bringupConfig, log *zlog.L
 	case protocol.OpInvoke:
 		_ = conn.SetDeadline(time.Time{})
 		handleInvoke(&req, state, cfg, enc, log)
+	case protocol.OpClean:
+		_ = conn.SetDeadline(time.Time{})
+		handleClean(&req, state, cfg, enc, log)
 	default:
 		_ = enc.Write(&protocol.Response{Error: fmt.Sprintf("unknown op: %q", req.Op)})
 	}
@@ -1752,6 +1755,107 @@ func handleInvoke(req *protocol.Request, state *alphaState, cfg bringupConfig, e
 		return
 	}
 	stream.Send(&protocol.Event{Kind: protocol.EventError, Error: fmt.Sprintf("invoke %s: provision failed", id)})
+}
+
+// handleClean runs each provision's `clean` teardown snippet against a
+// STOPPED stack. It mirrors handleConfigure's setup (store config,
+// materialize files + toolchains) but never spawns the services
+// (bringupAndSupervise). For every provision that declares a `clean`
+// snippet it builds a synthetic step — same trick as handleInvoke — whose
+// cmd IS the clean snippet, with no `after` (fires now; nothing is running
+// to wait on) and no check/verify, then runs it via runProvision in REVERSE
+// declaration order (teardown is the inverse of bringup). failfast is off:
+// a failed clean reports EventError but never shuts anything down.
+//
+// Service contexts are built locally, NOT addService'd: a registered ctx
+// whose bringup goroutine never runs would leave its `done` channel open
+// and hang the follow-up OpShutdown in shutdownAll. runProvision only needs
+// the parent's name/toolchain; bin resolution reads state.config/toolchains,
+// both populated below.
+func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, enc *protocol.Encoder, log *zlog.Logger) {
+	stream := newSafeEncoder(enc)
+	defer stream.Close()
+
+	if req.Configure == nil || req.Configure.Alphasfile == nil {
+		stream.Send(&protocol.Event{Kind: protocol.EventError, Error: "clean: missing alphasfile"})
+		return
+	}
+	args := req.Configure
+	newConfig := args.Alphasfile
+
+	state.configure(args.AlphasfilePath, args.FsHash, args.CfgHash, args.ParentDotenv, args.Agent, newConfig)
+	services := newConfig.All()
+	log.Info("alpha", "clean: configured from %s (%d services)", args.AlphasfilePath, len(services))
+
+	b := &bringup{state: state, cfg: cfg, stream: stream, log: log, failfast: false}
+
+	if err := materializeFiles(newConfig.AllFiles(), state, log); err != nil {
+		log.Error("alpha", "clean: materialize files: %v", err)
+		stream.Send(&protocol.Event{Kind: protocol.EventError, Error: "file: " + err.Error()})
+		return
+	}
+
+	// Materialize toolchains so a clean snippet that shells out to the
+	// service's tooling (psql, redis-cli, bundle exec) finds it on PATH.
+	// runProvision's toolchainEnv blocks on the `ready` barrier, so spawning
+	// the goroutines here is enough — they short-circuit when the install is
+	// already cached in ZORDON_HOME.
+	for lang, tcCfg := range newConfig.Toolchain {
+		if tcCfg == nil || tcCfg.Version == "" {
+			continue
+		}
+		tc := newToolchainCtx(lang, tcCfg.Version, tcCfg.Tools, tcCfg.Env)
+		state.addToolchain(tc)
+		go bringupToolchain(tc, state.zordonHome, log)
+	}
+	pkgSeen := map[string]bool{}
+	for _, svc := range services {
+		if svc.Toolchain != alphasfile.ToolchainPkg || svc.Pkg == nil {
+			continue
+		}
+		if pkgSeen[svc.Pkg.Name] {
+			continue
+		}
+		pkgSeen[svc.Pkg.Name] = true
+		tc := newToolchainCtx(svc.Pkg.Name, svc.Pkg.Version, nil, nil)
+		tc.isPkg = true
+		if svc.Runtime != nil {
+			tc.installEnv = svc.Runtime.BuildEnv
+		}
+		state.addToolchain(tc)
+		go bringupToolchain(tc, state.zordonHome, log)
+	}
+
+	// Reverse order: services last-declared first, provisions within a
+	// service last-declared first.
+	cleaned := 0
+	for i := len(services) - 1; i >= 0; i-- {
+		svc := services[i]
+		if svc.Runtime == nil {
+			continue
+		}
+		parent := newServiceCtx(svc.Name(), svc.Toolchain)
+		serviceID := "service." + svc.Toolchain + "." + svc.Name()
+		steps := svc.Runtime.Provision
+		for j := len(steps) - 1; j >= 0; j-- {
+			orig := steps[j]
+			if strings.TrimSpace(orig.Clean) == "" {
+				continue
+			}
+			step := &alphasfile.ProvisionStep{
+				Name: orig.Name + "@clean",
+				Cmd:  orig.Clean,
+				Env:  orig.Env,
+			}
+			pc := newProvisionCtx(serviceID, step)
+			log.Info("alpha", "clean %s.runtime.provision.%s", serviceID, orig.Name)
+			runProvision(b, pc, parent)
+			cleaned++
+		}
+	}
+
+	log.Info("alpha", "clean: ran %d provision clean step(s)", cleaned)
+	stream.Send(&protocol.Event{Kind: protocol.EventDone})
 }
 
 // resolveProvisionArgs validates supplied invocation values against a
