@@ -497,11 +497,16 @@ type ProvisionStep struct {
 	// snippets as `${self.runtime.provision.<name>.arguments.<arg>}`; at
 	// configure each such reference resolves to a placeholder, substituted by
 	// alpha at invoke. A provision with arguments must be latent.
-	Arguments []*ProvisionArg           `json:"arguments,omitempty"`
-	Check     string                    `json:"check,omitempty"`
-	Cmd       string                    `json:"cmd"`
-	Verify    string                    `json:"verify,omitempty"`
-	Env       zenv.EnvironmentVariables `json:"env,omitempty"`
+	Arguments []*ProvisionArg `json:"arguments,omitempty"`
+	Check     string          `json:"check,omitempty"`
+	Cmd       string          `json:"cmd"`
+	Verify    string          `json:"verify,omitempty"`
+	// Clean is the teardown snippet `zordon clean` runs (stack stopped) to
+	// undo this provision's side effects. Always the provision's own snippet
+	// — never inherited from a CmdRef template, since the teardown reflects
+	// what THIS provision did with its own env. Empty ⇒ nothing to clean.
+	Clean string                    `json:"clean,omitempty"`
+	Env   zenv.EnvironmentVariables `json:"env,omitempty"`
 	// After holds the resolved barrier refs ("service.go.db@ready",
 	// "service.go.api.runtime.provision.create-tables@success", ...).
 	// alpha parses these at bringup and selects on (target, terminal-
@@ -743,6 +748,7 @@ type provisionBlock struct {
 	Check       hcl.Expression   `hcl:"check,optional"`
 	Cmd         hcl.Expression   `hcl:"cmd"`
 	Verify      hcl.Expression   `hcl:"verify,optional"`
+	Clean       hcl.Expression   `hcl:"clean,optional"`
 	Env         hcl.Expression   `hcl:"env,optional"`
 	After       hcl.Expression   `hcl:"after,optional"`
 	Detached    bool             `hcl:"detached,optional"`

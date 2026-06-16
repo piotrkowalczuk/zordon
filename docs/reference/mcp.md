@@ -29,7 +29,7 @@ Every subcommand is exposed except `mcp` itself.
 
 | Field | Value |
 | --- | --- |
-| Name | the subcommand name (`start`, `status`, `stop`, `sudo`, `worktree`, `plan`, `get`) |
+| Name | the subcommand name (`start`, `status`, `stop`, `clean`, `sudo`, `worktree`, `plan`, `get`) |
 | Input | `{ "args": ["<flag-or-arg>", ...] }` — flags and positional arguments, exactly as on the CLI; pass `["-h"]` for the full flag list |
 | Output | the command's combined stdout+stderr, captured into the tool result |
 

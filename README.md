@@ -40,6 +40,7 @@ Create an `Alphasfile` (see [examples/simple](examples/simple/Alphasfile)), then
 zordon start              # spawn alpha, push config, stream bringup logs
 zordon status             # what's running across the whole chain right now?
 zordon stop               # ask alpha to shut its children down and exit
+zordon clean              # run each provision's clean teardown (stack stopped)
 zordon worktree create x  # a parallel, isolated copy of the stack
 ```
 

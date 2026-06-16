@@ -263,6 +263,113 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 	return nil
 }
 
+// runClean runs each provision's `clean` teardown snippet for the
+// invocation (leaf) level. Like `zordon stop`, shared parents are left
+// untouched; we still walk the chain to accumulate the leaf's parent context
+// (services / toolchain / sysenv / dotenv) so clean snippets resolve against
+// the same env they ran under.
+//
+// Clean operates on a STOPPED stack: it spawns a transient alpha that
+// materializes toolchains and rebuilds service env WITHOUT starting the
+// services, runs the clean snippets, then shuts that alpha down. When
+// waitStopped is set (the `zordon stop --clean` path) a still-running leaf
+// alpha is waited out rather than rejected; otherwise a running stack is an
+// error directing the user to stop first.
+func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, verbose, agent, waitStopped bool, zordonHome string, testCfg alphasfile.TestConfig) error {
+	fed, err := NewFederationState(zordonHome)
+	if err != nil {
+		return err
+	}
+
+	cfg := startConfig{
+		alphaBin: alphaBin,
+		alphaLog: alphaLog,
+		timeout:  timeout,
+		verbose:  verbose,
+		agent:    agent,
+	}
+
+	var parents alphasfile.GlobalComputedState
+	for _, lvl := range fed.Levels() {
+		inv := lvl.Invocation()
+		parentDotenv := append([]string{}, parents.Dotenv()...)
+		parentJSON, err := json.Marshal(parents.Services())
+		if err != nil {
+			return fmt.Errorf("marshal parent ctx: %w", err)
+		}
+		cfgHash := invocation.ConfigHash(lvl.Bytes(), parentJSON)
+
+		af, old, reused, err := resolveLevel(ctx, lvl, cfgHash, parents.ParentContext(), testCfg)
+		if err != nil {
+			return fmt.Errorf("%s: %w", lvl.Path(), err)
+		}
+
+		if !lvl.IsLeaf() {
+			// Accumulate parent context only — shared parents are never cleaned.
+			if reused {
+				parents.Join(adoptedBlock(old))
+			} else {
+				parents.Join(af.Block())
+			}
+			continue
+		}
+
+		// Leaf. Clean requires the stack to be down.
+		if old != nil {
+			if !waitStopped {
+				return fmt.Errorf("%s: alpha is running (pid=%d); run `zordon stop` first, or `zordon stop --clean`", lvl.Path(), old.PID)
+			}
+			if err := waitSocketGone(ctx, inv.SocketPath(), timeout); err != nil {
+				return fmt.Errorf("%s: waiting for alpha to stop before clean: %w", lvl.Path(), err)
+			}
+		}
+
+		unlock, err := control.Lock(inv.StateDir)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+
+		return cleanLeaf(ctx, lvl, af, parentDotenv, cfg, log)
+	}
+	return errors.New("no invocation level in chain")
+}
+
+// cleanLeaf mirrors reconcileAlpha's leaf path but drives a teardown instead
+// of a bringup: spawn a transient alpha, send OpClean, then always shut that
+// alpha down (it exists only to run the clean snippets).
+func cleanLeaf(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, parentDotenv []string, cfg startConfig, log *zlog.Logger) error {
+	inv := lvl.inv
+	sock := inv.SocketPath()
+
+	levelLog := zfs.NewResolver(inv.Dir, inv.FsHash).AlphaLogFile(cfg.alphaLog)
+	if err := zfs.EnsureSharedDir(filepath.Dir(levelLog)); err != nil {
+		return fmt.Errorf("mkdir state dir: %w", err)
+	}
+	if err := zfs.EnsureSharedDir(inv.TmpDir); err != nil {
+		return fmt.Errorf("mkdir tmp dir: %w", err)
+	}
+
+	ctxLevel, cancel := context.WithTimeout(ctx, cfg.timeout)
+	defer cancel()
+	if err := spawnAlpha(cfg.alphaBin, levelLog, sock, cfg.timeout, cfg.verbose, log, inv.Env); err != nil {
+		return fmt.Errorf("%s: %w", lvl.afPath, err)
+	}
+	if err := control.WaitListening(ctxLevel, sock); err != nil {
+		return fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
+	}
+
+	cleanErr := pushClean(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, af, cfg.agent)
+	// Always shut the transient alpha down, success or failure.
+	if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
+		log.Error("zordon", "shutdown transient alpha: %v", e)
+	}
+	if cleanErr != nil {
+		return fmt.Errorf("%s: %w", lvl.afPath, cleanErr)
+	}
+	return nil
+}
+
 // runSudo applies the idempotent privileged hooks for every running level
 // in the chain (steps pulled from each alpha's live state so snippets carry
 // the ports services actually bound to).

@@ -739,6 +739,14 @@ func (r *resolver) finishService(st *svcState) error {
 			if err != nil {
 				return err
 			}
+			// clean is the provision's own teardown snippet (run by `zordon
+			// clean`), interpolated in the same scope as cmd/verify. Unlike
+			// check/verify it is allowed alongside a cmd-ref: it undoes what
+			// this invoker did, not what the referenced template owns.
+			clean, err := r.evalStr(pb.Clean, selfP, label+".clean", dirs)
+			if err != nil {
+				return err
+			}
 			if isRef && (strings.TrimSpace(check) != "" || strings.TrimSpace(verify) != "") {
 				return fmt.Errorf("%s: check/verify are not allowed when cmd references another provision (the template owns them)", label)
 			}
@@ -785,6 +793,7 @@ func (r *resolver) finishService(st *svcState) error {
 				Check:       check,
 				Cmd:         cmd,
 				Verify:      verify,
+				Clean:       clean,
 				Env:         penv,
 				After:       afterClean,
 				Detached:    pb.Detached,
