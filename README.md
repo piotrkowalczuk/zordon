@@ -18,7 +18,7 @@ Three goals shape every decision.
 Why not containers?
 Code is increasingly written in a loop — change something, run the real stack against it, read the result, go again, hundreds of times an hour.
 Containers buy isolation by paying full cold-start and idle-overhead cost on *every* run: right for production, wasteful for a loop.
-Zordon takes the other side, recovering isolation from per-run [worktrees](docs/worktrees.md) instead of images — so a second stack beside yours, or a tenth, is a non-event.
+Zordon takes the other side, recovering isolation from per-run [workspaces](docs/workspaces.md) instead of images — so a second stack beside yours, or a tenth, is a non-event.
 
 Declare the whole stack in one `Alphasfile`:
 
@@ -44,7 +44,7 @@ zordon start   # resolve, build, bring it up, stream logs until everything is RE
 - **Polyglot toolchains.** Go, Rust, Ruby and Node.js services built straight from a git URL or local source; native packages (Redis, PostgreSQL, etcd, …) provisioned through [mise](https://mise.jdx.dev).
 - **One manifest.** The whole stack — source, build, run, env, readiness, logs — declared in a single [`Alphasfile`](docs/alphasfile.md).
 - **Dynamic configuration as a graph.** Values are functions, not strings: `net::pickport()` picks a free port, `fs::tmp()`/`fs::hash()` give per-run paths, and services reference each other (`service.go.caddy.vars.http`) with zero hardcoded wiring. → [docs](docs/dynamic-config.md)
-- **Worktrees.** `zordon worktree create x` stands up a second, fully isolated copy of the entire stack — own ports, own dirs — an agent's sandbox beside yours, no port-mapping. → [docs](docs/worktrees.md)
+- **Workspaces.** `zordon workspace create x` stands up a second, fully isolated copy of the entire stack — own ports, own dirs — an agent's sandbox beside yours, no port-mapping. → [docs](docs/workspaces.md)
 - **Federation.** Alphasfiles chain by directory position: a project *sits below* shared infra instead of importing it. Move it in the tree and its environment recomputes. → [docs](docs/federation.md)
 - **Readiness-aware bringup.** HTTP and exec readiness checks over a dependency graph; `zordon start` returns the moment every service is READY, then keeps the stack alive in the background.
 - **Convergent re-runs.** Re-running costs only what actually changed — no blanket teardown and rebuild.
@@ -61,7 +61,7 @@ Full docs: **<https://piotrkowalczuk.github.io/zordon/>**
 
 - [Alphasfile](docs/alphasfile.md) — the manifest: services, source pointers, readiness, logs
 - [Dynamic configuration](docs/dynamic-config.md) — the DAG, helpers, `self`, cross-service refs
-- [Worktrees](docs/worktrees.md) — parallel, isolated copies of the whole stack
+- [Workspaces](docs/workspaces.md) — parallel, isolated copies of the whole stack
 - [Federation](docs/federation.md) — chained Alphasfiles, shared infra, `zordon sudo`
 - [MCP server](docs/reference/mcp.md) — drive zordon (and its provisions) from an agent over MCP
 
@@ -84,7 +84,7 @@ zordon start              # spawn alpha, push config, stream bringup logs
 zordon status             # what's running across the whole chain right now?
 zordon stop               # ask alpha to shut its children down and exit
 zordon clean              # run each provision's clean teardown (stack stopped)
-zordon worktree create x  # a parallel, isolated copy of the stack
+zordon workspace create x  # a parallel, isolated copy of the stack
 ```
 
 See the [docs](https://piotrkowalczuk.github.io/zordon/) for everything else.

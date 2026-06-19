@@ -37,9 +37,9 @@ import (
 //	/sandbox/ during federation discovery, which is the same scope
 //	the toolchain cache and registry already live in.
 //
-// When zordon is run from <X>/.zordon/worktrees/<name>/, walkUp
+// When zordon is run from <X>/workspaces/<name>/, walkUp
 // naturally climbs to <X>/Alphasfile and adopts it as the leaf —
-// the worktree shares the project's file; only its Invocation
+// the workspace shares the project's file; only its Invocation
 // (state dir, hash) differs.
 func discoverChain(zordonHome string) (chain []string, invocationFile string, err error) {
 	invocationFile, err = walkUp()
@@ -103,8 +103,8 @@ type level struct {
 
 // resolveChain walks the chain top-down WITHOUT spawning anything, building
 // each level's Invocation from the resolved services of running ancestors.
-// The leaf's Invocation is derived from CWD (so a run from a worktree dir
-// gets that worktree's identity); parents are always "main", rooted at
+// The leaf's Invocation is derived from CWD (so a run from a workspace dir
+// gets that workspace's identity); parents are always "main", rooted at
 // their own directory.
 func resolveChain(ctx context.Context, zordonHome string, testCfg alphasfile.TestConfig) ([]*level, error) {
 	return walkChain(zordonHome, func(lv *level) (*protocol.StateInfo, error) {

@@ -52,11 +52,11 @@ directory, and from it a state dir, sockets, build outputs and
 per-service checkouts. Two runs of the same Alphasfile from different
 directories are different invocations, hence fully disjoint.
 
-So the Alphasfile is a template; an invocation (a worktree) is one
+So the Alphasfile is a template; an invocation (a workspace) is one
 concrete instantiation of it. "A run" — not "the file" — is the noun
 everything else hangs off.
 
-→ [Worktrees](worktrees.md)
+→ [Workspaces](workspaces.md)
 
 ## Service and toolchain
 
@@ -101,6 +101,6 @@ A run has an implicit filesystem shape you address symbolically, never
 by hardcoded path: `fs::src()` (this service's checkout), `fs::bin()`
 (build outputs, deliberately outside the checkout), `fs::tmp()`
 (scratch / generated files). They resolve per invocation, which is what
-keeps two worktrees from ever writing over each other.
+keeps two workspaces from ever writing over each other.
 
 → [Dynamic configuration](dynamic-config.md)

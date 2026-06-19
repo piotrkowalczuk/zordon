@@ -61,7 +61,7 @@ func TestClean_zordonClean(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/svc1")
 	p.WriteFile("Alphasfile", cleanAlphasfile)
 
-	marker := filepath.Join(p.Dir(), ".zordon", "worktrees", "main", "markers", "clean-me")
+	marker := filepath.Join(p.Dir(), "workspaces", "main", "markers", "clean-me")
 
 	start := p.Zordon("start", "--timeout", "120s", "--alpha-log", p.AlphaLogPath()).
 		WithTimeout(125 * time.Second).Run(t)
@@ -125,7 +125,7 @@ func TestClean_stopClean(t *testing.T) {
 	p.CopyTree("golden/go/echo", "src/svc1")
 	p.WriteFile("Alphasfile", cleanAlphasfile)
 
-	marker := filepath.Join(p.Dir(), ".zordon", "worktrees", "main", "markers", "clean-me")
+	marker := filepath.Join(p.Dir(), "workspaces", "main", "markers", "clean-me")
 
 	start := p.Zordon("start", "--timeout", "120s", "--alpha-log", p.AlphaLogPath()).
 		WithTimeout(125 * time.Second).Run(t)

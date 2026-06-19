@@ -3,6 +3,8 @@
 .DS_Store
 data
 .zordon
+# per-invocation workspace state (zordon workspace create / start writes here)
+workspaces
 examples/zordon
 _*.md
 # Ignore personal/local Claude state, but share the project hook config.

@@ -46,15 +46,15 @@ func TestMonorepoPerServiceBranches(t *testing.T) {
 	for _, svc := range []string{"svc-a", "svc-b"} {
 		dest := filepath.Join(wt, "src", svc)
 		if err := p.AddWorktree(ctx, dest, "zordon/main/"+svc, run); err != nil {
-			t.Fatalf("monorepo worktree %s: %v", svc, err)
+			t.Fatalf("monorepo workspace %s: %v", svc, err)
 		}
 		if _, err := os.Stat(filepath.Join(dest, ".git")); err != nil {
-			t.Fatalf("worktree %s not materialized: %v", svc, err)
+			t.Fatalf("workspace %s not materialized: %v", svc, err)
 		}
 	}
 
 	// Same branch reused at a different path still errors clearly (the
-	// guard must remain — it's now per-service, not per-worktree).
+	// guard must remain — it's now per-service, not per-workspace).
 	err = p.AddWorktree(ctx, filepath.Join(wt, "elsewhere"), "zordon/main/svc-a", run)
 	if err == nil || !strings.Contains(err.Error(), "already checked out") {
 		t.Fatalf("want already-checked-out error for reused branch, got %v", err)

@@ -9,7 +9,7 @@ import (
 )
 
 // Regression oracle for the Rust toolchain. Pure Compile — no cargo, no
-// spawn. `app` is the runnable worktree mode; the use-only / git+src
+// spawn. `app` is the runnable workspace mode; the use-only / git+src
 // reference shapes are commented out (offline-runnable example).
 func TestExampleRustResolves(t *testing.T) {
 	b, err := os.ReadFile("../../examples/rust/Alphasfile")
@@ -18,7 +18,7 @@ func TestExampleRustResolves(t *testing.T) {
 	}
 	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
-		StateDir: "/repo/examples/rust/.zordon/worktrees/main",
+		StateDir: "/repo/examples/rust/workspaces/main",
 	}
 	af, err := Compile("/repo/examples/rust/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {
@@ -26,14 +26,14 @@ func TestExampleRustResolves(t *testing.T) {
 	}
 
 	app := svcByName(af, "app")
-	if app == nil || !app.Worktreeable() || app.UseOnly() {
-		t.Fatalf("app must be a worktree rust service: %+v", app)
+	if app == nil || !app.Workspaceable() || app.UseOnly() {
+		t.Fatalf("app must be a workspace rust service: %+v", app)
 	}
 	if app.Toolchain != ToolchainRust {
 		t.Errorf("toolchain = %q, want rust", app.Toolchain)
 	}
 	// Runtime.Dir is the exe-anchored work dir (zfs.ServiceCwd).
-	wantDir := "/repo/examples/rust/.zordon/worktrees/main/src/app/examples/rust/src/app"
+	wantDir := "/repo/examples/rust/workspaces/main/src/app/examples/rust/src/app"
 	if app.Runtime.Dir != wantDir {
 		t.Errorf("app dir = %q, want %q", app.Runtime.Dir, wantDir)
 	}

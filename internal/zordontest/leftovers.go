@@ -26,7 +26,7 @@ import (
 //     never deregistered, meaning either alpha died unexpectedly
 //     or graceful stop didn't reap a child.
 //  2. The per-project state dir (<root>/.zordon/) still containing
-//     a socket or live worktree — secondary signal; should be
+//     a socket or live workspace — secondary signal; should be
 //     covered by (1) but useful for non-registry-using services.
 //
 // On a hit, the harness ALSO best-effort reaps via registry so the
@@ -119,10 +119,10 @@ func (p *Project) fsHash() string {
 
 // findStaleSocket scans the project's per-run state for an alpha
 // socket. Returns its path on hit, "" otherwise. Looks under
-// <root>/.zordon/worktrees/* because that's where alpha stages its
-// per-worktree state dir.
+// <root>/workspaces/* because that's where alpha stages its
+// per-workspace state dir.
 func findStaleSocket(root string) string {
-	matches, _ := filepath.Glob(filepath.Join(root, ".zordon", "worktrees", "*", "alpha.sock"))
+	matches, _ := filepath.Glob(filepath.Join(root, "workspaces", "*", "alpha.sock"))
 	if len(matches) == 0 {
 		return ""
 	}

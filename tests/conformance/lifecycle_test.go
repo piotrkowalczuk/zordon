@@ -76,7 +76,7 @@ service "go" "svc1" {
 
 	// Grab the socket path BEFORE stop so we can verify it disappears.
 	// The socket lives next to the alpha log inside the project's
-	// .zordon/worktrees/main/ tree; alpha's startup log carries the
+	// workspaces/main/ tree; alpha's startup log carries the
 	// resolved path.
 	sock := parseSocketPath(t, p.AlphaLogPath())
 

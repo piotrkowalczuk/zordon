@@ -21,9 +21,9 @@ Stateless. For one `zordon start` it:
 1. **Discovers the chain** — walks the invocation dir up to `$HOME`,
    collecting every `Alphasfile`, plus the optional global
    `~/.zordon/Alphasfile`; root-first, leaf last.
-2. **Builds an Invocation per level** — `Dir`, `Worktree`, `StateDir`,
+2. **Builds an Invocation per level** — `Dir`, `Workspace`, `StateDir`,
    `Hash`, `TmpDir`. The leaf's identity comes from the CWD (so a run
-   from `.zordon/worktrees/<name>/` is that worktree); parents are
+   from `workspaces/<name>/` is that workspace); parents are
    always `main` rooted at their own dir.
 3. **Resolves** each Alphasfile (pure: HCL2 parse → DAG → interpolate;
    no process spawn, no clone). Parent results feed the child's
@@ -71,7 +71,7 @@ the config hash, and the federation parents' file-level dotenv paths.
 Per invocation:
 
 ```
-<projectRoot>/.zordon/worktrees/<worktree>/
+<projectRoot>/workspaces/<workspace>/
   ├── start.lock          # flock guarding this level
   ├── src/<service>/      # per-service git worktree (fs::src)
   ├── bin/                # build outputs           (fs::bin)
@@ -85,4 +85,4 @@ $TMPDIR/
 
 `fs::bin()` is deliberately outside `src/` so building never dirties a
 `src` primary's working tree. The invocation hash makes `main` and any
-worktree fully disjoint on disk.
+workspace fully disjoint on disk.

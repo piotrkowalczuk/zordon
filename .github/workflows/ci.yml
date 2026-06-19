@@ -33,7 +33,7 @@ jobs:
           # No *_macos examples here — they need pfctl/resolver and
           # only run on macOS (via `make e2e`'s *_macos gate locally).
           - simple
-          - worktree
+          - workspace
     container:
       image: ${{ matrix.distro }}
       # tini as pid 1 to reap zombies; GitHub's bare `tail` pid 1

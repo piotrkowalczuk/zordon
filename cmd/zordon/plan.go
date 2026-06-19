@@ -218,9 +218,9 @@ func renderService(body *hclwrite.Body, s *alphasfile.Service) {
 		}
 	}
 
-	if s.Package != nil && s.Package.Worktree != nil && len(s.Package.Worktree.Sparse) > 0 {
-		wb := sb.AppendNewBlock("worktree", nil).Body()
-		wb.SetAttributeValue("sparse", stringListVal(s.Package.Worktree.Sparse))
+	if s.Package != nil && s.Package.Workspace != nil && len(s.Package.Workspace.Sparse) > 0 {
+		wb := sb.AppendNewBlock("workspace", nil).Body()
+		wb.SetAttributeValue("sparse", stringListVal(s.Package.Workspace.Sparse))
 	}
 
 	for _, st := range rt.Sudo {

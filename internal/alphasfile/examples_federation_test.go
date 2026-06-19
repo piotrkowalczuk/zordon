@@ -9,7 +9,7 @@ import (
 )
 
 // Regression oracle for the federation project's `print`: it must
-// surface the per-worktree domain (httpbin.<fs::hash>.test) on the
+// surface the per-workspace domain (httpbin.<fs::hash>.test) on the
 // Caddy port pulled from the federation parent context. Pure Compile.
 func TestExampleFederationPrint(t *testing.T) {
 	b, err := os.ReadFile("../../examples/federation_macos/project/Alphasfile")
@@ -18,8 +18,8 @@ func TestExampleFederationPrint(t *testing.T) {
 	}
 	iv := &invocation.InvocationState{
 		FsHash: "feedface00001111", TmpDir: "/tmp/zordon-feedface00001111",
-		Worktree: invocation.MainWorktree,
-		StateDir: "/repo/examples/federation_macos/project/.zordon/worktrees/main",
+		Workspace: invocation.MainWorkspace,
+		StateDir:  "/repo/examples/federation_macos/project/workspaces/main",
 	}
 	// Federation parent: caddy resolved with its vars (http + config_dir),
 	// the project reads service.go.caddy.vars.* through the flat namespace.
@@ -45,8 +45,8 @@ func TestExampleFederationPrint(t *testing.T) {
 	if !strings.Contains(p, "http://"+wantHost+":8080/") {
 		t.Errorf("print missing domain+hash+caddy port: %q", p)
 	}
-	if !strings.Contains(p, "worktree feedface00001111") {
-		t.Errorf("print missing worktree hash tail: %q", p)
+	if !strings.Contains(p, "workspace feedface00001111") {
+		t.Errorf("print missing workspace hash tail: %q", p)
 	}
 	if strings.Contains(p, "${") {
 		t.Errorf("print not fully interpolated: %q", p)

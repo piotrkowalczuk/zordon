@@ -10,7 +10,7 @@ need curl
 
 start
 
-markers="$EXROOT/.zordon/worktrees/main/markers"
+markers="$EXROOT/workspaces/main/markers"
 
 # Sync provisions: must be done by the time start returned.
 assert_present "$markers/init"

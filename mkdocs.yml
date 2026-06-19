@@ -39,7 +39,7 @@ nav:
       - Ruby: services/ruby.md
       - Node.js: services/nodejs.md
       - Package (pkg): services/pkg.md
-  - Worktrees: worktrees.md
+  - Workspaces: workspaces.md
   - Federation: federation.md
   - How-to:
       - Run a provision via MCP: how-to/run-a-provision-via-mcp.md

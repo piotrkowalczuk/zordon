@@ -11,7 +11,7 @@ need_net # postgres + redis build from source on first run
 
 start
 
-dump="$EXROOT/.zordon/worktrees/main/dump.sql"
+dump="$EXROOT/workspaces/main/dump.sql"
 assert_present "$dump"
 [ -s "$dump" ] || fail "dump file is empty — pg_dump produced no output"
 

@@ -3,7 +3,7 @@ sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 service "go" "serviceA" {
   src {
     path = "../.."
-    exe = "./examples/worktree/src/serviceA"
+    exe = "./examples/workspace/src/serviceA"
   }
 
   vars = {
@@ -18,10 +18,10 @@ service "go" "serviceA" {
     ]
   }
 
-  print = "http://127.0.0.1:${self.vars.port}/  (serviceA, worktree ${fs::hash()})"
+  print = "http://127.0.0.1:${self.vars.port}/  (serviceA, workspace ${fs::hash()})"
 
-  worktree {
-    sparse = ["examples/worktree/src/serviceA"]
+  workspace {
+    sparse = ["examples/workspace/src/serviceA"]
   }
 
   readiness {
@@ -37,7 +37,7 @@ service "go" "serviceA" {
 service "go" "serviceB" {
   src {
     path = "../.."
-    exe = "./examples/worktree/src/serviceB"
+    exe = "./examples/workspace/src/serviceB"
   }
 
   vars = {
@@ -52,10 +52,10 @@ service "go" "serviceB" {
     ]
   }
 
-  print = "http://127.0.0.1:${self.vars.port}/  (serviceB, worktree ${fs::hash()})"
+  print = "http://127.0.0.1:${self.vars.port}/  (serviceB, workspace ${fs::hash()})"
 
-  worktree {
-    sparse = ["examples/worktree/src/serviceB"]
+  workspace {
+    sparse = ["examples/workspace/src/serviceB"]
   }
 
   readiness {
@@ -71,7 +71,7 @@ service "go" "serviceB" {
 service "go" "serviceC" {
   src {
     path = "../.."
-    exe = "./examples/worktree/src/serviceC"
+    exe = "./examples/workspace/src/serviceC"
   }
 
   vars = {
@@ -86,10 +86,10 @@ service "go" "serviceC" {
     ]
   }
 
-  print = "http://127.0.0.1:${self.vars.port}/  (serviceC, worktree ${fs::hash()})"
+  print = "http://127.0.0.1:${self.vars.port}/  (serviceC, workspace ${fs::hash()})"
 
-  worktree {
-    sparse = ["examples/worktree/src/serviceC"]
+  workspace {
+    sparse = ["examples/workspace/src/serviceC"]
   }
 
   readiness {

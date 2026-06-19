@@ -22,11 +22,11 @@ arguments / readiness probe that consume them.
   the `exe` subdir, so the two coincide only when no `exe` is set.
 - `fs::bin()` — the per-invocation build-output dir, deliberately
   **outside** the source checkout so building never dirties a `src`
-  primary's worktree. The default Go build drops `<name>` here; reference
+  primary's workspace. The default Go build drops `<name>` here; reference
   it from `cmd` as `${fs::bin()}/<name>`.
 - `fs::hash()` — short hash identifying this **alpha instance** by its
-  filesystem location (project root + worktree). Stable across edits;
-  distinct per worktree. Handy for collision-free names, e.g.
+  filesystem location (project root + workspace). Stable across edits;
+  distinct per workspace. Handy for collision-free names, e.g.
   `app.${fs::hash()}.test`.
 - `cfg::hash()` — short hash of the **manifest** (Alphasfile bytes +
   resolved parent context). Changes whenever the manifest does — what

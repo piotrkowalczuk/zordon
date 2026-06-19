@@ -12,13 +12,13 @@ import (
 type StartOption func(*startOpts)
 
 type startOpts struct {
-	dir     string        // cwd relative to project root (e.g. a worktree subdir)
+	dir     string        // cwd relative to project root (e.g. a workspace subdir)
 	bringup time.Duration // zordon's own --timeout: the service bringup budget
 	env     map[string]string
 }
 
 // StartIn runs `zordon start` from relPath (relative to the project
-// root) instead of the root — drive a worktree subdir the way a
+// root) instead of the root — drive a workspace subdir the way a
 // developer `cd`s into it.
 func StartIn(relPath string) StartOption {
 	return func(o *startOpts) { o.dir = relPath }
@@ -76,7 +76,7 @@ func (p *Project) Start(t testing.TB, opts ...StartOption) *StartOutcome {
 			}
 		}
 		// Stop the alpha from wherever Start launched it (o.dir): a
-		// worktree-level alpha (StartIn) isn't reachable by the project-root
+		// workspace-level alpha (StartIn) isn't reachable by the project-root
 		// cleanup, so without this it leaks. Symmetric with Start, so callers
 		// don't hand-roll a Stop. Best-effort, no t.Fatal (we're in Cleanup).
 		_ = p.StopFrom(o.dir)

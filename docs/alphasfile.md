@@ -84,11 +84,11 @@ defaults — keep the manifest small.
   **Alphasfile's directory**. `path` is interpolated, so it can be
   derived from the host environment, e.g.
   `src { path = "${os::env("MONOREPO")}/services/api" }`. Outside a live
-  invocation (`zordon worktree`) only host-level helpers like `os::env`
+  invocation (`zordon workspace`) only host-level helpers like `os::env`
   are available; `fs::`/`cfg::`/`self.*` need a running instance.
 - **`src { exe = "..." }`** — the build target subdir (Go: the main
   package), relative to the source root. Default `.`. Can ride
-  alongside `git { }` (subdir within the cloned worktree) **or**
+  alongside `git { }` (subdir within the cloned workspace) **or**
   inside `src { path, exe }` for a local checkout.
 - **`crate { name, version, index, registry, git, branch, tag, rev }`**
   — rust-only. `cargo install <name>` from a registry or a git URL.
@@ -97,7 +97,7 @@ defaults — keep the manifest small.
 
 The build is the toolchain
 default run **in the checkout** — Go: `go build` of `exe` into
-`fs::bin()` (out-of-tree, so it never dirties a `src` worktree); Rust:
+`fs::bin()` (out-of-tree, so it never dirties a `src` workspace); Rust:
 `cargo build --release`; Ruby: `bundle install`. Override it with
 `build { cmd = [...] }` (see [Phases](#phases-build-runtime-agent)).
 It runs from the checkout; with no `runtime { cmd }` zordon runs the
@@ -105,8 +105,8 @@ built binary, and `runtime { cmd = [...] }` is an explicit argv override
 (needed only when the toolchain has more than one way to run it, e.g.
 `bundle exec ...` or `caddy run ...`).
 
-This is what makes parallel **worktrees** possible — see
-[Worktrees](worktrees.md).
+This is what makes parallel **workspaces** possible — see
+[Workspaces](workspaces.md).
 
 ### Flags / arguments
 

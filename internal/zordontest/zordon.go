@@ -45,7 +45,7 @@ func (z *ZordonCmd) WithEnv(key, value string) *ZordonCmd {
 
 // WithDir runs the invocation from relPath (relative to the project
 // root) instead of the project root itself. Use it to drive zordon
-// from inside a worktree subdir so walkUp picks up the same Alphasfile
+// from inside a workspace subdir so walkUp picks up the same Alphasfile
 // the way a developer would by `cd`-ing in.
 func (z *ZordonCmd) WithDir(relPath string) *ZordonCmd {
 	z.dir = relPath

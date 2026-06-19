@@ -8,7 +8,7 @@ source ../_lib.sh
 
 start
 
-state="$EXROOT/.zordon/worktrees/main"
+state="$EXROOT/workspaces/main"
 seeded="$state/data/seeded"
 registered="$state/registered"
 

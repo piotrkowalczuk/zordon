@@ -1,7 +1,7 @@
 // Command serviceA is one of three binaries in the SAME repo —
-// examples/worktree is a genuine monorepo (serviceA/B/C share one
+// examples/workspace is a genuine monorepo (serviceA/B/C share one
 // primary). Each gets its own per-service checkout and branch
-// (zordon/<worktree>/<service>); they never collide.
+// (zordon/<workspace>/<service>); they never collide.
 package main
 
 import (
@@ -20,7 +20,7 @@ func main() {
 
 	cwd, _ := os.Getwd()
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "hello from examples/worktree\nservice=%s\ntag=%s\naddr=%s\ncheckout=%s\n",
+		fmt.Fprintf(w, "hello from examples/workspace\nservice=%s\ntag=%s\naddr=%s\ncheckout=%s\n",
 			service, *tag, *addr, cwd)
 	})
 	fmt.Printf("%s: listening on %s (tag=%s, checkout=%s)\n", service, *addr, *tag, cwd)

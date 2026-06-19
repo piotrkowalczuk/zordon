@@ -18,8 +18,8 @@ func TestExampleEnvResolves(t *testing.T) {
 	}
 	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
-		Worktree: invocation.MainWorktree,
-		StateDir: "/repo/examples/env/.zordon/worktrees/main",
+		Workspace: invocation.MainWorkspace,
+		StateDir:  "/repo/examples/env/workspaces/main",
 	}
 	af, err := Compile("/repo/examples/env/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {
@@ -30,7 +30,7 @@ func TestExampleEnvResolves(t *testing.T) {
 		t.Fatal("app not resolved")
 	}
 
-	// src-only in the main worktree → in place: build/run from src as-is
+	// src-only in the main workspace → in place: build/run from src as-is
 	// (no git worktree add, no HEAD reset → uncommitted edits work). dir
 	// is the exe-anchored service work dir: resolved src (../.. ⇒ /repo)
 	// joined with `exe = "./examples/env/src/app"`. zfs.ServiceCwd is the
@@ -42,8 +42,8 @@ func TestExampleEnvResolves(t *testing.T) {
 	if s.Runtime.Dir != wantDir {
 		t.Errorf("in-place dir = %q, want %q (resolved ../.. + exe)", s.Runtime.Dir, wantDir)
 	}
-	if strings.Contains(s.Runtime.Dir, "/.zordon/worktrees/") {
-		t.Errorf("in-place must not be a worktree checkout: %q", s.Runtime.Dir)
+	if strings.Contains(s.Runtime.Dir, "/workspaces/") {
+		t.Errorf("in-place must not be a workspace checkout: %q", s.Runtime.Dir)
 	}
 
 	if s.Runtime.Env["ENV_STATIC"] != "hello" {

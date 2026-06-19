@@ -48,7 +48,7 @@ func TestExample_mcp(t *testing.T) {
 
 	// (1,2) tools/list: every command (except `mcp` itself) and every provision.
 	tools := listTools(ctx, t, cs)
-	for _, want := range []string{"start", "status", "stop", "get", "plan", "worktree", "sudo"} {
+	for _, want := range []string{"start", "status", "stop", "get", "plan", "workspace", "sudo"} {
 		if tools[want] == nil {
 			t.Errorf("tools/list missing command tool %q\n%s", want, stderr())
 		}
