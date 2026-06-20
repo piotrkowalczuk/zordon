@@ -18,11 +18,11 @@ const testCfgHash = "00000000cfg00000"
 // on $TMPDIR / cwd. Resolution must be pure: no clone, no spawn, no fs.
 func testInv() *invocation.InvocationState {
 	return &invocation.InvocationState{
-		Dir:      "/proj",
-		Worktree: "main",
-		StateDir: "/proj/.zordon/worktrees/main",
-		FsHash:   "abcd1234ef567890",
-		TmpDir:   "/tmp/zordon-abcd1234ef567890",
+		Dir:       "/proj",
+		Workspace: "main",
+		StateDir:  "/proj/workspaces/main",
+		FsHash:    "abcd1234ef567890",
+		TmpDir:    "/tmp/zordon-abcd1234ef567890",
 	}
 }
 
@@ -72,7 +72,7 @@ service "go" "api" {
 	if got := api.Runtime.Vars["tmp"]; got != "/tmp/zordon-abcd1234ef567890" {
 		t.Errorf("fs::tmp() = %v", got)
 	}
-	wantDir := "/proj/.zordon/worktrees/main/src/api"
+	wantDir := "/proj/workspaces/main/src/api"
 	if api.Runtime.Dir != wantDir {
 		t.Errorf("self.dir resolved = %q, want %q", api.Runtime.Dir, wantDir)
 	}
@@ -94,10 +94,10 @@ service "go" "api" {
 	}
 }
 
-// fs::state() returns the per-worktree state root
-// (`<repo>/.zordon/worktrees/<wt>`) — a stable location services can
+// fs::state() returns the per-workspace state root
+// (`<repo>/workspaces/<wt>`) — a stable location services can
 // drop persistent caches into (Bootsnap, Vite, sccache) that survive
-// across `zordon start` but are scoped per worktree. fs::tmp is
+// across `zordon start` but are scoped per workspace. fs::tmp is
 // invocation-scoped (volatile), fs::bin is for built binaries; state
 // is the right home for "regenerated on demand, but expensive enough
 // to keep across runs".
@@ -110,7 +110,7 @@ service "go" "api" {
 `
 	af := compile(t, src, nil)
 	api := svcByName(af, "api")
-	want := "/proj/.zordon/worktrees/main/cache/bootsnap"
+	want := "/proj/workspaces/main/cache/bootsnap"
 	if got := api.Runtime.Vars["cache_dir"]; got != want {
 		t.Errorf("fs::state() interpolation = %q, want %q", got, want)
 	}
@@ -129,7 +129,7 @@ service "go" "api" {
 `
 	af := compile(t, src, nil)
 	api := svcByName(af, "api")
-	want := "/proj/.zordon/worktrees/main/src/db@5432"
+	want := "/proj/workspaces/main/src/db@5432"
 	if got := api.Runtime.Vars["db_at"]; got != want {
 		t.Errorf("cross-service ref = %q, want %q", got, want)
 	}
@@ -138,7 +138,7 @@ service "go" "api" {
 func TestResolveFederationParentFlatNamespace(t *testing.T) {
 	parent := NewParentContext([]*Service{{
 		Toolchain: "go",
-		Runtime:   &RuntimeConfig{Name: "caddy", Dir: "/other/.zordon/worktrees/main/src/caddy", Vars: map[string]any{"http": int64(8080)}},
+		Runtime:   &RuntimeConfig{Name: "caddy", Dir: "/other/workspaces/main/src/caddy", Vars: map[string]any{"http": int64(8080)}},
 		Package:   &Package{Toolchain: "go", Git: "github.com/caddyserver/caddy"},
 	}})
 	src := `
@@ -152,7 +152,7 @@ service "go" "app" {
 	if got := app.Runtime.Vars["upstream"]; got != "127.0.0.1:8080" {
 		t.Errorf("parent vars ref = %q", got)
 	}
-	if got := app.Runtime.Vars["caddydir"]; got != "/other/.zordon/worktrees/main/src/caddy" {
+	if got := app.Runtime.Vars["caddydir"]; got != "/other/workspaces/main/src/caddy" {
 		t.Errorf("parent dir ref = %q", got)
 	}
 }
@@ -171,7 +171,7 @@ service "rust" "x" {
 
 // `git { }` + `src { exe }` is the canonical remote-with-subdir form:
 // git carries the URL (and ref); src carries only the build subdir
-// within the cloned worktree (no path).
+// within the cloned workspace (no path).
 func TestResolveGitWithSrcExe(t *testing.T) {
 	af := compile(t, `
 service "go" "api" {
@@ -183,8 +183,8 @@ service "go" "api" {
 }
 `, nil)
 	s := svcByName(af, "api")
-	if s == nil || !s.Worktreeable() || s.UseOnly() {
-		t.Fatalf("git+src{exe} must be a worktree service: %+v", s.Package)
+	if s == nil || !s.Workspaceable() || s.UseOnly() {
+		t.Fatalf("git+src{exe} must be a workspace service: %+v", s.Package)
 	}
 	if s.Package.Git != "github.com/a/api" || s.Package.Tag != "v1.0.0" || s.Package.Exe != "./cmd/api" {
 		t.Errorf("git+src{exe} not carried: %+v", s.Package)
@@ -219,16 +219,16 @@ service "go" "dup" {
 	}
 }
 
-func TestResolveUseOnlyNoWorktree(t *testing.T) {
-	// rust use-only block: installed, not worktree-able, no checkout dir.
+func TestResolveUseOnlyNoWorkspace(t *testing.T) {
+	// rust use-only block: installed, not workspace-able, no checkout dir.
 	af := compile(t, `
 service "rust" "tansu" {
   crate { name = "tansu" }
 }
 `, nil)
 	s := svcByName(af, "tansu")
-	if !s.UseOnly() || s.Worktreeable() || !s.Buildable() {
-		t.Errorf("use-only flags wrong: useOnly=%v wt=%v build=%v", s.UseOnly(), s.Worktreeable(), s.Buildable())
+	if !s.UseOnly() || s.Workspaceable() || !s.Buildable() {
+		t.Errorf("use-only flags wrong: useOnly=%v wt=%v build=%v", s.UseOnly(), s.Workspaceable(), s.Buildable())
 	}
 	if s.Package.Install != "tansu" {
 		t.Errorf("install = %q, want tansu", s.Package.Install)
@@ -285,7 +285,7 @@ service "go" "x" {
 // (the file that contains them), not against CWD where zordon happened
 // to be invoked from. Without this, running `zordon start` from a
 // subdir would compute different paths than running it from the
-// project root — same Alphasfile, different resolved checkouts. Worktrees
+// project root — same Alphasfile, different resolved checkouts. Workspaces
 // have the same need (they adopt the project-root Alphasfile and run
 // from a state subdir).
 func TestResolveSrc_resolvesAgainstAlphasfileDir(t *testing.T) {
@@ -327,7 +327,7 @@ service "go" "api" {
 	}
 }
 
-// The parse-only path (ParseServices, used by `zordon worktree`)
+// The parse-only path (ParseServices, used by `zordon workspace`)
 // resolves src{path} too, with the host-level function set available.
 func TestParseServicesSrcPathUsesFunctions(t *testing.T) {
 	t.Setenv("ZORDON_SRC_ROOT", "/tmp/monorepo")

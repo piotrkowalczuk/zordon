@@ -19,7 +19,7 @@ func TestCommandToolSubcommands(t *testing.T) {
 		all = append(all, s.Name)
 	}
 	slices.Sort(all)
-	wantAll := []string{"clean", "get", "mcp", "plan", "start", "status", "stop", "sudo", "worktree"}
+	wantAll := []string{"clean", "get", "mcp", "plan", "start", "status", "stop", "sudo", "workspace"}
 	if !slices.Equal(all, wantAll) {
 		t.Fatalf("subcommands = %v; want %v (update the MCP surface intentionally)", all, wantAll)
 	}
@@ -29,7 +29,7 @@ func TestCommandToolSubcommands(t *testing.T) {
 		tools = append(tools, s.Name)
 	}
 	slices.Sort(tools)
-	wantTools := []string{"clean", "get", "plan", "start", "status", "stop", "sudo", "worktree"}
+	wantTools := []string{"clean", "get", "plan", "start", "status", "stop", "sudo", "workspace"}
 	if !slices.Equal(tools, wantTools) {
 		t.Errorf("command tools = %v; want %v (mcp excluded)", tools, wantTools)
 	}

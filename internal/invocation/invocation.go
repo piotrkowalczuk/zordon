@@ -2,9 +2,9 @@
 // is this, and where does its state live". It is a leaf package (stdlib
 // only) so both the CLI and the resolver can depend on it without cycles.
 //
-// Every run happens in some worktree — the project root is just the
-// implicit worktree named "main". A run from
-// <X>/.zordon/worktrees/<name>/ is the worktree "<name>" over the same
+// Every run happens in some workspace — the project root is just the
+// implicit workspace named "main". A run from
+// <X>/workspaces/<name>/ is the workspace "<name>" over the same
 // adopted Alphasfile (<X>/Alphasfile), with its own state dir, hash, tmp
 // dir and per-service checkouts. There is no separate "default mode": the
 // only thing that differs is the name.
@@ -19,59 +19,59 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
-const MainWorktree = "main"
+const MainWorkspace = "main"
 
-// WorktreeName is the identifier of a worktree — "main" for the
-// implicit project-root worktree, or a user-chosen label for a side
-// checkout under <root>/.zordon/worktrees/<name>. Implements
+// WorkspaceName is the identifier of a workspace — "main" for the
+// implicit project-root workspace, or a user-chosen label for a side
+// checkout under <root>/workspaces/<name>. Implements
 // flag.Value so cmd/alpha and cmd/zordon register it directly as a
-// flag (auto-mapped to ZORDON_WORKTREE).
+// flag (auto-mapped to ZORDON_WORKSPACE).
 //
-// Validation: empty value normalizes to MainWorktree (so callers can
+// Validation: empty value normalizes to MainWorkspace (so callers can
 // always use the value as a non-empty path component); otherwise
 // allows letters, digits, '-', '_'. Anything else is rejected because
 // the name flows into git branch refs and filesystem paths where '/'
 // or shell metacharacters would surprise users.
-type WorktreeName string
+type WorkspaceName string
 
-func (w *WorktreeName) String() string {
+func (w *WorkspaceName) String() string {
 	if w == nil {
-		return MainWorktree
+		return MainWorkspace
 	}
 	if *w == "" {
-		return MainWorktree
+		return MainWorkspace
 	}
 	return string(*w)
 }
 
-func (w *WorktreeName) Set(s string) error {
+func (w *WorkspaceName) Set(s string) error {
 	if s == "" {
-		*w = MainWorktree
+		*w = MainWorkspace
 		return nil
 	}
 	for _, r := range s {
 		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
 			(r >= '0' && r <= '9') || r == '-' || r == '_'
 		if !ok {
-			return fmt.Errorf("invocation: worktree name %q: only [A-Za-z0-9_-] allowed", s)
+			return fmt.Errorf("invocation: workspace name %q: only [A-Za-z0-9_-] allowed", s)
 		}
 	}
-	*w = WorktreeName(s)
+	*w = WorkspaceName(s)
 	return nil
 }
 
-// Name returns the worktree label as a plain string (== MainWorktree
+// Name returns the workspace label as a plain string (== MainWorkspace
 // for the zero value), suitable for path joining and branch refs.
-func (w WorktreeName) Name() string {
+func (w WorkspaceName) Name() string {
 	if w == "" {
-		return MainWorktree
+		return MainWorkspace
 	}
 	return string(w)
 }
 
-// IsMain reports whether this is the implicit project-root worktree.
-func (w WorktreeName) IsMain() bool {
-	return w == "" || w == MainWorktree
+// IsMain reports whether this is the implicit project-root workspace.
+func (w WorkspaceName) IsMain() bool {
+	return w == "" || w == MainWorkspace
 }
 
 // InvocationState is the filesystem-location identity of a run: pure directory
@@ -83,37 +83,37 @@ func (w WorktreeName) IsMain() bool {
 // Alphasfile bytes + resolved parent context, so it is computed at the call
 // site via ConfigHash() and carried by the resolved alphasfile.Alphasfile.
 type InvocationState struct {
-	Dir      string            // normalized invocation dir (project root or worktree dir)
-	Worktree string            // "main" or "<name>"
-	StateDir string            // <X>/.zordon/worktrees/<Worktree>
-	FsHash   string            // sha8(Dir) — instance identity
-	TmpDir   string            // $TMPDIR/zordon-<FsHash>  (short; sockets live here)
-	Env      map[string]string // injected into spawned services
+	Dir       string            // normalized invocation dir (project root or workspace dir)
+	Workspace string            // "main" or "<name>"
+	StateDir  string            // <X>/workspaces/<Workspace>
+	FsHash    string            // sha8(Dir) — instance identity
+	TmpDir    string            // $TMPDIR/zordon-<FsHash>  (short; sockets live here)
+	Env       map[string]string // injected into spawned services
 
-	// OwnedServices is the set of services this (named) worktree took at
-	// `zordon worktree create <wt> [svc ...]`. Populated by build() from a
+	// OwnedServices is the set of services this (named) workspace took at
+	// `zordon workspace create <ws> [svc ...]`. Populated by build() from a
 	// scan of <StateDir>/src/*/.git (presence of .git = a real `git worktree
 	// add` was performed). Services NOT in this set fall back to the anchor
-	// Alphasfile's resolved dir (same as the main worktree's InPlace) so
+	// Alphasfile's resolved dir (same as the main workspace's InPlace) so
 	// they share the user's live tree instead of getting a forked, empty
-	// per-worktree checkout.
+	// per-workspace checkout.
 	//
 	// nil (the zero value) is "ownership unknown" — preserved for legacy
 	// struct-literal callers and historical behavior (treat every service
-	// as owned). Never consulted in the main worktree.
+	// as owned). Never consulted in the main workspace.
 	OwnedServices map[string]bool
 }
 
-// OwnsService reports whether the named worktree carries its own per-service
-// checkout for svc. Always false in the main worktree (main never forks; it
-// uses the live src tree in place). In named worktrees: nil OwnedServices ⇒
+// OwnsService reports whether the named workspace carries its own per-service
+// checkout for svc. Always false in the main workspace (main never forks; it
+// uses the live src tree in place). In named workspaces: nil OwnedServices ⇒
 // legacy "all owned" default (struct-literal callers in tests); non-nil ⇒
 // explicit set membership (the production path, populated from disk in
-// build()). The MainWorktree check uses the literal "main" string only —
-// an empty Worktree is treated as a (degenerate) named worktree, matching
+// build()). The MainWorkspace check uses the literal "main" string only —
+// an empty Workspace is treated as a (degenerate) named workspace, matching
 // the historical eval semantics relied on by oracle tests.
 func (i *InvocationState) OwnsService(svc string) bool {
-	if i == nil || i.Worktree == MainWorktree {
+	if i == nil || i.Workspace == MainWorkspace {
 		return false
 	}
 	if i.OwnedServices == nil {
@@ -135,11 +135,11 @@ func (i *InvocationState) BinDir() string {
 	return filepath.Join(i.StateDir, "bin")
 }
 
-// ProjectRoot is the directory the leaf Alphasfile lives in (the worktree's
+// ProjectRoot is the directory the leaf Alphasfile lives in (the workspace's
 // <X>). Relative `dir` primaries resolve against this.
 func (i *InvocationState) ProjectRoot() string {
-	// StateDir == <root>/.zordon/worktrees/<wt>
-	return filepath.Dir(filepath.Dir(filepath.Dir(i.StateDir)))
+	// StateDir == <root>/workspaces/<ws>
+	return filepath.Dir(filepath.Dir(i.StateDir))
 }
 
 // SocketPath is the alpha control socket for this invocation (kept under
@@ -152,18 +152,17 @@ func (i *InvocationState) SocketPath() string {
 func (i *InvocationState) LockPath() string     { return filepath.Join(i.StateDir, "start.lock") }
 func (i *InvocationState) AlphaLogPath() string { return filepath.Join(i.StateDir, "alpha.log") }
 
-// projectRootAndWorktree decides, purely from a directory, whether it is a
-// worktree dir (<X>/.zordon/worktrees/<name>) and returns the project root
-// <X> plus the worktree name. Otherwise the dir itself is the project root
-// and the worktree is "main".
-func projectRootAndWorktree(dir string) (root, worktree string) {
+// projectRootAndWorkspace decides, purely from a directory, whether it is a
+// workspace dir (<X>/workspaces/<name>) and returns the project root
+// <X> plus the workspace name. Otherwise the dir itself is the project root
+// and the workspace is "main".
+func projectRootAndWorkspace(dir string) (root, workspace string) {
 	clean := filepath.Clean(dir)
-	parent := filepath.Dir(clean) // .../.zordon/worktrees
-	gp := filepath.Dir(parent)    // .../.zordon
-	if filepath.Base(parent) == "worktrees" && filepath.Base(gp) == ".zordon" {
-		return filepath.Dir(gp), filepath.Base(clean)
+	parent := filepath.Dir(clean) // .../workspaces
+	if filepath.Base(parent) == "workspaces" {
+		return filepath.Dir(parent), filepath.Base(clean)
 	}
-	return clean, MainWorktree
+	return clean, MainWorkspace
 }
 
 // shortSum returns the first 16 hex chars of sha256(parts joined by 0-byte).
@@ -189,19 +188,19 @@ func NewInvocationState(invocationDir string) (*InvocationState, error) {
 	if err != nil {
 		return nil, err
 	}
-	root, wt := projectRootAndWorktree(abs)
-	return build(abs, root, wt), nil
+	root, ws := projectRootAndWorkspace(abs)
+	return build(abs, root, ws), nil
 }
 
 // NewInvocationStateAt builds the invocation for an Alphasfile addressed by its own
-// directory (used for federation parents, which are never worktrees —
+// directory (used for federation parents, which are never workspaces —
 // always "main" rooted at the file's dir).
 func NewInvocationStateAt(alphasfileDir string) (*InvocationState, error) {
 	abs, err := filepath.Abs(alphasfileDir)
 	if err != nil {
 		return nil, err
 	}
-	return build(abs, abs, MainWorktree), nil
+	return build(abs, abs, MainWorkspace), nil
 }
 
 // ConfigHash is the manifest identity: sha8 of the Alphasfile bytes joined with
@@ -214,19 +213,19 @@ func ConfigHash(afBytes, parentCtx []byte) string {
 	return shortSum(afBytes, parentCtx)
 }
 
-func build(dir, root, wt string) *InvocationState {
-	stateDir := filepath.Join(root, ".zordon", "worktrees", wt)
+func build(dir, root, ws string) *InvocationState {
+	stateDir := filepath.Join(root, "workspaces", ws)
 	fsh := shortSum([]byte(dir))
 	tmp := filepath.Join(zfs.SystemTempDir(), "zordon-"+fsh)
 	return &InvocationState{
 		Dir:           dir,
-		Worktree:      wt,
+		Workspace:     ws,
 		StateDir:      stateDir,
 		FsHash:        fsh,
 		TmpDir:        tmp,
-		OwnedServices: scanOwnedServices(stateDir, wt),
+		OwnedServices: scanOwnedServices(stateDir, ws),
 		Env: map[string]string{
-			"ZORDON_WORKTREE":  wt,
+			"ZORDON_WORKSPACE": ws,
 			"ZORDON_STATE_DIR": stateDir,
 			"ZORDON_FS_HASH":   fsh,
 		},
@@ -234,11 +233,11 @@ func build(dir, root, wt string) *InvocationState {
 }
 
 // scanOwnedServices reads <stateDir>/src/*/.git markers (one per service
-// that got a real `git worktree add`). Returns nil for the main worktree
-// (irrelevant — main never forks) and for a fresh worktree with no
+// that got a real `git worktree add`). Returns nil for the main workspace
+// (irrelevant — main never forks) and for a fresh workspace with no
 // materialized services (== "ownership unknown", legacy default).
-func scanOwnedServices(stateDir, wt string) map[string]bool {
-	if wt == "" || wt == MainWorktree {
+func scanOwnedServices(stateDir, ws string) map[string]bool {
+	if ws == "" || ws == MainWorkspace {
 		return nil
 	}
 	entries, err := zfs.ReadDir(filepath.Join(stateDir, "src"))

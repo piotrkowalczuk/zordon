@@ -295,11 +295,11 @@ type runConfig struct {
 	LogFile       string
 	Stabilization time.Duration
 	ShutdownGrace time.Duration
-	Home          zfs.DirName             // resolved zordon home (--home → ZORDON_HOME; "" ⇒ ~/.zordon)
-	TommyBin      zfs.DirName             // tommy wrapper override (--tommy-bin → ZORDON_TOMMY_BIN)
-	Worktree      invocation.WorktreeName // which worktree this alpha runs for (--worktree → ZORDON_WORKTREE)
-	ReadyFD       zfs.FileDescriptor      // parent handshake fd (--ready-fd → ZORDON_READY_FD; 0 ⇒ no handshake)
-	ParentFD      zfs.FileDescriptor      // parent-death pipe fd (--parent-fd → ZORDON_PARENT_FD; 0 ⇒ standalone)
+	Home          zfs.DirName              // resolved zordon home (--home → ZORDON_HOME; "" ⇒ ~/.zordon)
+	TommyBin      zfs.DirName              // tommy wrapper override (--tommy-bin → ZORDON_TOMMY_BIN)
+	Workspace     invocation.WorkspaceName // which workspace this alpha runs for (--workspace → ZORDON_WORKSPACE)
+	ReadyFD       zfs.FileDescriptor       // parent handshake fd (--ready-fd → ZORDON_READY_FD; 0 ⇒ no handshake)
+	ParentFD      zfs.FileDescriptor       // parent-death pipe fd (--parent-fd → ZORDON_PARENT_FD; 0 ⇒ standalone)
 }
 
 func main() {
@@ -316,10 +316,10 @@ func main() {
 	stabilization := runFlags.DurationLong("stabilization", 1*time.Second, "how long a service must stay alive after spawn to be considered ready")
 	shutdownGrace := runFlags.DurationLong("shutdown-grace", 2*time.Second, "time given to children to exit on SIGTERM before SIGKILL")
 	var home, tommyBin zfs.DirName
-	var worktree invocation.WorktreeName
+	var workspace invocation.WorkspaceName
 	runFlags.Value(0, "home", &home, "directory holding shared mise install and toolchain cache (env: ZORDON_HOME; defaults to ~/.zordon)")
 	runFlags.Value(0, "tommy-bin", &tommyBin, "tommy wrapper binary path (env: ZORDON_TOMMY_BIN; defaults to alpha-sibling lookup)")
-	runFlags.Value(0, "worktree", &worktree, "worktree name this alpha runs for (env: ZORDON_WORKTREE)")
+	runFlags.Value(0, "workspace", &workspace, "workspace name this alpha runs for (env: ZORDON_WORKSPACE)")
 	var readyFD, parentFD zfs.FileDescriptor
 	runFlags.Value(0, "ready-fd", &readyFD, "fd to signal READY=1 on once listening (env: ZORDON_READY_FD; 0 ⇒ no handshake)")
 	runFlags.Value(0, "parent-fd", &parentFD, "inherited read-end fd of the parent-death pipe (env: ZORDON_PARENT_FD; 0 ⇒ standalone)")
@@ -336,7 +336,7 @@ func main() {
 				ShutdownGrace: *shutdownGrace,
 				Home:          zfs.DirName(zfs.ZordonHome(home.Path())),
 				TommyBin:      tommyBin,
-				Worktree:      worktree,
+				Workspace:     workspace,
 				ReadyFD:       readyFD,
 				ParentFD:      parentFD,
 			})
@@ -364,7 +364,7 @@ type alphaState struct {
 	cfgHash        string   // manifest identity (Alphasfile+parent ctx); drives drift detection
 	zordonHome     string   // ~/.zordon — host-wide registry root (empty ⇒ registry disabled)
 	tommyBin       string   // path to the tommy wrapper interposed before every service (empty ⇒ spawn unwrapped)
-	worktree       string   // worktree name this alpha runs for (== invocation.MainWorktree by default)
+	workspace      string   // workspace name this alpha runs for (== invocation.MainWorkspace by default)
 	parentDotenv   []string // file-level dotenv paths inherited from federation parents
 	agentMode      bool     // configured via `zordon --agent`: apply agent{} env overlay
 	config         *alphasfile.Alphasfile
@@ -1526,7 +1526,7 @@ func serveAlpha(ctx context.Context, rc runConfig, life *daemon.Lifeline) error 
 		fsHash:     fsHash,
 		zordonHome: zordonHome,
 		tommyBin:   tommyBin,
-		worktree:   rc.Worktree.Name(),
+		workspace:  rc.Workspace.Name(),
 		shutdownCh: make(chan struct{}),
 		life:       life,
 	}
@@ -2277,7 +2277,7 @@ func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
 
 	// 2. Prepare. Two stages with different concurrency profiles:
 	//
-	//    a. Worktree materialization (git clone --bare + git worktree
+	//    a. Workspace materialization (git clone --bare + git worktree
 	//       add): serialized per-primary via state.primaryLockFor so
 	//       monorepo siblings don't race on the same bare clone path.
 	//       Cheap when the bare already exists — just a `git fetch`.
@@ -2334,10 +2334,10 @@ func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
 	if primaryKey := primaryKeyOf(svc); primaryKey != "" {
 		mu := state.primaryLockFor(primaryKey)
 		mu.Lock()
-		repoDir, err = prepareWorktree(prepCtx, svc, name, state.worktree, state.zordonHome, stream, log)
+		repoDir, err = prepareWorkspace(prepCtx, svc, name, state.workspace, state.zordonHome, stream, log)
 		mu.Unlock()
 	} else {
-		repoDir, err = prepareWorktree(prepCtx, svc, name, state.worktree, state.zordonHome, stream, log)
+		repoDir, err = prepareWorkspace(prepCtx, svc, name, state.workspace, state.zordonHome, stream, log)
 	}
 	if err != nil {
 		prepareFail(err)
@@ -2370,7 +2370,7 @@ func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
 
 // primaryKeyOf returns the cross-service-shareable key for a primary
 // (so monorepo services lock on the same string). Empty for services
-// without a worktree-able primary (crate / install).
+// without a workspaceable primary (crate / install).
 func primaryKeyOf(svc *alphasfile.Service) string {
 	if svc.Package == nil {
 		return ""
@@ -2831,7 +2831,7 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent
 		// matching the build cwd. Without this, a monorepo Go/Rust service
 		// would start with cwd at the repo root mirror and relative file
 		// refs (`./config.yml`) would resolve differently in main vs named
-		// worktree — a footgun the unification closes.
+		// workspace — a footgun the unification closes.
 		cmd.Dir = serviceCwd(svc)
 		if cmd.Dir == "" {
 			cmd.Dir = checkout
@@ -2922,7 +2922,7 @@ func defaultBuild(svc *alphasfile.Service, name, binDir, dest string) string {
 		}
 		return fmt.Sprintf("go build %s-o %q .", gcflags, out)
 	case alphasfile.ToolchainRust:
-		// Worktree rust: `cargo install --path .` from the exe-anchor into
+		// Workspace rust: `cargo install --path .` from the exe-anchor into
 		// <stateDir>/bin (== binDir). Stable CARGO_TARGET_DIR keeps
 		// compilation incremental across runs; --force so code edits land.
 		opts := ""
@@ -3110,7 +3110,7 @@ func inferNodeRunCmd(root string) ([]string, error) {
 	return nil, fmt.Errorf("package.json has no scripts.start, main, or single-entry bin — declare runtime { cmd = [...] }")
 }
 
-// prepareWorktree materializes the per-invocation checkout (or just
+// prepareWorkspace materializes the per-invocation checkout (or just
 // resolves the live src dir for InPlace / returns "" for use-only) and
 // returns the dir the subsequent build step should run in. Split out
 // from the build step so the per-primary lock — which exists to keep
@@ -3119,11 +3119,11 @@ func inferNodeRunCmd(root string) ([]string, error) {
 // dest dirs are independent and run in parallel even when their
 // services share a primary (a monorepo).
 //
-// Returns the checkout dir (empty for use-only services). Worktreeable
+// Returns the checkout dir (empty for use-only services). Workspaceable
 // = has a git or dir primary; crate/prebuilt services return "" here
 // and let the subsequent build step (`cargo install <crate>` /
 // `go install ...`) materialize the binary into bin dir.
-func prepareWorktree(ctx context.Context, svc *alphasfile.Service, name, wtName, zordonHome string, stream *safeEncoder, log *zlog.Logger) (string, error) {
+func prepareWorkspace(ctx context.Context, svc *alphasfile.Service, name, wsName, zordonHome string, stream *safeEncoder, log *zlog.Logger) (string, error) {
 	if svc.Package == nil || !svc.Buildable() {
 		return "", nil
 	}
@@ -3131,7 +3131,7 @@ func prepareWorktree(ctx context.Context, svc *alphasfile.Service, name, wtName,
 
 	switch {
 	case svc.Package.InPlace:
-		// src-only in the "main" worktree: use the live src tree as-is —
+		// src-only in the "main" workspace: use the live src tree as-is —
 		// no git worktree add, no HEAD reset. Uncommitted edits just work.
 		dest := ""
 		if svc.Runtime != nil {
@@ -3142,29 +3142,29 @@ func prepareWorktree(ctx context.Context, svc *alphasfile.Service, name, wtName,
 		}
 		log.Info("alpha", "prepare %s: in place %s (no worktree)", name, dest)
 		return dest, nil
-	case svc.Worktreeable():
+	case svc.Workspaceable():
 		dest := ""
 		if svc.Runtime != nil {
 			dest = svc.Runtime.Dir
 		}
 		if dest == "" {
-			return "", fmt.Errorf("worktree-able service %q has no resolved checkout dir", name)
+			return "", fmt.Errorf("workspaceable service %q has no resolved checkout dir", name)
 		}
 		// The git worktree checks out at the checkout ROOT (= fs::src).
 		// `dest` (= fs::exe / self.dir) is the <root>/<exe> build+run cwd,
 		// a subdir of the root when exe != ".". Adding the worktree at
 		// `dest` would target the wrong path and collide with
-		// `zordon worktree create` (which registers the root) the moment
-		// exe != "." — see TestWorktree_Go_exeOffset.
+		// `zordon workspace create` (which registers the root) the moment
+		// exe != "." — see TestWorkspace_Go_exeOffset.
 		checkout := dest
 		if svc.Runtime != nil && svc.Runtime.Checkout != "" {
 			checkout = svc.Runtime.Checkout
 		}
-		var worktree *source.Worktree
-		if svc.Package.Worktree != nil {
-			worktree = &source.Worktree{Sparse: svc.Package.Worktree.Sparse}
+		var workspace *source.Workspace
+		if svc.Package.Workspace != nil {
+			workspace = &source.Workspace{Sparse: svc.Package.Workspace.Sparse}
 		}
-		p, err := source.NewPrimary(zordonHome, svc.Package.Git, svc.Package.Src, svc.Ref(), worktree)
+		p, err := source.NewPrimary(zordonHome, svc.Package.Git, svc.Package.Src, svc.Ref(), workspace)
 		if err != nil {
 			return "", err
 		}
@@ -3172,11 +3172,11 @@ func prepareWorktree(ctx context.Context, svc *alphasfile.Service, name, wtName,
 		if err := p.Ensure(ctx, runner); err != nil {
 			return "", fmt.Errorf("ensure primary: %w", err)
 		}
-		// Branch is per (worktree, service): a monorepo where several
+		// Branch is per (workspace, service): a monorepo where several
 		// services share one primary repo would otherwise all want
-		// `zordon/<wt>` and the 2nd `git worktree add` would fail with
+		// `zordon/<ws>` and the 2nd `git worktree add` would fail with
 		// "branch already checked out". Slashes are valid in ref names.
-		branch := "zordon/" + wtName + "/" + name
+		branch := "zordon/" + wsName + "/" + name
 		log.Info("alpha", "prepare %s: worktree -> %s (branch %s)", name, checkout, branch)
 		if err := p.AddWorktree(ctx, checkout, branch, runner); err != nil {
 			return "", fmt.Errorf("git worktree: %w", err)
@@ -3189,7 +3189,7 @@ func prepareWorktree(ctx context.Context, svc *alphasfile.Service, name, wtName,
 }
 
 // prepareBuild runs the service's build step in dest (the worktree from
-// prepareWorktree, or "" for use-only `cargo install` / `go install`).
+// prepareWorkspace, or "" for use-only `cargo install` / `go install`).
 // Safe to run concurrently across services: each writes to its own
 // dest and bin dir; the per-primary lock is released BEFORE this step,
 // so monorepo siblings build in parallel.

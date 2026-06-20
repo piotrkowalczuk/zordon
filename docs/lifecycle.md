@@ -34,7 +34,7 @@ For each service in `Configure` order:
 2. **Prepare**
    - `git`/`src`: ensure the primary (bare-clone on first use), then
      `git worktree add` into `…/src/<svc>` on branch `zordon/<wt>`
-     (sparse cone if a `worktree { sparse = … }` block is set).
+     (sparse cone if a `workspace { sparse = … }` block is set).
    - `crate`: no checkout.
    - **Build** the toolchain default (or `build { cmd = [...] }`
      override) into `fs::bin()` — see [Services](services/go.md).

@@ -18,7 +18,7 @@ func TestExampleRubyResolves(t *testing.T) {
 	}
 	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
-		StateDir: "/repo/examples/ruby/.zordon/worktrees/main",
+		StateDir: "/repo/examples/ruby/workspaces/main",
 	}
 	af, err := Compile("/repo/examples/ruby/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {
@@ -26,8 +26,8 @@ func TestExampleRubyResolves(t *testing.T) {
 	}
 
 	app := svcByName(af, "app")
-	if app == nil || !app.Worktreeable() || app.UseOnly() {
-		t.Fatalf("app must be a worktree ruby service: %+v", app)
+	if app == nil || !app.Workspaceable() || app.UseOnly() {
+		t.Fatalf("app must be a workspace ruby service: %+v", app)
 	}
 	if app.Toolchain != ToolchainRuby {
 		t.Errorf("toolchain = %q, want ruby", app.Toolchain)

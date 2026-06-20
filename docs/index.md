@@ -48,7 +48,7 @@ iteration:
 Containers buy isolation by paying the full latency-and-overhead cost
 upfront, on every run. That trade is right for production and wrong for
 a loop. Zordon takes the other side: ordinary supervised host processes,
-with isolation recovered from per-run worktrees instead of from images.
+with isolation recovered from per-run workspaces instead of from images.
 
 ## Where it fits
 
@@ -63,5 +63,5 @@ that.
 
 - [Getting started](getting-started.md) — install and a first stack
 - [Concepts](concepts.md) — the mental model that makes the rest obvious
-- [Architecture](architecture.md) · [Alphasfile](alphasfile.md) · [Worktrees](worktrees.md) · [Federation](federation.md)
+- [Architecture](architecture.md) · [Alphasfile](alphasfile.md) · [Workspaces](workspaces.md) · [Federation](federation.md)
 - [`zordon mcp` reference](reference/mcp.md) · [Run a provision via MCP](how-to/run-a-provision-via-mcp.md) — drive zordon (and its provisions) from an agent over MCP

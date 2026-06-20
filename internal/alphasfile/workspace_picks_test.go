@@ -8,19 +8,19 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 )
 
-// TestWorktreePartialPick_NonPickedFallsBackToAnchor pins the rule that
-// services NOT picked at `zordon worktree create <wt> [svc ...]` resolve
+// TestWorkspacePartialPick_NonPickedFallsBackToAnchor pins the rule that
+// services NOT picked at `zordon workspace create <wt> [svc ...]` resolve
 // their dir to the anchor Alphasfile's project root (same place
-// main-worktree InPlace puts them), NOT to <wtdir>/src/<svc>. The
+// main-workspace InPlace puts them), NOT to <wtdir>/src/<svc>. The
 // "owned" set is determined from disk: presence of <wtdir>/src/<svc>/.git
-// (left by `git worktree add` in cmd/zordon/worktree.go:checkoutServices).
+// (left by `git worktree add` in cmd/zordon/workspace.go:checkoutServices).
 //
 // Today the resolver overrides every locally-declared service in a named
-// worktree to inv.CheckoutPath(name) — so non-picked services point at an
-// empty/forked dir under the worktree, and provision shells with relative
+// workspace to inv.CheckoutPath(name) — so non-picked services point at an
+// empty/forked dir under the workspace, and provision shells with relative
 // paths (`./plik.sql`) run with the wrong cwd. This test is expected to
 // fail until that override is fixed.
-func TestWorktreePartialPick_NonPickedFallsBackToAnchor(t *testing.T) {
+func TestWorkspacePartialPick_NonPickedFallsBackToAnchor(t *testing.T) {
 	tmp := t.TempDir()
 	af := []byte(`
 service "go" "serviceA" {
@@ -50,10 +50,10 @@ service "go" "serviceC" {
 		t.Fatal(err)
 	}
 
-	// Simulate `zordon worktree create feature serviceA`: only serviceA
+	// Simulate `zordon workspace create feature serviceA`: only serviceA
 	// gets a checkout (we leave a .git marker, mimicking what
 	// `git worktree add` leaves behind).
-	wtDir := filepath.Join(tmp, ".zordon", "worktrees", "feature")
+	wtDir := filepath.Join(tmp, "workspaces", "feature")
 	svcADir := filepath.Join(wtDir, "src", "serviceA")
 	if err := os.MkdirAll(svcADir, 0o755); err != nil {
 		t.Fatal(err)
@@ -66,9 +66,9 @@ service "go" "serviceC" {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inv.Worktree != "feature" {
-		t.Fatalf("invocation worktree = %q, want %q (wtDir %s not recognised as a worktree)",
-			inv.Worktree, "feature", wtDir)
+	if inv.Workspace != "feature" {
+		t.Fatalf("invocation workspace = %q, want %q (wtDir %s not recognised as a workspace)",
+			inv.Workspace, "feature", wtDir)
 	}
 
 	got, err := Compile(afPath, af, inv, nil, invocation.ConfigHash(af, nil), TestConfig{})
@@ -78,7 +78,7 @@ service "go" "serviceC" {
 
 	// Runtime.Dir is the exe-anchored work dir (zfs.ServiceCwd): the
 	// checkout root joined with src.exe. Owned services anchor on the
-	// per-worktree checkout; non-picked services anchor on the
+	// per-workspace checkout; non-picked services anchor on the
 	// (in-place) project root. Both join the service's `exe` offset.
 	want := map[string]string{
 		"serviceA": filepath.Join(svcADir, "a"), // owned: <wtdir>/src/serviceA + ./a

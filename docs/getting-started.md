@@ -21,7 +21,7 @@ zordon start              # resolve, build, bring the stack up, stream logs
 zordon start svc1 svc2    # bring up just these services (+ their after deps)
 zordon status             # what's running across the whole chain right now?
 zordon stop               # shut this level's services down
-zordon worktree create x  # a parallel, isolated copy of the whole stack
+zordon workspace create x  # a parallel, isolated copy of the whole stack
 zordon get <expr>         # print one resolved value (path or Go template)
 ```
 

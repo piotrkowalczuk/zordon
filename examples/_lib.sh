@@ -13,8 +13,8 @@ ZORDON="$ROOT/bin/zordon"
 ALPHA="$ROOT/bin/alpha"
 
 # Sourced right after `cd "$(dirname "$0")"`, so this is the example
-# root (examples/<name>) even for worktree, which cds deeper later.
-# Per-example binaries live under "$EXROOT/.zordon"; port discovery is
+# root (examples/<name>) even for workspace, which cds deeper later.
+# Per-example binaries live under "$EXROOT/workspaces"; port discovery is
 # scoped to it so a same-named binary from another example (several are
 # just called `app`) or a stale prior run can't be matched by mistake.
 EXROOT="$PWD"
@@ -54,17 +54,17 @@ zordon() { "$ZORDON" "$@"; }
 
 # reap: kill any process still bound to THIS example's state dir (a
 # leaked detached alpha/service from an earlier interrupted run).
-reap() { pkill -f "$EXROOT/.zordon/" >/dev/null 2>&1 || true; }
+reap() { pkill -f "$EXROOT/(\.zordon|workspaces)/" >/dev/null 2>&1 || true; }
 
 # reset_state: clean this example's zordon-managed scratch so the run is
-# reproducible. Removes its .zordon dir, prunes dead git worktrees, and
-# deletes the legacy bare `zordon/<wt>` branch (pre per-service-branch
-# scheme) which otherwise blocks creating `zordon/<wt>/<svc>`. Scoped to
+# reproducible. Removes its workspace dir, prunes dead git worktrees, and
+# deletes the legacy bare `zordon/<ws>` branch (pre per-service-branch
+# scheme) which otherwise blocks creating `zordon/<ws>/<svc>`. Scoped to
 # the zordon/* namespace — never touches user branches.
 reset_state() {
 	local wt="${1:-main}" repo b
 	reap
-	rm -rf "$EXROOT/.zordon/worktrees/$wt"
+	rm -rf "$EXROOT/workspaces/$wt"
 	# The user's repo (dir primaries) AND every cached bare clone (git
 	# primaries, ~/.zordon/src/**.git) may carry a legacy bare
 	# `zordon/<wt>` branch that blocks creating `zordon/<wt>/<svc>`.
@@ -81,7 +81,7 @@ reset_state() {
 #
 # alpha-log is pinned to <example>/.zordon/alpha.log so tests can assert
 # against it without colliding with other examples or stale runs in
-# /tmp/alpha.log. reset_state wipes .zordon/ first so the file starts empty.
+# /tmp/alpha.log.
 ALPHA_LOG="$EXROOT/.zordon/alpha.log"
 start() {
 	build_bins
@@ -99,7 +99,7 @@ port_of() {
 	local pat="$1" line
 	# Scope to this example's state dir first; fall back to a bare match
 	# (ruby is launched as `ruby .../app.rb`, not from "$EXROOT/.zordon").
-	line="$(ps -axww -o args= 2>/dev/null | grep -F "$EXROOT/.zordon" | grep -F -- "$pat" | grep -v grep | head -1 || true)"
+	line="$(ps -axww -o args= 2>/dev/null | grep -F "$EXROOT/workspaces" | grep -F -- "$pat" | grep -v grep | head -1 || true)"
 	[ -n "$line" ] || line="$(ps -axww -o args= 2>/dev/null | grep -F -- "$pat" | grep -v grep | head -1 || true)"
 	[ -n "$line" ] || return 1
 	echo "$line" | sed -nE 's/.*-addr 127\.0\.0\.1:([0-9]+).*/\1/p'

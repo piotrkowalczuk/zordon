@@ -19,8 +19,8 @@ func TestExamplePhasesResolves(t *testing.T) {
 	}
 	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
-		Worktree: invocation.MainWorktree,
-		StateDir: "/repo/examples/phases/.zordon/worktrees/main",
+		Workspace: invocation.MainWorkspace,
+		StateDir:  "/repo/examples/phases/workspaces/main",
 	}
 	af, err := Compile("/repo/examples/phases/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {

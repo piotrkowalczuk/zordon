@@ -18,7 +18,7 @@ func TestExampleGoResolves(t *testing.T) {
 	}
 	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
-		StateDir: "/repo/examples/go/.zordon/worktrees/main",
+		StateDir: "/repo/examples/go/workspaces/main",
 	}
 	af, err := Compile("/repo/examples/go/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {
@@ -26,14 +26,14 @@ func TestExampleGoResolves(t *testing.T) {
 	}
 
 	app := svcByName(af, "app")
-	if app == nil || !app.Worktreeable() || app.UseOnly() {
-		t.Fatalf("app must be a worktree service: %+v", app)
+	if app == nil || !app.Workspaceable() || app.UseOnly() {
+		t.Fatalf("app must be a workspace service: %+v", app)
 	}
 	// Runtime.Dir is the exe-anchored work dir (zfs.ServiceCwd): the
 	// per-invocation checkout joined with src.exe. examples/go pins
 	// `exe = "./examples/go/src/app"`, the build target inside the
 	// repo-rooted checkout.
-	wantDir := "/repo/examples/go/.zordon/worktrees/main/src/app/examples/go/src/app"
+	wantDir := "/repo/examples/go/workspaces/main/src/app/examples/go/src/app"
 	if app.Runtime.Dir != wantDir {
 		t.Errorf("app dir = %q, want %q", app.Runtime.Dir, wantDir)
 	}

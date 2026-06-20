@@ -17,8 +17,8 @@ func TestExampleStatusResolves(t *testing.T) {
 	}
 	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
-		Worktree: invocation.MainWorktree,
-		StateDir: "/repo/examples/status/.zordon/worktrees/main",
+		Workspace: invocation.MainWorkspace,
+		StateDir:  "/repo/examples/status/workspaces/main",
 	}
 	af, err := Compile("/repo/examples/status/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {

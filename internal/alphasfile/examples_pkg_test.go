@@ -19,7 +19,7 @@ func TestExamplePkgResolves(t *testing.T) {
 	}
 	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
-		StateDir: "/repo/examples/pkg/.zordon/worktrees/main",
+		StateDir: "/repo/examples/pkg/workspaces/main",
 	}
 	af, err := Compile("/repo/examples/pkg/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {
@@ -36,8 +36,8 @@ func TestExamplePkgResolves(t *testing.T) {
 	if redis.Pkg == nil || redis.Pkg.Name != "redis" || redis.Pkg.Version != "7.4.1" {
 		t.Fatalf("redis.Pkg = %+v, want {redis 7.4.1}", redis.Pkg)
 	}
-	if redis.Worktreeable() || redis.UseOnly() || redis.Buildable() {
-		t.Errorf("pkg service must not be worktreeable/use-only/buildable")
+	if redis.Workspaceable() || redis.UseOnly() || redis.Buildable() {
+		t.Errorf("pkg service must not be workspaceable/use-only/buildable")
 	}
 	if redis.Runtime.Readiness == nil || redis.Runtime.Readiness.TCP == nil || redis.Runtime.Readiness.TCP.Port <= 0 {
 		t.Errorf("redis must have a resolved TCP readiness probe: %+v", redis.Runtime.Readiness)

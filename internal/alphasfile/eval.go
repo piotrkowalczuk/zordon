@@ -421,14 +421,14 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 		// dir = where this service's code lives for this invocation.
 		//
 		//   src-only, used IN PLACE (your live working tree; zordon
-		//     never copies or git-worktrees it) when either:
-		//       - main worktree (the default; "main" just means "use
+		//     never copies or git-workspaces it) when either:
+		//       - main workspace (the default; "main" just means "use
 		//         src directly"), OR
-		//       - named worktree that did NOT pick this service at
-		//         `worktree create` (we share the anchor Alphasfile's
+		//       - named workspace that did NOT pick this service at
+		//         `workspace create` (we share the anchor Alphasfile's
 		//         tree so provision shells with relative paths like
 		//         `./plik.sql` resolve against the real source).
-		//   anything else (named worktree owning the service, or any
+		//   anything else (named workspace owning the service, or any
 		//     git primary) → a per-invocation checkout alpha
 		//     materializes via git worktree add.
 		//
@@ -989,8 +989,8 @@ func (r *resolver) finishService(st *svcState) error {
 		}
 	}
 
-	// Modes: use-only (install), remote-worktree (git block), or
-	// local-worktree (src{path}). git+src{exe} (no path) is allowed:
+	// Modes: use-only (install), remote-workspace (git block), or
+	// local-workspace (src{path}). git+src{exe} (no path) is allowed:
 	// src carries only the build subdir inside the cloned remote.
 	var srcGitURL, srcLocalPath, srcBranch, srcTag, srcRev, srcExe string
 	if sb.Git != nil {
@@ -1018,12 +1018,12 @@ func (r *resolver) finishService(st *svcState) error {
 		return fmt.Errorf("service %q has no source: declare src {}, git {}, or %s", sb.Name, field)
 	}
 
-	var worktree *Worktree
-	if sb.Worktree != nil && len(sb.Worktree.Sparse) > 0 {
+	var workspace *Workspace
+	if sb.Workspace != nil && len(sb.Workspace.Sparse) > 0 {
 		// Sparse cone paths are relative to the primary repo root (what
 		// `git sparse-checkout set` expects) — pass verbatim, not joined
 		// to an absolute Alphasfile path.
-		worktree = &Worktree{Sparse: cleanSparse(sb.Worktree.Sparse)}
+		workspace = &Workspace{Sparse: cleanSparse(sb.Workspace.Sparse)}
 	}
 
 	var dbg *DebuggerConfig
@@ -1039,7 +1039,7 @@ func (r *resolver) finishService(st *svcState) error {
 
 	// For use-only-from-git (rust crate { git, branch/tag/rev }) the git
 	// fields ride along in Package.Git/Branch/Tag/Rev — the alpha-side
-	// command builder reads them when Install != "". For worktree mode
+	// command builder reads them when Install != "". For workspace mode
 	// they hold the clone coordinates instead.
 	pkgGit, pkgBranch, pkgTag, pkgRev := srcGitURL, srcBranch, srcTag, srcRev
 	if install != "" && instGit != "" {
@@ -1064,9 +1064,9 @@ func (r *resolver) finishService(st *svcState) error {
 			Bin:       sb.Bin,
 			BuildCmd:  buildCmd,
 			Cmd:       strings.Join(command, " "),
-			Worktree:  worktree,
-			// In-place: src-only AND either main worktree, or a named
-			// worktree that did not pick this service (no per-worktree
+			Workspace: workspace,
+			// In-place: src-only AND either main workspace, or a named
+			// workspace that did not pick this service (no per-workspace
 			// checkout under <wtdir>/src/<svc>). Alpha builds/runs from
 			// src as-is — no git worktree add, no HEAD reset.
 			InPlace: srcLocalPath != "" && !r.inv.OwnsService(sb.Name),
@@ -1748,7 +1748,7 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 		"fs::src":   str(func() string { return dirs.root }),      // src.path: checkout root (service scope only)
 		"fs::exe":   str(func() string { return dirs.exe }),       // src.path + src.exe: exe-anchored work dir (= self.dir)
 		"fs::bin":   str(func() string { return r.inv.BinDir() }), // build outputs (outside src)
-		"fs::state": str(func() string { return r.inv.StateDir }), // per-worktree state root (.zordon/worktrees/<wt>)
+		"fs::state": str(func() string { return r.inv.StateDir }), // per-workspace state root (workspaces/<wt>)
 		"fs::hash":  r.fsHashFunc(),                               // instance identity (location)
 		// cfg:: namespace — manifest identity (Alphasfile bytes + parent ctx).
 		"cfg::hash": r.cfgHashFunc(),
@@ -1782,7 +1782,7 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 
 // evalStaticSrcPath evaluates a src{path} expression without a live
 // invocation — the parse-only context ParseServices (and `zordon
-// worktree`) runs in. Only host-level helpers (os::env) are available;
+// workspace`) runs in. Only host-level helpers (os::env) are available;
 // invocation/identity namespaces (fs::, cfg::, src::, net::, self.*)
 // are absent, so referencing them is a clear eval error rather than a
 // silent empty string. Returns "" when src{path} is absent.
@@ -1911,7 +1911,7 @@ func osEnvFunc() function.Function {
 // directory (so the same Alphasfile means the same thing regardless of
 // where the user ran zordon from — `cd into subdir; zordon start` walks
 // up to the same file and gets the same resolved paths). Empty stays
-// empty (no dir primary). Worktree invocations adopt the project-root
+// empty (no dir primary). Workspace invocations adopt the project-root
 // Alphasfile, so r.afDir is project root there too.
 func (r *resolver) resolveDir(dir string) string {
 	if dir == "" {
@@ -1921,8 +1921,8 @@ func (r *resolver) resolveDir(dir string) string {
 }
 
 // fsHashFunc returns the short (16 hex chars) hash that identifies this
-// alpha instance by its filesystem location (invocation dir + worktree).
-// Stable per directory across runs and edits; unique across worktrees.
+// alpha instance by its filesystem location (invocation dir + workspace).
+// Stable per directory across runs and edits; unique across workspaces.
 // Same token names the socket and tmp dir. Handy for collision-free
 // hostnames in a shared reverse proxy: "myapp.${fs::hash()}.test".
 func (r *resolver) fsHashFunc() function.Function {
@@ -1954,7 +1954,7 @@ func (r *resolver) cfgHashFunc() function.Function {
 
 // srcHashFunc returns the short identity of the current service's source
 // code. For a git-tracked checkout (dir/src primary, or a materialized git
-// worktree) that's `git rev-parse --short HEAD`; otherwise it errors. Use
+// workspace) that's `git rev-parse --short HEAD`; otherwise it errors. Use
 // it as a build cache key or a "code generation" stamp — pair with
 // fs::hash() when you also need the location.
 func (r *resolver) srcHashFunc(root string) function.Function {

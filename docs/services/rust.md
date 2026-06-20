@@ -2,7 +2,7 @@
 
 Rust has two source shapes — a **crate** (`cargo install` from a
 registry or a git URL) or a **git/src checkout** (zordon-managed
-worktree, built with `cargo install --path`) — and they are mutually
+workspace, built with `cargo install --path`) — and they are mutually
 exclusive.
 
 ```hcl
@@ -24,7 +24,7 @@ service "rust" "some-tool" {
   }
 }
 
-# zordon-managed worktree (clone + cargo install --path)
+# zordon-managed workspace (clone + cargo install --path)
 service "rust" "broker" {
   git {
     url = "https://github.com/acme/broker"
@@ -47,7 +47,7 @@ service "rust" "app" {
 - **`crate { name, version, index, registry, git, branch, tag, rev }`**
   — runs `cargo install <name>` with the cargo CLI source flags.
   `version` is mutually exclusive with `git`. `branch`/`tag`/`rev` are
-  only valid with `git`. Cargo manages the fetch — no zordon worktree.
+  only valid with `git`. Cargo manages the fetch — no zordon workspace.
 - **`git { url, branch, tag, rev }`** — a remote checkout zordon owns:
   `url` clones it, `branch`/`tag`/`rev` pin the revision. Builds via
   `cargo install --path`.
@@ -78,7 +78,7 @@ CARGO_TARGET_DIR=<cache> cargo install "<name>" --root <stateDir> \
   [--version …] [--git … [--branch|--tag|--rev …]] \
   [--index …] [--registry …] [--features …] [--bin …] --locked
 
-# git/src worktree (cwd = <checkout>/<exe>; --force so code changes are picked up)
+# git/src workspace (cwd = <checkout>/<exe>; --force so code changes are picked up)
 CARGO_TARGET_DIR=<cache> cargo install --path . --root <stateDir> \
   [--features …] [--bin …] --locked --force
 ```

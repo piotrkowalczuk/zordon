@@ -20,6 +20,7 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/control"
+	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/ring"
@@ -173,47 +174,89 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		},
 	}
 
-	// worktree (parent + nested create/list/rm as full ff subcommands — not a
-	// hand-rolled args switch — so each gets ff's own parsing, usage and -h).
-	wtFlags := ff.NewFlagSet("worktree").SetParent(rootFlags)
-	wtCmd := &ff.Command{
-		Name:      "worktree",
-		Usage:     "zordon worktree <create|list|rm> [args]",
-		ShortHelp: "manage parallel worktrees (isolated state/ports over the same Alphasfile)",
-		Flags:     wtFlags,
-		// No Exec: bare `zordon worktree` prints help listing the subcommands.
+	// workspace (parent + nested create/list/rm/service as full ff subcommands
+	// — not a hand-rolled args switch — so each gets ff's own parsing, usage
+	// and -h).
+	wsFlags := ff.NewFlagSet("workspace").SetParent(rootFlags)
+	wsCmd := &ff.Command{
+		Name:      "workspace",
+		Usage:     "zordon workspace <create|list|rm|service> [args]",
+		ShortHelp: "manage parallel workspaces (isolated state/ports over the same Alphasfile)",
+		Flags:     wsFlags,
+		// No Exec: bare `zordon workspace` prints help listing the subcommands.
 	}
-	wtCreateFlags := ff.NewFlagSet("create").SetParent(wtFlags)
-	wtCreateCmd := &ff.Command{
+	wsCreateFlags := ff.NewFlagSet("create").SetParent(wsFlags)
+	wsCreateCmd := &ff.Command{
 		Name:      "create",
-		Usage:     "zordon worktree create <name> [service[@rev] ...]",
-		ShortHelp: "create a worktree and check out its worktree-able services",
-		Flags:     wtCreateFlags,
+		Usage:     "zordon workspace create <name> [service[@rev] ...]",
+		ShortHelp: "create a workspace and check out its workspaceable services",
+		Flags:     wsCreateFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runWorktreeCreate(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, args, zfs.ZordonHome(home.Path()))
+			return runWorkspaceCreate(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, args, zfs.ZordonHome(home.Path()))
 		},
 	}
-	wtListFlags := ff.NewFlagSet("list").SetParent(wtFlags)
-	wtListCmd := &ff.Command{
+	wsListFlags := ff.NewFlagSet("list").SetParent(wsFlags)
+	wsListCmd := &ff.Command{
 		Name:      "list",
-		Usage:     "zordon worktree list",
-		ShortHelp: "list the worktrees of the current project",
-		Flags:     wtListFlags,
+		Usage:     "zordon workspace list",
+		ShortHelp: "list the workspaces of the current project",
+		Flags:     wsListFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runWorktreeList(stdio.Stdout)
+			return runWorkspaceList(stdio.Stdout)
 		},
 	}
-	wtRmFlags := ff.NewFlagSet("rm").SetParent(wtFlags)
-	wtRmCmd := &ff.Command{
+	wsRmFlags := ff.NewFlagSet("rm").SetParent(wsFlags)
+	wsRmCmd := &ff.Command{
 		Name:      "rm",
-		Usage:     "zordon worktree rm <name>",
-		ShortHelp: "remove a worktree directory",
-		Flags:     wtRmFlags,
+		Usage:     "zordon workspace rm <name>",
+		ShortHelp: "remove a workspace directory",
+		Flags:     wsRmFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runWorktreeRm(zlog.New(stdio.Stderr, *agent), args)
+			return runWorkspaceRm(zlog.New(stdio.Stderr, *agent), args)
 		},
 	}
-	wtCmd.Subcommands = []*ff.Command{wtCreateCmd, wtListCmd, wtRmCmd}
+	// workspace service add/rm: manage individual service checkouts inside an
+	// existing workspace. The target workspace is a --workspace flag value (not
+	// a positional), so the name never collides with the add/rm tokens;
+	// --services mirrors `zordon start --services`.
+	wsServiceFlags := ff.NewFlagSet("service").SetParent(wsFlags)
+	wsServiceCmd := &ff.Command{
+		Name:      "service",
+		Usage:     "zordon workspace service <add|rm> --workspace <name> --services <svc,...>",
+		ShortHelp: "add or remove individual service checkouts in an existing workspace",
+		Flags:     wsServiceFlags,
+		// No Exec: bare `zordon workspace service` prints help.
+	}
+	wsServiceAddFlags := ff.NewFlagSet("add").SetParent(wsServiceFlags)
+	var wsAddWorkspace invocation.WorkspaceName
+	wsServiceAddFlags.Value(0, "workspace", &wsAddWorkspace, "target workspace (created with zordon workspace create)")
+	wsAddServices := wsServiceAddFlags.StringLong("services", "", "services to check out, comma/space-separated; items may be service[@rev]; merged with positional args")
+	wsServiceAddCmd := &ff.Command{
+		Name:      "add",
+		Usage:     "zordon workspace service add --workspace <name> --services <svc[@rev],...>",
+		ShortHelp: "check out additional services into an existing workspace",
+		Flags:     wsServiceAddFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runWorkspaceServiceAdd(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsAddWorkspace,
+				parsePicks(append(strings.Fields(*wsAddServices), args...)), zfs.ZordonHome(home.Path()))
+		},
+	}
+	wsServiceRmFlags := ff.NewFlagSet("rm").SetParent(wsServiceFlags)
+	var wsRmWorkspace invocation.WorkspaceName
+	wsServiceRmFlags.Value(0, "workspace", &wsRmWorkspace, "target workspace")
+	wsRmServices := wsServiceRmFlags.StringLong("services", "", "services to detach, comma/space-separated; merged with positional args")
+	wsServiceRmCmd := &ff.Command{
+		Name:      "rm",
+		Usage:     "zordon workspace service rm --workspace <name> --services <svc,...>",
+		ShortHelp: "detach service checkouts from an existing workspace",
+		Flags:     wsServiceRmFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runWorkspaceServiceRm(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsRmWorkspace,
+				parsePicks(append(strings.Fields(*wsRmServices), args...)), zfs.ZordonHome(home.Path()))
+		},
+	}
+	wsServiceCmd.Subcommands = []*ff.Command{wsServiceAddCmd, wsServiceRmCmd}
+	wsCmd.Subcommands = []*ff.Command{wsCreateCmd, wsListCmd, wsRmCmd, wsServiceCmd}
 
 	// plan
 	planFlags := ff.NewFlagSet("plan").SetParent(rootFlags)
@@ -267,7 +310,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		},
 	}
 
-	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wtCmd, getCmd, planCmd, cleanCmd, mcpCmd)
+	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wsCmd, getCmd, planCmd, cleanCmd, mcpCmd)
 	return rootCmd, agent
 }
 
@@ -640,7 +683,7 @@ func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome 
 		}
 		marker := ""
 		if lv.isInvocation {
-			marker = fmt.Sprintf(" (invocation, worktree=%s)", lv.inv.Worktree)
+			marker = fmt.Sprintf(" (invocation, workspace=%s)", lv.inv.Workspace)
 		}
 		fmt.Fprintf(out, "# [%s] %s%s\n", lv.inv.FsHash, lv.afPath, marker)
 
@@ -720,6 +763,6 @@ func runStop(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg a
 	if resp.Error != "" {
 		return fmt.Errorf("alpha: %s", resp.Error)
 	}
-	log.Info("alpha", "shutdown requested (worktree=%s)", leaf.inv.Worktree)
+	log.Info("alpha", "shutdown requested (workspace=%s)", leaf.inv.Workspace)
 	return nil
 }

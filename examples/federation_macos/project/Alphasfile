@@ -34,7 +34,7 @@ service "go" "httpbin" {
     cmd = ["${fs::bin()}/go-httpbin", "-host", "127.0.0.1", "-port", "${self.vars.port}"]
   }
 
-  print = "http://${self.vars.address}:${service.go.caddy.vars.http}/  (via Caddy, worktree ${fs::hash()})"
+  print = "http://${self.vars.address}:${service.go.caddy.vars.http}/  (via Caddy, workspace ${fs::hash()})"
 
   readiness {
     http {

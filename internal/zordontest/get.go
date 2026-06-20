@@ -61,8 +61,8 @@ func (p *Project) Get(t testing.TB, expr string) Value {
 }
 
 // GetIn is Get run from relDir (relative to the project root) — use it to
-// resolve a service in a worktree subtree, whose alpha lives under that
-// worktree's state dir and isn't visible from the project root.
+// resolve a service in a workspace subtree, whose alpha lives under that
+// workspace's state dir and isn't visible from the project root.
 func (p *Project) GetIn(t testing.TB, relDir, expr string) Value {
 	t.Helper()
 	return p.get(t, relDir, expr)

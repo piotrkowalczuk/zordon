@@ -118,26 +118,26 @@ type Package struct {
 	Branch    string `json:"branch,omitempty"`
 	Tag       string `json:"tag,omitempty"`
 	Rev       string `json:"rev,omitempty"`
-	// Use-only: install a dependency instead of giving it a worktree.
+	// Use-only: install a dependency instead of giving it a workspace.
 	// Install is the resolved coordinate — Go: `pkg@version` for
 	// `go install`; Rust: the crate name for `cargo install`. Features is
 	// Rust-only. Mutually exclusive with git/src.
-	Install  string    `json:"install,omitempty"`
-	Version  string    `json:"version,omitempty"`  // rust use-only: cargo install --version
-	Index    string    `json:"index,omitempty"`    // rust use-only: cargo install --index
-	Registry string    `json:"registry,omitempty"` // rust use-only: cargo install --registry
-	Features []string  `json:"features,omitempty"`
-	Exe      string    `json:"exe,omitempty"`       // relative subdir within git/src where the build target lives ("" = project root)
-	Bin      string    `json:"bin,omitempty"`       // rust: cargo --bin target (multi-bin crates)
-	BuildCmd []string  `json:"build_cmd,omitempty"` // explicit build argv (from build{cmd}); empty ⇒ toolchain default
-	Cmd      string    `json:"cmd,omitempty"`       // Explicit execution argv if needed
-	Worktree *Worktree `json:"worktree,omitempty"`
-	// InPlace: src-only in the "main" worktree — build/run from src as-is,
+	Install   string     `json:"install,omitempty"`
+	Version   string     `json:"version,omitempty"`  // rust use-only: cargo install --version
+	Index     string     `json:"index,omitempty"`    // rust use-only: cargo install --index
+	Registry  string     `json:"registry,omitempty"` // rust use-only: cargo install --registry
+	Features  []string   `json:"features,omitempty"`
+	Exe       string     `json:"exe,omitempty"`       // relative subdir within git/src where the build target lives ("" = project root)
+	Bin       string     `json:"bin,omitempty"`       // rust: cargo --bin target (multi-bin crates)
+	BuildCmd  []string   `json:"build_cmd,omitempty"` // explicit build argv (from build{cmd}); empty ⇒ toolchain default
+	Cmd       string     `json:"cmd,omitempty"`       // Explicit execution argv if needed
+	Workspace *Workspace `json:"workspace,omitempty"`
+	// InPlace: src-only in the "main" workspace — build/run from src as-is,
 	// no git worktree add, no HEAD reset (the edit→start loop).
 	InPlace bool `json:"in_place,omitempty"`
 }
 
-type Worktree struct {
+type Workspace struct {
 	Sparse []string `json:"sparse,omitempty"`
 }
 
@@ -186,7 +186,7 @@ type AgentMCPFeature struct {
 }
 
 // ServiceMeta is the static, eval-free view of a service: identity plus its
-// source primary. `zordon worktree` uses it to materialize checkouts
+// source primary. `zordon workspace` uses it to materialize checkouts
 // without resolving the dynamic graph (no Invocation / parent context /
 // pickport needed just to `git worktree add`).
 type ServiceMeta struct {
@@ -195,7 +195,7 @@ type ServiceMeta struct {
 	Package   *Package
 }
 
-// Ref is the default revision for this service's worktree (Branch, then
+// Ref is the default revision for this service's workspace (Branch, then
 // Tag, then Rev; empty = primary HEAD).
 func (m *ServiceMeta) Ref() string {
 	switch {
@@ -211,15 +211,15 @@ func (m *ServiceMeta) Ref() string {
 	return ""
 }
 
-// Worktreeable reports whether this service has a git/src primary.
-func (m *ServiceMeta) Worktreeable() bool {
+// Workspaceable reports whether this service has a git/src primary.
+func (m *ServiceMeta) Workspaceable() bool {
 	return m.Package != nil && (m.Package.Git != "" || m.Package.Src != "")
 }
 
 // ParseServices does a parse-only decode of an Alphasfile: it returns each
 // service's identity and source primary without evaluating any expression
 // (vars / arguments / files / readiness / sudo are ignored). Pure, needs no
-// Invocation — the entry point for `zordon worktree`.
+// Invocation — the entry point for `zordon workspace`.
 func ParseServices(path string) ([]*ServiceMeta, error) {
 	b, err := zfs.Read(path)
 	if err != nil {
@@ -265,8 +265,8 @@ func ParseServices(path string) ([]*ServiceMeta, error) {
 		if sb.Crate != nil {
 			pkg.Install = strings.TrimSpace(sb.Crate.Name)
 		}
-		if sb.Worktree != nil && len(sb.Worktree.Sparse) > 0 {
-			pkg.Worktree = &Worktree{Sparse: cleanSparse(sb.Worktree.Sparse)}
+		if sb.Workspace != nil && len(sb.Workspace.Sparse) > 0 {
+			pkg.Workspace = &Workspace{Sparse: cleanSparse(sb.Workspace.Sparse)}
 		}
 		out = append(out, &ServiceMeta{Name: sb.Name, Toolchain: sb.Toolchain, Package: pkg})
 	}
@@ -329,15 +329,15 @@ func (s *Service) Ref() string {
 	return ""
 }
 
-// Worktreeable reports whether the service has a git/src primary (so it can
+// Workspaceable reports whether the service has a git/src primary (so it can
 // get a per-invocation checkout). Crate services don't (cargo install).
-func (s *Service) Worktreeable() bool {
+func (s *Service) Workspaceable() bool {
 	return s.Package != nil && !s.UseOnly() &&
 		(s.Package.Git != "" || s.Package.Src != "")
 }
 
 // UseOnly reports a use-only service: installed (go/cargo install) into
-// fs::bin, no worktree, not editable.
+// fs::bin, no workspace, not editable.
 func (s *Service) UseOnly() bool {
 	return s.Package != nil && s.Package.Install != ""
 }
@@ -346,7 +346,7 @@ func (s *Service) UseOnly() bool {
 // (a checkout build, or a use-only install). Every service must be
 // buildable — there is no "use a prebuilt $PATH binary" path.
 func (s *Service) Buildable() bool {
-	return s.Worktreeable() || s.UseOnly()
+	return s.Workspaceable() || s.UseOnly()
 }
 
 // BuildCmd returns the explicit build argv (from `build { cmd = [...] }`),
@@ -672,7 +672,7 @@ type serviceBlock struct {
 	// field serves both; eval interprets it by cty type.
 	Package  hcl.Expression `hcl:"package,optional"`
 	Bin      string         `hcl:"bin,optional"`      // rust: cargo --bin target
-	Features []string       `hcl:"features,optional"` // rust: cargo --features (applies to crate-install AND worktree build)
+	Features []string       `hcl:"features,optional"` // rust: cargo --features (applies to crate-install AND workspace build)
 
 	// dynamic (interpolated; order resolved by intra-service dependency DAG)
 	Vars hcl.Expression `hcl:"vars,optional"`
@@ -699,10 +699,10 @@ type serviceBlock struct {
 	Agent    *agentBlock    `hcl:"agent,block"`
 	Debugger *debuggerBlock `hcl:"debugger,block"`
 
-	Worktree  *worktreeBlock `hcl:"worktree,block"`
-	Sudo      []*sudoBlock   `hcl:"sudo,block"`
-	Files     []*fileBlock   `hcl:"file,block"`
-	Readiness *probeSpec     `hcl:"readiness,block"`
+	Workspace *workspaceBlock `hcl:"workspace,block"`
+	Sudo      []*sudoBlock    `hcl:"sudo,block"`
+	Files     []*fileBlock    `hcl:"file,block"`
+	Readiness *probeSpec      `hcl:"readiness,block"`
 }
 
 // build/runtime/agent are distinct phases with distinct payloads (not
@@ -781,7 +781,7 @@ type debuggerBlock struct {
 	WrapRuntime   *bool          `hcl:"wrap_runtime,optional"`
 }
 
-type worktreeBlock struct {
+type workspaceBlock struct {
 	Sparse []string `hcl:"sparse,optional"`
 }
 
@@ -798,14 +798,14 @@ type gitBlock struct {
 // srcBlock describes the local view of the source. Standalone (no
 // sibling `git { }`) it IS the source — `path` is the local checkout
 // zordon uses in place. Alongside `git { }` it carries only `exe`,
-// the subdir within the cloned worktree to build. `path` is therefore
+// the subdir within the cloned workspace to build. `path` is therefore
 // optional, but at least one of `path`/`exe` must be set.
 //
 // `path` is an interpolated expression so it can derive the checkout
 // location from the host environment, e.g.
 // `path = "${os::env("MONOREPO")}/services/api"`. In the eval pass the
 // full function set is available; the parse-only path (ParseServices,
-// used by `zordon worktree`) exposes only the host-level helpers
+// used by `zordon workspace`) exposes only the host-level helpers
 // (os::env) — invocation/identity namespaces error there.
 type srcBlock struct {
 	Path hcl.Expression `hcl:"path,optional"`
@@ -816,8 +816,8 @@ type srcBlock struct {
 // Mirrors the cargo install CLI source-selection flags: `version`/
 // `index`/`registry` for a registry source, or `git`+`branch`/`tag`/
 // `rev` for a git source (cargo handles the fetch — no zordon
-// worktree). Presence of this block is mutually exclusive with the
-// top-level `git {}` block (worktree/source path). `features` and
+// workspace). Presence of this block is mutually exclusive with the
+// top-level `git {}` block (workspace/source path). `features` and
 // `bin` are top-level on the service.
 type crateBlock struct {
 	Name     string `hcl:"name"`

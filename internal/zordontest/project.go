@@ -166,11 +166,11 @@ func (p *Project) MkdirAll(relPath string) *Project {
 }
 
 // GitInit turns relPath into a real git repo with a single initial
-// commit holding whatever files are already there. `zordon worktree`
+// commit holding whatever files are already there. `zordon workspace`
 // runs `git worktree add` against this dir, which requires a git repo
 // with at least HEAD pointing at a commit.
 //
-// Branch is hard-coded to "main" so the per-worktree branches zordon
+// Branch is hard-coded to "main" so the per-workspace branches zordon
 // creates (`zordon/<wt>/<svc>`) all base off the same start ref —
 // what a developer would get from a freshly initialized repo.
 func (p *Project) GitInit(relPath string) *Project {
@@ -237,7 +237,7 @@ func (p *Project) zordonStopBestEffort() error {
 }
 
 // StopFrom runs a best-effort `zordon stop` from relDir (relative to the
-// project root). Use it to tear down a worktree-level alpha that the
+// project root). Use it to tear down a workspace-level alpha that the
 // project-root cleanup can't reach. It takes no testing.TB on purpose: it
 // is meant for t.Cleanup, where t.Fatal/FailNow must never be called
 // (FailNow's runtime.Goexit aborts the remaining cleanup chain). Errors
@@ -302,7 +302,7 @@ func resolveZordonBinary(t *testing.T) string {
 //     serialized (tools.Acquire flocks per-(lang, version)), so the
 //     shared dir is safe under cross-package concurrent writes.
 //   - `.zordon/` matches the convention every other zordon dir uses
-//     (~/.zordon, <project>/.zordon/worktrees). A new contributor
+//     (~/.zordon, <project>/workspaces). A new contributor
 //     recognizes it instantly.
 //   - The existing `.gitignore` pattern covers it without a new line.
 //   - Walk-up bound (filepath.Dir(<repo>/.zordon) = <repo>) is the

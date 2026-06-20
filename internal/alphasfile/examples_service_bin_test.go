@@ -20,7 +20,7 @@ func TestExampleServiceBinResolves(t *testing.T) {
 	}
 	iv := &invocation.InvocationState{
 		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
-		StateDir: "/repo/examples/service_bin/.zordon/worktrees/main",
+		StateDir: "/repo/examples/service_bin/workspaces/main",
 	}
 	af, err := Compile("/repo/examples/service_bin/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {

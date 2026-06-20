@@ -4,9 +4,9 @@
 // bare-cloned under ~/.zordon/src) or user-owned (`dir`, an existing git
 // checkout zordon never writes to). Every invocation gets its own working
 // tree via `git worktree add` from that primary, so parallel invocations
-// (worktrees) are isolated. Services with neither git nor dir (a crates.io
+// (workspaces) are isolated. Services with neither git nor dir (a crates.io
 // crate, a prebuilt binary on $PATH) have no primary and are not
-// worktree-able.
+// workspaceable.
 package source
 
 import (
@@ -24,7 +24,7 @@ import (
 type Kind string
 
 const (
-	KindNone Kind = ""    // crate / prebuilt — not worktree-able
+	KindNone Kind = ""    // crate / prebuilt — not workspaceable
 	KindGit  Kind = "git" // zordon-owned bare primary
 	KindDir  Kind = "dir" // user-owned repo primary
 )
@@ -36,26 +36,26 @@ type Primary struct {
 	// filesystem path for KindDir.
 	Repo string
 	// Ref is the default revision (branch/tag/rev) checked out into new
-	// worktrees. Empty means the primary's current HEAD.
+	// workspaces. Empty means the primary's current HEAD.
 	Ref string
-	// Worktree contains sparse checkout configuration.
-	Worktree *Worktree
+	// Workspace contains sparse checkout configuration.
+	Workspace *Workspace
 	// zordonHome is the host-wide state root resolved at startup. Used
 	// to compute bare-clone paths (<zordonHome>/src/<repo>.git) without
 	// reading the env in business logic.
 	zordonHome string
 }
 
-type Worktree struct {
+type Workspace struct {
 	Sparse []string
 }
 
 // NewPrimary builds a Primary from a service's git/dir/ref fields. git and
-// dir are mutually exclusive; both empty ⇒ KindNone (not worktree-able).
+// dir are mutually exclusive; both empty ⇒ KindNone (not workspaceable).
 // zordonHome is the resolved host-wide state root (caller's --home /
 // ZORDON_HOME, defaulted to ~/.zordon at startup) used for bare-clone
 // paths; pass "" only when no git primary is involved.
-func NewPrimary(zordonHome, git, dir, ref string, worktree *Worktree) (Primary, error) {
+func NewPrimary(zordonHome, git, dir, ref string, workspace *Workspace) (Primary, error) {
 	switch {
 	case git != "" && dir != "":
 		return Primary{}, errors.New("service declares both git and dir; pick one primary")
@@ -64,20 +64,20 @@ func NewPrimary(zordonHome, git, dir, ref string, worktree *Worktree) (Primary, 
 		if err != nil {
 			return Primary{}, err
 		}
-		return Primary{Kind: KindGit, Repo: repo, Ref: ref, Worktree: worktree, zordonHome: zordonHome}, nil
+		return Primary{Kind: KindGit, Repo: repo, Ref: ref, Workspace: workspace, zordonHome: zordonHome}, nil
 	case dir != "":
 		abs, err := expandAbs(dir)
 		if err != nil {
 			return Primary{}, err
 		}
-		return Primary{Kind: KindDir, Repo: abs, Ref: ref, Worktree: worktree, zordonHome: zordonHome}, nil
+		return Primary{Kind: KindDir, Repo: abs, Ref: ref, Workspace: workspace, zordonHome: zordonHome}, nil
 	default:
-		return Primary{Kind: KindNone, Ref: ref, Worktree: worktree, zordonHome: zordonHome}, nil
+		return Primary{Kind: KindNone, Ref: ref, Workspace: workspace, zordonHome: zordonHome}, nil
 	}
 }
 
-// Worktreeable reports whether this service can get a git worktree.
-func (p Primary) Worktreeable() bool { return p.Kind == KindGit || p.Kind == KindDir }
+// Workspaceable reports whether this service can get a git worktree.
+func (p Primary) Workspaceable() bool { return p.Kind == KindGit || p.Kind == KindDir }
 
 func normalizeGit(git string) (string, error) {
 	g := strings.TrimPrefix(git, "https://")
@@ -230,8 +230,8 @@ func branchWorktreePath(ctx context.Context, gitDir, branch string) (string, boo
 }
 
 func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runner) error {
-	if !p.Worktreeable() {
-		return fmt.Errorf("service has no git/dir primary; not worktree-able")
+	if !p.Workspaceable() {
+		return fmt.Errorf("service has no git/dir primary; not workspaceable")
 	}
 	if run == nil {
 		return errors.New("source.AddWorktree: nil runner")
@@ -260,12 +260,12 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 	if other, ok := branchWorktreePath(ctx, gitDir, branch); ok {
 		if a, _ := filepath.Abs(other); filepath.Clean(a) != filepath.Clean(absOr(dest)) {
 			return fmt.Errorf("branch %q is already checked out at %s; "+
-				"remove that worktree first (e.g. `zordon worktree rm`) or point this one elsewhere",
+				"remove that worktree first (e.g. `zordon workspace rm`) or point this one elsewhere",
 				branch, other)
 		}
 	}
 
-	if p.Worktree != nil && len(p.Worktree.Sparse) > 0 {
+	if p.Workspace != nil && len(p.Workspace.Sparse) > 0 {
 		args := []string{"-C", gitDir, "worktree", "add", "--no-checkout", "--force", "-B", branch, dest, start}
 		if err := run(ctx, exec.CommandContext(ctx, "git", args...)); err != nil {
 			return fmt.Errorf("git worktree add: %w", err)
@@ -277,7 +277,7 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 		}
 
 		// Set the specific paths for sparse checkout
-		sparseArgs := append([]string{"-C", dest, "sparse-checkout", "set"}, p.Worktree.Sparse...)
+		sparseArgs := append([]string{"-C", dest, "sparse-checkout", "set"}, p.Workspace.Sparse...)
 		if err := run(ctx, exec.CommandContext(ctx, "git", sparseArgs...)); err != nil {
 			return fmt.Errorf("git sparse-checkout set: %w", err)
 		}

@@ -75,7 +75,7 @@ service "go" "api" {
 	if api == nil {
 		t.Fatal("service api not resolved")
 	}
-	const wantRoot = "/proj/.zordon/worktrees/main/src/api"
+	const wantRoot = "/proj/workspaces/main/src/api"
 	const wantExe = wantRoot + "/cmd/api"
 	if got := api.Runtime.Vars["root"]; got != wantRoot {
 		t.Errorf("fs::src() = %v, want checkout root %q", got, wantRoot)
@@ -91,10 +91,10 @@ service "go" "api" {
 	}
 	// The wire-stable split alpha consumes: Dir is the exe-anchored
 	// build/run cwd, Checkout is the checkout root that `git worktree add`
-	// targets. Conflating them broke worktree services with exe != "."
-	// (see TestWorktree_Go_exeOffset).
+	// targets. Conflating them broke workspace services with exe != "."
+	// (see TestWorkspace_Go_exeOffset).
 	if got := api.Runtime.Checkout; got != wantRoot {
-		t.Errorf("Runtime.Checkout = %q, want checkout root %q (the worktree-add target)", got, wantRoot)
+		t.Errorf("Runtime.Checkout = %q, want checkout root %q (the workspace-add target)", got, wantRoot)
 	}
 	if got := api.Runtime.Dir; got != wantExe {
 		t.Errorf("Runtime.Dir = %q, want exe-anchored %q (the build/run cwd)", got, wantExe)
