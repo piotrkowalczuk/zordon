@@ -540,9 +540,17 @@ type Alphasfile struct {
 	// CfgHash is the manifest identity (sha8 of Alphasfile bytes + resolved
 	// parent ctx) — the value cfg::hash() returns. Carried on the resolved
 	// result, not on the Invocation (which is pure directory facts).
-	CfgHash  string     `json:"cfg_hash,omitempty"`
-	Dotenv   []string   `json:"dotenv,omitempty"` // file-level .env files, applied under every service's env (in order)
-	Services []*Service `json:"services,omitempty"`
+	CfgHash string   `json:"cfg_hash,omitempty"`
+	Dotenv  []string `json:"dotenv,omitempty"` // file-level .env files, applied under every service's env (in order)
+	// Env is the file-level inline env overlay applied under every
+	// service's own env — the dotenv-less way to set a global variable.
+	// Layered above the file-level Dotenv (inline wins over file, as it
+	// does per-service) but below each service's own dotenv/env (a
+	// service's explicit config always wins over a global default).
+	// Federation merges parent ∪ child with the child winning on
+	// collision, the same direction toolchain env merges.
+	Env      zenv.EnvironmentVariables `json:"env,omitempty"`
+	Services []*Service                `json:"services,omitempty"`
 	// Toolchain pins the version+env of each language toolchain
 	// alpha materializes via mise. Keyed by the same string as
 	// service.Toolchain (`go`, `rust`, `ruby`). Federation children
@@ -608,6 +616,7 @@ func (af *Alphasfile) AllFiles() []*File {
 
 type rootBlock struct {
 	Dotenv    hcl.Expression  `hcl:"dotenv,optional"` // file-level .env applied to every service
+	Env       hcl.Expression  `hcl:"env,optional"`    // file-level inline env applied to every service
 	SysEnv    hcl.Expression  `hcl:"sysenv,optional"` // closed-world whitelist of inherited OS env vars
 	Services  []*serviceBlock `hcl:"service,block"`
 	Toolchain *toolchainBlock `hcl:"toolchain,block"`
@@ -1079,6 +1088,7 @@ type BlockComputedState struct {
 	toolchain map[string]*ToolchainConfig
 	sysenv    []string
 	dotenv    []string
+	env       zenv.EnvironmentVariables
 	cfgHash   string
 }
 
@@ -1086,6 +1096,7 @@ func (b BlockComputedState) Services() []*Service                   { return b.s
 func (b BlockComputedState) Toolchain() map[string]*ToolchainConfig { return b.toolchain }
 func (b BlockComputedState) SysEnv() []string                       { return b.sysenv }
 func (b BlockComputedState) Dotenv() []string                       { return b.dotenv }
+func (b BlockComputedState) Env() zenv.EnvironmentVariables         { return b.env }
 func (b BlockComputedState) CfgHash() string                        { return b.cfgHash }
 
 // Block is the fresh-eval constructor: the resolved Alphasfile's own computed
@@ -1096,6 +1107,7 @@ func (af *Alphasfile) Block() BlockComputedState {
 		toolchain: af.Toolchain,
 		sysenv:    af.SysEnv,
 		dotenv:    af.Dotenv,
+		env:       af.Env,
 		cfgHash:   af.CfgHash,
 	}
 }
@@ -1103,12 +1115,13 @@ func (af *Alphasfile) Block() BlockComputedState {
 // AdoptBlock is the reuse constructor: the computed state of a running alpha,
 // rebuilt from its reported facts (the caller reads these off a
 // protocol.StateInfo, which this package can't import without a cycle).
-func AdoptBlock(services []*Service, toolchain map[string]*ToolchainConfig, sysenv, dotenv []string, cfgHash string) BlockComputedState {
+func AdoptBlock(services []*Service, toolchain map[string]*ToolchainConfig, sysenv, dotenv []string, env zenv.EnvironmentVariables, cfgHash string) BlockComputedState {
 	return BlockComputedState{
 		services:  services,
 		toolchain: toolchain,
 		sysenv:    sysenv,
 		dotenv:    dotenv,
+		env:       env,
 		cfgHash:   cfgHash,
 	}
 }
@@ -1123,6 +1136,7 @@ type GlobalComputedState struct {
 	toolchain map[string]*ToolchainConfig
 	sysenv    []string
 	dotenv    []string
+	env       zenv.EnvironmentVariables
 }
 
 // Join folds one level's computed block into the accumulator, preserving the
@@ -1140,6 +1154,9 @@ func (g *GlobalComputedState) Join(b BlockComputedState) {
 	}
 	g.sysenv = mergeSysEnv(g.sysenv, b.sysenv)
 	g.dotenv = append(g.dotenv, b.dotenv...)
+	if len(b.env) > 0 {
+		g.env = g.env.Join(b.env)
+	}
 }
 
 // Services returns the accumulated services (root-first, undeduped) — the slice
@@ -1149,6 +1166,11 @@ func (g *GlobalComputedState) Services() []*Service { return g.services }
 // Dotenv returns the accumulated file-level dotenv paths, root-first — the
 // parentDotenv a child alpha layers under its own services' env.
 func (g *GlobalComputedState) Dotenv() []string { return g.dotenv }
+
+// Env returns the accumulated file-level inline env (ancestors merged, the
+// deeper one winning) — the parentEnv a child alpha layers under its own
+// file-level env. Like Dotenv it flows separately from ParentContext.
+func (g *GlobalComputedState) Env() zenv.EnvironmentVariables { return g.env }
 
 // ParentContext projects the accumulator into the *ParentContext the resolver
 // consumes, or nil when nothing has accumulated yet (the root level passes nil,

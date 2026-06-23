@@ -56,6 +56,16 @@ func TestExampleEnvResolves(t *testing.T) {
 		t.Errorf("env{} must win over dotenv: OVERRIDE_ME=%q", s.Runtime.Env["OVERRIDE_ME"])
 	}
 
+	if af.Env["GLOBAL_INLINE"] != "1" {
+		t.Errorf("top-level env GLOBAL_INLINE = %q, want 1", af.Env["GLOBAL_INLINE"])
+	}
+	if af.Env["GLOBAL_OVERRIDDEN"] != "from-global" {
+		t.Errorf("top-level env GLOBAL_OVERRIDDEN = %q, want from-global", af.Env["GLOBAL_OVERRIDDEN"])
+	}
+	if s.Runtime.Env["GLOBAL_OVERRIDDEN"] != "from-service" {
+		t.Errorf("service env{} must declare its override: GLOBAL_OVERRIDDEN=%q", s.Runtime.Env["GLOBAL_OVERRIDDEN"])
+	}
+
 	want := []string{"/tmp/zordon-h0/app.env", "/tmp/zordon-h0/app.local.env"}
 	if len(s.Runtime.Dotenv) != len(want) || s.Runtime.Dotenv[0] != want[0] || s.Runtime.Dotenv[1] != want[1] {
 		t.Errorf("dotenv paths = %q, want %q (the generated file{}s, in order)", s.Runtime.Dotenv, want)

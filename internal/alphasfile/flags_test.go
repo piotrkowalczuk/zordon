@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-func sp(s string) *string { return &s }
-
 // renderFlags turns one argument group into argv tokens per the options.
 // The matrix covers each convention a target CLI might want — Go-flag
 // default, GNU long, space-separated, Windows slash/colon, glued short
@@ -22,12 +20,12 @@ func TestRenderFlags_byOptions(t *testing.T) {
 		want []string
 	}{
 		{"default single-dash equals", ToolchainGo, nil, addr, []string{"-addr=127.0.0.1:9000"}},
-		{"double-dash equals", ToolchainGo, &ArgOptions{Prefix: sp("--")}, addr, []string{"--addr=127.0.0.1:9000"}},
-		{"double-dash space → two argv", ToolchainGo, &ArgOptions{Prefix: sp("--"), Separator: sp(" ")}, addr, []string{"--addr", "127.0.0.1:9000"}},
-		{"windows slash colon", ToolchainGo, &ArgOptions{Prefix: sp("/"), Separator: sp(":")}, map[string]any{"out": "file"}, []string{"/out:file"}},
-		{"glued empty separator", ToolchainGo, &ArgOptions{Prefix: sp("-"), Separator: sp("")}, map[string]any{"O": 2}, []string{"-O2"}},
-		{"empty prefix", ToolchainGo, &ArgOptions{Prefix: sp("")}, map[string]any{"if": "/dev/zero"}, []string{"if=/dev/zero"}},
-		{"ruby forces space over explicit equals", ToolchainRuby, &ArgOptions{Prefix: sp("-"), Separator: sp("=")}, addr, []string{"-addr", "127.0.0.1:9000"}},
+		{"double-dash equals", ToolchainGo, &ArgOptions{Prefix: new("--")}, addr, []string{"--addr=127.0.0.1:9000"}},
+		{"double-dash space → two argv", ToolchainGo, &ArgOptions{Prefix: new("--"), Separator: new(" ")}, addr, []string{"--addr", "127.0.0.1:9000"}},
+		{"windows slash colon", ToolchainGo, &ArgOptions{Prefix: new("/"), Separator: new(":")}, map[string]any{"out": "file"}, []string{"/out:file"}},
+		{"glued empty separator", ToolchainGo, &ArgOptions{Prefix: new("-"), Separator: new("")}, map[string]any{"O": 2}, []string{"-O2"}},
+		{"empty prefix", ToolchainGo, &ArgOptions{Prefix: new("")}, map[string]any{"if": "/dev/zero"}, []string{"if=/dev/zero"}},
+		{"ruby forces space over explicit equals", ToolchainRuby, &ArgOptions{Prefix: new("-"), Separator: new("=")}, addr, []string{"-addr", "127.0.0.1:9000"}},
 		{"keys sorted within a group", ToolchainGo, nil, map[string]any{"c": 3, "a": 1, "b": 2}, []string{"-a=1", "-b=2", "-c=3"}},
 	}
 	for _, tt := range tests {
@@ -49,7 +47,7 @@ func TestFlags_autoAppendsAllGroupsNameSorted(t *testing.T) {
 				"serve":  {"port": 8080},
 				"global": {"debug": true},
 			},
-			Options: &ArgOptions{Prefix: sp("--")},
+			Options: &ArgOptions{Prefix: new("--")},
 		},
 	}
 	want := []string{"--debug=true", "--port=8080"} // global before serve

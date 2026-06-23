@@ -1,5 +1,15 @@
 sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
+# Top-level env: a global overlay applied under every service — the
+# dotenv-less way to set a variable for the whole stack. GLOBAL_INLINE
+# reaches the service with no .env file involved; GLOBAL_OVERRIDDEN is
+# overridden by the service's own env{} (a service always wins over a
+# global default).
+env = {
+  GLOBAL_INLINE     = "1"
+  GLOBAL_OVERRIDDEN = "from-global"
+}
+
 service "go" "app" {
   src {
     path = "../.."
@@ -30,9 +40,10 @@ service "go" "app" {
   dotenv = [self.file.denv.path, self.file.denv2.path]
 
   env = {
-    ENV_STATIC  = "hello"
-    ENV_DYN     = "127.0.0.1:${self.vars.port}"
-    OVERRIDE_ME = "from-env"
+    ENV_STATIC        = "hello"
+    ENV_DYN           = "127.0.0.1:${self.vars.port}"
+    OVERRIDE_ME       = "from-env"
+    GLOBAL_OVERRIDDEN = "from-service"
   }
 
   runtime {

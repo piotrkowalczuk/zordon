@@ -333,7 +333,7 @@ func walkUp() (string, error) {
 	}
 }
 
-func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, af *alphasfile.Alphasfile, failfast, agent bool) error {
+func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent bool) error {
 	log.Info("alpha", "Understood, Zordon!")
 
 	conn, err := control.Dial(sock, 1*time.Second)
@@ -358,6 +358,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 			FsHash:         fsHash,
 			CfgHash:        cfgHash,
 			ParentDotenv:   parentDotenv,
+			ParentEnv:      parentEnv,
 		},
 	}); err != nil {
 		return fmt.Errorf("send configure: %w", err)
@@ -447,7 +448,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 // its teardown output. Simpler than pushConfigure: clean never starts
 // services, so there are no per-service ready/fail events or failure
 // summary — just log lines until EventDone (success) or EventError.
-func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, af *alphasfile.Alphasfile, agent bool) error {
+func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, agent bool) error {
 	conn, err := control.Dial(sock, 1*time.Second)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
@@ -469,6 +470,7 @@ func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgH
 			FsHash:         fsHash,
 			CfgHash:        cfgHash,
 			ParentDotenv:   parentDotenv,
+			ParentEnv:      parentEnv,
 		},
 	}); err != nil {
 		return fmt.Errorf("send clean: %w", err)

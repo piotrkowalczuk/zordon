@@ -285,6 +285,61 @@ service "go" "svc1" {
 	}
 }
 
+func TestGoService_fileLevelEnvReachesRuntime(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+env = {
+  GLOBAL_INLINE     = "1"
+  GLOBAL_OVERRIDDEN = "from-global"
+}
+
+service "go" "svc1" {
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
+
+  vars = { port = net::pickport() }
+
+  env = {
+    GLOBAL_OVERRIDDEN = "from-service"
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`)
+
+	mustStart(t, p)
+	port := p.Get(t, "service.go.svc1.vars.port").Int()
+	echo := mustDecodeEcho(t, port)
+	if got := echo.Env["GLOBAL_INLINE"]; got != "1" {
+		t.Errorf("GLOBAL_INLINE = %q; want 1 (top-level env must reach runtime, no dotenv file)", got)
+	}
+	if got := echo.Env["GLOBAL_OVERRIDDEN"]; got != "from-service" {
+		t.Errorf("GLOBAL_OVERRIDDEN = %q; want from-service (service env{} wins over global env)", got)
+	}
+}
+
 // TestGoService_varsInterpolationInCmd covers cross-cutting: `vars`
 // declared at the service level + ${self.vars.X} interpolated into
 // the runtime cmd argv. Both the cmd template (alphasfile resolver)

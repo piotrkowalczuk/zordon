@@ -270,6 +270,11 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	if err != nil {
 		return nil, err
 	}
+	// File-level inline env: same top-level scope as dotenv (no `self`).
+	genvMap, err := r.evalMap(root.Env, nil, "env", srcDirs{})
+	if err != nil {
+		return nil, err
+	}
 	toolchain := p.toolchain
 	if len(toolchain) == 0 {
 		toolchain = nil
@@ -301,6 +306,7 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	return &Alphasfile{
 		CfgHash:   r.cfgHash,
 		Dotenv:    gdot,
+		Env:       toStringMap(genvMap),
 		Services:  r.resolvedServices,
 		Toolchain: toolchain,
 		SysEnv:    sysEnv,

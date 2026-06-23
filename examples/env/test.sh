@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Claim: env precedence — process < dotenv < env{}. The env{} block's
-# OVERRIDE_ME must win over the dotenv's; both static and dynamic
-# (port-interpolated) values are injected.
+# Claim: env precedence — process < global env < dotenv < service env{}.
+# The env{} block's OVERRIDE_ME must win over the dotenv's; both static
+# and dynamic (port-interpolated) values are injected. The top-level
+# (global) env reaches the service with no dotenv file, and the service's
+# own env{} wins over a colliding global key.
 cd "$(dirname "$0")"
 source ../_lib.sh
 need curl
@@ -27,9 +29,14 @@ assert_line "DOTENV2_FROM_FILE=1"          # second dotenv file in the list
 assert_line "ENV_DYN=127.0.0.1:$port"
 assert_line "OVERRIDE_ME=from-env"         # env{} wins over dotenv
 assert_line "DOTENV_ORDER=second"          # later dotenv file wins over earlier
+assert_line "GLOBAL_INLINE=1"              # top-level env, no dotenv file needed
+assert_line "GLOBAL_OVERRIDDEN=from-service" # service env{} wins over global env
 grep -Fxq -- "OVERRIDE_ME=from-dotenv" <<<"$env" \
 	&& fail "overridden dotenv value leaked (OVERRIDE_ME=from-dotenv present)" \
 	|| pass "overridden dotenv value absent"
 grep -Fxq -- "DOTENV_ORDER=first" <<<"$env" \
 	&& fail "earlier dotenv value leaked (DOTENV_ORDER=first present)" \
 	|| pass "earlier dotenv value overridden by later file"
+grep -Fxq -- "GLOBAL_OVERRIDDEN=from-global" <<<"$env" \
+	&& fail "global env value leaked (GLOBAL_OVERRIDDEN=from-global present)" \
+	|| pass "global env value overridden by service env{}"

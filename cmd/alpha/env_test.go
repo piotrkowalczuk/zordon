@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -20,7 +22,7 @@ func TestBuildCmd_injectsEnv(t *testing.T) {
 		},
 		Package: &alphasfile.Package{Toolchain: alphasfile.ToolchainGo, Src: "/tmp/x"},
 	}
-	cmd, err := buildCmd(svc, "/tmp/x", nil, false, nil, nil)
+	cmd, err := buildCmd(svc, "/tmp/x", nil, nil, false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +56,7 @@ func TestBuildCmd_explicitCmdDoesNotAutoAppend(t *testing.T) {
 		},
 		Package: &alphasfile.Package{Toolchain: alphasfile.ToolchainGo, Src: "/tmp/x"},
 	}
-	cmd, err := buildCmd(svc, "/tmp/x", nil, false, nil, nil)
+	cmd, err := buildCmd(svc, "/tmp/x", nil, nil, false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +75,7 @@ func TestServiceEnv_emptyAllowDropsHostVars(t *testing.T) {
 	t.Setenv("BUNDLE_GEMFILE", "/host/poison/Gemfile")
 	t.Setenv("HOME", "/Users/test")
 
-	got := serviceEnv(nil, nil, nil, nil)
+	got := serviceEnv(nil, nil, nil, nil, nil, nil)
 
 	for _, kv := range got {
 		if strings.HasPrefix(kv, "RUBYLIB=") || strings.HasPrefix(kv, "BUNDLE_") || strings.HasPrefix(kv, "HOME=") {
@@ -91,7 +93,7 @@ func TestServiceEnv_whitelistDropsEverythingElse(t *testing.T) {
 	t.Setenv("GEM_HOME", "/host/poison")
 	t.Setenv("BUNDLE_GEMFILE", "/host/poison/Gemfile")
 
-	got := serviceEnv(nil, nil, []string{"HOME", "LANG"}, nil)
+	got := serviceEnv([]string{"HOME", "LANG"}, nil, nil, nil, nil, nil)
 
 	want := map[string]string{"HOME": "/Users/test", "LANG": "en_US.UTF-8"}
 	gotMap := map[string]string{}
@@ -114,7 +116,7 @@ func TestServiceEnv_whitelistDropsEverythingElse(t *testing.T) {
 // Explicit env map overlays on top of the (filtered) host env.
 func TestServiceEnv_explicitOverlay(t *testing.T) {
 	t.Setenv("LANG", "C")
-	got := serviceEnv(nil, map[string]string{"PATH": "/svc/bin", "EXTRA": "yes"}, []string{"LANG"}, nil)
+	got := serviceEnv([]string{"LANG"}, nil, nil, nil, nil, map[string]string{"PATH": "/svc/bin", "EXTRA": "yes"})
 	gotMap := map[string]string{}
 	for _, kv := range got {
 		k, v, _ := strings.Cut(kv, "=")
@@ -125,6 +127,61 @@ func TestServiceEnv_explicitOverlay(t *testing.T) {
 	}
 	if gotMap["PATH"] != "/svc/bin" || gotMap["EXTRA"] != "yes" {
 		t.Errorf("explicit overlay missing: %v", gotMap)
+	}
+}
+
+func TestServiceEnv_precedence(t *testing.T) {
+	dir := t.TempDir()
+	gdot := filepath.Join(dir, "global.env")
+	sdot := filepath.Join(dir, "svc.env")
+	mustWriteEnvFile(t, gdot, "LAYER=global-dotenv\n")
+	mustWriteEnvFile(t, sdot, "LAYER=svc-dotenv\n")
+
+	cases := map[string]struct {
+		toolchain map[string]string
+		globalDot []string
+		globalEnv map[string]string
+		svcDot    []string
+		svcEnv    map[string]string
+		want      string
+	}{
+		"global env beats global dotenv": {
+			globalDot: []string{gdot},
+			globalEnv: map[string]string{"LAYER": "global-env"},
+			want:      "global-env",
+		},
+		"global env beats toolchain": {
+			toolchain: map[string]string{"LAYER": "toolchain"},
+			globalEnv: map[string]string{"LAYER": "global-env"},
+			want:      "global-env",
+		},
+		"service dotenv beats global env": {
+			globalEnv: map[string]string{"LAYER": "global-env"},
+			svcDot:    []string{sdot},
+			want:      "svc-dotenv",
+		},
+		"service env beats everything": {
+			toolchain: map[string]string{"LAYER": "toolchain"},
+			globalDot: []string{gdot},
+			globalEnv: map[string]string{"LAYER": "global-env"},
+			svcDot:    []string{sdot},
+			svcEnv:    map[string]string{"LAYER": "svc-env"},
+			want:      "svc-env",
+		},
+	}
+
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			got := serviceEnv(nil, c.toolchain, c.globalDot, c.globalEnv, c.svcDot, c.svcEnv)
+			m := map[string]string{}
+			for _, kv := range got {
+				k, v, _ := strings.Cut(kv, "=")
+				m[k] = v
+			}
+			if m["LAYER"] != c.want {
+				t.Errorf("LAYER = %q, want %q", m["LAYER"], c.want)
+			}
+		})
 	}
 }
 
@@ -159,5 +216,12 @@ func TestPhaseEnv_precedence(t *testing.T) {
 	got = phaseEnv(svc, svc.Runtime.BuildEnv, true)
 	if got["LEVEL"] != "agent" {
 		t.Fatalf("build/agent overlay wrong: %v", got)
+	}
+}
+
+func mustWriteEnvFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }

@@ -70,6 +70,21 @@ func TestGlobalComputedState_Join(t *testing.T) {
 	}
 }
 
+func TestGlobalComputedState_JoinEnv(t *testing.T) {
+	var g GlobalComputedState
+	g.Join(BlockComputedState{env: map[string]string{"A": "root", "SHARED": "root"}})
+	g.Join(BlockComputedState{env: map[string]string{"B": "child", "SHARED": "child"}})
+
+	got := g.Env()
+	want := map[string]string{"A": "root", "B": "child", "SHARED": "child"}
+	if !reflect.DeepEqual(map[string]string(got), want) {
+		t.Errorf("Env() = %v, want %v (child wins on collision)", got, want)
+	}
+	if g.ParentContext() != nil {
+		t.Error("ParentContext() non-nil after env-only Joins, want nil")
+	}
+}
+
 // A dotenv-only contribution must not make ParentContext non-nil: dotenv flows
 // separately (parentDotenv), exactly as the pre-refactor guard
 // `if len(accumulated) > 0 || len(toolchain) > 0 || len(sysenv) > 0` did.

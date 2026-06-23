@@ -360,13 +360,14 @@ type alphaState struct {
 	mu             sync.RWMutex
 	startedAt      time.Time
 	alphasfilePath string
-	fsHash         string   // filesystem-location identity (== inv.FsHash)
-	cfgHash        string   // manifest identity (Alphasfile+parent ctx); drives drift detection
-	zordonHome     string   // ~/.zordon — host-wide registry root (empty ⇒ registry disabled)
-	tommyBin       string   // path to the tommy wrapper interposed before every service (empty ⇒ spawn unwrapped)
-	workspace      string   // workspace name this alpha runs for (== invocation.MainWorkspace by default)
-	parentDotenv   []string // file-level dotenv paths inherited from federation parents
-	agentMode      bool     // configured via `zordon --agent`: apply agent{} env overlay
+	fsHash         string            // filesystem-location identity (== inv.FsHash)
+	cfgHash        string            // manifest identity (Alphasfile+parent ctx); drives drift detection
+	zordonHome     string            // ~/.zordon — host-wide registry root (empty ⇒ registry disabled)
+	tommyBin       string            // path to the tommy wrapper interposed before every service (empty ⇒ spawn unwrapped)
+	workspace      string            // workspace name this alpha runs for (== invocation.MainWorkspace by default)
+	parentDotenv   []string          // file-level dotenv paths inherited from federation parents
+	parentEnv      map[string]string // file-level inline env inherited from federation parents (deeper ancestor wins)
+	agentMode      bool              // configured via `zordon --agent`: apply agent{} env overlay
 	config         *alphasfile.Alphasfile
 	services       map[string]*serviceCtx   // keyed by service name
 	provisions     map[string]*provisionCtx // keyed by provision ID ("service.<tc>.<svc>.runtime.provision.<name>")
@@ -731,9 +732,17 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
 //  4. toolchain.<lang>.env → user-explicit overrides at the language
 //     level. Layers 2–4 together form the "toolchain initial envs"
 //     returned by toolchainEnv.
-//  5. dotenv files (federation parents → this Alphasfile → service).
-//  6. service.env + phase env (build/runtime) + agent overlay →
+//  5. global dotenv files (federation parents → this Alphasfile).
+//  6. global inline env (federation parents merged → this Alphasfile) —
+//     the dotenv-less way to set a variable for every service.
+//  7. service dotenv files.
+//  8. service.env + phase env (build/runtime) + agent overlay →
 //     per-service overrides at the top.
+//
+// Layers 5–6 are the "global" tier applied under every service; 7–8 are
+// the service's own. Within each tier inline env beats dotenv files;
+// across tiers the service always beats the global default. The build
+// phase is hermetic — it skips layers 5–7 entirely.
 
 // serviceCtx is one running service plus the channels that drive its
 // lifecycle. The supervisor goroutine is the sole owner of cmd.Wait —
@@ -1198,13 +1207,14 @@ func (sc *serviceCtx) TerminalFailure() *barrier.Barrier {
 // lifecycle. cmd.Wait has exactly one owner across the whole codebase,
 // which keeps "exec: Wait was already called" from being expressible.)
 
-func (s *alphaState) configure(path, fsHash, cfgHash string, parentDotenv []string, agent bool, af *alphasfile.Alphasfile) {
+func (s *alphaState) configure(path, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, agent bool, af *alphasfile.Alphasfile) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.alphasfilePath = path
 	s.fsHash = fsHash
 	s.cfgHash = cfgHash
 	s.parentDotenv = parentDotenv
+	s.parentEnv = parentEnv
 	s.agentMode = agent
 	s.config = af
 	s.readiness = make(map[string]string)
@@ -1265,6 +1275,7 @@ func (s *alphaState) snapshot() *protocol.StateInfo {
 	if s.config != nil {
 		info.Services = s.config.All()
 		info.Dotenv = s.config.Dotenv
+		info.Env = s.config.Env
 		info.Toolchain = s.config.Toolchain
 		info.SysEnv = s.config.SysEnv
 	}
@@ -1783,7 +1794,7 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 	args := req.Configure
 	newConfig := args.Alphasfile
 
-	state.configure(args.AlphasfilePath, args.FsHash, args.CfgHash, args.ParentDotenv, args.Agent, newConfig)
+	state.configure(args.AlphasfilePath, args.FsHash, args.CfgHash, args.ParentDotenv, args.ParentEnv, args.Agent, newConfig)
 	services := newConfig.All()
 	log.Info("alpha", "clean: configured from %s (%d services)", args.AlphasfilePath, len(services))
 
@@ -1985,7 +1996,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		state.stopServices(toStop)
 	}
 
-	state.configure(req.Configure.AlphasfilePath, req.Configure.FsHash, req.Configure.CfgHash, req.Configure.ParentDotenv, req.Configure.Agent, newConfig)
+	state.configure(req.Configure.AlphasfilePath, req.Configure.FsHash, req.Configure.CfgHash, req.Configure.ParentDotenv, req.Configure.ParentEnv, req.Configure.Agent, newConfig)
 	services := newConfig.All()
 	files := newConfig.AllFiles()
 	log.Info("alpha", "configured from %s (%d services, %d files, failfast=%v), starting bringup",
@@ -2393,20 +2404,20 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 	state, cfg, stream, log, failfast := b.state, b.cfg, b.stream, b.log, b.failfast
 	name := svc.Name()
 
-	// env precedence (low→high): process env → federation parents'
-	// file-level dotenv (root-first) → this Alphasfile's file-level
-	// dotenv → this service's dotenv → this service's env block.
+	// env precedence (low→high): process env → toolchain → global dotenv
+	// files (federation parents root-first, then this Alphasfile) → global
+	// inline env (parents merged, then this Alphasfile) → this service's
+	// dotenv → this service's env block.
 	state.mu.RLock()
-	envFiles := append([]string{}, state.parentDotenv...)
+	globalDotenv := append([]string{}, state.parentDotenv...)
+	globalEnv := zenv.EnvironmentVariables(state.parentEnv)
 	var sysenv []string
 	if state.config != nil {
-		envFiles = append(envFiles, state.config.Dotenv...)
+		globalDotenv = append(globalDotenv, state.config.Dotenv...)
+		globalEnv = globalEnv.Join(state.config.Env)
 		sysenv = state.config.SysEnv
 	}
 	state.mu.RUnlock()
-	if svc.Runtime != nil {
-		envFiles = append(envFiles, svc.Runtime.Dotenv...)
-	}
 
 	// Resolve toolchain envs FIRST — they're the initial environment
 	// (PATH/GOROOT/GEM_PATH/...) the service runs under. Dotenv +
@@ -2420,7 +2431,7 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 		return
 	}
 
-	cmd, err := buildCmd(svc, repoDir, envFiles, agent, sysenv, tcEnv)
+	cmd, err := buildCmd(svc, repoDir, globalDotenv, globalEnv, agent, sysenv, tcEnv)
 	if err != nil {
 		log.Error("alpha", "build cmd %s: %v", name, err)
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
@@ -2734,14 +2745,22 @@ func streamLines(name, kind string, r io.Reader, stream *safeEncoder, log *zlog.
 // serviceEnv composes a child process env in the precedence documented
 // at the top of this file (lowest → highest):
 //
-//	NewEnvironmentVariablesFromHost(allow) → toolchain → dotenv files → env
+//	FromHost(allow) → toolchain → global dotenv files → global env →
+//	    service dotenv files → service env
+//
+// The split between the global pair (file-level dotenv + inline env,
+// applied to every service) and the service pair keeps the rule "a
+// service's own config always wins over a global default" while still
+// letting an inline value beat a file at each tier.
 //
 // Thin wrapper over zenv.EnvironmentVariables.Join / .JoinFile so the
-// spawn sites don't have to spell out the chain four times.
-func serviceEnv(envFiles []string, env map[string]string, allow []string, toolchain map[string]string) []string {
+// spawn sites don't have to spell out the chain by hand.
+func serviceEnv(allow []string, toolchain map[string]string, globalDotenv []string, globalEnv map[string]string, svcDotenv []string, env map[string]string) []string {
 	return zenv.FromHost(allow).
 		Join(toolchain).
-		JoinFile(envFiles...).
+		JoinFile(globalDotenv...).
+		Join(globalEnv).
+		JoinFile(svcDotenv...).
 		Join(env).
 		Slice()
 }
@@ -2783,7 +2802,7 @@ func debuggerWrap(svc *alphasfile.Service, argv []string) []string {
 	return append(wrap, argv...)
 }
 
-func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent bool, sysenv []string, toolchain map[string]string) (*exec.Cmd, error) {
+func buildCmd(svc *alphasfile.Service, checkout string, globalDotenv []string, globalEnv map[string]string, agent bool, sysenv []string, toolchain map[string]string) (*exec.Cmd, error) {
 	name := svc.Name()
 	if name == "" {
 		return nil, errors.New("service has no name")
@@ -2838,14 +2857,16 @@ func buildCmd(svc *alphasfile.Service, checkout string, envFiles []string, agent
 		}
 	}
 	var runEnv map[string]string
+	var svcDotenv []string
 	if svc.Runtime != nil {
 		runEnv = phaseEnv(svc, svc.Runtime.RunEnv, agent)
+		svcDotenv = svc.Runtime.Dotenv
 	}
 	// ALWAYS set cmd.Env (even when no dotenv / no overlay): with cmd.Env
 	// nil, exec inherits the full alpha process env — defeating the
 	// closed-world whitelist. serviceEnv with empty sysenv returns no
 	// host vars, which is the desired strictest default.
-	cmd.Env = serviceEnv(envFiles, runEnv, sysenv, toolchain)
+	cmd.Env = serviceEnv(sysenv, toolchain, globalDotenv, globalEnv, svcDotenv, runEnv)
 	return cmd, nil
 }
 
@@ -3249,8 +3270,10 @@ func prepareBuild(ctx context.Context, svc *alphasfile.Service, name, dest strin
 		return fmt.Errorf("build toolchain: %w", err)
 	}
 	// ALWAYS set Env (even empty) — nil would inherit alpha's full env
-	// and undo the closed-world whitelist.
-	c.Env = serviceEnv(nil, be, sysenv, tcEnv)
+	// and undo the closed-world whitelist. The build stays hermetic:
+	// like file-level dotenv, the global env overlay is a runtime concern
+	// and does not reach the build (use build.env / toolchain.env for that).
+	c.Env = serviceEnv(sysenv, tcEnv, nil, nil, nil, be)
 	// exec.Command resolved c.Path against alpha's os.Environ()
 	// BEFORE we set c.Env. If the user passed a bare name (`go`,
 	// `cargo`, etc.) it now points at whatever is on alpha's PATH
