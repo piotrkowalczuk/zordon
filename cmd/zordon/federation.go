@@ -134,6 +134,7 @@ func stateFromAlphasfile(af *alphasfile.Alphasfile) *protocol.StateInfo {
 		Toolchain: af.Toolchain,
 		SysEnv:    af.SysEnv,
 		Dotenv:    append([]string(nil), af.Dotenv...),
+		Env:       af.Env,
 	}
 }
 
@@ -219,6 +220,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 	for _, lvl := range fed.Levels() {
 		inv := lvl.Invocation()
 		parentDotenv := append([]string{}, parents.Dotenv()...)
+		parentEnv := parents.Env()
 		parentJSON, err := json.Marshal(parents.Services())
 		if err != nil {
 			return fmt.Errorf("marshal parent ctx: %w", err)
@@ -252,7 +254,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			af.Services = filtered
 		}
 
-		if err := reconcileAlpha(ctx, lvl, af, old, parentDotenv, cfg, log); err != nil {
+		if err := reconcileAlpha(ctx, lvl, af, old, parentDotenv, parentEnv, cfg, log); err != nil {
 			return err
 		}
 
@@ -293,6 +295,7 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 	for _, lvl := range fed.Levels() {
 		inv := lvl.Invocation()
 		parentDotenv := append([]string{}, parents.Dotenv()...)
+		parentEnv := parents.Env()
 		parentJSON, err := json.Marshal(parents.Services())
 		if err != nil {
 			return fmt.Errorf("marshal parent ctx: %w", err)
@@ -330,7 +333,7 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		}
 		defer unlock()
 
-		return cleanLeaf(ctx, lvl, af, parentDotenv, cfg, log)
+		return cleanLeaf(ctx, lvl, af, parentDotenv, parentEnv, cfg, log)
 	}
 	return errors.New("no invocation level in chain")
 }
@@ -338,7 +341,7 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 // cleanLeaf mirrors reconcileAlpha's leaf path but drives a teardown instead
 // of a bringup: spawn a transient alpha, send OpClean, then always shut that
 // alpha down (it exists only to run the clean snippets).
-func cleanLeaf(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, parentDotenv []string, cfg startConfig, log *zlog.Logger) error {
+func cleanLeaf(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, parentDotenv []string, parentEnv map[string]string, cfg startConfig, log *zlog.Logger) error {
 	inv := lvl.inv
 	sock := inv.SocketPath()
 
@@ -359,7 +362,7 @@ func cleanLeaf(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, p
 		return fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
 
-	cleanErr := pushClean(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, af, cfg.agent)
+	cleanErr := pushClean(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.agent)
 	// Always shut the transient alpha down, success or failure.
 	if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
 		log.Error("zordon", "shutdown transient alpha: %v", e)

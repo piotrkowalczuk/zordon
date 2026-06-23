@@ -85,7 +85,7 @@ func (f *FederationState) Levels() []ChainLevel { return f.levels }
 // accumulator through the same Join(block) path as a freshly resolved one —
 // no separate glue per source.
 func adoptedBlock(st *protocol.StateInfo) alphasfile.BlockComputedState {
-	return alphasfile.AdoptBlock(st.Services, st.Toolchain, st.SysEnv, st.Dotenv, st.CfgHash)
+	return alphasfile.AdoptBlock(st.Services, st.Toolchain, st.SysEnv, st.Dotenv, st.Env, st.CfgHash)
 }
 
 // startConfig bundles the spawn/configure knobs reconcileAlpha needs so the
@@ -146,7 +146,7 @@ func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx
 // replacement and block until it has accepted the config (EventDone) or
 // failed. Resolution already happened (resolveLevel) — so a config that
 // won't even parse never tears down the old, healthy alpha.
-func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, old *protocol.StateInfo, parentDotenv []string, cfg startConfig, log *zlog.Logger) error {
+func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, old *protocol.StateInfo, parentDotenv []string, parentEnv map[string]string, cfg startConfig, log *zlog.Logger) error {
 	inv := lvl.inv
 	sock := inv.SocketPath()
 
@@ -185,7 +185,7 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 	if err := control.WaitListening(ctxLevel, sock); err != nil {
 		return fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
-	if err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, af, cfg.failfast, cfg.agent); err != nil {
+	if err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent); err != nil {
 		return fmt.Errorf("%s: %w", lvl.afPath, err)
 	}
 	return nil

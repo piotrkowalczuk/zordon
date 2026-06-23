@@ -75,6 +75,9 @@ func renderState(st *protocol.StateInfo) []byte {
 	if len(st.Dotenv) > 0 {
 		body.SetAttributeValue("dotenv", stringListVal(st.Dotenv))
 	}
+	if len(st.Env) > 0 {
+		body.SetAttributeValue("env", mapStringStringVal(st.Env))
+	}
 	if len(st.SysEnv) > 0 {
 		body.SetAttributeValue("sysenv", stringListVal(st.SysEnv))
 	}

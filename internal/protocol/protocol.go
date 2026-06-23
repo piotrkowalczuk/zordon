@@ -73,6 +73,11 @@ type ConfigureArgs struct {
 	// higher in the federation chain (root-first). Each service applies
 	// these (then its own file-level dotenv, then its per-service env).
 	ParentDotenv []string `json:"parent_dotenv,omitempty"`
+	// ParentEnv carries file-level inline `env` accumulated from every
+	// Alphasfile higher in the federation chain (deeper ancestor winning on
+	// collision). Layered under this level's own file-level env, which is in
+	// turn under each service's own dotenv/env.
+	ParentEnv map[string]string `json:"parent_env,omitempty"`
 }
 
 type Response struct {
@@ -107,6 +112,7 @@ type StateInfo struct {
 	FsHash         string                                 `json:"fs_hash,omitempty"`  // instance identity (location)
 	CfgHash        string                                 `json:"cfg_hash,omitempty"` // manifest identity (Alphasfile+parent ctx)
 	Dotenv         []string                               `json:"dotenv,omitempty"`   // file-level dotenv (for federation chain)
+	Env            map[string]string                      `json:"env,omitempty"`      // file-level inline env (for federation chain)
 	Services       []*alphasfile.Service                  `json:"services,omitempty"`
 	Toolchain      map[string]*alphasfile.ToolchainConfig `json:"toolchain,omitempty"` // for federation child inheritance
 	SysEnv         []string                               `json:"sysenv,omitempty"`    // closed-world env whitelist (federation accumulates)

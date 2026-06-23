@@ -62,8 +62,13 @@ Lowest to highest, last wins:
    `toolchain.<lang>.env` overlay
 3. federation-parent **file-level** `dotenv` (root-first)
 4. this Alphasfile's file-level `dotenv`
-5. the service's `dotenv`
-6. the service's `env { }` block, then the matching phase's `env { }`
+5. **file-level `env { }`** — the top-level inline overlay applied under
+   every service (federation parents merged root-first with the deeper
+   level winning, then this Alphasfile's own). The dotenv-less way to set
+   a variable for the whole stack; inline beats the file-level `dotenv`
+   above it, just as a service's `env` beats its `dotenv`.
+6. the service's `dotenv`
+7. the service's `env { }` block, then the matching phase's `env { }`
    (`runtime`/`build`), and finally `agent { env { } }` when alpha
    runs in `--agent` mode
 
@@ -71,10 +76,13 @@ The toolchain is the **initial** environment: it lays down PATH /
 GOROOT / GEM_PATH / GOTOOLCHAIN / etc. so language tooling resolves to
 the pinned install. Per-service config (`dotenv`, `env`, phase env)
 layers on top, so users override toolchain defaults — never the other
-way around.
+way around. A service's own `dotenv`/`env` likewise wins over the
+file-level `dotenv`/`env`: the global tier is a default, not an override.
 
-All of `dotenv`/`env` are interpolated and DAG-ordered like any other
-field.
+All of `dotenv`/`env` (file-level and per-service) are interpolated and
+DAG-ordered like any other field. The file-level `env` and `dotenv` are
+runtime-only — like `dotenv`, they do not reach the hermetic build phase
+(use `build { env }` or `toolchain.<lang>.env` for builds).
 
 ## Reconfigure
 
