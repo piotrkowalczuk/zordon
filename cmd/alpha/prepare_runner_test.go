@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"errors"
-	"os"
+	"io"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
 
@@ -22,9 +24,14 @@ import (
 
 // discardLog gives the runner a real *zlog.Logger that throws output
 // away — keeps the test silent without forcing a no-op logger type.
+// Must use io.Discard, NOT os.NewFile(uintptr(0), …): that wraps fd 0
+// (stdin), and closing/finalizing it frees fd 0 for reuse — which under
+// `go test -coverprofile` the coverage writer then grabs, only to have a
+// stale wrapper close it, surfacing as "write _cover_.out: bad file
+// descriptor". io.Discard holds no descriptor at all.
 func discardLog(t *testing.T) *zlog.Logger {
 	t.Helper()
-	return zlog.New(os.NewFile(uintptr(0), os.DevNull), false)
+	return zlog.New(io.Discard, false)
 }
 
 // Happy path: subprocess exits naturally before ctx cancels. The
@@ -88,33 +95,37 @@ func TestPrepareRunner_ctxCancelReapsSubprocess(t *testing.T) {
 // build helper could pin alpha pre-fix.
 func TestPrepareRunner_ctxCancelEscalatesToSIGKILL(t *testing.T) {
 	runner := newPrepareRunner("svc1", newSafeEncoder(nil), discardLog(t))
-	// Bash trap on TERM ⇒ SIGTERM is no-op; only SIGKILL stops this.
-	cmd := exec.Command("/bin/sh", "-c", `trap '' TERM; sleep 30`)
+	// Shell traps TERM (⇒ SIGTERM is a no-op; only SIGKILL stops it), then
+	// touches the marker passed as $0. Gating the cancel on that marker
+	// removes the race the old fixed 50ms timer had: under load the trap
+	// might not be installed yet, SIGTERM would kill an un-trapped shell
+	// outright, and the escalation path would never be exercised.
+	ready := filepath.Join(t.TempDir(), "trapped")
+	cmd := exec.Command("/bin/sh", "-c", `trap '' TERM; : > "$0"; sleep 30`, ready)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
+	done := make(chan error, 1)
+	go func() { done <- runner(ctx, cmd) }()
+
+	waitForFile(t, ready, 5*time.Second) // trap is installed once it exists
 
 	start := time.Now()
-	err := runner(ctx, cmd)
+	cancel()
+	err := <-done
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
-	// Grace is 2s in newPrepareRunner; total bound: cancel-delay
-	// (50ms) + grace (2s) + slack < 4s.
+	// SIGTERM is trapped, so the runner must wait the full 2s grace before
+	// SIGKILL: bound the window at grace (2s) + slack < 4s, measured from
+	// cancel. It must NOT return early — that would mean SIGTERM killed an
+	// un-trapped shell and the escalation path was skipped.
 	if elapsed > 4*time.Second {
 		t.Fatalf("SIGKILL escalation took %s, expected <4s", elapsed)
 	}
 	if elapsed < 1500*time.Millisecond {
-		// Suspiciously fast — SIGTERM should NOT have killed a TRAPed
-		// shell, so we must have waited the grace. If we didn't, the
-		// trap broke silently and this test doesn't actually cover
-		// the escalation path.
-		t.Fatalf("returned in %s — too fast; SIGTERM trap may not be in effect, escalation path not exercised", elapsed)
+		t.Fatalf("returned in %s — too fast; SIGTERM trap not exercised, escalation path skipped", elapsed)
 	}
 	if cmd.Process != nil && processAlive(cmd.Process.Pid) {
 		t.Fatalf("pid %d still alive after SIGKILL window", cmd.Process.Pid)
@@ -154,4 +165,20 @@ func processAlive(pid int) bool {
 		return true
 	}
 	return errors.Is(err, syscall.EPERM)
+}
+
+// waitForFile blocks until path exists or timeout elapses, polling so the
+// test can synchronize on a marker a subprocess writes.
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if zfs.Exists(path) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not appear within %s", path, timeout)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
