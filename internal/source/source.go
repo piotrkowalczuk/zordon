@@ -229,6 +229,26 @@ func branchWorktreePath(ctx context.Context, gitDir, branch string) (string, boo
 	return "", false
 }
 
+// worktreeLocked reports whether the worktree at dest is locked. AddWorktree
+// creates worktrees locked and clears the lock only once the checkout
+// finishes, so a still-locked worktree means a prior setup (e.g. one killed
+// by failfast) never completed — the tree is incomplete and must be rebuilt,
+// not reused.
+//
+// Detection reads the `locked` marker file in the worktree's admin dir,
+// which git has written since worktree locking landed (2.7). It deliberately
+// does NOT parse `git worktree list --porcelain`: that output only grew a
+// `locked` line in git 2.36, so on the older distro gits in CI it would
+// always report "not locked" and the heal would silently no-op.
+func worktreeLocked(ctx context.Context, dest string) bool {
+	out, err := exec.CommandContext(ctx, "git", "-C", dest, "rev-parse", "--absolute-git-dir").Output()
+	if err != nil {
+		return false
+	}
+	adminDir := strings.TrimSpace(string(out))
+	return zfs.Exists(filepath.Join(adminDir, "locked"))
+}
+
 func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runner) error {
 	if !p.Workspaceable() {
 		return fmt.Errorf("service has no git/dir primary; not workspaceable")
@@ -236,13 +256,21 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 	if run == nil {
 		return errors.New("source.AddWorktree: nil runner")
 	}
+	gitDir := p.primaryPath()
 	if zfs.Exists(filepath.Join(dest, ".git")) {
-		return nil // existing worktree — reuse
+		if !worktreeLocked(ctx, dest) {
+			return nil // checkout finished cleanly — reuse
+		}
+		// A prior setup died mid-init (e.g. failfast killed it before the
+		// checkout finished); the lock is git's durable "not done" marker.
+		// Unlock so remove can run, drop the half-baked tree, and fall
+		// through to rebuild it.
+		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "unlock", dest))
+		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "remove", "--force", dest))
 	}
 	if err := zfs.EnsureDir(filepath.Dir(dest)); err != nil {
 		return fmt.Errorf("mkdir worktree parent: %w", err)
 	}
-	gitDir := p.primaryPath()
 	start := p.Ref
 	if start == "" {
 		start = "HEAD"
@@ -265,34 +293,38 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 		}
 	}
 
-	if p.Workspace != nil && len(p.Workspace.Sparse) > 0 {
-		args := []string{"-C", gitDir, "worktree", "add", "--no-checkout", "--force", "-B", branch, dest, start}
-		if err := run(ctx, exec.CommandContext(ctx, "git", args...)); err != nil {
-			return fmt.Errorf("git worktree add: %w", err)
-		}
+	// Create the worktree locked and unchecked-out: `--lock` marks it
+	// atomically at creation, so a failfast kill never leaves an
+	// unlocked-but-incomplete tree, and `--no-checkout` defers the
+	// interruptible checkout to run while locked. `--reason` is deliberately
+	// omitted — `git worktree add` only learned it in 2.34 and the distro
+	// gits in CI reject it. The lock is the completion sentinel, cleared only
+	// on success below.
+	args := []string{"-C", gitDir, "worktree", "add", "--lock", "--no-checkout", "--force", "-B", branch, dest, start}
+	if err := run(ctx, exec.CommandContext(ctx, "git", args...)); err != nil {
+		return fmt.Errorf("git worktree add: %w", err)
+	}
 
-		// Initialize sparse checkout
+	if p.Workspace != nil && len(p.Workspace.Sparse) > 0 {
 		if err := run(ctx, exec.CommandContext(ctx, "git", "-C", dest, "sparse-checkout", "init")); err != nil {
 			return fmt.Errorf("git sparse-checkout init: %w", err)
 		}
-
-		// Set the specific paths for sparse checkout
 		sparseArgs := append([]string{"-C", dest, "sparse-checkout", "set"}, p.Workspace.Sparse...)
 		if err := run(ctx, exec.CommandContext(ctx, "git", sparseArgs...)); err != nil {
 			return fmt.Errorf("git sparse-checkout set: %w", err)
 		}
-
-		// Perform the checkout manually
-		if err := run(ctx, exec.CommandContext(ctx, "git", "-C", dest, "checkout", branch)); err != nil {
-			return fmt.Errorf("git checkout: %w", err)
-		}
-	} else {
-		args := []string{"-C", gitDir, "worktree", "add", "--force", "-B", branch, dest, start}
-		if err := run(ctx, exec.CommandContext(ctx, "git", args...)); err != nil {
-			return fmt.Errorf("git worktree add: %w", err)
-		}
 	}
 
+	if err := run(ctx, exec.CommandContext(ctx, "git", "-C", dest, "checkout", branch)); err != nil {
+		return fmt.Errorf("git checkout: %w", err)
+	}
+
+	// Checkout finished; clear the lock so the next start reuses the tree
+	// instead of rebuilding it. This unlock is the commit point — until it
+	// runs, the worktree reads as not-yet-finished.
+	if err := run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "unlock", dest)); err != nil {
+		return fmt.Errorf("git worktree unlock: %w", err)
+	}
 	return nil
 }
 
