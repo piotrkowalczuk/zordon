@@ -1,0 +1,67 @@
+# examples/pkg_tools — install a standalone CLI from a mise package backend
+# and use it from a provision. Here it's `atlas` (Ariga's schema-migration
+# tool, from the aqua backend). atlas belongs to no language toolchain, so it
+# is declared under `toolchain { pkg { tools } }`: zordon installs it with
+# `mise install` and exposes it on PATH only where a step asks for it, via
+# fs::toolchain::bin(toolchain.pkg) + env::prepend.
+#
+# The `go` service is just a supervised host. Its `migrate` provision runs
+# atlas against a local SQLite file BEFORE the app starts (runtime.after gates
+# on migrate.success); then the trivial HTTP app comes up. The point is the
+# tool install and its PATH exposure — not the app.
+#
+# First start downloads atlas via mise/aqua (a prebuilt single binary — fast;
+# cached under <repo>/.zordon afterwards).
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  pkg {
+    # key = mise ref (optionally backend-qualified), value = version.
+    # Installed via `mise install aqua:ariga/atlas@1.2.0`. Multiple entries
+    # are allowed; their bins are pooled behind fs::toolchain::bin(toolchain.pkg).
+    tools = {
+      "aqua:ariga/atlas" = "1.2.0"
+    }
+  }
+}
+
+service "go" "app" {
+  src {
+    path = "../.."
+  }
+
+  vars = {
+    port = net::pickport()
+    db   = "${fs::state()}/app.db"
+  }
+
+  build {
+    cmd = ["go", "build", "-o", "${fs::bin()}/app", "./examples/go/src/app"]
+  }
+
+  runtime {
+    # The app comes up only after the schema migration has been applied.
+    after = [self.runtime.provision.migrate.success]
+
+    # atlas is not on PATH by default — env::prepend the pkg toolchain's bin
+    # dir (which holds every tool declared in `toolchain { pkg { tools } }`).
+    # Without this the CLI wouldn't be found and the provision would fail.
+    # `apply` is idempotent, so a restart re-runs it as a no-op.
+    provision "migrate" {
+      env    = { PATH = env::prepend(fs::toolchain::bin(toolchain.pkg)) }
+      cmd    = "atlas migrate apply --url sqlite://${self.vars.db}?_fk=1 --dir file://${fs::src()}/examples/pkg_tools/migrations"
+      verify = "atlas migrate status --url sqlite://${self.vars.db}?_fk=1 --dir file://${fs::src()}/examples/pkg_tools/migrations | grep -q 'Migration Status: OK'"
+    }
+
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

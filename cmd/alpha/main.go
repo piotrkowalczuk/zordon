@@ -602,6 +602,13 @@ type toolchainCtx struct {
 	// language EnsureTools, and lang holds the mise tool ref (e.g.
 	// "redis" / "aqua:etcd-io/etcd").
 	isPkg bool
+	// pkgTools marks the `toolchain { pkg { tools } }` pseudo-toolchain:
+	// standalone mise-backend CLIs (mise-ref → version, e.g.
+	// "aqua:ariga/atlas" → "0.29.0") that belong to no language. Each is
+	// installed via EnsurePackage; their bin dirs are pooled into
+	// binPaths behind fs::toolchain::bin(toolchain.pkg). lang/version are
+	// unused in this mode.
+	pkgTools map[string]string
 	// installEnv (pkg only): the service's `build { env }` overlaid onto
 	// the `mise install` — configure flags / build vars a source-compiled
 	// backend needs (e.g. POSTGRES_EXTRA_CONFIGURE_OPTIONS). NOT applied
@@ -663,6 +670,15 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
 		tc.lifecycle.Reach("failed")
 		return
 	}
+	// pkg pseudo-toolchain: install each standalone CLI (aqua:ariga/atlas,
+	// …) via `mise install` and pool every tool's bin dir behind
+	// fs::toolchain::bin(toolchain.pkg). Distinct from the language path
+	// below: multiple independent (ref, version) installs, each locked on
+	// its own key, rather than one interpreter with tools layered in.
+	if tc.pkgTools != nil {
+		bringupPkgTools(tc, bin, zordonHome, log)
+		return
+	}
 	// ResolveDataDir uses zordonHome as the walk-up anchor; the
 	// default toolchain root lives directly under it. Alpha doesn't
 	// have a per-service cwd to pivot from at this stage (we
@@ -720,6 +736,47 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
 	tc.binPaths = binDirs
 	tc.lifecycle.Reach("ready")
 	log.Info("alpha", "toolchain %s@%s: ready", tc.lang, tc.version)
+}
+
+// bringupPkgTools materializes the `toolchain { pkg { tools } }`
+// pseudo-toolchain: each (mise-ref, version) is installed with `mise
+// install` (EnsurePackage) and its bin dir(s) pooled into tc.binPaths, so
+// fs::toolchain::bin(toolchain.pkg) hands every declared tool's binaries
+// to a provision that env::prepends it. Unlike the language path, each
+// tool takes its own per-(ref, version) lock — they're independent
+// installs, not one interpreter's layered tool world. Any install error
+// Reaches "failed" so waiters on toolchain.pkg@ready unblock rather than
+// deadlock.
+func bringupPkgTools(tc *toolchainCtx, bin, zordonHome string, log *zlog.Logger) {
+	defaultDataDir := filepath.Join(zordonHome, "toolchain")
+	var pooled []string
+	for ref, version := range tc.pkgTools {
+		dataDir := tools.ResolveDataDir(zordonHome, defaultDataDir, ref, version)
+		release, err := tools.Acquire(dataDir, ref, version)
+		if err != nil {
+			log.Error("alpha", "toolchain pkg: acquire %s@%s: %v", ref, version, err)
+			tc.lifecycle.Reach("failed")
+			return
+		}
+		log.Info("alpha", "toolchain pkg: installing %s@%s", ref, version)
+		if err := tools.EnsurePackage(bin, dataDir, ref, version, nil, logWriter(log, "mise-tool")); err != nil {
+			release()
+			log.Error("alpha", "toolchain pkg: install %s@%s: %v", ref, version, err)
+			tc.lifecycle.Reach("failed")
+			return
+		}
+		_, binDirs, err := tools.MiseEnvWithBinDirs(bin, dataDir, ref, version, logWriter(log, "mise"))
+		release()
+		if err != nil {
+			log.Error("alpha", "toolchain pkg: mise env %s@%s: %v", ref, version, err)
+			tc.lifecycle.Reach("failed")
+			return
+		}
+		pooled = append(pooled, binDirs...)
+	}
+	tc.binPaths = pooled
+	tc.lifecycle.Reach("ready")
+	log.Info("alpha", "toolchain pkg: ready (%d tools)", len(tc.pkgTools))
 }
 
 // Env precedence (lowest to highest), assembled in serviceEnv:
@@ -1819,6 +1876,12 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 		state.addToolchain(tc)
 		go bringupToolchain(tc, state.zordonHome, log)
 	}
+	if pkgTC := newConfig.Toolchain[alphasfile.ToolchainPkg]; pkgTC != nil && len(pkgTC.Tools) > 0 {
+		tc := newToolchainCtx(alphasfile.ToolchainPkg, "", nil, nil)
+		tc.pkgTools = pkgTC.Tools
+		state.addToolchain(tc)
+		go bringupToolchain(tc, state.zordonHome, log)
+	}
 	pkgSeen := map[string]bool{}
 	for _, svc := range services {
 		if svc.Toolchain != alphasfile.ToolchainPkg || svc.Pkg == nil {
@@ -2029,6 +2092,17 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 			continue
 		}
 		tc := newToolchainCtx(lang, tcCfg.Version, tcCfg.Tools, tcCfg.Env)
+		state.addToolchain(tc)
+		go bringupToolchain(tc, state.zordonHome, log)
+	}
+
+	// pkg pseudo-toolchain: `toolchain { pkg { tools } }` carries no
+	// version (the loop above skips it), so materialize it here — one
+	// entity keyed "pkg" that installs every declared standalone CLI and
+	// pools their bins behind toolchain.pkg@ready / fs::toolchain::bin.
+	if pkgTC := newConfig.Toolchain[alphasfile.ToolchainPkg]; pkgTC != nil && len(pkgTC.Tools) > 0 {
+		tc := newToolchainCtx(alphasfile.ToolchainPkg, "", nil, nil)
+		tc.pkgTools = pkgTC.Tools
 		state.addToolchain(tc)
 		go bringupToolchain(tc, state.zordonHome, log)
 	}

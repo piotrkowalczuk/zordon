@@ -202,6 +202,27 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 				Env:     toStringMap(envMap),
 			}
 		}
+		// pkg pseudo-toolchain: standalone mise-backend CLIs (e.g.
+		// aqua:ariga/atlas) that belong to no language. Stored under the
+		// ToolchainPkg key with an empty Version; alpha installs each via
+		// `mise install` and pools their bins behind
+		// fs::toolchain::bin(toolchain.pkg).
+		if root.Toolchain.Pkg != nil {
+			toolsMap, err := r.evalMap(root.Toolchain.Pkg.Tools, nil, "toolchain.pkg.tools", srcDirs{})
+			if err != nil {
+				return nil, err
+			}
+			tools := toStringMap(toolsMap)
+			if len(tools) == 0 {
+				return nil, fmt.Errorf("toolchain.pkg: tools is required and must be non-empty (e.g. tools = { \"aqua:ariga/atlas\" = \"0.29.0\" })")
+			}
+			for ref, version := range tools {
+				if strings.TrimSpace(version) == "" {
+					return nil, fmt.Errorf("toolchain.pkg.tools[%q]: a version is required (e.g. %q = \"0.29.0\")", ref, ref)
+				}
+			}
+			toolchain[ToolchainPkg] = &ToolchainConfig{Tools: tools}
+		}
 	}
 	// Project pinned toolchains into cty so HCL expressions like
 	// `toolchain.ruby.ready` resolve to the canonical barrier ref
