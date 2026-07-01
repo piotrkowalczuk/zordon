@@ -198,16 +198,6 @@ func (p Primary) Ensure(ctx context.Context, run Runner) error {
 	return fmt.Errorf("unknown primary kind %q", p.Kind)
 }
 
-// AddWorktree creates (or reuses) a working tree at dest, on branch
-// `branch`, starting from p.Ref (or the primary's HEAD). Reuses an existing
-// valid worktree as-is so parallel invocations stay stable across restarts.
-func absOr(p string) string {
-	if a, err := filepath.Abs(p); err == nil {
-		return a
-	}
-	return p
-}
-
 // branchWorktreePath returns the path of the worktree that currently has
 // `branch` checked out (refs/heads/<branch>), if any. Read-only query; runs
 // git directly (not via Runner) so the porcelain output can be parsed.
@@ -249,6 +239,10 @@ func worktreeLocked(ctx context.Context, dest string) bool {
 	return zfs.Exists(filepath.Join(adminDir, "locked"))
 }
 
+// AddWorktree creates (or reuses) a working tree at dest, on branch
+// `branch`, starting from p.Ref (or the primary's HEAD). A finished worktree
+// is reused as-is so parallel invocations stay stable across restarts; one
+// left half-built by a killed init is reclaimed and rebuilt.
 func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runner) error {
 	if !p.Workspaceable() {
 		return fmt.Errorf("service has no git/dir primary; not workspaceable")
@@ -257,16 +251,11 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 		return errors.New("source.AddWorktree: nil runner")
 	}
 	gitDir := p.primaryPath()
-	if zfs.Exists(filepath.Join(dest, ".git")) {
-		if !worktreeLocked(ctx, dest) {
-			return nil // checkout finished cleanly — reuse
-		}
-		// A prior setup died mid-init (e.g. failfast killed it before the
-		// checkout finished); the lock is git's durable "not done" marker.
-		// Unlock so remove can run, drop the half-baked tree, and fall
-		// through to rebuild it.
-		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "unlock", dest))
-		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "remove", "--force", dest))
+	// A finished worktree is reused as-is: the lock is cleared only on
+	// success (below), so a present, unlocked .git means the checkout
+	// completed. Anything else falls through to reclaim + rebuild.
+	if zfs.Exists(filepath.Join(dest, ".git")) && !worktreeLocked(ctx, dest) {
+		return nil
 	}
 	if err := zfs.EnsureDir(filepath.Dir(dest)); err != nil {
 		return fmt.Errorf("mkdir worktree parent: %w", err)
@@ -276,17 +265,23 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 		start = "HEAD"
 	}
 
-	// If the directory was manually deleted but Git still tracks it, a later
-	// `worktree add` fails. `worktree prune` silently drops stale admin
-	// entries and is a no-op otherwise (unlike `worktree remove <dest>`,
-	// which prints a scary "fatal: not a working tree" when dest isn't one).
-	_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "prune"))
-
-	// prune only reclaims worktrees whose directory vanished. If the branch
-	// is still checked out at a *different* live path, `worktree add -B`
-	// would hard-fail with a raw git fatal — surface a clear error instead.
-	if other, ok := branchWorktreePath(ctx, gitDir, branch); ok {
-		if a, _ := filepath.Abs(other); filepath.Clean(a) != filepath.Clean(absOr(dest)) {
+	// Reclaim a leftover registration of <branch> before re-adding. A setup
+	// killed mid-init leaves the worktree LOCKED with the `initializing`
+	// sentinel; the working dir may still be present (incomplete checkout,
+	// #38) or already cleaned away while the bare's registration survives
+	// (#40). A locked entry blocks both `worktree prune` (it skips locked
+	// entries) and `worktree add -B` (the branch stays "held" at the dead
+	// path), so unlock, then `remove --force` (reclaims a dir-present entry)
+	// and `prune` (reclaims a dir-gone one). Gated on branchWorktreePath so a
+	// fresh add stays quiet (no "fatal: not a working tree" from remove). If
+	// <branch> is STILL registered afterwards, it's a live worktree
+	// elsewhere — a real collision, surfaced clearly. Matching is by branch,
+	// never by path, to stay immune to /var↔/private/var symlink differences.
+	if _, registered := branchWorktreePath(ctx, gitDir, branch); registered {
+		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "unlock", dest))
+		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "remove", "--force", dest))
+		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "prune"))
+		if other, still := branchWorktreePath(ctx, gitDir, branch); still {
 			return fmt.Errorf("branch %q is already checked out at %s; "+
 				"remove that worktree first (e.g. `zordon workspace rm`) or point this one elsewhere",
 				branch, other)

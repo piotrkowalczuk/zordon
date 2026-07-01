@@ -183,6 +183,41 @@ func TestPrimary_AddWorktree_rebuildsLockedWorktree(t *testing.T) {
 	}
 }
 
+// A setup killed mid-init can leave the worktree LOCKED in the bare's admin
+// registration while the working dir is later cleaned away (#40). The
+// dangling locked registration keeps holding <branch> — plain `worktree
+// prune` skips locked entries — so the next AddWorktree would fail with
+// "cannot force update the branch … used by worktree at <dest>". It must
+// instead reclaim the orphan (unlock + prune) and rebuild.
+func TestPrimary_AddWorktree_reclaimsOrphanedLockedRegistration(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := commitFileRepo(t, "pkg/app/main.go", "package app\n")
+	p, err := NewPrimary("", "", repo, "", &Workspace{Sparse: []string{"pkg/app"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	dest := filepath.Join(t.TempDir(), "app")
+	src := filepath.Join(dest, "pkg", "app", "main.go")
+
+	// Register the branch as a locked worktree, then delete the dir —
+	// leaving the orphaned, locked registration behind.
+	git(t, repo, "worktree", "add", "--lock", "--reason", "initializing",
+		"--no-checkout", "--force", "-B", "zordon/main/app", dest, "HEAD")
+	if err := zfs.RemoveTree(dest); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
+		t.Fatalf("AddWorktree over orphaned locked registration: %v", err)
+	}
+	if !zfs.Exists(src) {
+		t.Fatalf("worktree not rebuilt: %s missing", src)
+	}
+}
+
 // commitFileRepo creates a temp git repo with a single committed file at
 // rel and returns the repo dir.
 func commitFileRepo(t *testing.T, rel, content string) string {

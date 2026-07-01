@@ -1,4 +1,4 @@
-.PHONY: fmt build test e2e lint gen clean
+.PHONY: fmt build build.race build.release test test.race test.coverage e2e lint gen clean
 
 EXAMPLES ?= $(shell ls -d examples/*/)
 GOTEST_TIMEOUT ?= 30m
@@ -13,11 +13,37 @@ build:
 	go build -o bin/alpha ./cmd/alpha/
 	go build -o bin/tommy ./cmd/tommy/
 
-test: build
+# Race-instrumented service binaries, so the supervisor's own goroutines are
+# checked when tests spawn them (conformance/e2e), not just the test process.
+build.race:
+	mkdir -p bin
+	go build -race -o bin/zordon ./cmd/zordon/
+	go build -race -o bin/alpha ./cmd/alpha/
+	go build -race -o bin/tommy ./cmd/tommy/
+
+# Distribution binaries: -trimpath for reproducibility, -s -w to strip the
+# debug info and symbol table (smaller binaries).
+build.release:
+	mkdir -p bin
+	go build -trimpath -ldflags "-s -w" -o bin/zordon ./cmd/zordon/
+	go build -trimpath -ldflags "-s -w" -o bin/alpha ./cmd/alpha/
+	go build -trimpath -ldflags "-s -w" -o bin/tommy ./cmd/tommy/
+
+# `test` is two decoupled passes so a coverage-report-writer hiccup can't sink
+# the correctness signal, and each runs against the build it needs.
+test: test.race test.coverage
+
+test.race: build.race
 	ZORDON_BIN="$(CURDIR)/bin/zordon" \
 	ZORDON_TOMMY_BIN="$(CURDIR)/bin/tommy" \
 	PATH="$(CURDIR)/bin:$$PATH" \
-	go test -timeout $(GOTEST_TIMEOUT) -cover -coverpkg=./... -coverprofile=cover.out -count=2 -race ./...
+	go test -timeout $(GOTEST_TIMEOUT) -count=2 -race ./...
+
+test.coverage: build
+	ZORDON_BIN="$(CURDIR)/bin/zordon" \
+	ZORDON_TOMMY_BIN="$(CURDIR)/bin/tommy" \
+	PATH="$(CURDIR)/bin:$$PATH" \
+	go test -timeout $(GOTEST_TIMEOUT) -cover -coverpkg=./... -coverprofile=cover.out ./...
 
 lint:
 	go vet ./...
