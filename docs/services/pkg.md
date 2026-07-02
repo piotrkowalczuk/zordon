@@ -142,3 +142,55 @@ SIGTERM→SIGKILL on stop, `tommy` reaping it if alpha is SIGKILLed, and
 the registry reaper cleaning up after an unclean shutdown.
 
 See `examples/pkg/Alphasfile` for redis + postgres.
+
+## Standalone CLI tools (`toolchain { pkg { tools } }`)
+
+A `pkg` **service** runs a package as a supervised process. To install a
+package purely for its **command-line binary** — a tool like `atlas`,
+`sqlc`, or `golang-migrate` that no service supervises and that belongs
+to no language runtime — declare it under `toolchain { pkg { tools } }`
+instead:
+
+```hcl
+toolchain {
+  pkg {
+    # key = mise ref (optionally backend-qualified), value = version.
+    tools = {
+      "aqua:ariga/atlas" = "1.2.0"
+    }
+  }
+}
+```
+
+Each entry is installed with `mise install <ref>@<version>` (the same
+mechanism, backends, and cache as a pkg service's `package`). The map is
+**ref → version**; the ref carries any backend qualifier, so there is no
+separate `backend`/object form here. A `version` is **required** for each
+entry, and the block must declare at least one tool.
+
+The installed binaries are **not** put on `PATH` globally. A build,
+runtime, or provision step opts in with
+`fs::toolchain::bin(toolchain.pkg)` — the dir holding every tool declared
+in the block — layered onto `PATH` with `env::prepend`:
+
+```hcl
+service "go" "app" {
+  # ...
+  runtime {
+    after = [self.runtime.provision.migrate.success]
+
+    provision "migrate" {
+      env = { PATH = env::prepend(fs::toolchain::bin(toolchain.pkg)) }
+      cmd = "atlas migrate apply --url sqlite://${self.vars.db} --dir file://migrations"
+    }
+  }
+}
+```
+
+`fs::toolchain::bin(toolchain.pkg)` blocks until the tools are installed,
+so a step that uses one is automatically gated on the install — the same
+deferred-resolution model as
+[`fs::service::bin` / `fs::toolchain::bin` for a language toolchain](../how-to/use-a-binary-from-another-service.md).
+
+See `examples/pkg_tools/Alphasfile` for `atlas` running a SQLite
+migration, and the [how-to guide](../how-to/install-a-cli-tool-with-mise.md).

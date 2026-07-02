@@ -631,12 +631,23 @@ type toolchainBlock struct {
 	Rust   *langToolchainBlock `hcl:"rust,block"`
 	Ruby   *langToolchainBlock `hcl:"ruby,block"`
 	Nodejs *langToolchainBlock `hcl:"nodejs,block"`
+	Pkg    *pkgToolchainBlock  `hcl:"pkg,block"`
 }
 
 type langToolchainBlock struct {
 	Version string         `hcl:"version"`
 	Tools   hcl.Expression `hcl:"tools,optional"`
 	Env     hcl.Expression `hcl:"env,optional"`
+}
+
+// pkgToolchainBlock declares standalone CLI tools installed via mise's
+// package backends (e.g. `aqua:ariga/atlas`) — tools that belong to no
+// language runtime. Unlike langToolchainBlock there is no single
+// `version` (each entry pins its own) and no `env` overlay: the tools
+// are materialized only to expose their binaries via
+// fs::toolchain::bin(toolchain.pkg). The map is mise-ref → version.
+type pkgToolchainBlock struct {
+	Tools hcl.Expression `hcl:"tools,optional"`
 }
 
 // byLabel projects the typed sub-blocks back into a label-keyed map so
