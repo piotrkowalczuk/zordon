@@ -1,6 +1,6 @@
 module github.com/piotrkowalczuk/zordon
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/creack/pty v1.1.24

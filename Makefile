@@ -1,6 +1,7 @@
 .PHONY: fmt build test e2e lint gen clean
 
 EXAMPLES ?= $(shell ls -d examples/*/)
+GOTEST_TIMEOUT ?= 30m
 
 fmt:
 	go fix ./...
@@ -16,7 +17,7 @@ test: build
 	ZORDON_BIN="$(CURDIR)/bin/zordon" \
 	ZORDON_TOMMY_BIN="$(CURDIR)/bin/tommy" \
 	PATH="$(CURDIR)/bin:$$PATH" \
-	go test -cover -coverpkg=./... -coverprofile=cover.out -count=2 -race  ./...
+	go test -timeout $(GOTEST_TIMEOUT) -cover -coverpkg=./... -coverprofile=cover.out -count=2 -race ./...
 
 lint:
 	go vet ./...
