@@ -204,7 +204,10 @@ func TestPrimary_AddWorktree_reclaimsOrphanedLockedRegistration(t *testing.T) {
 
 	// Register the branch as a locked worktree, then delete the dir —
 	// leaving the orphaned, locked registration behind.
-	git(t, repo, "worktree", "add", "--lock", "--reason", "initializing",
+	// `--lock` (no `--reason`) mirrors AddWorktree's own invocation: the lock
+	// is the sentinel, and `git worktree add --reason` only exists in git 2.34+
+	// which the debian:11 CI leg (git 2.30) rejects.
+	git(t, repo, "worktree", "add", "--lock",
 		"--no-checkout", "--force", "-B", "zordon/main/app", dest, "HEAD")
 	if err := zfs.RemoveTree(dest); err != nil {
 		t.Fatal(err)
