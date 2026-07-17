@@ -1139,7 +1139,7 @@ func runProvision(b *bringup, pc *provisionCtx, parent *serviceCtx) {
 	if parentSvc != nil && parentSvc.Package != nil {
 		exe = parentSvc.Package.Exe
 	}
-	if err := checkSpawnCwd(cwd, exe); err != nil {
+	if err := zfs.CheckSpawnCwd(cwd, exe); err != nil {
 		log.Error("alpha", "provision[%s]: %v", pc.id, err)
 		pc.lifecycle.Reach("failure")
 		if failfast && !pc.step.Detached {
@@ -2527,7 +2527,7 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 	if svc.Package != nil {
 		exe = svc.Package.Exe
 	}
-	if err := checkSpawnCwd(cmd.Dir, exe); err != nil {
+	if err := zfs.CheckSpawnCwd(cmd.Dir, exe); err != nil {
 		log.Error("alpha", "runtime %s: %v", name, err)
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
 		sc.lifecycle.Reach("failed")
@@ -3080,30 +3080,6 @@ func serviceCwd(svc *alphasfile.Service) string {
 	return svc.Runtime.Dir
 }
 
-// checkSpawnCwd guards a build/runtime/provision spawn against a working
-// directory that no longer exists. os/exec reports a missing cwd as a
-// fork/exec PathError against cmd.Path (the toolchain binary) rather than
-// the cwd, so without this the operator debugs a healthy binary. exe is
-// the src{} exe subdir (may be "") used only to enrich the message.
-func checkSpawnCwd(dir, exe string) error {
-	if dir == "" {
-		return nil
-	}
-	info, err := zfs.Stat(dir)
-	switch {
-	case err == nil && info.IsDir():
-		return nil
-	case err == nil:
-		return fmt.Errorf("working directory is not a directory: %s", dir)
-	case !zfs.IsMissingErr(err):
-		return err // permission-denied etc. — surface verbatim
-	}
-	if exe = strings.TrimSpace(exe); exe != "" && exe != "." {
-		return fmt.Errorf("working directory does not exist: %s (src exe %q not found in checkout — removed upstream?)", dir, exe)
-	}
-	return fmt.Errorf("working directory does not exist: %s", dir)
-}
-
 // nodePM is the result of PM detection — both the binary to invoke and
 // whether a lockfile exists (which decides between `install` and the
 // reproducible-mode flag).
@@ -3367,7 +3343,7 @@ func prepareBuild(ctx context.Context, svc *alphasfile.Service, name, dest strin
 	if c.Dir == "" {
 		c.Dir = dest
 	}
-	if err := checkSpawnCwd(c.Dir, svc.Package.Exe); err != nil {
+	if err := zfs.CheckSpawnCwd(c.Dir, svc.Package.Exe); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

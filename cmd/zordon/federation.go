@@ -126,27 +126,25 @@ func resolveChain(ctx context.Context, zordonHome string, testCfg alphasfile.Tes
 
 // validateInPlaceSources rejects a service whose in-place src{exe} subdir
 // was removed from the checkout, before a build/runtime spawn misreports it
-// as fork/exec <toolchain binary>. Only in-place services are checkable
-// here — git/workspace checkouts are materialized later at bringup. Skips
-// when the checkout root itself is absent (that is a src.path problem, and
-// keeps this tolerant of not-yet-created trees). This touches the fs, so it
-// lives out of the pure resolution path and is called only by plan/start.
+// as fork/exec <toolchain binary>. It reuses zfs.CheckSpawnCwd — the same
+// guard the alpha spawn sites use — so plan/start and bringup agree on the
+// diagnosis. Only in-place services are checkable here; git/workspace
+// checkouts are materialized later at bringup. The zfs.Exists(root) gate
+// skips a service whose checkout root itself is absent (a src.path problem,
+// and tolerant of not-yet-created trees). fs-touching, so it lives out of
+// the pure resolution path and is called only by plan/start.
 func validateInPlaceSources(af *alphasfile.Alphasfile) error {
 	for _, s := range af.All() {
 		pkg := s.Package
 		if pkg == nil || !pkg.InPlace || s.Runtime == nil {
 			continue
 		}
-		exe := strings.TrimSpace(pkg.Exe)
-		if exe == "" || exe == "." {
-			continue
-		}
 		root, dir := s.Runtime.Checkout, s.Runtime.Dir
-		if root == "" || dir == "" {
+		if root == "" || dir == "" || !zfs.Exists(root) {
 			continue
 		}
-		if zfs.Exists(root) && zfs.Missing(dir) {
-			return fmt.Errorf("service %q: exe %q does not exist under %q (removed upstream?)", s.Name(), exe, root)
+		if err := zfs.CheckSpawnCwd(dir, pkg.Exe); err != nil {
+			return fmt.Errorf("service %q: %w", s.Name(), err)
 		}
 	}
 	return nil
