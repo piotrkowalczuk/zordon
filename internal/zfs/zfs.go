@@ -376,6 +376,37 @@ func ServiceCwd(checkout, exe string) string {
 	return filepath.Clean(filepath.Join(checkout, exe))
 }
 
+// CheckSpawnCwd validates a resolved service working directory (the output
+// of ServiceCwd) before it is handed to os/exec as cmd.Dir. It is the
+// spawn-time companion to the eval-time ServiceCwd builder.
+//
+// Why it exists: os/exec reports a missing cwd as a fork/exec PathError
+// against cmd.Path — the toolchain binary — not against the directory. So a
+// build/runtime spawned with a vanished checkout subdir surfaces as
+// "fork/exec <…>/go: no such file or directory", pointing at a healthy
+// binary. This check turns that red herring into the real cause.
+//
+// dir "" is a no-op (use-only installs leave cmd.Dir unset). exe is the
+// src{} exe offset (may be "") used only to enrich the message.
+func CheckSpawnCwd(dir, exe string) error {
+	if dir == "" {
+		return nil
+	}
+	info, err := os.Stat(dir)
+	switch {
+	case err == nil && info.IsDir():
+		return nil
+	case err == nil:
+		return fmt.Errorf("working directory is not a directory: %s", dir)
+	case !IsMissingErr(err):
+		return err // permission-denied etc. — surface verbatim
+	}
+	if exe = strings.TrimSpace(exe); exe != "" && exe != "." {
+		return fmt.Errorf("working directory does not exist: %s (src exe %q not found in checkout — removed upstream?)", dir, exe)
+	}
+	return fmt.Errorf("working directory does not exist: %s", dir)
+}
+
 // Resolver computes the on-disk paths that depend on a single zordon
 // run's context — the directory it was invoked from and that run's
 // FsHash. It is the intended single home for every derived path in

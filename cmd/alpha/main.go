@@ -1135,6 +1135,18 @@ func runProvision(b *bringup, pc *provisionCtx, parent *serviceCtx) {
 	}
 	env := base.Slice()
 	cwd := provisionCwd(parentSvc, alphasfileDir)
+	exe := ""
+	if parentSvc != nil && parentSvc.Package != nil {
+		exe = parentSvc.Package.Exe
+	}
+	if err := zfs.CheckSpawnCwd(cwd, exe); err != nil {
+		log.Error("alpha", "provision[%s]: %v", pc.id, err)
+		pc.lifecycle.Reach("failure")
+		if failfast && !pc.step.Detached {
+			state.requestShutdown(fmt.Sprintf("failfast: provision %s: %v", pc.id, err))
+		}
+		return
+	}
 
 	// Stream labels are just the phase — the canonical entity ID is
 	// already part of the log line's service column and the provision
@@ -2511,6 +2523,16 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 		sc.lifecycle.Reach("failed")
 		return
 	}
+	exe := ""
+	if svc.Package != nil {
+		exe = svc.Package.Exe
+	}
+	if err := zfs.CheckSpawnCwd(cmd.Dir, exe); err != nil {
+		log.Error("alpha", "runtime %s: %v", name, err)
+		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
+		sc.lifecycle.Reach("failed")
+		return
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// exec.Command resolved cmd.Path against alpha's os.Environ() PATH
 	// when the command was constructed. cmd.Env's PATH now reflects the
@@ -3320,6 +3342,9 @@ func prepareBuild(ctx context.Context, svc *alphasfile.Service, name, dest strin
 	c.Dir = serviceCwd(svc) // exe-anchored; "" ⇒ alpha's cwd (use-only crate install)
 	if c.Dir == "" {
 		c.Dir = dest
+	}
+	if err := zfs.CheckSpawnCwd(c.Dir, svc.Package.Exe); err != nil {
+		return fmt.Errorf("build: %w", err)
 	}
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var be map[string]string
