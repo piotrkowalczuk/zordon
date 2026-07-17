@@ -32,6 +32,9 @@ func runPlan(_ context.Context, w io.Writer, zordonHome string, picks []string, 
 		if err != nil {
 			return nil, err
 		}
+		if err := validateInPlaceSources(af); err != nil {
+			return nil, err
+		}
 		st := stateFromAlphasfile(af)
 		if lv.isInvocation && len(picks) > 0 {
 			filtered, err := pickServices(af.All(), picks)

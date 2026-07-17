@@ -124,6 +124,34 @@ func resolveChain(ctx context.Context, zordonHome string, testCfg alphasfile.Tes
 	})
 }
 
+// validateInPlaceSources rejects a service whose in-place src{exe} subdir
+// was removed from the checkout, before a build/runtime spawn misreports it
+// as fork/exec <toolchain binary>. Only in-place services are checkable
+// here — git/workspace checkouts are materialized later at bringup. Skips
+// when the checkout root itself is absent (that is a src.path problem, and
+// keeps this tolerant of not-yet-created trees). This touches the fs, so it
+// lives out of the pure resolution path and is called only by plan/start.
+func validateInPlaceSources(af *alphasfile.Alphasfile) error {
+	for _, s := range af.All() {
+		pkg := s.Package
+		if pkg == nil || !pkg.InPlace || s.Runtime == nil {
+			continue
+		}
+		exe := strings.TrimSpace(pkg.Exe)
+		if exe == "" || exe == "." {
+			continue
+		}
+		root, dir := s.Runtime.Checkout, s.Runtime.Dir
+		if root == "" || dir == "" {
+			continue
+		}
+		if zfs.Exists(root) && zfs.Missing(dir) {
+			return fmt.Errorf("service %q: exe %q does not exist under %q (removed upstream?)", s.Name(), exe, root)
+		}
+	}
+	return nil
+}
+
 // stateFromAlphasfile projects a resolved Alphasfile into the wire-shape
 // StateInfo used as the static-evaluation fallback for federation walks.
 // No PIDs / Running — only the static facets (services, toolchain pins,
@@ -252,6 +280,10 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			}
 			log.Info("zordon", "picks=%v → bringing up %d of %d service(s)", picks, len(filtered), len(af.All()))
 			af.Services = filtered
+		}
+
+		if err := validateInPlaceSources(af); err != nil {
+			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
 
 		if err := reconcileAlpha(ctx, lvl, af, old, parentDotenv, parentEnv, cfg, log); err != nil {
