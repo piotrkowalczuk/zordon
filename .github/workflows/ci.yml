@@ -101,7 +101,13 @@ jobs:
           chmod +x .zordon/bin/mise
           .zordon/bin/mise --version
       - name: Run Tests
-        run: make test
+        run: make test.race
+      - name: Coverage
+        # Non-blocking: the coverage pass drives the gocoverdir writer, whose
+        # rare `bad file descriptor` hiccup must not red a build whose
+        # correctness signal (the race pass above) already passed.
+        run: make test.coverage
+        continue-on-error: true
       - name: Run E2E Test
         run: make e2e EXAMPLES=examples/${{ matrix.example }}
 
