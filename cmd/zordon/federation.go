@@ -202,8 +202,8 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 	// the whole chain is handled.
 	var unlocks []func()
 	defer func() {
-		for i := len(unlocks) - 1; i >= 0; i-- {
-			unlocks[i]()
+		for _, unlock := range slices.Backward(unlocks) {
+			unlock()
 		}
 	}()
 

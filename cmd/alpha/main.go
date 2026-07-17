@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1903,16 +1904,14 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 	// Reverse order: services last-declared first, provisions within a
 	// service last-declared first.
 	cleaned := 0
-	for i := len(services) - 1; i >= 0; i-- {
-		svc := services[i]
+	for _, svc := range slices.Backward(services) {
 		if svc.Runtime == nil {
 			continue
 		}
 		parent := newServiceCtx(svc.Name(), svc.Toolchain)
 		serviceID := "service." + svc.Toolchain + "." + svc.Name()
 		steps := svc.Runtime.Provision
-		for j := len(steps) - 1; j >= 0; j-- {
-			orig := steps[j]
+		for _, orig := range slices.Backward(steps) {
 			if strings.TrimSpace(orig.Clean) == "" {
 				continue
 			}

@@ -13,7 +13,7 @@ sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 toolchain {
   go {
-    version = "1.26.4"
+    version = "1.26.5"
   }
 }
 

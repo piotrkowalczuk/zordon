@@ -145,7 +145,7 @@ func TestToolchainBin_compilesToDirective(t *testing.T) {
 	// project" case) — referenced by a redis provision via toolchain.go.
 	af := compile(t, `
 toolchain {
-  go { version = "1.26.4" }
+  go { version = "1.26.5" }
 }
 
 service "pkg" "redis" {

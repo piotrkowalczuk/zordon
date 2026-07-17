@@ -120,8 +120,7 @@ func exitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 		if ws, ok := ee.Sys().(syscall.WaitStatus); ok {
 			if ws.Signaled() {
 				return 128 + int(ws.Signal())
