@@ -9,11 +9,11 @@ service "go" "caddy" {
 
   vars = {
     http       = net::pickport()
-    config_dir = "${fs::tmp()}/conf.d"
+    config_dir = "${fs::etc()}/conf.d"
   }
 
   file "caddyfile" {
-    path = "${fs::tmp()}/Caddyfile"
+    path = "${fs::etc()}/Caddyfile"
     body = <<-EOT
       {
       	admin off
@@ -79,7 +79,7 @@ service "go" "coredns" {
   }
 
   file "corefile" {
-    path = "${fs::tmp()}/Corefile"
+    path = "${fs::etc()}/Corefile"
     body = <<-EOT
       test:${self.vars.dns} {
         template IN A {

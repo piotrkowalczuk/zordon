@@ -113,10 +113,10 @@ service "go" "caddy" {
   src { exe = "./cmd/caddy" }   # build target within the clone
   vars = {
     http       = net::pickport()
-    config_dir = "${fs::tmp()}/conf.d"
+    config_dir = "${fs::etc()}/conf.d"
   }
   file "caddyfile" {
-    path = "${fs::tmp()}/Caddyfile"
+    path = "${fs::etc()}/Caddyfile"
     body = "…  import ${self.vars.config_dir}/*.caddy"
   }
   runtime {
@@ -156,6 +156,13 @@ up, then brings the project up with the parent's resolved port and
 config dir injected — a complete loop with zero hardcoded ports and zero
 registration code. (Prometheus is a stand-in for any OSS Go web app;
 only the fragment is project-specific.)
+
+The parent's `Caddyfile` and `conf.d` live in `fs::etc()`, not `fs::tmp()`:
+a shared parent is long-lived and its config must outlast the OS temp
+janitor (macOS reaps untouched temp files after ~3 idle days), so
+declaratively-managed config a service needs to run belongs in the
+persistent per-workspace state dir. The child writes its fragment into the
+parent's `fs::etc()` dir through `service.go.caddy.vars.config_dir`.
 
 `cmd` (a list expression, evaluated after `vars`/`file`/`arguments`)
 overrides the default run — needed for subcommand-driven binaries like

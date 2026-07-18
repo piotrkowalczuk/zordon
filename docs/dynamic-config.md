@@ -15,8 +15,10 @@ arguments / readiness probe that consume them.
 - `net::pickport()` — returns a free TCP port (binds to `:0`, closes,
   reports the port). Each call returns a new port — store it in `vars`
   if you need to reuse it.
-- `fs::tmp()` — a per-invocation scratch dir under `$TMPDIR/zordon-<fs::hash>/`
-  for generated files. Stable within one evaluation.
+- `fs::tmp()` — a per-invocation **scratch** dir under `$TMPDIR/zordon-<fs::hash>/`.
+  For disposable byproducts only: it lives in the OS temp dir, which the
+  system may reap (macOS clears untouched files after ~3 idle days). A file a
+  service needs to *run* belongs in `fs::etc()`/`fs::var()` below, not here.
 - `fs::src()` — the calling service's source checkout root (its
   per-invocation `git worktree`). `self.dir` is the same path anchored at
   the `exe` subdir, so the two coincide only when no `exe` is set.
@@ -24,6 +26,16 @@ arguments / readiness probe that consume them.
   **outside** the source checkout so building never dirties a `src`
   primary's workspace. The default Go build drops `<name>` here; reference
   it from `cmd` as `${fs::bin()}/<name>`.
+- `fs::etc()` — the calling service's persistent **config** dir
+  (`<workspace-state>/etc/<service>`), borrowing `/etc` from the FHS. Home
+  for generated configuration a service reads to run (a `Caddyfile`, a
+  `.env`); it survives across runs and is never reaped, unlike `fs::tmp()`.
+- `fs::var()` — the calling service's persistent **variable state** dir
+  (`<workspace-state>/var/<service>`), borrowing `/var`. Home for runtime
+  data the service owns — databases, logs, spool.
+- `fs::service::etc(service.<tc>.<name>)` / `fs::service::var(...)` — a
+  **peer's** etc/var dir, the cross-service handle `fs::service::bin` gives
+  for bins. Lets one service drop a file straight into another's config dir.
 - `fs::hash()` — short hash identifying this **alpha instance** by its
   filesystem location (project root + workspace). Stable across edits;
   distinct per workspace. Handy for collision-free names, e.g.

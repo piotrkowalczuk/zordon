@@ -1,0 +1,70 @@
+# fs::etc() / fs::var() — the FHS-style persistent path anchors.
+#
+# The path anchor, not the file{} block, decides where a file lives:
+#   fs::tmp()  — scratch/byproducts; the OS may reap it (macOS ~3 idle days).
+#   fs::etc()  — generated CONFIG a service needs to run (must survive).
+#   fs::var()  — variable runtime STATE: databases, logs, spool (must survive).
+# etc/var resolve to <workspace-state>/etc|var/<service>, so — unlike tmp —
+# they are never reaped.
+#
+# fs::service::etc(service.X) names a PEER's etc dir, exactly like
+# fs::service::bin names a peer's bin: below, `backend` drops a config
+# fragment straight into `gateway`'s etc dir.
+
+service "go" "gateway" {
+  src {
+    path = "../.."
+    exe  = "./examples/fs_anchors/src/gateway"
+  }
+
+  vars = { port = net::pickport() }
+
+  # Generated config the gateway reads at startup — durable, so an idle
+  # gateway still finds it days later.
+  file "conf" {
+    path = "${fs::etc()}/gateway.conf"
+    body = "port=${self.vars.port}\n"
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/gateway", "-conf", self.file.conf.path, "-data", "${fs::var()}/state"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "backend" {
+  src {
+    path = "../.."
+    exe  = "./examples/fs_anchors/src/backend"
+  }
+
+  vars = { port = net::pickport() }
+
+  # Write into a PEER's persistent etc dir — same-alpha cross-service,
+  # the fs::service::bin pattern applied to etc.
+  file "fragment" {
+    path = "${fs::service::etc(service.go.gateway)}/backend.conf"
+    body = "backend=ready\n"
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/backend", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
