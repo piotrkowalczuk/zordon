@@ -36,6 +36,14 @@ service "go" "api" {
 	if got, want := api.Runtime.Files[0].Path, "/proj/workspaces/main/etc/api/app.conf"; got != want {
 		t.Errorf("file path anchored at fs::etc() = %q, want %q", got, want)
 	}
+	// The per-service anchor dirs are persisted on the runtime so alpha can
+	// pre-create them at bringup without re-deriving the layout.
+	if got, want := api.Runtime.EtcDir, "/proj/workspaces/main/etc/api"; got != want {
+		t.Errorf("Runtime.EtcDir = %q, want %q", got, want)
+	}
+	if got, want := api.Runtime.VarDir, "/proj/workspaces/main/var/api"; got != want {
+		t.Errorf("Runtime.VarDir = %q, want %q", got, want)
+	}
 }
 
 // fs::service::etc / fs::service::var name a same-invocation peer's persistent

@@ -1478,6 +1478,30 @@ func materializeFiles(files []*alphasfile.File, state *alphaState, log *zlog.Log
 	return nil
 }
 
+// ensureAnchorDirs pre-creates each service's persistent per-service anchor
+// dirs (fs::etc / fs::var → <StateDir>/etc|var/<svc>) so a provision or cmd
+// that writes into them (e.g. `${fs::var()}/pgdata`) doesn't have to `mkdir -p`
+// first. Idempotent; 0o750 to match the private state these anchors hold.
+// bin (<StateDir>/bin) is created at build time and src/checkout by the
+// worktree, so only etc/var need pre-creation here.
+func ensureAnchorDirs(services []*alphasfile.Service, log *zlog.Logger) error {
+	for _, s := range services {
+		if s.Runtime == nil {
+			continue
+		}
+		for _, dir := range []string{s.Runtime.EtcDir, s.Runtime.VarDir} {
+			if dir == "" {
+				continue
+			}
+			if err := zfs.EnsureDir(dir); err != nil {
+				return fmt.Errorf("service %s: %w", s.Name(), err)
+			}
+			log.Info("alpha", "ensured anchor dir %s", dir)
+		}
+	}
+	return nil
+}
+
 // safeEncoder serializes writes from multiple goroutines and silently drops
 // events once the underlying connection has gone away.
 type safeEncoder struct {
@@ -1875,6 +1899,11 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 		stream.Send(&protocol.Event{Kind: protocol.EventError, Error: "file: " + err.Error()})
 		return
 	}
+	if err := ensureAnchorDirs(services, log); err != nil {
+		log.Error("alpha", "clean: ensure anchor dirs: %v", err)
+		stream.Send(&protocol.Event{Kind: protocol.EventError, Error: "anchor dir: " + err.Error()})
+		return
+	}
 
 	// Materialize toolchains so a clean snippet that shells out to the
 	// service's tooling (psql, redis-cli, bundle exec) finds it on PATH.
@@ -2083,6 +2112,11 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	if err := materializeFiles(files, state, log); err != nil {
 		log.Error("alpha", "materialize files: %v", err)
 		stream.Send(&protocol.Event{Kind: protocol.EventError, Error: "file: " + err.Error()})
+		return
+	}
+	if err := ensureAnchorDirs(services, log); err != nil {
+		log.Error("alpha", "ensure anchor dirs: %v", err)
+		stream.Send(&protocol.Event{Kind: protocol.EventError, Error: "anchor dir: " + err.Error()})
 		return
 	}
 
