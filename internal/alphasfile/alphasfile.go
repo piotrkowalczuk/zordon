@@ -103,6 +103,8 @@ type RuntimeConfig struct {
 	Dir       string           `json:"dir,omitempty"`      // service working dir = <checkout>/<exe> (= fs::exe / self.dir)
 	Checkout  string           `json:"checkout,omitempty"` // checkout root (= fs::src); the `git worktree add` target
 	BinDir    string           `json:"bin_dir,omitempty"`  // per-invocation build output (= fs::bin)
+	EtcDir    string           `json:"etc_dir,omitempty"`  // persistent per-service config dir (= fs::etc)
+	VarDir    string           `json:"var_dir,omitempty"`  // persistent per-service state dir (= fs::var)
 	Print     string           `json:"print,omitempty"`    // extra `zordon status` line (resolved)
 	Readiness *probe.Probe     `json:"readiness,omitempty"`
 }

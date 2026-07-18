@@ -897,6 +897,8 @@ func (r *resolver) finishService(st *svcState) error {
 		Dir:       st.dir,
 		Checkout:  st.dirs.root,
 		BinDir:    r.inv.BinDir(),
+		EtcDir:    st.dirs.etc,
+		VarDir:    st.dirs.vardir,
 		Print:     printLine,
 	}
 	// Resolve per-toolchain defaults so the wire-stable Service is fully
