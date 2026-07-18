@@ -421,8 +421,10 @@ type svcState struct {
 // working dir (fs::exe ≈ src.path + src.exe = self.dir). Zero value = file scope
 // (no service): both "", so fs::src/fs::exe error cleanly.
 type srcDirs struct {
-	root string // checkout root    → fs::src()
-	exe  string // <checkout>/<exe> → fs::exe()
+	root   string // checkout root        → fs::src()
+	exe    string // <checkout>/<exe>      → fs::exe()
+	etc    string // <StateDir>/etc/<svc>  → fs::etc()
+	vardir string // <StateDir>/var/<svc>  → fs::var()
 }
 
 // prepareServices initializes one svcState per service: validates
@@ -530,13 +532,18 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 		self["env"] = cty.EmptyObjectVal
 		self["file"] = cty.EmptyObjectVal
 
+		var etcDir, varDir string
+		if r.inv != nil {
+			etcDir = filepath.Join(r.inv.StateDir, "etc", sb.Name)
+			varDir = filepath.Join(r.inv.StateDir, "var", sb.Name)
+		}
 		st := &svcState{
 			sb:       sb,
 			id:       sid,
 			dir:      dir,
 			self:     self,
 			fileVals: map[string]cty.Value{},
-			dirs:     srcDirs{root: checkout, exe: dir},
+			dirs:     srcDirs{root: checkout, exe: dir, etc: etcDir, vardir: varDir},
 			srcPath:  srcPath,
 		}
 		out[sid] = st
@@ -1776,6 +1783,8 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 		"fs::exe":   str(func() string { return dirs.exe }),       // src.path + src.exe: exe-anchored work dir (= self.dir)
 		"fs::bin":   str(func() string { return r.inv.BinDir() }), // build outputs (outside src)
 		"fs::state": str(func() string { return r.inv.StateDir }), // per-workspace state root (workspaces/<wt>)
+		"fs::etc":   str(func() string { return dirs.etc }),       // <StateDir>/etc/<svc>: generated config that must persist (service scope only)
+		"fs::var":   str(func() string { return dirs.vardir }),    // <StateDir>/var/<svc>: variable runtime state — db/logs (service scope only)
 		"fs::hash":  r.fsHashFunc(),                               // instance identity (location)
 		// cfg:: namespace — manifest identity (Alphasfile bytes + parent ctx).
 		"cfg::hash": r.cfgHashFunc(),
@@ -1793,6 +1802,8 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 		//     world (e.g. a Go `go install` tool used from a Ruby project).
 		//   env::prepend/append put dirs onto a PATH-style var.
 		"fs::service::bin":   svcBinFunc(),
+		"fs::service::etc":   r.svcPathFunc("etc"),
+		"fs::service::var":   r.svcPathFunc("var"),
 		"fs::toolchain::bin": tcBinFunc(),
 		"env::prepend":       envOpFunc("prepend"),
 		"env::append":        envOpFunc("append"),
@@ -1854,6 +1865,35 @@ func svcBinFunc() function.Function {
 				return cty.NilVal, errors.New("fs::service::bin: service reference has a non-string name/toolchain")
 			}
 			return cty.StringVal(BinSentinel("svc", serviceID(tc.AsString(), name.AsString()))), nil
+		},
+	})
+}
+
+// svcPathFunc implements fs::service::etc / fs::service::var — the per-service
+// persistent dir (<StateDir>/<sub>/<svc>) of a same-invocation service named by
+// a `self` or `service.<tc>.<name>` reference. Unlike fs::service::bin these are
+// pure StateDir joins known at eval, so they resolve to the concrete path here
+// rather than a deferred sentinel. Scope is the current invocation (all
+// same-alpha services share one StateDir); a federation parent's dir is reached
+// through its exported vars, not here. sub is "etc" or "var".
+func (r *resolver) svcPathFunc(sub string) function.Function {
+	return function.New(&function.Spec{
+		Params: []function.Parameter{{Name: "service", Type: cty.DynamicPseudoType}},
+		Type:   function.StaticReturnType(cty.String),
+		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
+			if r.inv == nil || r.inv.StateDir == "" {
+				return cty.NilVal, fmt.Errorf("fs::service::%s() called but no invocation configured", sub)
+			}
+			v := args[0]
+			t := v.Type()
+			if v.IsNull() || !t.IsObjectType() || !t.HasAttribute("name") || !t.HasAttribute("toolchain") {
+				return cty.NilVal, fmt.Errorf("fs::service::%s: expected a service reference (self or service.<tc>.<name>), got %s", sub, t.FriendlyName())
+			}
+			name := v.GetAttr("name")
+			if name.Type() != cty.String {
+				return cty.NilVal, fmt.Errorf("fs::service::%s: service reference has a non-string name", sub)
+			}
+			return cty.StringVal(filepath.Join(r.inv.StateDir, sub, name.AsString())), nil
 		},
 	})
 }
