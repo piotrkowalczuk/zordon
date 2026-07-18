@@ -3,7 +3,6 @@ package tools
 import (
 	"fmt"
 	"io"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
@@ -50,12 +49,11 @@ func EnsureNodeCorepack(binPath, dataDir, version string, env map[string]string,
 	// layout). isolatedEnv puts the mise binary on PATH so the
 	// mise-installed node's npm wrapper, which calls `mise reshim`
 	// post-install, can find mise itself.
-	install := exec.Command(binPath, "exec", spec, "--",
+	install := miseCommand(binPath, dataDir, "exec", spec, "--",
 		"npm", "install", "-g",
 		"--prefix", refreshRoot,
 		"--no-fund", "--no-audit",
 		"corepack@latest")
-	install.Env = isolatedEnv(dataDir, binPath)
 	install.Stdout = logOut
 	install.Stderr = logOut
 	if err := install.Run(); err != nil {
@@ -64,10 +62,9 @@ func EnsureNodeCorepack(binPath, dataDir, version string, env map[string]string,
 
 	// `corepack enable` writes pnpm/pnpx/yarn/yarnpkg shims to shimDir.
 	// Run via mise exec so the refreshed corepack finds node on PATH.
-	enable := exec.Command(binPath, "exec", spec, "--",
+	enable := miseCommand(binPath, dataDir, "exec", spec, "--",
 		corepackBin, "enable",
 		"--install-directory", shimDir)
-	enable.Env = isolatedEnv(dataDir, binPath)
 	enable.Stdout = logOut
 	enable.Stderr = logOut
 	if err := enable.Run(); err != nil {
