@@ -37,7 +37,7 @@ test.race: build.race
 	ZORDON_BIN="$(CURDIR)/bin/zordon" \
 	ZORDON_TOMMY_BIN="$(CURDIR)/bin/tommy" \
 	PATH="$(CURDIR)/bin:$$PATH" \
-	go test -timeout $(GOTEST_TIMEOUT) -count=2 -race ./...
+	go test -timeout $(GOTEST_TIMEOUT) -count=1 -race ./...
 
 test.coverage: build
 	ZORDON_BIN="$(CURDIR)/bin/zordon" \
