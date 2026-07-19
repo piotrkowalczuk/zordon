@@ -55,6 +55,17 @@ workspace or point this one elsewhere) instead of a raw git failure.
 Federation parents (below) are *reused* across workspaces — only the
 leaf forks.
 
+### The `.workspace` marker
+
+`zordon workspace create` drops an empty `.workspace` file into
+`workspaces/<name>/` — an explicit, durable "this directory is a workspace"
+signal for zordon and for agents/tooling that would otherwise have to guess
+from the path.
+The `<root>/workspaces/<name>/` path stays authoritative, so editing or
+deleting the marker never un-workspaces a conventional workspace; the marker
+is an additive signal, not a single point of failure.
+`main` is the project root and carries no marker.
+
 ### Partial checkout (`sparse`)
 
 For a big monorepo you rarely want the whole tree. A `workspace { sparse

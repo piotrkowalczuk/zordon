@@ -96,6 +96,9 @@ func runWorkspaceCreate(ctx context.Context, log *zlog.Logger, out io.Writer, ar
 	if err := zfs.EnsureSharedDir(dir); err != nil {
 		return err
 	}
+	if err := zfs.AtomicWrite(filepath.Join(dir, invocation.WorkspaceMarker), nil); err != nil {
+		return err
+	}
 	log.Info("zordon", "created workspace %q", name)
 
 	// Materialize source checkouts. With no service args, every workspaceable
