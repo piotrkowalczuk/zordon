@@ -18,4 +18,6 @@ If this project has an `Alphasfile`, its local stack (databases, brokers, servic
 
 **Before improvising:** if a task looks like "reset the DB" or "seed test data" and no provision tool matches, that step hasn't been declared for this project — say so rather than reaching for raw SQL or scripts.
 
-No `Alphasfile` in this working directory → this skill and the zordon tools don't apply; ignore both.
+**Workspaces:** running `workspace create x` spawns an isolated, fully independent copy of the entire stack in its own directory, with its own Alphasfile and separate ports/paths. The zordon tools apply in that workspace directory exactly as they do in the original — use them there too, not the CLI.
+
+No `Alphasfile` anywhere in or above the current working directory → this skill and the zordon tools don't apply; this project is not zordon-managed.
