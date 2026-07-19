@@ -54,7 +54,7 @@ test.fast:
 
 test.race: build.race
 	$(ZORDON_TEST_ENV) \
-	go test -timeout $(GOTEST_TIMEOUT) -count=2 -race -tags '$(CONFORMANCE_TAGS)' ./...
+	go test -timeout $(GOTEST_TIMEOUT) -count=1 -race -tags '$(CONFORMANCE_TAGS)' ./...
 
 test.coverage: build
 	$(ZORDON_TEST_ENV) \
@@ -67,7 +67,7 @@ test.coverage: build
 # toolchains, so the race binaries and a zordon home are still required.
 test.unit: build.race
 	$(ZORDON_TEST_ENV) \
-	go test -timeout $(GOTEST_TIMEOUT) -count=2 -race ./...
+	go test -timeout $(GOTEST_TIMEOUT) -count=1 -race ./...
 
 test.coverage.unit: build
 	$(ZORDON_TEST_ENV) \

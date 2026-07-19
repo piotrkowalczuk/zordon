@@ -7,7 +7,16 @@ description: Use in a repo that has an Alphasfile, or inside a zordon workspace 
 
 ## When this applies
 
-This applies when there is an `Alphasfile` at or above the working directory, or the working directory is a `workspaces/<name>/` copy (an isolated stack of its own). Otherwise the project is not zordon-managed — ignore this skill and the zordon tools.
+This applies when there is an `Alphasfile` at or above the working directory, or the working directory is a workspace copy — an isolated stack of its own.
+A workspace directory carries a `.workspace` marker file (and lives at `workspaces/<name>/`); that marker is the unambiguous signal that you are inside a workspace.
+Otherwise the project is not zordon-managed — ignore this skill and the zordon tools.
+
+## Prefer a workspace
+
+Default to an isolated workspace rather than the project's main/shared stack: a workspace is a disposable copy with its own ports and state, so your work never disturbs the developer's running stack.
+Unless the user explicitly wants the main stack, ask — before `start`ing from the project root — whether to create and use a workspace instead.
+Create one with `zordon workspace create <name>` and work from `workspaces/<name>/` (recognizable by its `.workspace` marker).
+Entering a workspace is by directory: the MCP tools act on the directory the server runs in, so `cd workspaces/<name>` and drive it with the `zordon` CLI there — a directory-independent `--workspace` selector for the MCP tools does not exist yet.
 
 ## Prefer the tools, not the shell
 

@@ -21,6 +21,12 @@ import (
 
 const MainWorkspace = "main"
 
+// WorkspaceMarker is the empty file `zordon workspace create` drops into a
+// workspace dir as an explicit, durable "this is a workspace" signal (also
+// read by agents via SKILL.md). The <root>/workspaces/<name>/ path stays
+// authoritative, so removing the marker can't un-workspace one.
+const WorkspaceMarker = ".workspace"
+
 // WorkspaceName is the identifier of a workspace — "main" for the
 // implicit project-root workspace, or a user-chosen label for a side
 // checkout under <root>/workspaces/<name>. Implements
@@ -159,7 +165,10 @@ func (i *InvocationState) AlphaLogPath() string { return filepath.Join(i.StateDi
 func projectRootAndWorkspace(dir string) (root, workspace string) {
 	clean := filepath.Clean(dir)
 	parent := filepath.Dir(clean) // .../workspaces
-	if filepath.Base(parent) == "workspaces" {
+	// <root>/workspaces/<name>/. The path is authoritative; the .workspace
+	// marker create drops there is an equivalent positive signal, so a
+	// conventional workspace stays one even if the marker is removed.
+	if filepath.Base(parent) == "workspaces" || zfs.Exists(filepath.Join(clean, WorkspaceMarker)) {
 		return filepath.Dir(parent), filepath.Base(clean)
 	}
 	return clean, MainWorkspace

@@ -1,10 +1,29 @@
 name: CI
 
 on:
+  # Docs-only changes can't break the Go build or tests, so skip the whole
+  # workflow for them (the docs site is built separately by docs.yml). Mirrors
+  # the local pre-git gate's docs-only skip. Any non-docs file in the change
+  # still runs CI. Safe because main has no required status checks.
   push:
     branches: [ main, master ]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'mkdocs.yml'
   pull_request:
     branches: [ main, master ]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'mkdocs.yml'
+
+# Cancel an in-progress run when a newer commit lands on the same ref, so
+# rapid pushes to a PR don't pile up parallel matrices. (Merged-PR runs are
+# cancelled separately by delete_branch_on_merge deleting the head branch.)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:

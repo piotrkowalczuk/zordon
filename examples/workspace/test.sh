@@ -21,6 +21,10 @@ reset_state feature
 zordon workspace create feature
 trap 'cd "$EXDIR" && zordon stop --agent >/dev/null 2>&1 || true' EXIT
 
+# create drops the explicit .workspace marker (the "this dir is a workspace"
+# signal); the path stays authoritative, but the marker must be present.
+assert_present "$EXDIR/workspaces/feature/.workspace"
+
 # Per-service add/rm against the existing workspace (the
 # `zordon workspace service {add,rm}` command): drop serviceC's checkout,
 # then bring it back on its own branch — without touching A/B.
