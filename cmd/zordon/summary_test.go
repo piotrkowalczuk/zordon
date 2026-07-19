@@ -16,8 +16,13 @@ func TestPrintStartSummary(t *testing.T) {
 	s := &summary.StartSummary{
 		TotalMS: 4210,
 		Services: []summary.ServiceTiming{
-			{Name: "db", Toolchain: "go", BuildMS: 1400, SpawnMS: 10, ReadyMS: 390, TotalMS: 1800},
-			{Name: "api", Toolchain: "go", After: []string{"service.go.db@ready"}, WaitMS: 1810, BuildMS: 200, SpawnMS: 20, ReadyMS: 380, TotalMS: 2410},
+			{Name: "db", Toolchain: "go", BuildMS: 1400, SpawnMS: 10, ReadyMS: 390, TotalMS: 1800,
+				Deps: []summary.DepTiming{{Ref: "toolchain.go@ready", WaitMS: 0}}},
+			{Name: "api", Toolchain: "go", WaitMS: 1810, BuildMS: 200, SpawnMS: 20, ReadyMS: 380, TotalMS: 2410,
+				Deps: []summary.DepTiming{
+					{Ref: "toolchain.go@ready", WaitMS: 0},
+					{Ref: "service.go.db.runtime@ready", WaitMS: 1810, LongPole: true},
+				}},
 		},
 		Provisions: []summary.ProvisionTiming{
 			{Name: "seed", Service: "api", After: []string{"service.go.db@ready"}, RunMS: 1100},
@@ -33,7 +38,11 @@ func TestPrintStartSummary(t *testing.T) {
 		"wait", "build", "spawn", "ready", "total", // phase column headers
 		"db", "api",
 		"1.40s", // db build duration
-		"after: service.go.db@ready",
+		"after:",
+		"toolchain.go@ready",          // implicit toolchain dep is surfaced
+		"service.go.db.runtime@ready", // api's declared dep
+		"<- long pole",                // the dep that gated api's start
+		"1.81s",                       // api's wait on the long-pole dep
 		"provisions:",
 		"seed", "1.10s",
 		"warmup", "detached (running)",

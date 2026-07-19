@@ -571,8 +571,15 @@ func printStartSummary(log *zlog.Logger, s *summary.StartSummary) {
 			log.Info("zordon", "  %-3d %-16s %-8s %8s %8s %8s %8s %8s",
 				i+1, st.Name, st.Toolchain,
 				fmtDur(st.WaitMS), fmtDur(st.BuildMS), fmtDur(st.SpawnMS), fmtDur(st.ReadyMS), fmtDur(st.TotalMS))
-			if len(st.After) > 0 {
-				log.Info("zordon", "      after: %s", strings.Join(st.After, ", "))
+			if len(st.Deps) > 0 {
+				log.Info("zordon", "      after:")
+				for _, d := range st.Deps {
+					marker := ""
+					if d.LongPole {
+						marker = "   <- long pole"
+					}
+					log.Info("zordon", "        %-30s %8s%s", d.Ref, fmtDur(d.WaitMS), marker)
+				}
 			}
 		}
 	}

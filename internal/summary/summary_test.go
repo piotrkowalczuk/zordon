@@ -14,11 +14,17 @@ func TestBuild_phasesAndOrder(t *testing.T) {
 	services := []Service{
 		{
 			Name: "api", Toolchain: "go",
-			After:     []string{"service.go.db@ready"},
+			Deps: []Dep{
+				{Ref: "toolchain.go@ready", SatisfiedAt: at(50)},
+				{Ref: "service.go.db.runtime@ready", SatisfiedAt: at(1800)},
+			},
 			Scheduled: at(0), Started: at(1800), BuildDone: at(2000), Running: at(2020), Ready: at(2400),
 		},
 		{
 			Name: "db", Toolchain: "go",
+			Deps: []Dep{
+				{Ref: "toolchain.go@ready", SatisfiedAt: at(0)},
+			},
 			Scheduled: at(0), Started: at(0), BuildDone: at(1400), Running: at(1410), Ready: at(1800),
 		},
 	}
@@ -58,11 +64,20 @@ func TestBuild_phasesAndOrder(t *testing.T) {
 			t.Errorf("api %s = %d, want %d", c.label, c.got, c.want)
 		}
 	}
-	if len(api.After) != 1 || api.After[0] != "service.go.db@ready" {
-		t.Errorf("api.After = %v, want [service.go.db@ready]", api.After)
+	// api's deps sorted by ascending wait: toolchain (50ms) then db
+	// (1800ms), with db — the last to clear — flagged the long pole.
+	if len(api.Deps) != 2 {
+		t.Fatalf("api.Deps = %+v, want 2", api.Deps)
 	}
-	if got.Services[0].After != nil {
-		t.Errorf("db.After = %v, want nil (no deps)", got.Services[0].After)
+	if d := api.Deps[0]; d.Ref != "toolchain.go@ready" || d.WaitMS != 50 || d.LongPole {
+		t.Errorf("api.Deps[0] = %+v, want toolchain 50ms not-longpole", d)
+	}
+	if d := api.Deps[1]; d.Ref != "service.go.db.runtime@ready" || d.WaitMS != 1800 || !d.LongPole {
+		t.Errorf("api.Deps[1] = %+v, want db 1800ms longpole", d)
+	}
+	// db has a single dep → not flagged (nothing to disambiguate).
+	if db := got.Services[0]; len(db.Deps) != 1 || db.Deps[0].LongPole {
+		t.Errorf("db.Deps = %+v, want 1 dep, not long pole", db.Deps)
 	}
 
 	if len(got.Provisions) != 2 || got.Provisions[0].Name != "seed" || got.Provisions[1].Name != "warmup" {

@@ -107,7 +107,10 @@ service "go" "api" {
 		"wait", "build", "spawn", "ready", "total", // phase columns
 		"db",
 		"api",
-		"service.go.db", // api's dep, whatever exact ref form resolves to
+		"after:",
+		"toolchain.go@ready",          // implicit toolchain dep is surfaced
+		"service.go.db.runtime@ready", // api's declared dep
+		"<- long pole",                // the dep that gated api's start
 		"provisions:",
 		"seed",
 	}

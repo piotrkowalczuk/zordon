@@ -9,30 +9,36 @@ import (
 
 // buildStartSummary is the adapter between the live serviceCtx/provisionCtx
 // timing and summary.Build. Its own logic — include only services that
-// reached ready, map the runtime.after deps and provision parents, order by
-// when each service started — is what this covers. The exact phase math is
-// summary.Build's, tested there; here start order is pinned via explicit
-// startedAt values so it doesn't depend on the real clock.
+// reached ready, carry each dependency's satisfaction time, order by when
+// each service started — is what this covers. Phase math and long-pole
+// selection belong to summary.Build (tested there); here start order and the
+// dep list are pinned via explicit timestamps so they don't depend on the
+// real clock.
 func TestBuildStartSummary(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 
-	svc := func(name string, after ...string) *alphasfile.Service {
+	svc := func(name string) *alphasfile.Service {
 		return &alphasfile.Service{
 			Toolchain: "go",
-			Runtime:   &alphasfile.RuntimeConfig{Name: name, After: after},
+			Runtime:   &alphasfile.RuntimeConfig{Name: name},
 		}
 	}
 	db := svc("db")
-	api := svc("api", "service.go.db@ready")
+	api := svc("api")
 	stuck := svc("stuck")
 
 	dbCtx := newServiceCtx("db", "go")
 	dbCtx.startedAt = base
+	dbCtx.deps = []depSat{{ref: "toolchain.go@ready", at: base}}
 	dbCtx.build.Reach("success")
 	dbCtx.lifecycle.Reach("ready")
 
 	apiCtx := newServiceCtx("api", "go")
 	apiCtx.startedAt = base.Add(time.Second) // started after db → sorts second
+	apiCtx.deps = []depSat{
+		{ref: "toolchain.go@ready", at: base},
+		{ref: "service.go.db.runtime@ready", at: base.Add(time.Second)},
+	}
 	apiCtx.build.Reach("success")
 	apiCtx.lifecycle.Reach("ready")
 
@@ -65,11 +71,14 @@ func TestBuildStartSummary(t *testing.T) {
 	if got.Services[0].Toolchain != "go" {
 		t.Errorf("db toolchain = %q, want go", got.Services[0].Toolchain)
 	}
-	if got.Services[0].After != nil {
-		t.Errorf("db.After = %v, want nil", got.Services[0].After)
+
+	// api's two deps carried through; the db barrier cleared last → long pole.
+	apiDeps := got.Services[1].Deps
+	if len(apiDeps) != 2 {
+		t.Fatalf("api.Deps = %+v, want 2", apiDeps)
 	}
-	if a := got.Services[1].After; len(a) != 1 || a[0] != "service.go.db@ready" {
-		t.Errorf("api.After = %v, want [service.go.db@ready]", a)
+	if d := apiDeps[len(apiDeps)-1]; d.Ref != "service.go.db.runtime@ready" || !d.LongPole {
+		t.Errorf("api long-pole dep = %+v, want service.go.db.runtime@ready flagged", d)
 	}
 
 	if len(got.Provisions) != 1 {

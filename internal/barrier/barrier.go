@@ -14,22 +14,27 @@
 // see the channel as closed.
 package barrier
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // Barrier is a one-shot edge. Construct with New, fire with Trigger,
 // observe with Wait or Triggered. Zero value is NOT usable — always go
 // through New.
 type Barrier struct {
-	ch   chan struct{}
-	once sync.Once
+	ch      chan struct{}
+	once    sync.Once
+	firedAt time.Time
 }
 
 // New returns a fresh, untriggered Barrier.
 func New() *Barrier { return &Barrier{ch: make(chan struct{})} }
 
 // Trigger fires the barrier. Idempotent: any number of calls beyond
-// the first are no-ops.
-func (b *Barrier) Trigger() { b.once.Do(func() { close(b.ch) }) }
+// the first are no-ops. firedAt is written before the close, so any
+// observer of the closed channel sees it (happens-before via close).
+func (b *Barrier) Trigger() { b.once.Do(func() { b.firedAt = time.Now(); close(b.ch) }) }
 
 // Wait returns a channel that closes when the barrier fires (or is
 // already closed if it has already fired). Safe to call any number of
@@ -43,6 +48,19 @@ func (b *Barrier) Triggered() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// FiredAt reports when the barrier fired and whether it has. Non-blocking.
+// Reading firedAt only after observing the channel closed is race-free:
+// the close synchronizes-with this receive, and Trigger writes firedAt
+// before closing.
+func (b *Barrier) FiredAt() (time.Time, bool) {
+	select {
+	case <-b.ch:
+		return b.firedAt, true
+	default:
+		return time.Time{}, false
 	}
 }
 

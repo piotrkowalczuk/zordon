@@ -865,6 +865,17 @@ type serviceCtx struct {
 	// lifecycle.ReachedAt; the start summary uses it to split the
 	// dep-wait phase from the service's own work.
 	startedAt time.Time
+	// deps records, per dependency (implicitRuntimeAfter order), when its
+	// barrier actually fired — captured from the barrier itself, so the
+	// start summary can attribute the wait phase correctly regardless of
+	// the order this goroutine observed the barriers in.
+	deps []depSat
+}
+
+// depSat is one dependency and the moment its barrier fired.
+type depSat struct {
+	ref string
+	at  time.Time
 }
 
 func newServiceCtx(name, toolchain string) *serviceCtx {
@@ -2338,8 +2349,8 @@ func buildStartSummary(services []*alphasfile.Service, serviceCtxs map[string]*s
 			Running:   running,
 			Ready:     ready,
 		}
-		if svc.Runtime != nil {
-			item.After = svc.Runtime.After
+		for _, d := range sc.deps {
+			item.Deps = append(item.Deps, summary.Dep{Ref: d.ref, SatisfiedAt: d.at})
 		}
 		svcs = append(svcs, item)
 	}
@@ -2457,6 +2468,8 @@ func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
 		}
 		select {
 		case <-bt.target.Wait():
+			at, _ := bt.target.FiredAt()
+			sc.deps = append(sc.deps, depSat{ref: ref, at: at})
 		case <-bt.fail.Wait():
 			// Dep already failed. The first failure in the bringup chain
 			// is the one that triggers shutdown; subsequent dep-failure

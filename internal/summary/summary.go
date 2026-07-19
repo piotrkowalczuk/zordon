@@ -10,6 +10,7 @@
 package summary
 
 import (
+	"cmp"
 	"slices"
 	"time"
 )
@@ -23,17 +24,29 @@ type StartSummary struct {
 }
 
 // ServiceTiming breaks one service's bringup into phases: wait (blocked on
-// runtime.after deps) → build (workspace prepare + build cmd) → spawn (exec
+// dependencies) → build (workspace prepare + build cmd) → spawn (exec
 // launch) → ready (readiness probe / stabilization). Total is scheduled→ready.
+// Deps attributes the wait phase across the individual dependencies.
 type ServiceTiming struct {
-	Name      string   `json:"name"`
-	Toolchain string   `json:"toolchain,omitempty"`
-	After     []string `json:"after,omitempty"` // resolved runtime.after refs
-	WaitMS    int64    `json:"wait_ms"`
-	BuildMS   int64    `json:"build_ms"`
-	SpawnMS   int64    `json:"spawn_ms"`
-	ReadyMS   int64    `json:"ready_ms"`
-	TotalMS   int64    `json:"total_ms"`
+	Name      string      `json:"name"`
+	Toolchain string      `json:"toolchain,omitempty"`
+	Deps      []DepTiming `json:"deps,omitempty"`
+	WaitMS    int64       `json:"wait_ms"`
+	BuildMS   int64       `json:"build_ms"`
+	SpawnMS   int64       `json:"spawn_ms"`
+	ReadyMS   int64       `json:"ready_ms"`
+	TotalMS   int64       `json:"total_ms"`
+}
+
+// DepTiming is how long a service was blocked on one dependency — its
+// runtime.after refs plus the implicit toolchain. WaitMS is scheduled →
+// dependency satisfied. LongPole marks the dep that gated the service's
+// start (the last to clear); set only when the service has more than one,
+// so a lone dependency isn't labelled the bottleneck trivially.
+type DepTiming struct {
+	Ref      string `json:"ref"`
+	WaitMS   int64  `json:"wait_ms"`
+	LongPole bool   `json:"long_pole,omitempty"`
 }
 
 // ProvisionTiming reports one provision's run. RunMS is zero (omitted) for a
@@ -53,12 +66,20 @@ type ProvisionTiming struct {
 type Service struct {
 	Name      string
 	Toolchain string
-	After     []string
+	Deps      []Dep
 	Scheduled time.Time
 	Started   time.Time // deps cleared, the service's own work begins
 	BuildDone time.Time
 	Running   time.Time // process launched
 	Ready     time.Time
+}
+
+// Dep is one resolved dependency the service waited on and when its barrier
+// fired (the true close time, so attribution is correct regardless of the
+// order the supervisor happened to observe the barriers in).
+type Dep struct {
+	Ref         string
+	SatisfiedAt time.Time
 }
 
 // Provision is the raw per-provision timing the supervisor captured. Done is
@@ -82,19 +103,16 @@ func Build(bringupStart, now time.Time, services []Service, provisions []Provisi
 	svc := slices.Clone(services)
 	slices.SortFunc(svc, func(a, b Service) int { return a.Started.Compare(b.Started) })
 	for _, x := range svc {
-		t := ServiceTiming{
+		s.Services = append(s.Services, ServiceTiming{
 			Name:      x.Name,
 			Toolchain: x.Toolchain,
+			Deps:      depTimings(x.Scheduled, x.Deps),
 			WaitMS:    msBetween(x.Scheduled, x.Started),
 			BuildMS:   msBetween(x.Started, x.BuildDone),
 			SpawnMS:   msBetween(x.BuildDone, x.Running),
 			ReadyMS:   msBetween(x.Running, x.Ready),
 			TotalMS:   msBetween(x.Scheduled, x.Ready),
-		}
-		if len(x.After) > 0 {
-			t.After = x.After
-		}
-		s.Services = append(s.Services, t)
+		})
 	}
 
 	prov := slices.Clone(provisions)
@@ -111,6 +129,26 @@ func Build(bringupStart, now time.Time, services []Service, provisions []Provisi
 	}
 
 	return s
+}
+
+// depTimings attributes a service's wait phase across its dependencies:
+// each dep's WaitMS is scheduled → satisfied. Ordered by ascending wait so
+// the bottleneck reads last, and that last (largest-wait) dep is flagged
+// LongPole — the one that actually gated the service's start — but only
+// when there's more than one dep to disambiguate.
+func depTimings(scheduled time.Time, deps []Dep) []DepTiming {
+	if len(deps) == 0 {
+		return nil
+	}
+	out := make([]DepTiming, len(deps))
+	for i, d := range deps {
+		out[i] = DepTiming{Ref: d.Ref, WaitMS: msBetween(scheduled, d.SatisfiedAt)}
+	}
+	slices.SortFunc(out, func(a, b DepTiming) int { return cmp.Compare(a.WaitMS, b.WaitMS) })
+	if len(out) > 1 {
+		out[len(out)-1].LongPole = true
+	}
+	return out
 }
 
 // msBetween is b-a in whole milliseconds, clamped to zero for a missing
