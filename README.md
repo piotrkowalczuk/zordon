@@ -56,7 +56,7 @@ zordon start   # resolve, build, bring it up, stream logs until everything is RE
 
 ## Documentation
 
-Full docs: **<https://piotrkowalczuk.github.io/zordon/>**
+Full docs: **<https://zordon.io>**
 (source in [`docs/`](docs/), built with MkDocs Material).
 
 - [Alphasfile](docs/alphasfile.md) — the manifest: services, source pointers, readiness, logs
@@ -87,7 +87,7 @@ zordon clean              # run each provision's clean teardown (stack stopped)
 zordon workspace create x  # a parallel, isolated copy of the stack
 ```
 
-See the [docs](https://piotrkowalczuk.github.io/zordon/) for everything else.
+See the [docs](https://zordon.io) for everything else.
 
 ## Use with Claude (MCP)
 
