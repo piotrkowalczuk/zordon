@@ -927,9 +927,9 @@ func (r *resolver) finishService(st *svcState) error {
 	}
 
 	switch sb.Toolchain {
-	case ToolchainGo, ToolchainRust, ToolchainRuby, ToolchainNode, ToolchainPkg:
+	case ToolchainGo, ToolchainRust, ToolchainRuby, ToolchainNode, ToolchainJava, ToolchainPkg:
 	default:
-		return fmt.Errorf("unknown toolchain %q (want go|rust|ruby|nodejs|pkg)", sb.Toolchain)
+		return fmt.Errorf("unknown toolchain %q (want go|rust|ruby|nodejs|java|pkg)", sb.Toolchain)
 	}
 
 	// `package` is polymorphic — a string (go) or a string/object (pkg).

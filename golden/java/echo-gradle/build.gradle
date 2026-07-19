@@ -1,0 +1,21 @@
+// Conformance fixture: builds golden/java/echo-gradle into a runnable
+// build/libs/echo.jar. JDK-only (no dependencies). archiveFileName pins
+// the artifact name so zordon's inferJavaRunCmd finds exactly one jar.
+//
+// No `java.toolchain {}` block on purpose: that would make Gradle try to
+// auto-provision a JDK. Instead we compile with whatever JDK runs Gradle
+// (JAVA_HOME, pinned by zordon via mise) and target release 21.
+plugins {
+    id 'java'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+}
+
+jar {
+    archiveFileName = 'echo.jar'
+    manifest {
+        attributes 'Main-Class': 'echo.Echo'
+    }
+}

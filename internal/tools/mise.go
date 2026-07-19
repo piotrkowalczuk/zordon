@@ -330,6 +330,11 @@ func toolInstallCmd(binPath, dataDir, toolchain, version, name, ver string) (*ex
 		// at service-spawn time; here we still need the flag because
 		// that env isn't applied at tool-install).
 		argv = []string{"npm", "install", "-g", "--no-fund", "--no-audit", name + "@" + ver}
+	case "java":
+		// The JDK has no per-toolchain tool world (no gem/npm-global
+		// analog). Build tools come from the project's Maven/Gradle
+		// wrapper, not from toolchain.java.tools.
+		return nil, fmt.Errorf("toolchain java: no tool installer — Maven/Gradle come from the project wrapper (./mvnw / ./gradlew), not toolchain.java.tools")
 	default:
 		return nil, fmt.Errorf("toolchain %q: no tool installer wired", toolchain)
 	}

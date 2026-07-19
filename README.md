@@ -41,7 +41,7 @@ zordon start   # resolve, build, bring it up, stream logs until everything is RE
 ## Features
 
 - **No containers, no daemon.** Your databases, brokers, proxies and services run as plain supervised host processes — nothing to image, mount or register.
-- **Polyglot toolchains.** Go, Rust, Ruby and Node.js services built straight from a git URL or local source; native packages (Redis, PostgreSQL, etcd, …) provisioned through [mise](https://mise.jdx.dev).
+- **Polyglot toolchains.** Go, Rust, Ruby, Node.js and Java (Maven/Gradle) services built straight from a git URL or local source; native packages (Redis, PostgreSQL, etcd, …) provisioned through [mise](https://mise.jdx.dev).
 - **One manifest.** The whole stack — source, build, run, env, readiness, logs — declared in a single [`Alphasfile`](docs/alphasfile.md).
 - **Dynamic configuration as a graph.** Values are functions, not strings: `net::pickport()` picks a free port, `fs::tmp()`/`fs::hash()` give per-run paths, and services reference each other (`service.go.caddy.vars.http`) with zero hardcoded wiring. → [docs](docs/dynamic-config.md)
 - **Workspaces.** `zordon workspace create x` stands up a second, fully isolated copy of the entire stack — own ports, own dirs — an agent's sandbox beside yours, no port-mapping. → [docs](docs/workspaces.md)

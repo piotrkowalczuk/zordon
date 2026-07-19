@@ -36,6 +36,14 @@ const (
 	// the install path uses directly; this constant is the zordon-side
 	// identifier (block label + service label).
 	ToolchainNode = "nodejs"
+	// ToolchainJava is "java": a JVM service (Maven/Gradle) with no
+	// single-binary artifact — like nodejs it builds into the checkout
+	// (target/*.jar or build/libs/*.jar) and runs via an interpreter
+	// (`java -jar`). The mise tool name is "java" (identity), and mise's
+	// java plugin exports JAVA_HOME. The default build uses the project's
+	// committed Maven/Gradle wrapper (./mvnw / ./gradlew); the run command
+	// is inferred from the produced jar.
+	ToolchainJava = "java"
 	// ToolchainPkg is "pkg": a native package (redis/postgres/etcd/…)
 	// installed via mise and run as a normal supervised process. Unlike
 	// the language toolchains it has no source build — `package` is a
@@ -384,6 +392,9 @@ var toolchainDefaultsFor = map[string]toolchainDefaults{
 	ToolchainRust: {TTY: false},
 	ToolchainRuby: {TTY: true},
 	ToolchainNode: {TTY: true},
+	// java: JVM System.out and logback's ConsoleAppender flush per line
+	// under a pipe, so startup logs flow without a PTY (like go/rust).
+	ToolchainJava: {TTY: false},
 	// pkg: the package binary (redis-server / postgres / …) writes
 	// startup logs line-by-line to stderr; no PTY needed.
 	ToolchainPkg: {TTY: false},
@@ -633,6 +644,7 @@ type toolchainBlock struct {
 	Rust   *langToolchainBlock `hcl:"rust,block"`
 	Ruby   *langToolchainBlock `hcl:"ruby,block"`
 	Nodejs *langToolchainBlock `hcl:"nodejs,block"`
+	Java   *langToolchainBlock `hcl:"java,block"`
 	Pkg    *pkgToolchainBlock  `hcl:"pkg,block"`
 }
 
@@ -667,6 +679,9 @@ func (t *toolchainBlock) byLabel() map[string]*langToolchainBlock {
 	}
 	if t.Nodejs != nil {
 		out[ToolchainNode] = t.Nodejs
+	}
+	if t.Java != nil {
+		out[ToolchainJava] = t.Java
 	}
 	return out
 }

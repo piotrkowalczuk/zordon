@@ -73,6 +73,9 @@ jobs:
           - rust
           - node
           - pkg
+          # java installs a JDK and builds the golden Maven + Gradle fixtures
+          # through their committed wrappers (golden/java/echo-{maven,gradle}).
+          - java
     container:
       image: ${{ matrix.distro }}
       # tini as pid 1 to reap zombies; GitHub's bare `tail` pid 1
@@ -161,6 +164,10 @@ jobs:
           # only run on macOS (via `make e2e`'s *_macos gate locally).
           - simple
           - workspace
+          # java clones spring-petclinic and runs its Maven wrapper: a
+          # real (heavy, network-bound) JVM build per distro. The wrapper
+          # downloads Maven + deps into HOME's ~/.m2 on a cold cache.
+          - java
     container:
       image: ${{ matrix.distro }}
       # tini as pid 1 to reap zombies; GitHub's bare `tail` pid 1
@@ -240,4 +247,12 @@ jobs:
         run: make test.coverage.unit
         continue-on-error: true
       - name: Run E2E Test
+        # Examples default ZORDON_HOME to ~/.zordon, but "Pre-place mise" above
+        # drops mise under <repo>/.zordon. Point the examples at that same home
+        # so a toolchain example (java) finds the pre-placed mise and installs
+        # its JDK through it, instead of falling back to `cargo install mise`
+        # (no cargo in these containers) — the toolchain-less simple/workspace
+        # examples don't care.
+        env:
+          ZORDON_HOME: ${{ github.workspace }}/.zordon
         run: make e2e EXAMPLES=examples/${{ matrix.example }}

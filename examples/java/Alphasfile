@@ -1,0 +1,55 @@
+# Java example: Spring PetClinic, cloned from git and supervised as a host
+# process. Zero RUN config — zordon infers the runnable jar
+# (target/spring-petclinic-*.jar) and runs `java -jar` on it. Only a JDK is
+# pinned (via mise); the committed Maven wrapper (./mvnw) self-provisions Maven.
+#
+# The build is spelled out only to add -Dmaven.gitcommitid.skip=true:
+# PetClinic's git-commit-id-maven-plugin reads git HEAD to stamp build info,
+# but zordon checks the repo out into a LINKED git worktree (its .git is a
+# file, not a dir) that the plugin can't resolve. Skipping it leaves a fully
+# runnable jar. Drop the build block for a project without such a plugin.
+
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  # Pin the JDK zordon materializes via mise. mise's java plugin exports
+  # JAVA_HOME, which the Maven wrapper and the runtime both use. PetClinic
+  # targets Java 17; a Temurin 21 LTS builds and runs it fine.
+  java {
+    version = "temurin-21.0.5+11.0.LTS"
+  }
+}
+
+service "java" "petclinic" {
+  git {
+    url = "github.com/spring-projects/spring-petclinic"
+    # Pinned for reproducibility; swap for branch = "main" to track upstream.
+    rev = "f182358d02e4a68e52bdbabf55ca7800288511e7"
+  }
+
+  build {
+    # -B: non-interactive (no progress-bar spam under the supervisor).
+    # -DskipTests: we only need the jar, not PetClinic's test suite.
+    # -Dmaven.gitcommitid.skip=true: PetClinic's git-commit-id plugin reads
+    #   HEAD via JGit, which can't resolve zordon's linked git worktree —
+    #   skip it (the only flag here that isn't a plain preference).
+    cmd = ["./mvnw", "-B", "-DskipTests", "-Dmaven.gitcommitid.skip=true", "package"]
+  }
+
+  vars = { port = net::pickport() }
+
+  # Spring Boot relaxed binding: SERVER_PORT -> server.port. The inferred
+  # `java -jar` run passes no argv, so the port travels via env (like Node's
+  # PORT), keeping the run zero-config.
+  env = { SERVER_PORT = "${self.vars.port}" }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    # JVM boot + Spring context init is slow; give it a wide window.
+    period            = "1s"
+    failure_threshold = 180
+  }
+}
