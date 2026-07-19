@@ -7,7 +7,12 @@ service "ruby" "ruby-service" {
   }
 
   vars = { port = net::pickport() }
-  log  { format = "plain"  filter = "^\\tfrom .*" }
+  log {
+    format = "plain"
+    filter = <<-EOT
+      hasPrefix(line, "\tfrom ") or hasPrefix(line, "/Users/")
+    EOT
+  }
 
   runtime {
     cmd = ["bundle", "exec", "ruby", "myapp.rb", "-p", "${self.vars.port}"]
@@ -40,6 +45,9 @@ with `build { cmd = [...] }` if `bundle install` isn't what you want.
 
 ## Logs
 
-Ruby stack traces are noisy; `log { format = "plain" filter = "<regex>" }`
-drops matching lines (e.g. the `from …` backtrace frames) from the
-streamed output.
+Ruby stack traces are noisy; a `log { filter = "<expression>" }` block
+drops matching lines (e.g. the `from …` backtrace frames) at the source,
+before they reach the streamed output or alpha's log.
+The filter is a small predicate DSL — `hasPrefix`/`contains`/`matches` on
+the raw line, plus `json`/`logfmt`/`severity` for structured fields — see
+the [log filter reference](../reference/log-filter.md).

@@ -1,0 +1,41 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  go {
+    version = "1.26.5"
+  }
+}
+
+service "go" "app" {
+  src {
+    path = "../.."
+    exe  = "./examples/log_filter/src/app"
+  }
+
+  vars = { port = net::pickport() }
+
+  # Drop two classes of noise at the source — before a line reaches the
+  # output OR alpha's log file. The cost planner runs the cheap predicate
+  # first, so on the vast majority of lines only the raw-byte prefix/
+  # substring test runs; severity() (a lazy field scan) touches just the
+  # lines that already carry a level. See internal/logfilter.
+  log {
+    filter = <<-EOT
+      hasPrefix(line, "\tfrom ")
+      or (contains(line, "level") and severity(line) <= DEBUG)
+    EOT
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

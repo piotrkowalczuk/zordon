@@ -7,6 +7,7 @@ require (
 	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/peterbourgon/ff/v4 v4.0.0-beta.1
+	github.com/tidwall/gjson v1.18.0
 	github.com/zclconf/go-cty v1.18.1
 )
 
@@ -55,7 +56,6 @@ require (
 	github.com/securego/gosec/v2 v2.26.1 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
-	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect

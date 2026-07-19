@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/daemon"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/lifecycle"
+	"github.com/piotrkowalczuk/zordon/internal/logfilter"
 	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
@@ -1240,8 +1242,8 @@ func runShell(pc *provisionCtx, state *alphaState, grace time.Duration, snippet 
 
 	var streamWg sync.WaitGroup
 	streamWg.Add(2)
-	go func() { defer streamWg.Done(); streamLines(svcName, label, stdout, stream, log) }()
-	go func() { defer streamWg.Done(); streamLines(svcName, label, stderr, stream, log) }()
+	go func() { defer streamWg.Done(); streamLines(svcName, label, stdout, stream, log, nil) }()
+	go func() { defer streamWg.Done(); streamLines(svcName, label, stderr, stream, log, nil) }()
 
 	cmdDone := make(chan struct{})
 	var cmdErr error
@@ -2710,6 +2712,14 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 		defer pr.Close()
 	}
 
+	filt, err := logfilter.Compile(svc.Runtime.Log.Filter)
+	if err != nil {
+		log.Error("alpha", "log filter %s: %v", name, err)
+		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "log filter: " + err.Error()})
+		sc.lifecycle.Reach("failed")
+		return
+	}
+
 	stdout, stderr, ttyCleanup, err := attachStdio(cmd, *svc.Runtime.Log.TTY)
 	if err != nil {
 		closeParentW(sc)
@@ -2772,8 +2782,8 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 		closeParentW(sc)
 	}()
 
-	go streamLines(name, "stdout", stdout, stream, log)
-	go streamLines(name, "stderr", stderr, stream, log)
+	go streamLines(name, "stdout", stdout, stream, log, filt)
+	go streamLines(name, "stderr", stderr, stream, log, filt)
 
 	// Own cmd.Wait here. No separate supervise goroutine — bringup AND
 	// runtime supervision live on the same stack.
@@ -2943,14 +2953,21 @@ func attachStdio(cmd *exec.Cmd, useTTY bool) (stdout, stderr io.ReadCloser, clea
 	return ptmx, stderr, cleanup, nil
 }
 
-func streamLines(name, kind string, r io.Reader, stream *safeEncoder, log *zlog.Logger) {
+func streamLines(name, kind string, r io.Reader, stream *safeEncoder, log *zlog.Logger, filt *logfilter.Filter) {
 	s := bufio.NewScanner(r)
 	s.Buffer(make([]byte, 64*1024), 1024*1024)
 	for s.Scan() {
 		// PTYs default to ONLCR (LF→CRLF on output); strip the trailing CR
 		// rather than fiddle with termios so the same path handles pipes
 		// (no CR) and PTYs uniformly.
-		line := strings.TrimRight(s.Text(), "\r")
+		raw := bytes.TrimRight(s.Bytes(), "\r")
+		// Drop a filtered line before either sink — the log file AND the
+		// wire — so at extreme volume a dropped line costs one predicate on
+		// the raw bytes and nothing else (no string, no marshal, no write).
+		if filt.Drop(raw, kind, name) {
+			continue
+		}
+		line := string(raw)
 		log.Service(name, kind, line)
 		// Skip the event allocation entirely when zordon has detached:
 		// the marshal would be thrown away, and per-line allocations
@@ -3563,8 +3580,8 @@ func newPrepareRunner(name string, stream *safeEncoder, log *zlog.Logger) source
 		// write end.
 		var streamWg sync.WaitGroup
 		streamWg.Add(2)
-		go func() { defer streamWg.Done(); streamLines(name, "prepare", stdout, stream, log) }()
-		go func() { defer streamWg.Done(); streamLines(name, "prepare", stderr, stream, log) }()
+		go func() { defer streamWg.Done(); streamLines(name, "prepare", stdout, stream, log, nil) }()
+		go func() { defer streamWg.Done(); streamLines(name, "prepare", stderr, stream, log, nil) }()
 
 		waitErr := make(chan error, 1)
 		go func() { waitErr <- c.Wait() }()
