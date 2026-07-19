@@ -1,0 +1,11 @@
+{
+  "name": "zordon",
+  "owner": { "name": "piotrkowalczuk", "url": "https://github.com/piotrkowalczuk" },
+  "plugins": [
+    {
+      "name": "zordon",
+      "source": "./",
+      "description": "Auto-registers the zordon MCP server for Alphasfile-managed local dev stacks."
+    }
+  ]
+}

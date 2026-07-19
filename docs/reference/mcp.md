@@ -14,6 +14,7 @@ Launch it the way an MCP client launches any local server — as a subprocess wh
 
 The agent decides when to use these tools from three signals (it is the model's judgement — there is no hard routing):
 
+- **The Claude Code plugin** — installing it (see [how-to](../how-to/install-the-claude-code-plugin.md)) registers the server and a skill automatically; the manual signals below are what it replaces.
 - **Server `instructions`** — at `initialize` the server returns an `instructions` string (MCP's server-purpose field) that the client injects into the agent's context: what zordon is and when to reach for it, scoped so it is ignored where there is no `Alphasfile`.
 - **Per-tool descriptions** — each tool carries a description (a command's help; a provision's resolved `cmd`, flags, and the no-kill-alpha note).
 - **Project context** — for Claude Code, a line in `CLAUDE.md`/`AGENTS.md` ("this project's stack is managed by zordon — use the `zordon` MCP tools") is the strongest nudge.

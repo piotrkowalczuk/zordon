@@ -64,6 +64,7 @@ Full docs: **<https://zordon.io>**
 - [Workspaces](docs/workspaces.md) — parallel, isolated copies of the whole stack
 - [Federation](docs/federation.md) — chained Alphasfiles, shared infra, `zordon sudo`
 - [MCP server](docs/reference/mcp.md) — drive zordon (and its provisions) from an agent over MCP
+- [Install the Claude Code plugin](docs/how-to/install-the-claude-code-plugin.md) — zero-config setup via `/plugin install`
 
 ## Installation
 
@@ -93,6 +94,17 @@ See the [docs](https://zordon.io) for everything else.
 
 `zordon mcp` runs an [MCP](https://modelcontextprotocol.io) server over stdio.
 It exposes every zordon command — and every provision — as a tool, so an agent can drive your stack and run provisions on demand.
+
+The fastest path is the Claude Code plugin — no manual config:
+
+```sh
+/plugin marketplace add piotrkowalczuk/zordon
+/plugin install zordon@zordon
+```
+
+This registers the `zordon mcp` server and a skill nudging the agent toward it automatically; see the [install how-to](docs/how-to/install-the-claude-code-plugin.md).
+
+For other MCP clients, or without the plugin:
 
 The MCP **client launches the server**; you don't run `zordon mcp` yourself.
 With Claude Code, register it from your project directory:
