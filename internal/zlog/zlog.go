@@ -103,11 +103,17 @@ func (l *Logger) emit(src, level, msg string) {
 		return
 	}
 	srcCol := fmt.Sprintf("%-15s", src)
+	tail := ""
 	if l.color {
 		srcCol = colorFor(src) + srcCol + ansiReset
+		// Reset SGR at the end of every line. A forwarded service line can
+		// leave a colour open — and dropping the line that carried the
+		// matching reset (log filtering) makes that common — which would
+		// otherwise bleed into the lines that follow.
+		tail = ansiReset
 	}
-	fmt.Fprintf(l.w, "[%s] %s [%-5s] - %s\n",
-		time.Now().Format(time.RFC3339), srcCol, level, msg)
+	fmt.Fprintf(l.w, "[%s] %s [%-5s] - %s%s\n",
+		time.Now().Format(time.RFC3339), srcCol, level, msg, tail)
 }
 
 func colorFor(src string) string {

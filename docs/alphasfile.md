@@ -273,11 +273,18 @@ stayed alive for `--stabilization` (default `1s`).
 service "ruby" "ruby-service" {
   ...
   log {
-    format = "plain"        # or "json"; structured logs get parsed
-    filter = "^\\tfrom .*"  # regex of lines to drop
+    format = "plain"  # or "json"; structured logs get parsed
+    # A boolean predicate over each line; true drops the line, at the
+    # source, before it reaches the output or alpha's log.
+    filter = <<-EOT
+      hasPrefix(line, "\tfrom ") or (contains(line, "level") and severity(line) <= DEBUG)
+    EOT
   }
 }
 ```
+
+`filter` is a small DSL — `contains`/`hasPrefix`/`matches` on the raw line, `json`/`logfmt`/`severity` for structured fields, combined with `and`/`or`/`not`.
+See the [log filter reference](reference/log-filter.md).
 
 ### Debugger
 

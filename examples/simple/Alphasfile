@@ -113,7 +113,14 @@ service "ruby" "ruby-service" {
 
   log {
     format = "plain"
-    filter = "^\\tfrom |^/Users/.*|:in `.*'|:in `<.*>'"
+    # Drop ruby backtrace noise ("from …" frames and ":in `…'" tails) so
+    # only the app's own output shows. Cheap raw-byte prefix tests gate the
+    # regex; see internal/logfilter for the DSL and its cost planner.
+    filter = <<-EOT
+      hasPrefix(line, "\tfrom ")
+      or hasPrefix(line, "/Users/")
+      or matches(line, ":in `.*'")
+    EOT
   }
 
   runtime {

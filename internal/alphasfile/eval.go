@@ -17,6 +17,7 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/lifecycle"
+	"github.com/piotrkowalczuk/zordon/internal/logfilter"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
@@ -909,6 +910,9 @@ func (r *resolver) finishService(st *svcState) error {
 		rt.Log.Format = sb.Log.Format
 		rt.Log.Filter = sb.Log.Filter
 		rt.Log.TTY = sb.Log.TTY
+		if err := logfilter.Validate(rt.Log.Filter); err != nil {
+			return fmt.Errorf("log filter: %w", err)
+		}
 	}
 	if rt.Log.TTY == nil {
 		def := toolchainDefaultsFor[sb.Toolchain].TTY

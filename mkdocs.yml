@@ -46,8 +46,10 @@ nav:
       - Use a binary from another service: how-to/use-a-binary-from-another-service.md
       - Install a CLI tool from a mise package: how-to/install-a-cli-tool-with-mise.md
       - Clean up provision side effects: how-to/clean-up-provision-side-effects.md
+      - Filter noisy service logs: how-to/filter-noisy-logs.md
   - Reference:
       - zordon mcp: reference/mcp.md
+      - Log filter DSL: reference/log-filter.md
 
 markdown_extensions:
   - admonition
