@@ -10,6 +10,18 @@ This installs `zordon`, `alpha`, and the `tommy` reaper (alpha finds it
 as a sibling) into your `$GOBIN` (or `$GOPATH/bin`). Make sure that
 directory is on your `$PATH`.
 
+### Use from Claude Code (optional)
+
+If you drive your stack from an agent, install the Claude Code plugin — it registers the `zordon mcp` server and a bundled skill automatically, with no `.mcp.json` editing.
+
+```sh
+/plugin marketplace add piotrkowalczuk/zordon
+/plugin install zordon@zordon
+```
+
+The plugin does not bundle the binary, so you still need `zordon` on your `$PATH` from the `go install` step above.
+See the [install how-to](how-to/install-the-claude-code-plugin.md) for the full walkthrough.
+
 ## A first stack
 
 Create an `Alphasfile` in your project root — start from the
