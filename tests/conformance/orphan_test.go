@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // Orphan-safety conformance: the load-bearing guarantee that a service
 // never outlives the supervisor that spawned it, even when the
 // supervisor is hard-killed (SIGKILL / OOM) and runs ZERO cleanup code.

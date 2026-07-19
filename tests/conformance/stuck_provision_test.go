@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // End-to-end reproduction for the provision side of the "alpha hangs
 // because a subprocess can't be cancelled" family. Mirrors stuck_build_test
 // but exercises runProvision → runShell instead of bringupAndSupervise →

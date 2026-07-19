@@ -1,3 +1,5 @@
+//go:build conformance_node
+
 package conformance_test
 
 import (

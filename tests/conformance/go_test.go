@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // Package conformance contains behavioral tests of zordon's externally
 // observable behavior — driven through the zordon CLI using the
 // zordontest harness, asserting on HTTP responses, log contents,
@@ -21,11 +23,7 @@
 package conformance_test
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1215,22 +1213,12 @@ service "go" "cons" {
 	}
 }
 
-// --- shared helpers (package-local) ----------------------------
-
-func mustStart(t *testing.T, p *zordontest.Project) {
-	t.Helper()
-	p.Start(t).OK()
-}
-
-// echoResponse is the JSON shape golden/go/echo's GET / returns.
-// Tests that only care about reachability use mustGetEcho; tests
-// that inspect specific fields use mustDecodeEcho.
-type echoResponse struct {
-	Env            map[string]string `json:"env"`
-	Cwd            string            `json:"cwd"`
-	Argv           []string          `json:"argv"`
-	RuntimeVersion string            `json:"runtime_version"`
-}
+// --- go reachability helper (package-local) --------------------
+//
+// The shared echo helpers (echoResponse, mustStart, mustDecodeEcho,
+// tryDecodeEcho, readFile) live in the untagged shared_test.go so the
+// rust/node/pkg legs compile too. This one stays here: it asserts the
+// go-pinned runtime version, so it belongs to the go bucket.
 
 func mustGetEcho(t *testing.T, port int) {
 	t.Helper()
@@ -1238,68 +1226,4 @@ func mustGetEcho(t *testing.T, port int) {
 	if !strings.HasPrefix(echo.RuntimeVersion, "go1.26") {
 		t.Errorf("runtime_version = %q; want go1.26.x (pinned toolchain)", echo.RuntimeVersion)
 	}
-}
-
-func mustDecodeEcho(t testing.TB, port int) echoResponse {
-	t.Helper()
-	// Retry: readiness having passed means the service served alpha's probe,
-	// but the test connects from a different process a beat later — on a
-	// loaded CI runner the accept loop can briefly refuse, or a slow runtime
-	// (rust cold-build) can lag the first external request. A genuinely dead
-	// service stays refused for the whole window, so this masks the race, not
-	// real failures.
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
-	for {
-		echo, err := tryDecodeEcho(ctx, url)
-		if err == nil {
-			return echo
-		}
-
-		select {
-		case <-ctx.Done():
-			t.Fatalf("timed out waiting for echo to start: %v", ctx.Err())
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-}
-
-func tryDecodeEcho(ctx context.Context, url string) (echoResponse, error) {
-	var echo echoResponse
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return echo, err
-	}
-
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return echo, err
-	}
-	defer res.Body.Close()
-
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return echo, err
-	}
-	if res.StatusCode != http.StatusOK {
-		return echo, fmt.Errorf("status %d: %s", res.StatusCode, body)
-	}
-	if err := json.NewDecoder(strings.NewReader(string(body))).Decode(&echo); err != nil {
-		return echo, fmt.Errorf("decode echo: %w (body: %s)", err, body)
-	}
-
-	return echo, nil
-}
-
-// readFile is a thin testing.T-aware wrapper that returns content
-// as string for tests asserting on generated-file bodies.
-func readFile(t *testing.T, path string) (string, error) {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
 }

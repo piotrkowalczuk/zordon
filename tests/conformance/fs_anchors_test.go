@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // fs_anchors conformance pins the #46 fix end-to-end: a file{} anchored at
 // fs::etc() is materialized on disk under the persistent per-workspace state
 // dir (<state>/etc/<svc>), not under the OS per-invocation temp dir

@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // Conformance tests for the `debugger { ... }` macro on `service "go"`.
 //
 // The macro is a compile-time expansion of an Alphasfile block into

@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // Latent-provision shutdown conformance: a service with a latent
 // provision (after = never) must not deadlock alpha's shutdown.
 //

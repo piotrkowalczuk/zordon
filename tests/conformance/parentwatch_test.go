@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // Parent-watch conformance: when zordon is killed mid-bringup, alpha
 // must observe the death and shut itself + its services down — even
 // though zordon ran zero cleanup code. The mechanism is the inherited

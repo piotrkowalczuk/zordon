@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // Grandchild-escape conformance for the BUILD path.
 //
 // newPrepareRunner serializes its two waits — wg.Wait() (stream

@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 package conformance_test
 
 import (

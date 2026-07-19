@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // A stray mise.toml next to the Alphasfile (e.g. left behind by `mise use`)
 // must not influence toolchain resolution: zordon runs every mise command with
 // --no-config. The poison here is a far-future min_version, which makes any

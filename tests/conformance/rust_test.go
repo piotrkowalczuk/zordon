@@ -1,3 +1,5 @@
+//go:build conformance_rust
+
 package conformance_test
 
 import (

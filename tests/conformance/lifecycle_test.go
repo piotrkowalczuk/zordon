@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // Lifecycle conformance: the externally-observable invariants of
 // zordon's happy-path control flow — start, status, stop. The orphan
 // and parent-watch suites cover the unhappy paths (signals, kills);

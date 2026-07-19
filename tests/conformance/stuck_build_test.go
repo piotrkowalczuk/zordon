@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // End-to-end reproduction of the "alpha hangs because build can't be
 // cancelled" bug. Pinned scenario:
 //
