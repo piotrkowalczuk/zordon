@@ -1,6 +1,6 @@
 site_name: Zordon
 site_description: A process supervisor for local agentic workflows — supervised host processes, declared in an Alphasfile.
-site_url: https://piotrkowalczuk.github.io/zordon/
+site_url: https://zordon.io/
 repo_url: https://github.com/piotrkowalczuk/zordon
 repo_name: piotrkowalczuk/zordon
 edit_uri: edit/main/docs/
