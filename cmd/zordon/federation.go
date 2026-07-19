@@ -17,6 +17,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/summary"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
@@ -207,7 +208,7 @@ func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, err
 	return out, nil
 }
 
-func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, summary bool, picks []string, zordonHome string, testCfg alphasfile.TestConfig) error {
+func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, wantSummary bool, picks []string, zordonHome string, testCfg alphasfile.TestConfig) error {
 	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
 
 	fed, err := NewFederationState(zordonHome)
@@ -241,9 +242,14 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 		failfast: failfast,
 		verbose:  verbose,
 		agent:    agent,
-		summary:  summary,
-		stdout:   out,
 	}
+
+	// The summary is a report, not progress: collect one per brought-up
+	// level and render them all at the very end (below), after the whole
+	// bringup log stream — so the view lands cleanly after the logs, not
+	// interleaved with them.
+	showSummary := wantSummary || verbose
+	var summaries []*summary.StartSummary
 
 	var parents alphasfile.GlobalComputedState
 	for _, lvl := range fed.Levels() {
@@ -287,13 +293,23 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
 
-		if err := reconcileAlpha(ctx, lvl, af, old, parentDotenv, parentEnv, cfg, log); err != nil {
+		sum, err := reconcileAlpha(ctx, lvl, af, old, parentDotenv, parentEnv, cfg, log)
+		if err != nil {
 			return err
+		}
+		if sum != nil {
+			summaries = append(summaries, sum)
 		}
 
 		// Privileged hooks are NOT run here — `zordon start` stays
 		// non-interactive. Run `zordon sudo` to apply them across the chain.
 		parents.Join(af.Block())
+	}
+
+	if showSummary {
+		for _, s := range summaries {
+			printStartSummary(out, s)
+		}
 	}
 	return nil
 }

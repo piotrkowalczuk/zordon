@@ -335,12 +335,17 @@ func walkUp() (string, error) {
 	}
 }
 
-func pushConfigure(ctx context.Context, log *zlog.Logger, out io.Writer, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent, showSummary bool) error {
+// pushConfigure streams one level's bringup and, on success, returns the
+// start summary the daemon attached to EventDone (nil on failure). It does
+// NOT render the summary: rendering waits until the whole log stream is done
+// (see runStart), so the summary lands as a clean block after the logs, not
+// mid-stream.
+func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent bool) (*summary.StartSummary, error) {
 	log.Info("alpha", "Understood, Zordon!")
 
 	conn, err := control.Dial(sock, 1*time.Second)
 	if err != nil {
-		return fmt.Errorf("dial: %w", err)
+		return nil, fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
 	if dl, ok := ctx.Deadline(); ok {
@@ -363,7 +368,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, out io.Writer, sock, a
 			ParentEnv:      parentEnv,
 		},
 	}); err != nil {
-		return fmt.Errorf("send configure: %w", err)
+		return nil, fmt.Errorf("send configure: %w", err)
 	}
 
 	// Clear the deadline for the streaming phase (bringup can take minutes)
@@ -417,7 +422,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, out io.Writer, sock, a
 			// whatever failures we've already recorded — the first
 			// service that died is almost always the real cause and
 			// the alpha-side error after that is noise.
-			return finish(fmt.Errorf("recv event: %w", err))
+			return nil, finish(fmt.Errorf("recv event: %w", err))
 		}
 		switch ev.Kind {
 		case protocol.EventLog:
@@ -434,15 +439,12 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, out io.Writer, sock, a
 			failures = append(failures, failure{service: ev.Service, err: ev.Error})
 		case protocol.EventDone:
 			if len(failures) > 0 {
-				return finish(nil)
-			}
-			if showSummary && ev.Summary != nil {
-				printStartSummary(out, ev.Summary)
+				return nil, finish(nil)
 			}
 			log.Info("zordon", "alpha ready, detaching")
-			return nil
+			return ev.Summary, nil
 		case protocol.EventError:
-			return finish(fmt.Errorf("alpha: %s", ev.Error))
+			return nil, finish(fmt.Errorf("alpha: %s", ev.Error))
 		default:
 			log.Info("zordon", "alpha sent unknown event kind=%q", ev.Kind)
 		}
