@@ -1,23 +1,49 @@
 ---
 name: zordon
-description: Use when a task touches this project's local dev stack — starting/stopping it, checking status, or running a declared provision (migrations, seeding, teardown) — in a repo that has an Alphasfile. Prefer the zordon MCP tools over running `zordon`/`alpha` in Bash.
+description: Use in a repo that has an Alphasfile, or inside a zordon workspace copy, when a task touches the local dev stack — bringing services up or down, checking status or ports, or running a declared provision (migration, seeding, teardown). Prefer the zordon MCP tools over running the `zordon`/`alpha` binaries in Bash, and don't improvise a setup step that wasn't declared as a provision.
 ---
 
 # Working with a zordon-managed stack
 
-If this project has an `Alphasfile`, its local stack (databases, brokers, services) is supervised by zordon, and the MCP tools below are the intended interface — not the `zordon` binary via Bash.
+## When this applies
 
-**Reach for the tools, not the shell:**
-- `start` / `stop` — bring the declared stack up or down.
-- `status` / `get` — check what's running and on which ports before assuming something is broken or re-starting it.
-- `plan` — see the fully resolved config without side effects.
-- `provision__<toolchain>_<service>__<step>` tools — the *only* sanctioned way to run one-off setup (migrations, seeding, fixture teardown). Each one maps to a step the project author explicitly declared; there is no general-purpose "run arbitrary command" tool.
-- `sudo` / `workspace` — federation and isolated-copy operations; use them instead of hand-rolling directory tricks.
+This applies when there is an `Alphasfile` at or above the working directory, or the working directory is a `workspaces/<name>/` copy (an isolated stack of its own). Otherwise the project is not zordon-managed — ignore this skill and the zordon tools.
 
-**Why not Bash:** the tool boundary is deliberate — it's the project's declared contract for what an agent may do to the stack, not an incidental convenience. Shelling out to `zordon` directly works but bypasses structured results and, for provisions, the guarantee that a failed provision never tears the running stack down.
+## Prefer the tools, not the shell
 
-**Before improvising:** if a task looks like "reset the DB" or "seed test data" and no provision tool matches, that step hasn't been declared for this project — say so rather than reaching for raw SQL or scripts.
+The zordon MCP tools are the declared interface to the stack; the `zordon`/`alpha` binaries in Bash are not. The tools return structured results, and an on-demand provision that fails reports an error but never tears the running stack down — so it is safe to poke a live stack through them.
 
-**Workspaces:** running `workspace create x` spawns an isolated, fully independent copy of the entire stack in its own directory, with its own Alphasfile and separate ports/paths. The zordon tools apply in that workspace directory exactly as they do in the original — use them there too, not the CLI.
+## Task → tool
 
-No `Alphasfile` anywhere in or above the current working directory → this skill and the zordon tools don't apply; this project is not zordon-managed.
+| Goal | Tool |
+| --- | --- |
+| Bring the stack up (or a subset — pass service names) | `start` |
+| See what's running across the chain, and on which ports | `status` |
+| Read one resolved value (a port, `ready`, the command) | `get <expr>`, e.g. `service.go.api.vars.port` |
+| Preview the resolved config with no side effects | `plan` |
+| Run a declared one-off (migrate, seed, create topic, teardown) | the matching `provision__<toolchain>_<service>__<step>` tool |
+| Stand up an isolated parallel copy of the stack | the workspace tool — confirm its exact name via `tools/list` |
+| Apply privileged wiring (DNS, port :80) | `sudo` |
+| Stop this level | `stop` |
+| Tear down a provision's side effects | `clean` |
+
+For a command tool's flags and arguments, pass `["-h"]`; for a provision, read the tool's own description (it carries the resolved `cmd` and env keys).
+
+## Ordering rules that trip agents up
+
+- A provision runs *inside* a live supervisor. `start` before invoking a `provision__*` tool; a "no alpha running" error means you skipped `start`.
+- `clean` refuses a running stack — `stop` first, or use `stop --clean` in one step. `stop` on its own never runs `clean`.
+- `stop` and `clean` only affect your invocation level; shared parent infrastructure keeps running.
+- Tool names may not match CLI subcommand names (the workspace tool in particular). Confirm names from `tools/list` rather than assuming.
+- If the project uses a non-default `ZORDON_HOME`, the MCP server must run with the same value or it targets a different stack.
+
+## Guardrail: don't improvise
+
+If a task needs a step — reset the DB, seed fixtures — and no `provision__*` tool matches, that step wasn't declared for this project. Say so rather than reaching for raw SQL, ad-hoc scripts, or the filesystem.
+
+## Deeper detail
+
+- Lifecycle and states — <https://zordon.io/lifecycle/>
+- Provisions — <https://zordon.io/reference/mcp/>, <https://zordon.io/how-to/run-a-provision-via-mcp/>
+- Workspaces — <https://zordon.io/workspaces/>
+- Federation and sudo — <https://zordon.io/federation/>

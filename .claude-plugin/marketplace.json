@@ -1,5 +1,6 @@
 {
   "name": "zordon",
+  "description": "Local dev-stack supervisor for Alphasfile-managed projects — auto-registers the `zordon mcp` server so agents can drive the stack.",
   "owner": { "name": "piotrkowalczuk", "url": "https://github.com/piotrkowalczuk" },
   "plugins": [
     {
