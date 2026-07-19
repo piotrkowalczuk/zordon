@@ -31,7 +31,6 @@ git_sub() {
 }
 
 op=
-git_sub commit && op=commit
 git_sub push && op=push
 
 # Neither commit nor push -> not our business, let it through.
