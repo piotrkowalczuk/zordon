@@ -3075,6 +3075,20 @@ func buildCmd(svc *alphasfile.Service, checkout string, globalDotenv []string, g
 			return nil, fmt.Errorf("service %q: %w", name, err)
 		}
 		cmd = exec.Command(argv[0], append(argv[1:], svc.Flags()...)...)
+	case svc.Toolchain == alphasfile.ToolchainJava:
+		// Java has no single-binary artifact (a jar isn't directly
+		// executable via <binDir>/<name>); with no explicit runtime cmd,
+		// inference finds the built jar and runs `java -jar <jar>`. Must
+		// sit before the binDir branch since a Java service is Buildable().
+		root := serviceCwd(svc)
+		if root == "" {
+			root = checkout
+		}
+		argv, err := inferJavaRunCmd(root)
+		if err != nil {
+			return nil, fmt.Errorf("service %q: %w", name, err)
+		}
+		cmd = exec.Command(argv[0], append(argv[1:], svc.Flags()...)...)
 	case binDir != "" && svc.Buildable():
 		// Every service is built by zordon (git/src checkout or crate
 		// cargo-install) into the out-of-tree bin dir; run it from there.
@@ -3208,6 +3222,10 @@ func defaultBuild(svc *alphasfile.Service, name, binDir, dest string) string {
 		root := serviceCwd(svc)
 		pm := detectNodePM(root)
 		return nodeInstallCmd(pm, root)
+	case alphasfile.ToolchainJava:
+		// Wrapper-first Maven/Gradle build from the exe-anchor; the jar it
+		// produces is picked up by inferJavaRunCmd at run time.
+		return javaBuildCmd(serviceCwd(svc))
 	}
 	return ""
 }
@@ -3370,6 +3388,80 @@ func inferNodeRunCmd(root string) ([]string, error) {
 		}
 	}
 	return nil, fmt.Errorf("package.json has no scripts.start, main, or single-entry bin — declare runtime { cmd = [...] }")
+}
+
+// javaBuildCmd is the default build for a Java service: wrapper-first,
+// so the committed Maven/Gradle wrapper self-provisions the exact
+// build-tool version the project pins (JDK still comes from mise). root
+// is the exe-anchor where pom.xml / build.gradle lives. Returns a shell
+// snippet run via /bin/sh -c (cwd = root). When a build file is present
+// but its wrapper isn't, it returns a snippet that fails loudly rather
+// than "" (which prepareBuild reads as "nothing to build").
+func javaBuildCmd(root string) string {
+	switch {
+	case exists(filepath.Join(root, "pom.xml")):
+		if exists(filepath.Join(root, "mvnw")) {
+			return "./mvnw -q -B -DskipTests package"
+		}
+		return javaNoWrapper("Maven", "mvnw", "mvn -N wrapper:wrapper")
+	case exists(filepath.Join(root, "build.gradle")) || exists(filepath.Join(root, "build.gradle.kts")):
+		if exists(filepath.Join(root, "gradlew")) {
+			// --no-daemon so no Gradle daemon lingers outside the
+			// supervisor's process group; -x test skips the test task.
+			return "./gradlew --console=plain --no-daemon -x test build"
+		}
+		return javaNoWrapper("Gradle", "gradlew", "gradle wrapper")
+	}
+	return "echo 'zordon: java service has no pom.xml or build.gradle at the exe-anchor; declare build { cmd = [...] }' >&2; exit 1"
+}
+
+func javaNoWrapper(tool, wrapper, gen string) string {
+	return fmt.Sprintf("echo 'zordon: %s project has no ./%s wrapper; generate one (%s) or declare build { cmd = [...] }' >&2; exit 1",
+		tool, wrapper, gen)
+}
+
+// inferJavaRunCmd builds the runtime argv for a Java service with no
+// `runtime { cmd = [...] }`: it locates the single runnable jar the
+// build produced and runs `java -jar <jar>`. Maven writes to target/,
+// Gradle to build/libs/. Spring Boot leaves a non-runnable sibling next
+// to the fat jar (`*.jar.original` for Maven, `*-plain.jar` for Gradle),
+// plus the usual `-sources`/`-javadoc` artifacts — all excluded so the
+// match is unambiguous. Zero or many candidates is a hard error telling
+// the user to declare runtime { cmd }.
+func inferJavaRunCmd(root string) ([]string, error) {
+	var dir string
+	switch {
+	case exists(filepath.Join(root, "pom.xml")):
+		dir = filepath.Join(root, "target")
+	case exists(filepath.Join(root, "build.gradle")) || exists(filepath.Join(root, "build.gradle.kts")):
+		dir = filepath.Join(root, "build", "libs")
+	default:
+		return nil, fmt.Errorf("no pom.xml or build.gradle at %s — declare runtime { cmd = [...] }", root)
+	}
+	entries, err := zfs.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read build output %s: %w — declare runtime { cmd = [...] }", dir, err)
+	}
+	var jars []string
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".jar") {
+			continue
+		}
+		if strings.HasSuffix(n, "-sources.jar") || strings.HasSuffix(n, "-javadoc.jar") || strings.HasSuffix(n, "-plain.jar") {
+			continue
+		}
+		jars = append(jars, n)
+	}
+	switch len(jars) {
+	case 1:
+		return []string{"java", "-jar", filepath.Join(dir, jars[0])}, nil
+	case 0:
+		return nil, fmt.Errorf("no runnable jar in %s — declare runtime { cmd = [...] }", dir)
+	default:
+		// zfs.ReadDir (os.ReadDir) returns entries sorted by name.
+		return nil, fmt.Errorf("multiple jars in %s (%s) — declare runtime { cmd = [...] }", dir, strings.Join(jars, ", "))
+	}
 }
 
 // prepareWorkspace materializes the per-invocation checkout (or just

@@ -38,6 +38,7 @@ nav:
       - Rust: services/rust.md
       - Ruby: services/ruby.md
       - Node.js: services/nodejs.md
+      - Java: services/java.md
       - Package (pkg): services/pkg.md
   - Workspaces: workspaces.md
   - Federation: federation.md

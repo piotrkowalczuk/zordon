@@ -95,7 +95,7 @@ func renderState(st *protocol.StateInfo) []byte {
 
 func renderToolchainBlock(body *hclwrite.Body, tc map[string]*alphasfile.ToolchainConfig) {
 	tb := body.AppendNewBlock("toolchain", nil).Body()
-	for _, lang := range []string{alphasfile.ToolchainGo, alphasfile.ToolchainRust, alphasfile.ToolchainRuby, alphasfile.ToolchainNode} {
+	for _, lang := range []string{alphasfile.ToolchainGo, alphasfile.ToolchainRust, alphasfile.ToolchainRuby, alphasfile.ToolchainNode, alphasfile.ToolchainJava} {
 		cfg, ok := tc[lang]
 		if !ok || cfg == nil {
 			continue

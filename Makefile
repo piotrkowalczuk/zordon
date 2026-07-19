@@ -1,4 +1,4 @@
-.PHONY: fmt build build.race build.release test test.fast test.race test.coverage test.unit test.coverage.unit test.conformance.go test.conformance.rust test.conformance.node test.conformance.pkg e2e lint gen clean
+.PHONY: fmt build build.race build.release test test.fast test.race test.coverage test.unit test.coverage.unit test.conformance.go test.conformance.rust test.conformance.node test.conformance.pkg test.conformance.java e2e lint gen clean
 
 EXAMPLES ?= $(shell ls -d examples/*/)
 GOTEST_TIMEOUT ?= 30m
@@ -7,7 +7,7 @@ GOTEST_TIMEOUT ?= 30m
 # tests/conformance/*_test.go): a plain `go test ./...` stays fast and each
 # toolchain runs on its own CI leg. CONFORMANCE_TAGS is the full set — every
 # conformance test — used by the whole-module test.race/test.coverage passes.
-CONFORMANCE_TAGS ?= conformance_go conformance_rust conformance_node conformance_pkg
+CONFORMANCE_TAGS ?= conformance_go conformance_rust conformance_node conformance_pkg conformance_java
 ZORDON_TEST_ENV = ZORDON_BIN="$(CURDIR)/bin/zordon" ZORDON_TOMMY_BIN="$(CURDIR)/bin/tommy" PATH="$(CURDIR)/bin:$$PATH"
 
 # Comma-separated form of the tag set: GOFLAGS=-tags can't hold spaces (they'd
@@ -91,6 +91,10 @@ test.conformance.node: build.race
 test.conformance.pkg: build.race
 	$(ZORDON_TEST_ENV) \
 	go test -timeout $(GOTEST_TIMEOUT) -race -tags conformance_pkg ./tests/conformance/
+
+test.conformance.java: build.race
+	$(ZORDON_TEST_ENV) \
+	go test -timeout $(GOTEST_TIMEOUT) -race -tags conformance_java ./tests/conformance/
 
 # The conformance suites compile only under their per-toolchain build tags, so
 # the linters must see the full set — otherwise they flag the shared helpers as
