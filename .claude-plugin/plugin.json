@@ -1,0 +1,10 @@
+{
+  "name": "zordon",
+  "displayName": "Zordon",
+  "description": "Local dev-stack supervisor (databases, brokers, services) declared in an Alphasfile, run as host processes — auto-registers the `zordon mcp` server so agents can start/stop the stack, inspect it, and run declared provisions without shelling out.",
+  "author": "piotrkowalczuk",
+  "homepage": "https://zordon.io",
+  "repository": "https://github.com/piotrkowalczuk/zordon",
+  "license": "GPL-3.0",
+  "keywords": ["mcp", "dev-stack", "supervisor", "alphasfile", "local-development"]
+}

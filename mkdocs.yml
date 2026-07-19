@@ -47,6 +47,7 @@ nav:
       - Install a CLI tool from a mise package: how-to/install-a-cli-tool-with-mise.md
       - Clean up provision side effects: how-to/clean-up-provision-side-effects.md
       - Filter noisy service logs: how-to/filter-noisy-logs.md
+      - Install the Claude Code plugin: how-to/install-the-claude-code-plugin.md
   - Reference:
       - zordon mcp: reference/mcp.md
       - Log filter DSL: reference/log-filter.md

@@ -18,6 +18,11 @@ jobs:
           cache: true
       - name: Run lint
         run: make lint
+      - name: Validate plugin JSON
+        run: |
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json; do
+            jq empty "$f"
+          done
 
   test-examples:
     runs-on: ubuntu-latest
