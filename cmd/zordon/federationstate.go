@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"time"
 
@@ -98,6 +99,10 @@ type startConfig struct {
 	verbose  bool
 	agent    bool
 	summary  bool
+	// stdout is where the structured start summary VIEW is written (stderr
+	// carries the log-style bringup chatter). The MCP server swaps in a
+	// buffer here to capture it as a tool result.
+	stdout io.Writer
 }
 
 // canReuse is the pure multi-agent-invariant decision: a running level may be
@@ -186,7 +191,7 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 	if err := control.WaitListening(ctxLevel, sock); err != nil {
 		return fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
-	if err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent, cfg.summary || cfg.verbose); err != nil {
+	if err := pushConfigure(ctxLevel, log, cfg.stdout, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent, cfg.summary || cfg.verbose); err != nil {
 		return fmt.Errorf("%s: %w", lvl.afPath, err)
 	}
 	return nil

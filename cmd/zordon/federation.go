@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -206,7 +207,7 @@ func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, err
 	return out, nil
 }
 
-func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, summary bool, picks []string, zordonHome string, testCfg alphasfile.TestConfig) error {
+func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, summary bool, picks []string, zordonHome string, testCfg alphasfile.TestConfig) error {
 	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
 
 	fed, err := NewFederationState(zordonHome)
@@ -241,6 +242,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		verbose:  verbose,
 		agent:    agent,
 		summary:  summary,
+		stdout:   out,
 	}
 
 	var parents alphasfile.GlobalComputedState

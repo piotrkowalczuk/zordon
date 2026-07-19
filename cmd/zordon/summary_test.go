@@ -6,12 +6,10 @@ import (
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/summary"
-	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
 
 func TestPrintStartSummary(t *testing.T) {
 	var buf bytes.Buffer
-	log := zlog.New(&buf, false) // non-terminal writer → no color, plain text
 
 	s := &summary.StartSummary{
 		TotalMS: 4210,
@@ -30,7 +28,7 @@ func TestPrintStartSummary(t *testing.T) {
 		},
 	}
 
-	printStartSummary(log, s)
+	printStartSummary(&buf, s)
 	out := buf.String()
 
 	for _, want := range []string{

@@ -121,7 +121,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "ensure alpha is running and push the Alphasfile config (--services/ZORDON_SERVICES or positional args bring up just that subset)",
 		Flags:     startFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runStart(ctx, zlog.New(stdio.Stderr, *agent), *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent, *startSummary,
+			return runStart(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent, *startSummary,
 				parsePicks(append(strings.Fields(*startServices), args...)),
 				zfs.ZordonHome(home.Path()),
 				testCfg())
@@ -335,7 +335,7 @@ func walkUp() (string, error) {
 	}
 }
 
-func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent, showSummary bool) error {
+func pushConfigure(ctx context.Context, log *zlog.Logger, out io.Writer, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent, showSummary bool) error {
 	log.Info("alpha", "Understood, Zordon!")
 
 	conn, err := control.Dial(sock, 1*time.Second)
@@ -437,7 +437,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 				return finish(nil)
 			}
 			if showSummary && ev.Summary != nil {
-				printStartSummary(log, ev.Summary)
+				printStartSummary(out, ev.Summary)
 			}
 			log.Info("zordon", "alpha ready, detaching")
 			return nil
@@ -547,45 +547,48 @@ func printFailureSummary(log *zlog.Logger, failures []failure, tails map[string]
 	log.Error("zordon", "%s", bar)
 }
 
-// printStartSummary writes the success counterpart of printFailureSummary:
-// a 60-dash-delimited block listing each service's bringup phases (wait /
-// build / spawn / ready / total) in the order services actually started,
-// then each provision's run duration. Same channel and constraints as the
-// failure summary — plain zlog to stderr, no ANSI/emoji, so it survives CI /
-// agent / piped contexts. Rendered only behind --summary / -v.
-func printStartSummary(log *zlog.Logger, s *summary.StartSummary) {
+// printStartSummary writes the success counterpart of printFailureSummary,
+// but as a structured VIEW on stdout — plain fmt.Fprintf, no zlog timestamp/
+// src/level prefix — following the same convention as status/get/plan (log
+// chatter goes to stderr, the actual report goes to stdout). Without the
+// per-line prefix the fixed-width columns align exactly. A 60-dash-delimited
+// block lists each service's bringup phases (wait / build / spawn / ready /
+// total) in start order, each service's per-dependency wait, then each
+// provision's run. No ANSI/emoji, so it survives CI / agent / piped contexts.
+// Rendered only behind --summary / -v.
+func printStartSummary(out io.Writer, s *summary.StartSummary) {
 	bar := strings.Repeat("-", 60)
-	log.Info("zordon", "%s", bar)
+	fmt.Fprintln(out, bar)
 
 	head := fmt.Sprintf("Bringup complete: %d service(s)", len(s.Services))
 	if len(s.Provisions) > 0 {
 		head += fmt.Sprintf(", %d provision(s)", len(s.Provisions))
 	}
 	head += fmt.Sprintf(" in %s", fmtDur(s.TotalMS))
-	log.Info("zordon", "%s", head)
+	fmt.Fprintln(out, head)
 
 	if len(s.Services) > 0 {
-		log.Info("zordon", "  %-3s %-16s %-8s %8s %8s %8s %8s %8s",
+		fmt.Fprintf(out, "  %-3s %-16s %-8s %8s %8s %8s %8s %8s\n",
 			"#", "service", "toolchain", "wait", "build", "spawn", "ready", "total")
 		for i, st := range s.Services {
-			log.Info("zordon", "  %-3d %-16s %-8s %8s %8s %8s %8s %8s",
+			fmt.Fprintf(out, "  %-3d %-16s %-8s %8s %8s %8s %8s %8s\n",
 				i+1, st.Name, st.Toolchain,
 				fmtDur(st.WaitMS), fmtDur(st.BuildMS), fmtDur(st.SpawnMS), fmtDur(st.ReadyMS), fmtDur(st.TotalMS))
 			if len(st.Deps) > 0 {
-				log.Info("zordon", "      after:")
+				fmt.Fprintln(out, "      after:")
 				for _, d := range st.Deps {
 					marker := ""
 					if d.LongPole {
 						marker = "   <- long pole"
 					}
-					log.Info("zordon", "        %-30s %8s%s", d.Ref, fmtDur(d.WaitMS), marker)
+					fmt.Fprintf(out, "        %-30s %8s%s\n", d.Ref, fmtDur(d.WaitMS), marker)
 				}
 			}
 		}
 	}
 
 	if len(s.Provisions) > 0 {
-		log.Info("zordon", "  provisions:")
+		fmt.Fprintln(out, "  provisions:")
 		for _, pt := range s.Provisions {
 			dur := fmtDur(pt.RunMS)
 			if pt.Detached {
@@ -599,14 +602,14 @@ func printStartSummary(log *zlog.Logger, s *summary.StartSummary) {
 			if svc == "" {
 				svc = "?"
 			}
-			log.Info("zordon", "    %-18s (%s) %s", pt.Name, svc, dur)
+			fmt.Fprintf(out, "    %-18s (%s) %s\n", pt.Name, svc, dur)
 			if len(pt.After) > 0 {
-				log.Info("zordon", "      after: %s", strings.Join(pt.After, ", "))
+				fmt.Fprintf(out, "      after: %s\n", strings.Join(pt.After, ", "))
 			}
 		}
 	}
 
-	log.Info("zordon", "%s", bar)
+	fmt.Fprintln(out, bar)
 }
 
 // fmtDur renders a millisecond duration compactly: "0ms", "320ms", "1.80s".
