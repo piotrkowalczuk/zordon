@@ -134,3 +134,32 @@ func TestBarrier_firstOfSelectsCorrectBranch(t *testing.T) {
 		<-target.Wait()
 	})
 }
+
+// FiredAt records the virtual instant of the first Trigger and is stable
+// across repeat Triggers (which are no-ops).
+func TestBarrier_firedAt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := New()
+		if _, ok := b.FiredAt(); ok {
+			t.Fatal("FiredAt reported fired before Trigger")
+		}
+
+		start := time.Now()
+		time.Sleep(1500 * time.Millisecond)
+		b.Trigger()
+
+		at, ok := b.FiredAt()
+		if !ok {
+			t.Fatal("FiredAt not set after Trigger")
+		}
+		if got := at.Sub(start); got != 1500*time.Millisecond {
+			t.Errorf("FiredAt = +%s, want +1.5s", got)
+		}
+
+		time.Sleep(time.Second)
+		b.Trigger() // idempotent — must not move firedAt
+		if at2, _ := b.FiredAt(); !at2.Equal(at) {
+			t.Errorf("firedAt moved on repeat Trigger: %s -> %s", at, at2)
+		}
+	})
+}

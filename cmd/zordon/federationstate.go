@@ -10,6 +10,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/summary"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
@@ -146,7 +147,7 @@ func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx
 // replacement and block until it has accepted the config (EventDone) or
 // failed. Resolution already happened (resolveLevel) — so a config that
 // won't even parse never tears down the old, healthy alpha.
-func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, old *protocol.StateInfo, parentDotenv []string, parentEnv map[string]string, cfg startConfig, log *zlog.Logger) error {
+func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, old *protocol.StateInfo, parentDotenv []string, parentEnv map[string]string, cfg startConfig, log *zlog.Logger) (*summary.StartSummary, error) {
 	inv := lvl.inv
 	sock := inv.SocketPath()
 
@@ -160,7 +161,7 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 			log.Error("zordon", "shutdown %s: %v", lvl.afPath, e)
 		}
 		if err := waitSocketGone(ctx, sock, cfg.timeout); err != nil {
-			return fmt.Errorf("%s: waiting for old alpha to exit: %w", lvl.afPath, err)
+			return nil, fmt.Errorf("%s: waiting for old alpha to exit: %w", lvl.afPath, err)
 		}
 	}
 
@@ -169,24 +170,25 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 		levelLog = zfs.NewResolver(inv.Dir, inv.FsHash).AlphaLogFile(cfg.alphaLog)
 	}
 	if err := zfs.EnsureSharedDir(filepath.Dir(levelLog)); err != nil {
-		return fmt.Errorf("mkdir state dir: %w", err)
+		return nil, fmt.Errorf("mkdir state dir: %w", err)
 	}
 	// The socket lives in inv.TmpDir ($TMPDIR/zordon-<FsHash>); alpha can't
 	// bind into a missing directory.
 	if err := zfs.EnsureSharedDir(inv.TmpDir); err != nil {
-		return fmt.Errorf("mkdir tmp dir: %w", err)
+		return nil, fmt.Errorf("mkdir tmp dir: %w", err)
 	}
 
 	ctxLevel, cancel := context.WithTimeout(ctx, cfg.timeout)
 	defer cancel()
 	if err := spawnAlpha(cfg.alphaBin, levelLog, sock, cfg.timeout, cfg.verbose, log, inv.Env); err != nil {
-		return fmt.Errorf("%s: %w", lvl.afPath, err)
+		return nil, fmt.Errorf("%s: %w", lvl.afPath, err)
 	}
 	if err := control.WaitListening(ctxLevel, sock); err != nil {
-		return fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
+		return nil, fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
-	if err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent); err != nil {
-		return fmt.Errorf("%s: %w", lvl.afPath, err)
+	sum, err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", lvl.afPath, err)
 	}
-	return nil
+	return sum, nil
 }

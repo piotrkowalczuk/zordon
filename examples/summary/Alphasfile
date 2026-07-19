@@ -1,0 +1,75 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+# examples/summary — demonstrates `zordon start --summary`.
+#
+# After a successful bringup, zordon prints a timing report: each service's
+# bringup broken into phases (wait / build / spawn / ready) plus each
+# provision's run duration, in the order things actually started. It's for
+# spotting where a slow local setup spends its time.
+#
+# This stack is shaped to make the report interesting: `api` waits on `db`
+# (so api's `wait` phase is non-zero and it starts second), and two
+# provisions with a short sleep give the provisions section real durations.
+
+toolchain {
+  go {
+    version = "1.26.5"
+  }
+}
+
+service "go" "db" {
+  src {
+    path = "../.."
+    exe  = "./examples/go/src/app"
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/db", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "api" {
+  src {
+    path = "../.."
+    exe  = "./examples/go/src/app"
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd   = ["${fs::bin()}/api", "-addr", "127.0.0.1:${self.vars.port}"]
+    after = [service.go.db.runtime.ready]
+
+    # No deps: races bringup. The short sleep makes its run duration show
+    # up in the summary rather than rounding to ~0ms.
+    provision "migrate" {
+      cmd = "/bin/sleep 1"
+    }
+
+    # Gated on the service being up, then talks to it.
+    provision "smoke" {
+      cmd   = "curl -fsS http://127.0.0.1:${self.vars.port}/ | grep -q go-example"
+      after = [self.runtime.ready]
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

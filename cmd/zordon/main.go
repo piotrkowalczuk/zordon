@@ -24,6 +24,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/ring"
+	"github.com/piotrkowalczuk/zordon/internal/summary"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
@@ -113,13 +114,14 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	// know they need `--failfast=false` to opt out.
 	startFailfast := startFlags.BoolLongDefault("failfast", true, "abort bringup and shut down alpha on first service failure")
 	startServices := startFlags.StringLong("services", "", "services to bring up, comma/space-separated (env: ZORDON_SERVICES); merged with any positional [service ...] args")
+	startSummary := startFlags.BoolLong("summary", "after a successful start, print a per-service/per-provision timing summary (also shown by -v)")
 	startCmd := &ff.Command{
 		Name:      "start",
 		Usage:     "zordon start [FLAGS] [service ...]",
 		ShortHelp: "ensure alpha is running and push the Alphasfile config (--services/ZORDON_SERVICES or positional args bring up just that subset)",
 		Flags:     startFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runStart(ctx, zlog.New(stdio.Stderr, *agent), *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent,
+			return runStart(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent, *startSummary,
 				parsePicks(append(strings.Fields(*startServices), args...)),
 				zfs.ZordonHome(home.Path()),
 				testCfg())
@@ -333,12 +335,17 @@ func walkUp() (string, error) {
 	}
 }
 
-func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent bool) error {
+// pushConfigure streams one level's bringup and, on success, returns the
+// start summary the daemon attached to EventDone (nil on failure). It does
+// NOT render the summary: rendering waits until the whole log stream is done
+// (see runStart), so the summary lands as a clean block after the logs, not
+// mid-stream.
+func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent bool) (*summary.StartSummary, error) {
 	log.Info("alpha", "Understood, Zordon!")
 
 	conn, err := control.Dial(sock, 1*time.Second)
 	if err != nil {
-		return fmt.Errorf("dial: %w", err)
+		return nil, fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
 	if dl, ok := ctx.Deadline(); ok {
@@ -361,7 +368,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 			ParentEnv:      parentEnv,
 		},
 	}); err != nil {
-		return fmt.Errorf("send configure: %w", err)
+		return nil, fmt.Errorf("send configure: %w", err)
 	}
 
 	// Clear the deadline for the streaming phase (bringup can take minutes)
@@ -415,7 +422,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 			// whatever failures we've already recorded — the first
 			// service that died is almost always the real cause and
 			// the alpha-side error after that is noise.
-			return finish(fmt.Errorf("recv event: %w", err))
+			return nil, finish(fmt.Errorf("recv event: %w", err))
 		}
 		switch ev.Kind {
 		case protocol.EventLog:
@@ -432,12 +439,12 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 			failures = append(failures, failure{service: ev.Service, err: ev.Error})
 		case protocol.EventDone:
 			if len(failures) > 0 {
-				return finish(nil)
+				return nil, finish(nil)
 			}
 			log.Info("zordon", "alpha ready, detaching")
-			return nil
+			return ev.Summary, nil
 		case protocol.EventError:
-			return finish(fmt.Errorf("alpha: %s", ev.Error))
+			return nil, finish(fmt.Errorf("alpha: %s", ev.Error))
 		default:
 			log.Info("zordon", "alpha sent unknown event kind=%q", ev.Kind)
 		}
@@ -540,6 +547,79 @@ func printFailureSummary(log *zlog.Logger, failures []failure, tails map[string]
 		}
 	}
 	log.Error("zordon", "%s", bar)
+}
+
+// printStartSummary writes the success counterpart of printFailureSummary,
+// but as a structured VIEW on stdout — plain fmt.Fprintf, no zlog timestamp/
+// src/level prefix — following the same convention as status/get/plan (log
+// chatter goes to stderr, the actual report goes to stdout). Without the
+// per-line prefix the fixed-width columns align exactly. A 60-dash-delimited
+// block lists each service's bringup phases (wait / build / spawn / ready /
+// total) in start order, each service's per-dependency wait, then each
+// provision's run. No ANSI/emoji, so it survives CI / agent / piped contexts.
+// Rendered only behind --summary / -v.
+func printStartSummary(out io.Writer, s *summary.StartSummary) {
+	bar := strings.Repeat("-", 60)
+	fmt.Fprintln(out, bar)
+
+	head := fmt.Sprintf("Bringup complete: %d service(s)", len(s.Services))
+	if len(s.Provisions) > 0 {
+		head += fmt.Sprintf(", %d provision(s)", len(s.Provisions))
+	}
+	head += fmt.Sprintf(" in %s", fmtDur(s.TotalMS))
+	fmt.Fprintln(out, head)
+
+	if len(s.Services) > 0 {
+		fmt.Fprintf(out, "  %-3s %-16s %-8s %8s %8s %8s %8s %8s\n",
+			"#", "service", "toolchain", "wait", "build", "spawn", "ready", "total")
+		for i, st := range s.Services {
+			fmt.Fprintf(out, "  %-3d %-16s %-8s %8s %8s %8s %8s %8s\n",
+				i+1, st.Name, st.Toolchain,
+				fmtDur(st.WaitMS), fmtDur(st.BuildMS), fmtDur(st.SpawnMS), fmtDur(st.ReadyMS), fmtDur(st.TotalMS))
+			if len(st.Deps) > 0 {
+				fmt.Fprintln(out, "      after:")
+				for _, d := range st.Deps {
+					marker := ""
+					if d.LongPole {
+						marker = "   <- long pole"
+					}
+					fmt.Fprintf(out, "        %-30s %8s%s\n", d.Ref, fmtDur(d.WaitMS), marker)
+				}
+			}
+		}
+	}
+
+	if len(s.Provisions) > 0 {
+		fmt.Fprintln(out, "  provisions:")
+		for _, pt := range s.Provisions {
+			dur := fmtDur(pt.RunMS)
+			if pt.Detached {
+				if pt.RunMS == 0 {
+					dur = "detached (running)"
+				} else {
+					dur += " (detached)"
+				}
+			}
+			svc := pt.Service
+			if svc == "" {
+				svc = "?"
+			}
+			fmt.Fprintf(out, "    %-18s (%s) %s\n", pt.Name, svc, dur)
+			if len(pt.After) > 0 {
+				fmt.Fprintf(out, "      after: %s\n", strings.Join(pt.After, ", "))
+			}
+		}
+	}
+
+	fmt.Fprintln(out, bar)
+}
+
+// fmtDur renders a millisecond duration compactly: "0ms", "320ms", "1.80s".
+func fmtDur(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.2fs", float64(ms)/1000)
 }
 
 // pinnedFiles holds *os.File handles that must live for the rest of

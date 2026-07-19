@@ -99,6 +99,69 @@ func TestInstance_branchBarriersStayDistinct(t *testing.T) {
 	})
 }
 
+// ReachedAt stamps each state with the virtual time it was reached, and
+// reports not-reached for a pending or unknown state.
+func TestInstance_reachedAtRecordsTransitionTimes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		in := NewInstance(svcDef)
+		start := time.Now()
+
+		if _, ok := in.ReachedAt("scheduled"); ok {
+			t.Fatal("ReachedAt(scheduled) reported reached before any Reach")
+		}
+		if _, ok := in.ReachedAt("nope"); ok {
+			t.Fatal("ReachedAt(unknown) must report not-reached")
+		}
+
+		time.Sleep(1 * time.Second)
+		in.Reach("scheduled")
+		time.Sleep(1 * time.Second)
+		in.Reach("running")
+		time.Sleep(1 * time.Second)
+		in.Reach("ready")
+
+		for _, c := range []struct {
+			state State
+			want  time.Duration
+		}{
+			{"scheduled", 1 * time.Second},
+			{"running", 2 * time.Second},
+			{"ready", 3 * time.Second},
+		} {
+			at, ok := in.ReachedAt(c.state)
+			if !ok {
+				t.Fatalf("ReachedAt(%q): not reached", c.state)
+			}
+			if got := at.Sub(start); got != c.want {
+				t.Errorf("ReachedAt(%q) = +%s, want +%s", c.state, got, c.want)
+			}
+		}
+	})
+}
+
+// A state skipped by a fast-path Reach of a later state is stamped with
+// that later Reach's time, not left unset — so a phase span computed from
+// it is never garbage.
+func TestInstance_reachedAtStampsSkippedPredecessors(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		in := NewInstance(svcDef)
+		start := time.Now()
+
+		time.Sleep(2 * time.Second)
+		in.Reach("ready") // scheduled+running never reached explicitly
+
+		for _, s := range []State{"scheduled", "running", "ready"} {
+			at, ok := in.ReachedAt(s)
+			if !ok {
+				t.Fatalf("ReachedAt(%q): predecessor not stamped by fast-path Reach", s)
+			}
+			if got := at.Sub(start); got != 2*time.Second {
+				t.Errorf("ReachedAt(%q) = +%s, want +2s (later Reach time)", s, got)
+			}
+		}
+	})
+}
+
 // "Race" between two transitions in a fast-paced producer. The waiter
 // observes the FINAL state and ALL intermediates monotonically — even
 // when transitions happen back-to-back within the same virtual instant.

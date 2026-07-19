@@ -33,6 +33,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/registry"
 	"github.com/piotrkowalczuk/zordon/internal/source"
+	"github.com/piotrkowalczuk/zordon/internal/summary"
 	"github.com/piotrkowalczuk/zordon/internal/tools"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
@@ -857,6 +858,24 @@ type serviceCtx struct {
 	// closing done; the close is the happens-before edge for any reader
 	// that has already received <-done.
 	exitErr error
+
+	// startedAt marks when runtime.after deps cleared and this service's
+	// own bringup (prepare/build/spawn/readiness) began. It's the one
+	// boundary that isn't a lifecycle state, so it can't come from
+	// lifecycle.ReachedAt; the start summary uses it to split the
+	// dep-wait phase from the service's own work.
+	startedAt time.Time
+	// deps records, per dependency (implicitRuntimeAfter order), when its
+	// barrier actually fired — captured from the barrier itself, so the
+	// start summary can attribute the wait phase correctly regardless of
+	// the order this goroutine observed the barriers in.
+	deps []depSat
+}
+
+// depSat is one dependency and the moment its barrier fired.
+type depSat struct {
+	ref string
+	at  time.Time
 }
 
 func newServiceCtx(name, toolchain string) *serviceCtx {
@@ -2187,16 +2206,12 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		}
 		toBringup = append(toBringup, svc)
 	}
+	bringupStart := time.Now()
 	serviceCtxs := map[string]*serviceCtx{}
 	for _, svc := range toBringup {
 		sc := newServiceCtx(svc.Name(), svc.Toolchain)
 		state.addService(sc)
 		serviceCtxs[svc.Name()] = sc
-	}
-	type provEntry struct {
-		pc       *provisionCtx
-		parent   *serviceCtx
-		detached bool
 	}
 	var provs []provEntry
 	for _, svc := range toBringup {
@@ -2293,8 +2308,85 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	if state.life != nil {
 		state.life.Release()
 	}
-	stream.Send(&protocol.Event{Kind: protocol.EventDone})
+	stream.Send(&protocol.Event{
+		Kind:    protocol.EventDone,
+		Summary: buildStartSummary(toBringup, serviceCtxs, provs, bringupStart, time.Now()),
+	})
 	log.Info("alpha", "bringup complete")
+}
+
+// provEntry pairs a provision with its parent service so the bringup
+// waiter and the start summary can reach both its lifecycle timing and
+// its owning service's name.
+type provEntry struct {
+	pc       *provisionCtx
+	parent   *serviceCtx
+	detached bool
+}
+
+// buildStartSummary reads the per-entity timestamps recorded during bringup
+// and hands them to summary.Build (which owns the phase math and ordering).
+// Only services that reached ready are included: a non-failfast run may leave
+// a failed service behind, whose timing is meaningless and already reported
+// via EventServiceFail.
+func buildStartSummary(services []*alphasfile.Service, serviceCtxs map[string]*serviceCtx, provs []provEntry, bringupStart, now time.Time) *summary.StartSummary {
+	var svcs []summary.Service
+	for _, svc := range services {
+		sc := serviceCtxs[svc.Name()]
+		if sc == nil || !sc.lifecycle.Reached("ready") {
+			continue
+		}
+		scheduled, _ := sc.lifecycle.ReachedAt("scheduled")
+		buildDone, _ := sc.build.ReachedAt("success")
+		running, _ := sc.lifecycle.ReachedAt("running")
+		ready, _ := sc.lifecycle.ReachedAt("ready")
+		item := summary.Service{
+			Name:      svc.Name(),
+			Toolchain: svc.Toolchain,
+			Scheduled: scheduled,
+			Started:   sc.startedAt,
+			BuildDone: buildDone,
+			Running:   running,
+			Ready:     ready,
+		}
+		for _, d := range sc.deps {
+			item.Deps = append(item.Deps, summary.Dep{Ref: d.ref, SatisfiedAt: d.at})
+		}
+		svcs = append(svcs, item)
+	}
+
+	var provisions []summary.Provision
+	for _, p := range provs {
+		pc := p.pc
+		scheduled, _ := pc.lifecycle.ReachedAt("scheduled")
+		running, _ := pc.lifecycle.ReachedAt("running")
+		done, _ := provisionTerminalAt(pc)
+		item := summary.Provision{
+			Name:      pc.step.Name,
+			After:     pc.step.After,
+			Detached:  p.detached,
+			Scheduled: scheduled,
+			Running:   running,
+			Done:      done,
+		}
+		if p.parent != nil {
+			item.Service = p.parent.name
+		}
+		provisions = append(provisions, item)
+	}
+
+	return summary.Build(bringupStart, now, svcs, provisions)
+}
+
+// provisionTerminalAt returns when a provision reached a terminal state
+// (success or failure) and whether it has. A detached provision still
+// running when the bringup completed has neither — its run duration is
+// omitted rather than guessed.
+func provisionTerminalAt(pc *provisionCtx) (time.Time, bool) {
+	if t, ok := pc.lifecycle.ReachedAt("success"); ok {
+		return t, true
+	}
+	return pc.lifecycle.ReachedAt("failure")
 }
 
 // implicitRuntimeAfter returns the full list of barrier refs a service
@@ -2376,6 +2468,8 @@ func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
 		}
 		select {
 		case <-bt.target.Wait():
+			at, _ := bt.target.FiredAt()
+			sc.deps = append(sc.deps, depSat{ref: ref, at: at})
 		case <-bt.fail.Wait():
 			// Dep already failed. The first failure in the bringup chain
 			// is the one that triggers shutdown; subsequent dep-failure
@@ -2399,6 +2493,7 @@ func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
 	}
 
 	log.Info("alpha", "bringup service=%s toolchain=%s", name, svc.Toolchain)
+	sc.startedAt = time.Now()
 	stream.Send(&protocol.Event{Kind: protocol.EventServiceStart, Service: name})
 
 	state.mu.RLock()

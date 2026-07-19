@@ -13,6 +13,8 @@
 package lifecycle
 
 import (
+	"time"
+
 	"github.com/piotrkowalczuk/zordon/internal/barrier"
 )
 
@@ -135,4 +137,16 @@ func (i *Instance) Barrier(s State) *barrier.Barrier {
 func (i *Instance) Reached(s State) bool {
 	b, ok := i.barriers[s]
 	return ok && b.Triggered()
+}
+
+// ReachedAt returns when state s was reached and whether it has been. A
+// state reached only transitively — its barrier triggered as a predecessor
+// of a later Reach — carries that trigger's time. Thin wrapper around
+// Barrier(s).FiredAt().
+func (i *Instance) ReachedAt(s State) (time.Time, bool) {
+	b, ok := i.barriers[s]
+	if !ok {
+		return time.Time{}, false
+	}
+	return b.FiredAt()
 }

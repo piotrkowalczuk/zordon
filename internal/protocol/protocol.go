@@ -13,6 +13,7 @@ import (
 	"io"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
+	"github.com/piotrkowalczuk/zordon/internal/summary"
 )
 
 type Op string
@@ -94,6 +95,10 @@ type Event struct {
 	Stream  string `json:"stream,omitempty"` // "stdout" or "stderr" for log lines
 	Line    string `json:"line,omitempty"`
 	Error   string `json:"error,omitempty"`
+	// Summary is attached to the terminal EventDone of a successful bringup
+	// (nil on failure and on every other kind). It carries per-service and
+	// per-provision timing so the client can print a start summary.
+	Summary *summary.StartSummary `json:"summary,omitempty"`
 }
 
 const (
