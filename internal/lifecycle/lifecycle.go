@@ -13,6 +13,9 @@
 package lifecycle
 
 import (
+	"sync"
+	"time"
+
 	"github.com/piotrkowalczuk/zordon/internal/barrier"
 )
 
@@ -97,12 +100,23 @@ func (d *Def) States() []State {
 type Instance struct {
 	def      *Def
 	barriers map[State]*barrier.Barrier
+
+	// reachedAt records when each state was first reached. Guarded by mu
+	// because a single entity's lifecycle is reached from more than one
+	// goroutine (e.g. a service's supervisor reaches ready/failed while a
+	// shutdown path may reach failed/stopped).
+	mu        sync.Mutex
+	reachedAt map[State]time.Time
 }
 
 // NewInstance allocates an Instance with a fresh barrier per state in
 // the Def.
 func NewInstance(def *Def) *Instance {
-	in := &Instance{def: def, barriers: make(map[State]*barrier.Barrier, len(def.states))}
+	in := &Instance{
+		def:       def,
+		barriers:  make(map[State]*barrier.Barrier, len(def.states)),
+		reachedAt: make(map[State]time.Time, len(def.states)),
+	}
 	for _, s := range def.states {
 		in.barriers[s] = barrier.New()
 	}
@@ -118,6 +132,17 @@ func (i *Instance) Reach(s State) {
 	if _, ok := i.barriers[s]; !ok {
 		return
 	}
+	now := time.Now()
+	i.mu.Lock()
+	for _, p := range i.def.preds[s] {
+		if _, seen := i.reachedAt[p]; !seen {
+			i.reachedAt[p] = now
+		}
+	}
+	if _, seen := i.reachedAt[s]; !seen {
+		i.reachedAt[s] = now
+	}
+	i.mu.Unlock()
 	for _, p := range i.def.preds[s] {
 		i.barriers[p].Trigger()
 	}
@@ -135,4 +160,14 @@ func (i *Instance) Barrier(s State) *barrier.Barrier {
 func (i *Instance) Reached(s State) bool {
 	b, ok := i.barriers[s]
 	return ok && b.Triggered()
+}
+
+// ReachedAt returns when state s was reached and whether it has been. A
+// state reached only transitively — skipped by a fast-path Reach of a
+// later state — is stamped with that later Reach's time.
+func (i *Instance) ReachedAt(s State) (time.Time, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	t, ok := i.reachedAt[s]
+	return t, ok
 }

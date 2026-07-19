@@ -97,6 +97,7 @@ type startConfig struct {
 	failfast bool
 	verbose  bool
 	agent    bool
+	summary  bool
 }
 
 // canReuse is the pure multi-agent-invariant decision: a running level may be
@@ -185,7 +186,7 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 	if err := control.WaitListening(ctxLevel, sock); err != nil {
 		return fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
-	if err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent); err != nil {
+	if err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent, cfg.summary || cfg.verbose); err != nil {
 		return fmt.Errorf("%s: %w", lvl.afPath, err)
 	}
 	return nil

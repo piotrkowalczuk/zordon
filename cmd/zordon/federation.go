@@ -206,7 +206,7 @@ func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, err
 	return out, nil
 }
 
-func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent bool, picks []string, zordonHome string, testCfg alphasfile.TestConfig) error {
+func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, summary bool, picks []string, zordonHome string, testCfg alphasfile.TestConfig) error {
 	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
 
 	fed, err := NewFederationState(zordonHome)
@@ -240,6 +240,7 @@ func runStart(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		failfast: failfast,
 		verbose:  verbose,
 		agent:    agent,
+		summary:  summary,
 	}
 
 	var parents alphasfile.GlobalComputedState

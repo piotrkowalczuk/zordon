@@ -24,6 +24,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/ring"
+	"github.com/piotrkowalczuk/zordon/internal/summary"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
@@ -113,13 +114,14 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	// know they need `--failfast=false` to opt out.
 	startFailfast := startFlags.BoolLongDefault("failfast", true, "abort bringup and shut down alpha on first service failure")
 	startServices := startFlags.StringLong("services", "", "services to bring up, comma/space-separated (env: ZORDON_SERVICES); merged with any positional [service ...] args")
+	startSummary := startFlags.BoolLong("summary", "after a successful start, print a per-service/per-provision timing summary (also shown by -v)")
 	startCmd := &ff.Command{
 		Name:      "start",
 		Usage:     "zordon start [FLAGS] [service ...]",
 		ShortHelp: "ensure alpha is running and push the Alphasfile config (--services/ZORDON_SERVICES or positional args bring up just that subset)",
 		Flags:     startFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runStart(ctx, zlog.New(stdio.Stderr, *agent), *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent,
+			return runStart(ctx, zlog.New(stdio.Stderr, *agent), *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent, *startSummary,
 				parsePicks(append(strings.Fields(*startServices), args...)),
 				zfs.ZordonHome(home.Path()),
 				testCfg())
@@ -333,7 +335,7 @@ func walkUp() (string, error) {
 	}
 }
 
-func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent bool) error {
+func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent, showSummary bool) error {
 	log.Info("alpha", "Understood, Zordon!")
 
 	conn, err := control.Dial(sock, 1*time.Second)
@@ -433,6 +435,9 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 		case protocol.EventDone:
 			if len(failures) > 0 {
 				return finish(nil)
+			}
+			if showSummary && ev.Summary != nil {
+				printStartSummary(log, ev.Summary)
 			}
 			log.Info("zordon", "alpha ready, detaching")
 			return nil
@@ -540,6 +545,69 @@ func printFailureSummary(log *zlog.Logger, failures []failure, tails map[string]
 		}
 	}
 	log.Error("zordon", "%s", bar)
+}
+
+// printStartSummary writes the success counterpart of printFailureSummary:
+// a 60-dash-delimited block listing each service's bringup phases (wait /
+// build / spawn / ready / total) in the order services actually started,
+// then each provision's run duration. Same channel and constraints as the
+// failure summary — plain zlog to stderr, no ANSI/emoji, so it survives CI /
+// agent / piped contexts. Rendered only behind --summary / -v.
+func printStartSummary(log *zlog.Logger, s *summary.StartSummary) {
+	bar := strings.Repeat("-", 60)
+	log.Info("zordon", "%s", bar)
+
+	head := fmt.Sprintf("Bringup complete: %d service(s)", len(s.Services))
+	if len(s.Provisions) > 0 {
+		head += fmt.Sprintf(", %d provision(s)", len(s.Provisions))
+	}
+	head += fmt.Sprintf(" in %s", fmtDur(s.TotalMS))
+	log.Info("zordon", "%s", head)
+
+	if len(s.Services) > 0 {
+		log.Info("zordon", "  %-3s %-16s %-8s %8s %8s %8s %8s %8s",
+			"#", "service", "toolchain", "wait", "build", "spawn", "ready", "total")
+		for i, st := range s.Services {
+			log.Info("zordon", "  %-3d %-16s %-8s %8s %8s %8s %8s %8s",
+				i+1, st.Name, st.Toolchain,
+				fmtDur(st.WaitMS), fmtDur(st.BuildMS), fmtDur(st.SpawnMS), fmtDur(st.ReadyMS), fmtDur(st.TotalMS))
+			if len(st.After) > 0 {
+				log.Info("zordon", "      after: %s", strings.Join(st.After, ", "))
+			}
+		}
+	}
+
+	if len(s.Provisions) > 0 {
+		log.Info("zordon", "  provisions:")
+		for _, pt := range s.Provisions {
+			dur := fmtDur(pt.RunMS)
+			if pt.Detached {
+				if pt.RunMS == 0 {
+					dur = "detached (running)"
+				} else {
+					dur += " (detached)"
+				}
+			}
+			svc := pt.Service
+			if svc == "" {
+				svc = "?"
+			}
+			log.Info("zordon", "    %-18s (%s) %s", pt.Name, svc, dur)
+			if len(pt.After) > 0 {
+				log.Info("zordon", "      after: %s", strings.Join(pt.After, ", "))
+			}
+		}
+	}
+
+	log.Info("zordon", "%s", bar)
+}
+
+// fmtDur renders a millisecond duration compactly: "0ms", "320ms", "1.80s".
+func fmtDur(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.2fs", float64(ms)/1000)
 }
 
 // pinnedFiles holds *os.File handles that must live for the rest of

@@ -77,19 +77,25 @@ reset_state() {
 	done
 }
 
-# start: bring the stack up; auto-stop on exit.
+# start: bring the stack up; auto-stop on exit. Extra args are forwarded to
+# `zordon start` (e.g. `start --summary`).
 #
 # alpha-log is pinned to <example>/.zordon/alpha.log so tests can assert
 # against it without colliding with other examples or stale runs in
-# /tmp/alpha.log.
+# /tmp/alpha.log. ZORDON_LOG captures zordon's OWN combined output — some
+# claims are about what the client prints (e.g. the start summary), which
+# never reaches the alpha log; assert_zordon_contains checks this file.
 ALPHA_LOG="$EXROOT/.zordon/alpha.log"
+ZORDON_LOG="$EXROOT/.zordon/zordon.log"
 start() {
 	build_bins
 	trap 'zordon stop --agent >/dev/null 2>&1 || true; reap' EXIT
 	reset_state main
 	mkdir -p "$(dirname "$ALPHA_LOG")"
 	info "zordon start"
-	zordon start --agent --timeout 90s --alpha-log "$ALPHA_LOG"
+	# pipefail (set above) makes the pipeline fail if zordon fails, so tee
+	# doesn't mask a nonzero start.
+	zordon start --agent --timeout 90s --alpha-log "$ALPHA_LOG" "$@" 2>&1 | tee "$ZORDON_LOG"
 }
 
 # port_of <argv-substring>: first `-addr 127.0.0.1:<port>` of a running
@@ -135,6 +141,19 @@ assert_log_contains() {
 	case "$log" in
 		*"$needle"*) pass "$label: contains '$needle'";;
 		*) fail "$label: expected to contain '$needle'. Log tail:\n$(tail -40 "$ALPHA_LOG")";;
+	esac
+}
+
+# assert_zordon_contains <needle> [label]: zordon's own captured output
+# (client-side, e.g. the start summary printed to stderr) must contain
+# <needle>. Distinct from assert_log_contains, which reads the alpha log.
+assert_zordon_contains() {
+	local needle="$1" label="${2:-zordon output}" log
+	[ -r "$ZORDON_LOG" ] || fail "$label: zordon log not found at $ZORDON_LOG"
+	log="$(cat "$ZORDON_LOG")"
+	case "$log" in
+		*"$needle"*) pass "$label: contains '$needle'";;
+		*) fail "$label: expected to contain '$needle'. Output:\n$(tail -40 "$ZORDON_LOG")";;
 	esac
 }
 
