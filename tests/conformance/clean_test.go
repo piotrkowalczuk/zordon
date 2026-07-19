@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // Clean conformance: a provision's `clean` snippet is the teardown that
 // `zordon clean` runs against a STOPPED stack — and that plain `zordon stop`
 // must NOT run. These pin both halves: clean undoes the side effect, and a

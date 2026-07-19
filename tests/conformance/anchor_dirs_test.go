@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // zordon pre-creates each service's fs::etc / fs::var dir at bringup, so a
 // provision or cmd can write into ${fs::var()}/… without a manual mkdir -p.
 // Without pre-creation the shell redirect below fails, the provision fails, and

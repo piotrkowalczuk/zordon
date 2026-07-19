@@ -1,3 +1,5 @@
+//go:build conformance_go
+
 // Start-summary conformance: `zordon start --summary` prints, after a
 // successful bringup, a timing block listing every service's bringup phases
 // (wait / build / spawn / ready / total) in start order plus each provision's

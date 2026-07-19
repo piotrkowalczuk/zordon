@@ -1,7 +1,8 @@
+//go:build conformance_go
+
 package conformance_test
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,6 +25,11 @@ import (
 //
 // Cwd in the echoed JSON must point at the per-workspace checkout —
 // the most observable invariant a regression would break.
+//
+// The per-language variants are split across workspace_<lang>_test.go
+// so each lands on its own toolchain leg; the shared helpers
+// (mustWorkspaceStart, mustCwdInWorkspace, mustZordonOK) live in
+// shared_test.go.
 
 func TestWorkspace_Go(t *testing.T) {
 	p := zordontest.NewProject(t)
@@ -129,89 +135,6 @@ service "go" "echo" {
 	}
 }
 
-func TestWorkspace_Rust(t *testing.T) {
-	p := zordontest.NewProject(t)
-	p.CopyTree("golden/rust/echo", "src/echo")
-	p.WriteFile("src/echo/.gitignore", "target/\n")
-	p.GitInit("src/echo")
-
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
-sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  rust {
-    version = "%s"
-  }
-}
-
-service "rust" "echo" {
-  src {
-    path = "./src/echo"
-    exe  = "."
-  }
-
-  vars = { port = net::pickport() }
-
-  runtime {
-    cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
-  }
-
-  readiness {
-    http {
-      path = "/"
-      port = self.vars.port
-    }
-    period            = "200ms"
-    failure_threshold = 50
-  }
-}
-`, rustVersion))
-
-	port := mustWorkspaceStart(t, p, "wt1", "rust", "echo")
-	echo := mustDecodeEcho(t, port)
-	if !strings.Contains(echo.RuntimeVersion, rustVersion) {
-		t.Errorf("runtime_version = %q; want it to contain pinned rust %s", echo.RuntimeVersion, rustVersion)
-	}
-	mustCwdInWorkspace(t, echo.Cwd, p, "wt1", "echo")
-}
-
-func TestWorkspace_Nodejs(t *testing.T) {
-	p := zordontest.NewProject(t)
-	p.CopyTree("golden/nodejs/echo", "src/echo")
-	p.GitInit("src/echo")
-
-	p.WriteFile("Alphasfile", fmt.Sprintf(`
-sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
-toolchain {
-  nodejs {
-    version = "%s"
-  }
-}
-
-service "nodejs" "echo" {
-  src { path = "./src/echo" }
-
-  vars = { port = net::pickport() }
-  env  = { PORT = "${self.vars.port}" }
-
-  readiness {
-    http {
-      path = "/"
-      port = self.vars.port
-    }
-    period            = "200ms"
-    failure_threshold = 50
-  }
-}
-`, nodeVersion))
-
-	port := mustWorkspaceStart(t, p, "wt1", "nodejs", "echo")
-	echo := mustDecodeEcho(t, port)
-	if !strings.HasPrefix(echo.RuntimeVersion, "v22.") {
-		t.Errorf("runtime_version = %q; want v22.x (pinned toolchain)", echo.RuntimeVersion)
-	}
-	mustCwdInWorkspace(t, echo.Cwd, p, "wt1", "echo")
-}
-
 // TestWorkspace_ServiceAddRm pins `zordon workspace service {add,rm}`: a
 // service's per-workspace checkout can be detached and re-materialized in an
 // existing workspace (git-only, no bringup), and the command rejects the main
@@ -256,51 +179,5 @@ service "go" "echo" {
 		if res := p.Zordon(bad...).WithTimeout(time.Minute).Run(t); res.ExitCode == 0 {
 			t.Errorf("zordon %s: exit 0, want failure", strings.Join(bad, " "))
 		}
-	}
-}
-
-// mustWorkspaceStart runs `zordon workspace create <wt> <svc>` and then
-// `zordon start` from inside the workspace dir. The two halves are split
-// so a failure in `workspace create` (git-init missing, bad checkout)
-// surfaces with its own error before alpha is involved. Returns the
-// port the service bound: each fixture uses net::pickport(), so the
-// value is read back from the running workspace alpha (get must run from
-// the workspace dir, where that alpha lives) rather than hardcoded.
-func mustWorkspaceStart(t *testing.T, p *zordontest.Project, wt, tc, svc string) int {
-	t.Helper()
-	res := p.Zordon("workspace", "create", wt, svc).WithTimeout(5 * time.Minute).Run(t)
-	if res.ExitCode != 0 {
-		t.Fatalf("zordon workspace create %s %s: exit %d\nstdout: %s\nstderr: %s",
-			wt, svc, res.ExitCode, res.Stdout, res.Stderr)
-	}
-	wtRel := filepath.Join("workspaces", wt)
-	// Start tears the workspace alpha down from wtRel on cleanup (the
-	// project-root stop can't reach it), so no manual Stop here.
-	p.Start(t, zordontest.StartIn(wtRel)).OK()
-	return p.GetIn(t, wtRel, fmt.Sprintf("service.%s.%s.vars.port", tc, svc)).Int()
-}
-
-// mustCwdInWorkspace pins the observable shape of a workspace run: the
-// spawned service's cwd is its per-workspace checkout dir, not the
-// project root and not the main workspace's checkout.
-func mustCwdInWorkspace(t *testing.T, cwd string, p *zordontest.Project, wt, svc string) {
-	t.Helper()
-	want := filepath.Join(p.Dir(), "workspaces", wt, "src", svc)
-	// macOS sometimes returns /private/var/... for /var/... — match by
-	// suffix so the assertion isn't flaky on the symlinked tmpdir.
-	if !strings.HasSuffix(cwd, filepath.Join("workspaces", wt, "src", svc)) {
-		t.Errorf("service cwd = %q; want a path ending with %q (the per-workspace checkout, not the anchor)",
-			cwd, want)
-	}
-}
-
-// mustZordonOK runs a zordon subcommand and fails the test unless it exits 0,
-// surfacing stdout+stderr so a non-zero exit reads with its cause.
-func mustZordonOK(t *testing.T, p *zordontest.Project, args ...string) {
-	t.Helper()
-	res := p.Zordon(args...).WithTimeout(2 * time.Minute).Run(t)
-	if res.ExitCode != 0 {
-		t.Fatalf("zordon %s: exit %d\nstdout: %s\nstderr: %s",
-			strings.Join(args, " "), res.ExitCode, res.Stdout, res.Stderr)
 	}
 }

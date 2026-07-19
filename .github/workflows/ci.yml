@@ -31,6 +31,100 @@ jobs:
           npm install -g @anthropic-ai/claude-code
           claude plugin validate ./
 
+  conformance:
+    # The conformance suite is gated behind per-toolchain build tags
+    # (tests/conformance/*_test.go). Promoting the toolchain to a matrix axis
+    # runs each on its own runner, so wall-clock is the slowest single
+    # toolchain instead of the serial sum, and each leg installs (and caches)
+    # only the one toolchain it needs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - ubuntu:24.04
+          - ubuntu:22.04
+          - debian:12
+          - debian:11
+          - fedora:latest
+          - archlinux:latest
+        toolchain:
+          - go
+          - rust
+          - node
+          - pkg
+    container:
+      image: ${{ matrix.distro }}
+      # tini as pid 1 to reap zombies; GitHub's bare `tail` pid 1
+      # doesn't, so a killed alpha/tommy lingers and kill(-pgid,0)
+      # reads it as still alive (the orphan test's liveness check).
+      options: --init
+    env:
+      CGO_ENABLED: "1"
+      GO_VERSION: "1.26.5"
+    steps:
+      - name: Install dependencies
+        run: |
+          set -e
+          # POSIX sh only — these container images default the run shell
+          # to /bin/sh (dash), so no `pipefail` or other bashisms here.
+          #
+          # Distro Go packages are far older than the go.mod toolchain
+          # (go 1.25.6 + `tool` directive), so install the official Go
+          # tarball. gcc -> `go test -race` (cgo); procps -> the e2e
+          # port_of helper greps `ps`.
+          #
+          # Every fetch here is network-bound; a transient distro-mirror
+          # or go.dev blip otherwise sinks the whole matrix at setup.
+          # Retry the package installs; let curl retry the download (to a
+          # file, then extract — a retried stream pipe could corrupt tar).
+          retry() { for i in 1 2 3 4 5; do "$@" && return 0; s=$((i * 5)); echo "  retry $i/5 in ${s}s: $*" >&2; sleep "$s"; done; return 1; }
+          if [ -x "$(command -v apt-get)" ]; then
+            retry apt-get update
+            retry apt-get install -y git gcc sudo make curl ca-certificates procps
+          fi
+          if [ -x "$(command -v dnf)" ]; then retry dnf install -y git gcc sudo make curl procps-ng; fi
+          if [ -x "$(command -v pacman)" ]; then retry pacman -Syu --noconfirm git gcc sudo make curl procps-ng; fi
+          curl --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
+          tar -C /usr/local -xzf /tmp/go.tgz
+          echo /usr/local/go/bin >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - name: Cache Go + toolchain
+        # Per-(distro, toolchain): each cache holds a single mise-installed
+        # toolchain, so it stays small (well under GitHub's 10GB cap) even
+        # across 24 legs. .zordon/toolchain/installs is MISE_DATA_DIR — the
+        # dir a cold run reinstalls go/rust/node/etc. into from scratch today.
+        # The key busts on go.sum / golden / conformance changes (that's where
+        # the pinned tool versions live); restore-keys warm-starts otherwise.
+        uses: actions/cache@v4
+        with:
+          path: |
+            /root/go/pkg/mod
+            /root/.cache/go-build
+            .zordon/toolchain/installs
+            .zordon/mise-cache
+            /root/.cargo
+            /root/.npm
+          key: ${{ matrix.distro }}-${{ matrix.toolchain }}-${{ hashFiles('go.sum', 'golden/**', 'tests/conformance/**') }}
+          restore-keys: |
+            ${{ matrix.distro }}-${{ matrix.toolchain }}-
+      - name: Trust workspace
+        # git "dubious ownership" (container root vs checkout uid) else
+        # breaks go build's VCS stamping.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Pre-place mise
+        # EnsureMise no-ops when <ZORDON_HOME>/bin/mise exists; the
+        # suite's ZORDON_HOME is <repo>/.zordon. Beats `cargo install`
+        # mise on every distro.
+        run: |
+          mkdir -p .zordon/bin
+          curl --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 -fsSL https://mise.jdx.dev/mise-latest-linux-x64 -o .zordon/bin/mise
+          chmod +x .zordon/bin/mise
+          .zordon/bin/mise --version
+      - name: Run conformance (${{ matrix.toolchain }})
+        run: make test.conformance.${{ matrix.toolchain }}
+
   test-examples:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -84,21 +178,24 @@ jobs:
           tar -C /usr/local -xzf /tmp/go.tgz
           echo /usr/local/go/bin >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
-      - name: Cache Go module + build cache
+      - name: Cache Go + toolchains
         # Containers run as root, so Go's defaults are /root/go/pkg/mod
         # and /root/.cache/go-build. This is shared by zordon's own
         # `go test`, the e2e `make build`, AND the from-source upstream
-        # services (caddy, coredns, go-httpbin). restore-keys lets a
-        # cache-miss job still warm-start from the newest prior cache
-        # instead of recompiling everything from zero.
+        # services (caddy, coredns, go-httpbin). A few internal tests still
+        # exercise real toolchains, so .zordon toolchain installs are cached
+        # too. restore-keys lets a cache-miss job warm-start from the newest
+        # prior cache instead of recompiling everything from zero.
         uses: actions/cache@v4
         with:
           path: |
             /root/go/pkg/mod
             /root/.cache/go-build
-          key: ${{ matrix.distro }}-go-${{ hashFiles('go.sum') }}
+            .zordon/toolchain/installs
+            .zordon/mise-cache
+          key: ${{ matrix.distro }}-unit-${{ hashFiles('go.sum', 'golden/**') }}
           restore-keys: |
-            ${{ matrix.distro }}-go-
+            ${{ matrix.distro }}-unit-
       - name: Trust workspace
         # git "dubious ownership" (container root vs checkout uid) else
         # breaks go build's VCS stamping.
@@ -112,14 +209,16 @@ jobs:
           curl --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 -fsSL https://mise.jdx.dev/mise-latest-linux-x64 -o .zordon/bin/mise
           chmod +x .zordon/bin/mise
           .zordon/bin/mise --version
-      - name: Run Tests
-        run: make test.race
+      - name: Run unit tests
+        # Untagged: the tagged conformance bringups run in the `conformance`
+        # job above; here the conformance package contributes only its static
+        # (no-bringup) tests, alongside the internal/cmd unit tests.
+        run: make test.unit
       - name: Coverage
         # Non-blocking: the coverage pass drives the gocoverdir writer, whose
         # rare `bad file descriptor` hiccup must not red a build whose
-        # correctness signal (the race pass above) already passed.
-        run: make test.coverage
+        # correctness signal (the unit race pass above) already passed.
+        run: make test.coverage.unit
         continue-on-error: true
       - name: Run E2E Test
         run: make e2e EXAMPLES=examples/${{ matrix.example }}
-
