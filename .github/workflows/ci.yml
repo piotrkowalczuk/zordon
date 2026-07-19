@@ -18,11 +18,18 @@ jobs:
           cache: true
       - name: Run lint
         run: make lint
-      - name: Validate plugin JSON
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate plugin manifest
+        # jq only checks JSON syntax; `claude plugin validate` checks the
+        # actual plugin/marketplace schema (it caught an author-as-string bug
+        # a bare `jq empty` waved through). Validates .claude-plugin/plugin.json
+        # + marketplace.json and the referenced .mcp.json.
         run: |
-          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json; do
-            jq empty "$f"
-          done
+          npm install -g @anthropic-ai/claude-code
+          claude plugin validate ./
 
   test-examples:
     runs-on: ubuntu-latest
