@@ -18,6 +18,13 @@ on:
       - '**.md'
       - 'mkdocs.yml'
 
+# Cancel an in-progress run when a newer commit lands on the same ref, so
+# rapid pushes to a PR don't pile up parallel matrices. (Merged-PR runs are
+# cancelled separately by delete_branch_on_merge deleting the head branch.)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
