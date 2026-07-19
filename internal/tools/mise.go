@@ -147,7 +147,18 @@ func ResolveDataDir(from, defaultDataDir, tool, version string) string {
 // inject it here rather than relying on the parent environment.
 func isolatedEnv(dataDir, miseBin string) []string {
 	cfgRoot := filepath.Dir(dataDir) // e.g. ~/.zordon
-	env := append(zenv.Environ(),
+	// Drop every host MISE_* first so a developer's MISE_ENV / MISE_*_DIR /
+	// MISE_IDIOMATIC_* can neither leak into nor duplicate the controlled set
+	// below — os.Environ() can carry a host MISE_DATA_DIR that would otherwise
+	// survive as an earlier (winning) duplicate of ours.
+	var env []string
+	for _, kv := range zenv.Environ() {
+		if strings.HasPrefix(kv, "MISE_") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env,
 		"MISE_DATA_DIR="+dataDir,
 		"MISE_CONFIG_DIR="+filepath.Join(cfgRoot, "mise-config"),
 		"MISE_STATE_DIR="+filepath.Join(cfgRoot, "mise-state"),
@@ -164,6 +175,22 @@ func isolatedEnv(dataDir, miseBin string) []string {
 		}
 	}
 	return append(env, "PATH="+miseDir)
+}
+
+// miseCommand builds an *exec.Cmd for a mise subcommand with zordon's
+// hermetic defaults: the leading `--no-config` global flag so mise never
+// reads a discovered config file — a stray mise.toml next to the Alphasfile
+// (e.g. left by `mise use`), any ancestor mise.toml walked up to /, the
+// global ~/.config/mise/*, or ~/.tool-versions. zordon supplies every
+// tool@version explicitly on the CLI, so no config is ever needed, and a
+// discovered one would only pollute toolchain resolution. Env is pinned to
+// zordon-owned MISE_*_DIR locations via isolatedEnv. Callers set
+// Stdout/Stderr and may append to cmd.Env.
+func miseCommand(binPath, dataDir string, args ...string) *exec.Cmd {
+	full := append([]string{"--no-config"}, args...)
+	cmd := exec.Command(binPath, full...)
+	cmd.Env = isolatedEnv(dataDir, binPath)
+	return cmd
 }
 
 // MiseEnv runs `mise env --json <tool>@<version>` with the resolved
@@ -193,9 +220,8 @@ func MiseEnv(binPath, dataDir, tool, version string, logOut io.Writer) (map[stri
 // that ships with another service's package. Same locking contract as MiseEnv.
 func MiseEnvWithBinDirs(binPath, dataDir, tool, version string, logOut io.Writer) (map[string]string, []string, error) {
 	spec := miseToolName(tool) + "@" + version
-	base := isolatedEnv(dataDir, binPath)
-	cmd := exec.Command(binPath, "env", "--json", spec)
-	cmd.Env = base
+	cmd := miseCommand(binPath, dataDir, "env", "--json", spec)
+	base := cmd.Env
 	cmd.Stderr = logOut
 	out, err := cmd.Output()
 	if err != nil {
@@ -230,16 +256,14 @@ func MiseEnvWithBinDirs(binPath, dataDir, tool, version string, logOut io.Writer
 // Acquire lock, since the install writes under dataDir.
 func EnsurePackage(binPath, dataDir, name, version string, buildEnv zenv.EnvironmentVariables, logOut io.Writer) error {
 	spec := name + "@" + version
-	cmd := exec.Command(binPath, "install", spec)
+	cmd := miseCommand(binPath, dataDir, "install", spec)
 	// buildEnv (the pkg service's `build { env }`) overlays the install
 	// environment — configure flags / build vars a source-compiled
 	// backend needs, e.g. POSTGRES_EXTRA_CONFIGURE_OPTIONS=--without-icu
 	// or PKG_CONFIG_PATH. Appended last so it wins over the host env.
-	env := isolatedEnv(dataDir, binPath)
 	for k, v := range buildEnv {
-		env = append(env, k+"="+v)
+		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	cmd.Env = env
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
 	if err := cmd.Run(); err != nil {
@@ -264,13 +288,11 @@ func EnsureTools(binPath, dataDir, toolchain, version string, items map[string]s
 	if len(items) == 0 {
 		return nil
 	}
-	env := isolatedEnv(dataDir, binPath)
 	for name, ver := range items {
-		cmd, err := toolInstallCmd(binPath, toolchain, version, name, ver)
+		cmd, err := toolInstallCmd(binPath, dataDir, toolchain, version, name, ver)
 		if err != nil {
 			return err
 		}
-		cmd.Env = env
 		cmd.Stdout = logOut
 		cmd.Stderr = logOut
 		if err := cmd.Run(); err != nil {
@@ -283,7 +305,7 @@ func EnsureTools(binPath, dataDir, toolchain, version string, items map[string]s
 // toolInstallCmd builds the `mise exec` line for one language-native
 // tool install. The actual install verb is per-toolchain because each
 // language has its own package-manager idiom.
-func toolInstallCmd(binPath, toolchain, version, name, ver string) (*exec.Cmd, error) {
+func toolInstallCmd(binPath, dataDir, toolchain, version, name, ver string) (*exec.Cmd, error) {
 	spec := miseToolName(toolchain) + "@" + version
 	var argv []string
 	switch toolchain {
@@ -312,7 +334,7 @@ func toolInstallCmd(binPath, toolchain, version, name, ver string) (*exec.Cmd, e
 		return nil, fmt.Errorf("toolchain %q: no tool installer wired", toolchain)
 	}
 	full := append([]string{"exec", spec, "--"}, argv...)
-	return exec.Command(binPath, full...), nil
+	return miseCommand(binPath, dataDir, full...), nil
 }
 
 // Acquire takes a process-wide exclusive lock on a lock file scoped to
