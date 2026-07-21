@@ -127,8 +127,17 @@ type StateInfo struct {
 type ServiceStatus struct {
 	Name      string `json:"name"`
 	PID       int    `json:"pid"`
-	Readiness string `json:"readiness,omitempty"` // "probing", "ready", "failed"
+	Readiness string `json:"readiness,omitempty"`
 }
+
+// Readiness values carried by ServiceStatus.Readiness. The empty string is
+// the fourth state: the service is registered but its process has not been
+// spawned yet, because alpha is still materializing toolchains or building.
+const (
+	ReadinessProbing = "probing"
+	ReadinessReady   = "ready"
+	ReadinessFailed  = "failed"
+)
 
 // Encoder writes newline-delimited JSON messages.
 type Encoder struct{ w io.Writer }

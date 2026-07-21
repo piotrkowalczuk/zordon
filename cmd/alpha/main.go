@@ -821,7 +821,12 @@ func bringupPkgTools(tc *toolchainCtx, bin, zordonHome string, log *zlog.Logger)
 type serviceCtx struct {
 	name      string
 	toolchain string
-	cmd       *exec.Cmd
+	// cmd belongs to the bringup goroutine alone — it is assigned only
+	// after cmd.Start() and read only by that same goroutine. Anything
+	// cross-goroutine (the OpState snapshot) reads pid instead, which is
+	// published under alphaState.mu by setServicePID.
+	cmd *exec.Cmd
+	pid int
 	// parentW is the write end of the tommy parent-death pipe. alpha
 	// holds it open for the whole service lifetime and never writes to
 	// it: tommy blocks reading the matching read end, so the kernel
@@ -1353,6 +1358,16 @@ func (s *alphaState) setReadiness(name, state string) {
 	s.readiness[name] = state
 }
 
+// setServicePID publishes a freshly spawned service's pid so the OpState
+// snapshot can report it without touching the bringup goroutine's *exec.Cmd.
+func (s *alphaState) setServicePID(name string, pid int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sc := s.services[name]; sc != nil {
+		sc.pid = pid
+	}
+}
+
 func (s *alphaState) snapshot() *protocol.StateInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1371,13 +1386,9 @@ func (s *alphaState) snapshot() *protocol.StateInfo {
 		info.SysEnv = s.config.SysEnv
 	}
 	for name, sc := range s.services {
-		pid := 0
-		if sc.cmd.Process != nil {
-			pid = sc.cmd.Process.Pid
-		}
 		info.Running = append(info.Running, protocol.ServiceStatus{
 			Name:      name,
-			PID:       pid,
+			PID:       sc.pid,
 			Readiness: s.readiness[name],
 		})
 	}
@@ -2523,6 +2534,10 @@ func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
 		sc.build.Reach("failure")
 		sc.lifecycle.Reach("failed")
+		// Without this a `--failfast=false` stack would keep reporting the
+		// service as still starting: readiness is otherwise only ever set
+		// from the spawn onwards, which this service never reaches.
+		state.setReadiness(name, protocol.ReadinessFailed)
 		// Failfast: a failed prepare means this service will never reach
 		// ready. Trigger the alpha-wide shutdown immediately so peers
 		// still in their own dep-wait or post-prepare gate bail out
@@ -2737,7 +2752,8 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 	}
 	ttyCleanup()
 	sc.cmd = cmd
-	state.setReadiness(name, "probing")
+	state.setServicePID(name, cmd.Process.Pid)
+	state.setReadiness(name, protocol.ReadinessProbing)
 	sc.lifecycle.Reach("running")
 	log.Info("alpha", "started %s pid=%d argv=%v", name, cmd.Process.Pid, cmd.Args)
 
@@ -2799,7 +2815,7 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 	select {
 	case err := <-readyCh:
 		if err != nil {
-			state.setReadiness(name, "failed")
+			state.setReadiness(name, protocol.ReadinessFailed)
 			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "readiness: " + err.Error()})
 			log.Info("alpha", "SIGTERM %s pgid=%d (reason: readiness probe failed: %v)", name, cmd.Process.Pid, err)
 			_ = killGroup(cmd.Process.Pid, syscall.SIGTERM)
@@ -2816,14 +2832,14 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 			return
 		}
 		sc.lifecycle.Reach("ready")
-		state.setReadiness(name, "ready")
+		state.setReadiness(name, protocol.ReadinessReady)
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceReady, Service: name})
 	case sc.exitErr = <-waitErr:
 		cancelProbe()
 		if sc.exitErr != nil {
 			log.Error("alpha", "%s exited before ready: %v", name, sc.exitErr)
 		}
-		state.setReadiness(name, "failed")
+		state.setReadiness(name, protocol.ReadinessFailed)
 		msg := "exited before ready"
 		if sc.exitErr != nil {
 			msg = sc.exitErr.Error()

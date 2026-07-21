@@ -788,20 +788,7 @@ func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome 
 		for _, s := range st.Services {
 			state := "stopped"
 			if status, ok := runningByName[s.Name()]; ok {
-				health := ""
-				if p := s.Runtime.Readiness; p != nil {
-					// Perform a live, single-shot probe.
-					pctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-					err := p.Check(pctx)
-					cancel()
-
-					if err == nil {
-						health = " [ready]"
-					} else {
-						health = fmt.Sprintf(" [unhealthy: %v]", err)
-					}
-				}
-				state = fmt.Sprintf("running pid=%d%s", status.PID, health)
+				state = serviceState(ctx, s, status)
 			}
 			fmt.Fprintf(out, "    - [%s] %s — %s\n", s.Toolchain, s.Name(), state)
 			if s.Runtime != nil && s.Runtime.Print != "" {
@@ -815,6 +802,42 @@ func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome 
 		return errors.New("no alpha running in the federation chain")
 	}
 	return nil
+}
+
+// serviceState renders one service's state cell for `zordon status` out of
+// what the running alpha reported. The live readiness probe fires ONLY for a
+// service alpha already calls ready: alpha stops probing at that point, so a
+// single-shot check is the only way to catch a service that degraded after
+// bringup. Below `ready` alpha's own verdict is the truthful one — re-probing
+// a service that is still being built would just print "connection refused"
+// about a process that was never claimed to be up.
+func serviceState(ctx context.Context, s *alphasfile.Service, status protocol.ServiceStatus) string {
+	switch status.Readiness {
+	case protocol.ReadinessReady:
+		return fmt.Sprintf("running pid=%d%s", status.PID, liveHealth(ctx, s))
+	case protocol.ReadinessProbing:
+		return fmt.Sprintf("running pid=%d [probing]", status.PID)
+	case protocol.ReadinessFailed:
+		// No pid: alpha has already reaped the process group, so printing
+		// the number it used to have only invites a stale `ps`.
+		return "failed"
+	}
+	return "starting"
+}
+
+// liveHealth is the single-shot probe suffix. A service that declares no
+// readiness has nothing to check — alpha called it ready on stabilization
+// alone — so it takes alpha's word for it.
+func liveHealth(ctx context.Context, s *alphasfile.Service) string {
+	if s.Runtime == nil || s.Runtime.Readiness == nil {
+		return " [ready]"
+	}
+	pctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if err := s.Runtime.Readiness.Check(pctx); err != nil {
+		return fmt.Sprintf(" [unhealthy: %v]", err)
+	}
+	return " [ready]"
 }
 
 func runStop(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg alphasfile.TestConfig) error {
