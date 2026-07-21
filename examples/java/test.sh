@@ -10,8 +10,11 @@ need_net
 
 # PetClinic is a real Spring Boot app: git clone + `./mvnw package`
 # (downloads Maven + hundreds of deps on a cold cache) + JVM boot takes
-# minutes, so raise the bringup timeout well past the harness's 90s
-# default. The later --timeout wins (ff last-value-wins).
+# minutes. Headroom over the harness's 90s default, though `--timeout`
+# only covers alpha's spawn -> READY -> listen handshake: pushConfigure
+# clears the socket deadline once configure is on the wire, so the
+# bringup stream itself is unbounded. The later --timeout wins (ff
+# last-value-wins).
 start --timeout 900s
 
 # The inferred `java -jar` run carries no -addr argv (the port travels via
