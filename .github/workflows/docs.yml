@@ -14,6 +14,11 @@ permissions:
   pages: write
   id-token: write
 
+# Public by design: the same value is served at https://zordon.io/$INDEXNOW_KEY.txt.
+env:
+  INDEXNOW_KEY: 173916922f4516ba509a10bda44e3e11
+  INDEXNOW_HOST: zordon.io
+
 # One concurrent deploy; a newer push supersedes an in-flight run.
 concurrency:
   group: pages
@@ -29,6 +34,10 @@ jobs:
           python-version: "3.12"
       - run: pip install mkdocs-material
       - run: mkdocs build --strict --site-dir _site
+      - name: Verify IndexNow key file is published
+        run: |
+          test -f "_site/${INDEXNOW_KEY}.txt"
+          test "$(cat "_site/${INDEXNOW_KEY}.txt")" = "$INDEXNOW_KEY"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
@@ -42,3 +51,32 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  indexnow:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit sitemap URLs to IndexNow
+        run: |
+          set -euo pipefail
+
+          # Pages serves the fresh sitemap only once the CDN catches up with the deploy.
+          urls=$(curl -fsSL --max-time 30 --retry 6 --retry-delay 10 --retry-all-errors \
+            "https://${INDEXNOW_HOST}/sitemap.xml" \
+            | grep -oE '<loc>[^<]+</loc>' | sed -E 's|</?loc>||g')
+          test -n "$urls"
+
+          payload=$(jq -Rn --arg host "$INDEXNOW_HOST" --arg key "$INDEXNOW_KEY" \
+            '{host: $host, key: $key, keyLocation: "https://\($host)/\($key).txt", urlList: [inputs | select(length > 0)]}' \
+            <<<"$urls")
+          echo "Submitting $(jq '.urlList | length' <<<"$payload") URLs"
+
+          code=$(curl -sS -o response.txt -w '%{http_code}' --max-time 30 \
+            -H 'Content-Type: application/json; charset=utf-8' \
+            -d "$payload" https://api.indexnow.org/indexnow)
+          echo "IndexNow responded $code"
+          cat response.txt
+          case "$code" in
+            200 | 202) ;;
+            *) exit 1 ;;
+          esac
