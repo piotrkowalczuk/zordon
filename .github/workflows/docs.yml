@@ -5,6 +5,8 @@ on:
     branches: [main, master]
     paths:
       - "docs/**"
+      - "skills/**"
+      - "scripts/agent-skills-index.py"
       - "mkdocs.yml"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -32,12 +34,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install mkdocs-material
+      - run: pip install mkdocs-material mkdocs-llmstxt
       - run: mkdocs build --strict --site-dir _site
+      - run: python3 scripts/agent-skills-index.py _site
       - name: Verify IndexNow key file is published
         run: |
           test -f "_site/${INDEXNOW_KEY}.txt"
           test "$(cat "_site/${INDEXNOW_KEY}.txt")" = "$INDEXNOW_KEY"
+      - name: Verify agent-facing artifacts are published
+        run: |
+          test -s _site/llms.txt
+          test -s _site/llms-full.txt
+          python3 -c "
+          import hashlib, json, pathlib
+          site = pathlib.Path('_site')
+          index = json.loads((site / '.well-known/agent-skills/index.json').read_text())
+          assert index['skills'], 'skills index is empty'
+          for skill in index['skills']:
+              served = site / skill['url'].lstrip('/')
+              digest = 'sha256:' + hashlib.sha256(served.read_bytes()).hexdigest()
+              assert digest == skill['digest'], f\"{skill['name']}: digest does not match served file\"
+          print(f\"agent-skills: verified {len(index['skills'])} skills\")
+          "
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

@@ -65,3 +65,29 @@ markdown_extensions:
 
 plugins:
   - search
+  - llmstxt:
+      markdown_description: >-
+        Zordon supervises the supporting stack local agentic and development
+        workflows run against — databases, brokers, proxies and services
+        declared in an Alphasfile and run as ordinary host processes, so a
+        stack is cheap to stand up, duplicate and throw away.
+      full_output: llms-full.txt
+      sections:
+        Overview:
+          - index.md
+          - getting-started.md
+          - concepts.md
+        Architecture:
+          - architecture.md
+          - lifecycle.md
+          - workspaces.md
+          - federation.md
+        Configuration:
+          - alphasfile.md
+          - dynamic-config.md
+        Services:
+          - services/*.md
+        How-to:
+          - how-to/*.md
+        Reference:
+          - reference/*.md
