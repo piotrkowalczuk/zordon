@@ -113,6 +113,7 @@ lint:
 gen:
 	go generate ./...
 	mkdocs build --strict --site-dir _site
+	python3 scripts/agent-skills-index.py _site
 
 
 clean:
