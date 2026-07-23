@@ -162,6 +162,12 @@ release:
     owner: piotrkowalczuk
     name: zordon
   prerelease: auto
+  # Delete and re-upload an asset that already exists instead of failing on
+  # the 422. Without this, v0.17.2 published every asset and still failed the
+  # run: uploading four ~9MB archives in parallel looked like a client-side
+  # failure, goreleaser retried, and GitHub had already accepted the first
+  # attempt. The run then aborted before publishing the Homebrew cask.
+  replace_existing_artifacts: true
   footer: |
     ## Install
 
