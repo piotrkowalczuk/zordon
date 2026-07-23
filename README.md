@@ -52,7 +52,7 @@ zordon start   # resolve, build, bring it up, stream logs until everything is RE
 - **Agent-friendly output.** `--agent` emits terse, structured logs; output is kept signal-dense because when a model reads your logs, tokens are the budget.
 - **MCP server.** `zordon mcp` exposes every command — and every provision — as MCP tools, so an agent can drive the whole stack. → [docs](docs/reference/mcp.md)
 - **Guardrails for agents.** The `Alphasfile` plus the MCP surface form a narrow, declared interface between agent and stack — it runs the *named* provisions you defined, not an open shell, so it can't improvise its way around your setup.
-- **Single binary.** `go install` and go — no runtime dependencies.
+- **No runtime dependencies.** Three static Go binaries — `zordon`, `alpha`, `tommy` — and nothing else to install, image, or register.
 
 ## Documentation
 
@@ -68,13 +68,30 @@ Full docs: **<https://zordon.io>**
 
 ## Installation
 
+Homebrew (macOS):
+
+```sh
+brew install piotrkowalczuk/tap/zordon
+```
+
+A release tarball (macOS and Linux, `arm64` and `amd64`) from
+[Releases](https://github.com/piotrkowalczuk/zordon/releases):
+
+```sh
+tar -xzf zordon_<version>_<os>_<arch>.tar.gz -C ~/.local/bin zordon alpha tommy
+```
+
+Or from source, if you have a Go toolchain:
+
 ```sh
 go install github.com/piotrkowalczuk/zordon/cmd/...@latest
 ```
 
-Installs `zordon`, `alpha`, and the `tommy` reaper (alpha finds it as a
-sibling) into your `$GOBIN` (or `$GOPATH/bin`) — make sure that
-directory is on your `$PATH`.
+Every variant installs the same three binaries — `zordon`, `alpha`, and
+the `tommy` reaper. Keep them in one directory and make sure that
+directory is on your `$PATH`: `zordon` finds `alpha` via `$PATH`, and
+`alpha` finds `tommy` only as a sibling of its own executable. See
+[Binaries and layout](docs/reference/binaries.md).
 
 ## Quick start
 
