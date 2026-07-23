@@ -56,9 +56,16 @@ jobs:
           # Platform archives are zordon_<version>_<os>_<arch>.tar.gz; the
           # source archive is zordon-<version>.tar.gz, and the underscore is
           # what keeps it out of this glob.
+          #
+          # The listing is read once into a variable rather than piped into
+          # `grep -q`: grep exits on its first match, tar then fails writing
+          # to the closed pipe, and pipefail reports that as the pipeline's
+          # status — so a successful match intermittently reads as a missing
+          # binary, depending on whether tar finished first.
           for archive in dist/zordon_*.tar.gz; do
+            listing=$(tar -tzf "$archive")
             for binary in zordon alpha tommy; do
-              tar -tzf "$archive" | grep -qx "$binary" \
+              grep -qx "$binary" <<<"$listing" \
                 || { echo "$archive is missing $binary"; exit 1; }
             done
             echo "ok $archive"
