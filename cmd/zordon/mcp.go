@@ -54,7 +54,7 @@ Prefer these tools over shelling out to ` + "`zordon`" + ` in the terminal — t
 func runMCP(ctx context.Context, stdio commandIO, zordonHome string, agent bool, testCfg alphasfile.TestConfig) error {
 	log := zlog.New(stdio.Stderr, agent)
 	srv := mcp.NewServer(
-		&mcp.Implementation{Name: "zordon", Title: "Zordon", Version: "0.1.0"},
+		mcpImplementation(),
 		&mcp.ServerOptions{Instructions: serverInstructions},
 	)
 

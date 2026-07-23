@@ -40,6 +40,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
+	"github.com/piotrkowalczuk/zordon/internal/zversion"
 )
 
 // toolchainEnv blocks until the materialized toolchain entity for the
@@ -307,11 +308,19 @@ type runConfig struct {
 }
 
 func main() {
+	if versionRequested(os.Args[1:]) {
+		fmt.Println(zversion.Line("alpha"))
+		return
+	}
+
 	rootFlags := ff.NewFlagSet("alpha")
 	rootCmd := &ff.Command{
 		Name:  "alpha",
 		Usage: "alpha [FLAGS] <SUBCOMMAND>",
 		Flags: rootFlags,
+		// --version bypasses ff (see versionRequested), so it cannot
+		// advertise itself through the flag set.
+		LongHelp: "Print the build identity with `alpha --version`.",
 	}
 
 	runFlags := ff.NewFlagSet("run").SetParent(rootFlags)
@@ -1737,6 +1746,11 @@ func signalReady(fd int) error {
 		return fmt.Errorf("fd %d not open", fd)
 	}
 	defer f.Close()
+	// VERSION goes first: zordon's reader returns as soon as it sees READY,
+	// so anything written after it would never be read.
+	if _, err := fmt.Fprintln(f, "VERSION="+zversion.Get().Version); err != nil {
+		return err
+	}
 	_, err := fmt.Fprintln(f, "READY=1")
 	return err
 }

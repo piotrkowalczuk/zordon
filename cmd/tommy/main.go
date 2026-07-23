@@ -42,6 +42,7 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/daemon"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zversion"
 )
 
 func main() {
@@ -57,7 +58,17 @@ func main() {
 	if v := os.Getenv("TOMMY_PARENT_FD"); v != "" {
 		_ = parentFD.Set(v) // best-effort: bad value falls through to argv flag
 	}
+	// tommy uses stdlib flag, which has no env-var binding, so a plain
+	// --version flag is safe here (unlike zordon/alpha, where ff would bind
+	// it to $ZORDON_VERSION). flag.Parse stops at --, so this cannot shadow
+	// a wrapped service's own --version.
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(zversion.Line("tommy"))
+		return
+	}
 
 	argv := flag.Args()
 	if len(argv) == 0 {

@@ -1,6 +1,6 @@
 # How to install the zordon Claude Code plugin
 
-Make sure you have `zordon` on your `PATH` first.
+Make sure you have `zordon` on your `PATH` first — `brew install piotrkowalczuk/tap/zordon` on macOS, or a release tarball elsewhere.
 See the [Install](../getting-started.md#install) step in Getting started.
 
 Run the marketplace add command from any directory to register the zordon plugin marketplace:

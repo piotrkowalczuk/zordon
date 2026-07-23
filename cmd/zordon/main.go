@@ -27,6 +27,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/summary"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
+	"github.com/piotrkowalczuk/zordon/internal/zversion"
 )
 
 // summaryTailLines is how many of each failed service's most recent
@@ -63,6 +64,11 @@ func main() {
 	// SIG_IGN for our purposes.
 	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
 
+	if versionRequested(os.Args[1:]) {
+		fmt.Println(zversion.Line("zordon"))
+		return
+	}
+
 	rootCmd, agent := buildRootCommand(commandIO{Stdout: os.Stdout, Stderr: os.Stderr})
 
 	err := rootCmd.ParseAndRun(context.Background(), os.Args[1:],
@@ -95,6 +101,9 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		Name:  "zordon",
 		Usage: "zordon [FLAGS] <SUBCOMMAND>",
 		Flags: rootFlags,
+		// --version is handled before ff parses (see versionRequested), so it
+		// cannot advertise itself through the flag set.
+		LongHelp: "Print the build identity with `zordon --version`.",
 	}
 	_ = home // resolved later through zfs.ZordonHome() when needed
 
@@ -728,6 +737,10 @@ func readHandshake(r *os.File, readyCh chan<- struct{}, errCh chan<- error, logf
 		switch key {
 		case "STATUS":
 			logf("alpha status: %s", value)
+		case "VERSION":
+			if msg := skewWarning(zversion.Get().Version, value); msg != "" {
+				logf("%s", msg)
+			}
 		case "READY":
 			if value == "1" {
 				close(readyCh)

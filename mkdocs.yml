@@ -50,6 +50,7 @@ nav:
       - Filter noisy service logs: how-to/filter-noisy-logs.md
       - Install the Claude Code plugin: how-to/install-the-claude-code-plugin.md
   - Reference:
+      - Binaries and layout: reference/binaries.md
       - zordon mcp: reference/mcp.md
       - Log filter DSL: reference/log-filter.md
 

@@ -1,0 +1,186 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+project_name: zordon
+
+before:
+  hooks:
+    # Deliberately not `go mod tidy`: it can rewrite go.mod/go.sum, and
+    # goreleaser refuses to release from a dirty tree.
+    - go mod download
+    - go mod verify
+
+builds:
+  # The three binaries share one platform matrix. They have to: an archive
+  # must hold the same number of binaries on every platform, and the runtime
+  # needs all three present together (see the archives comment below).
+  #
+  # Windows is absent because the code does not build for it — internal/zfs
+  # uses syscall.Flock, which does not exist there.
+  - id: zordon
+    main: ./cmd/zordon
+    binary: zordon
+    env: &env
+      # Needed to cross-build darwin from the Linux runner. Only `go test
+      # -race` wants cgo, and the readiness probes target loopback, so the
+      # pure-Go resolver costs nothing here.
+      - CGO_ENABLED=0
+    goos: &goos [darwin, linux]
+    goarch: &goarch [amd64, arm64]
+    flags: &flags [-trimpath]
+    mod_timestamp: &mod_timestamp "{{ .CommitTimestamp }}"
+    ldflags: &ldflags
+      - -s -w
+      # goreleaser strips the leading "v" from the tag; put it back so the
+      # printed version matches both the git tag and `go install ...@v1.2.3`.
+      - -X github.com/piotrkowalczuk/zordon/internal/zversion.version=v{{ .Version }}
+      - -X github.com/piotrkowalczuk/zordon/internal/zversion.commit={{ .FullCommit }}
+      - -X github.com/piotrkowalczuk/zordon/internal/zversion.date={{ .CommitDate }}
+
+  - id: alpha
+    main: ./cmd/alpha
+    binary: alpha
+    env: *env
+    goos: *goos
+    goarch: *goarch
+    flags: *flags
+    mod_timestamp: *mod_timestamp
+    ldflags: *ldflags
+
+  - id: tommy
+    main: ./cmd/tommy
+    binary: tommy
+    env: *env
+    goos: *goos
+    goarch: *goarch
+    flags: *flags
+    mod_timestamp: *mod_timestamp
+    ldflags: *ldflags
+
+archives:
+  # One archive per platform holding all three binaries at its root, because
+  # of how they find each other at runtime: zordon resolves alpha through
+  # $PATH, and alpha resolves tommy ONLY as a sibling of its own executable
+  # (no $PATH fallback, deliberately — a writable directory earlier on $PATH
+  # could otherwise substitute a malicious tommy into every service spawn).
+  # So the three have to land in one directory, and that directory has to be
+  # on $PATH. wrap_in_directory stays at its default (false) to keep that
+  # extraction a one-liner.
+  - id: default
+    ids: [zordon, alpha, tommy]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE.md
+      - README.md
+
+# GPL-3.0 §6 wants the source available alongside the object code. GitHub
+# attaches its own archive, but this one gets a checksum entry.
+source:
+  enabled: true
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  abbrev: 7
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Documentation
+      regexp: '^.*?docs(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: Other
+      order: 999
+  filters:
+    exclude:
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "^Merge"
+
+notarize:
+  macos:
+    # Gated so a fork, a snapshot, or a run without the secrets skips signing
+    # instead of failing. The `ne ""` half matters: a GitHub Actions secret
+    # that does not exist is still exported as an empty string, which plain
+    # isEnvSet would accept. Go template `and` short-circuits, so .Env is
+    # never dereferenced when the variable is genuinely unset.
+    - enabled: '{{ and (isEnvSet "MACOS_SIGN_P12") (ne .Env.MACOS_SIGN_P12 "") }}'
+      # All three: Gatekeeper assesses each binary, and alpha and tommy are
+      # exec'd on every bringup.
+      ids: [zordon, alpha, tommy]
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        wait: true
+        timeout: 30m
+
+homebrew_casks:
+  - name: zordon
+    ids: [default]
+    binaries: [zordon, alpha, tommy]
+    repository:
+      owner: piotrkowalczuk
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: "https://zordon.io"
+    description: "Process supervisor for local agentic workflows: databases, brokers and services declared in an Alphasfile, run as host processes"
+    commit_author:
+      name: goreleaser-bot
+      email: goreleaser-bot@users.noreply.github.com
+    skip_upload: auto
+    hooks:
+      post:
+        # A bare Mach-O binary cannot be stapled — stapling only works for
+        # .dmg/.pkg/.app — so a notarized binary would otherwise need an
+        # online Gatekeeper lookup on first run. These binaries really are
+        # signed and notarized; dropping the quarantine flag just makes that
+        # first run deterministic offline.
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}"]
+          end
+
+release:
+  github:
+    owner: piotrkowalczuk
+    name: zordon
+  prerelease: auto
+  footer: |
+    ## Install
+
+    ```sh
+    brew install piotrkowalczuk/tap/zordon
+    ```
+
+    Or extract all three binaries into one directory on your `$PATH`:
+
+    ```sh
+    tar -xzf zordon_{{ .Version }}_darwin_arm64.tar.gz -C ~/.local/bin zordon alpha tommy
+    ```
+
+    Keep the three together: `zordon` finds `alpha` on `$PATH`, and `alpha`
+    finds `tommy` only as a sibling of its own executable.
+
+    On macOS, binaries extracted from a browser download carry a quarantine
+    flag. Clear it with:
+
+    ```sh
+    xattr -dr com.apple.quarantine ~/.local/bin/zordon ~/.local/bin/alpha ~/.local/bin/tommy
+    ```

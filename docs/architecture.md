@@ -1,6 +1,6 @@
 # Architecture
 
-Two binaries, a unix-domain control socket, and a strict split between
+Three binaries, a unix-domain control socket, and a strict split between
 *resolving* config (pure) and *running* it (effectful).
 
 ```
@@ -12,7 +12,13 @@ you ──► zordon (CLI)                       alpha (supervisor, per level)
         │  Configure(resolved, parentEnv)  │  readiness probes
         │  ◄── Event stream (logs/ready) ──┤  compose env, reconfigure
         │  detach                          │  shutdown on stop/signal
+                                           │
+                                           └── spawn ──► tommy ──► service
+                                                         (reaper wrapper)
 ```
+
+How the three find each other at runtime is a hard constraint on how they
+are installed — see [Binaries and layout](reference/binaries.md).
 
 ## zordon — the CLI
 

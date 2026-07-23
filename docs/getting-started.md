@@ -2,13 +2,33 @@
 
 ## Install
 
+On macOS, use Homebrew:
+
+```sh
+brew install piotrkowalczuk/tap/zordon
+```
+
+On Linux, download a tarball from [Releases](https://github.com/piotrkowalczuk/zordon/releases) and extract it into a directory on your `$PATH`:
+
+```sh
+tar -xzf zordon_<version>_linux_amd64.tar.gz -C ~/.local/bin zordon alpha tommy
+```
+
+If you already have a Go toolchain, this works too:
+
 ```sh
 go install github.com/piotrkowalczuk/zordon/cmd/...@latest
 ```
 
-This installs `zordon`, `alpha`, and the `tommy` reaper (alpha finds it
-as a sibling) into your `$GOBIN` (or `$GOPATH/bin`). Make sure that
-directory is on your `$PATH`.
+Each option installs three binaries: `zordon`, `alpha`, and the `tommy` reaper.
+Keep all three in the same directory, and make sure that directory is on your `$PATH`.
+See [Binaries and layout](reference/binaries.md) for why.
+
+Check it worked:
+
+```sh
+zordon --version
+```
 
 ### Use from Claude Code (optional)
 
@@ -19,7 +39,7 @@ If you drive your stack from an agent, install the Claude Code plugin — it reg
 /plugin install zordon@zordon
 ```
 
-The plugin does not bundle the binary, so you still need `zordon` on your `$PATH` from the `go install` step above.
+The plugin does not bundle the binary, so you still need `zordon` on your `$PATH` from the install step above.
 See the [install how-to](how-to/install-the-claude-code-plugin.md) for the full walkthrough.
 
 ## A first stack

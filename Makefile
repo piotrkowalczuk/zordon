@@ -1,4 +1,4 @@
-.PHONY: fmt build build.race build.release test test.fast test.race test.coverage test.unit test.coverage.unit test.conformance.go test.conformance.rust test.conformance.node test.conformance.pkg test.conformance.java e2e lint gen clean
+.PHONY: fmt build build.race build.release test test.fast test.race test.coverage test.unit test.coverage.unit test.conformance.go test.conformance.rust test.conformance.node test.conformance.pkg test.conformance.java e2e lint gen release.check release.snapshot clean
 
 EXAMPLES ?= $(shell ls -d examples/*/)
 GOTEST_TIMEOUT ?= 30m
@@ -115,13 +115,20 @@ gen:
 	mkdocs build --strict --site-dir _site
 	python3 scripts/agent-skills-index.py _site
 
+release.check:
+	goreleaser check
+
+# Full release build into dist/ without tagging or publishing anything.
+release.snapshot:
+	goreleaser release --snapshot --clean
+
 
 clean:
 	-pkill -x tommy 2>/dev/null || true
 	-pkill -x alpha 2>/dev/null || true
 	-pkill -x zordon 2>/dev/null || true
 	go clean -testcache
-	rm -rf bin _site .zordon examples/.zordon examples/zordon *.out
+	rm -rf bin dist _site .zordon examples/.zordon examples/zordon *.out
 	rm -f *.out alpha.log examples/*/alpha.log
 	-rm -rf "$${TMPDIR:-/tmp}"/zordon-* 2>/dev/null || true
 
