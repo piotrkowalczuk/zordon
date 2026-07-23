@@ -65,8 +65,10 @@ A checkout left half-built, stale, or cross-linked by an interrupted run is dete
 
 ### Where you can run zordon
 
-`zordon` runs from exactly two kinds of directory: the project root (the one holding the `Alphasfile` — workspace `main`) and a workspace dir (`workspaces/<name>`).
-Running from any other subdir, or from inside a service checkout that happens to carry its own `Alphasfile`, is refused with a message pointing at the two valid dirs — otherwise that subdir would become a shadow project root and materialize a whole nested stack under it.
+Run it from anywhere in the tree — zordon resolves the invocation by walking **up**, like git from a subdir.
+It climbs to the nearest workspace boundary (a `workspaces/<name>` dir or a `.workspace` marker) and then to the project `Alphasfile` at or above it, so a run from a plain project subdir attaches to `main` and a run from inside a workspace (including a service checkout under it) attaches to that workspace.
+The `.workspace` marker is authoritative over its whole subtree: it **shadows** any `Alphasfile` a checked-out service repo carries, so such a buried file is never mistaken for a project root — which is what used to fork a nested `workspaces/…` stack whose branches collided with the real one.
+The instance identity (`fs::hash()`, state dir) comes from the resolved root/workspace, not the raw cwd, so every subdir of a project maps to the same running stack.
 
 ### The `.workspace` marker
 

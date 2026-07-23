@@ -18,28 +18,29 @@ you ──► zordon (CLI)                       alpha (supervisor, per level)
 
 Stateless. For one `zordon start` it:
 
-1. **Discovers the chain** — walks the invocation dir up to `$HOME`,
-   collecting every `Alphasfile`, plus the optional global
+1. **Resolves the invocation** — walks the CWD **up**, like git from a
+   subdir: first to the nearest *workspace boundary* (a `workspaces/<name>`
+   dir or a `.workspace` marker), then to the project `Alphasfile` at or
+   above it. The marker is a boundary — an `Alphasfile` buried in a service
+   checkout below it is shadowed, never adopted — so a run from any subdir
+   attaches to the enclosing stack instead of forking a nested one.
+2. **Discovers the chain** — from that resolved root, collects every
+   `Alphasfile` up to `$HOME`, plus the optional global
    `~/.zordon/Alphasfile`; root-first, leaf last.
-   The invocation dir is **gated**: zordon runs only from the directory
-   that holds the Alphasfile (workspace `main`) or from a workspace dir
-   (`workspaces/<name>`). A run from any other subdir — or from inside a
-   service checkout that carries its own Alphasfile — is refused, so a
-   subdir can never become a shadow project root with its own nested stack.
-2. **Builds an Invocation per level** — `Dir`, `Workspace`, `StateDir`,
-   `Hash`, `TmpDir`. The leaf's identity comes from the CWD, which the gate
-   above has pinned to the root or a workspace dir (so a run from
-   `workspaces/<name>/` is that workspace); parents are always `main`
-   rooted at their own dir.
-3. **Resolves** each Alphasfile (pure: HCL2 parse → DAG → interpolate;
+3. **Builds an Invocation per level** — `Dir`, `Workspace`, `StateDir`,
+   `Hash`, `TmpDir`. The leaf's identity comes from the **resolved**
+   root/workspace, not the raw CWD — so every subdir of a project gets the
+   same `Hash` (and re-attaches to the same alpha) instead of a nested
+   stack; parents are always `main` rooted at their own dir.
+4. **Resolves** each Alphasfile (pure: HCL2 parse → DAG → interpolate;
    no process spawn, no clone). Parent results feed the child's
    evaluation context.
-4. **Locks** each level with an exclusive `flock`
+5. **Locks** each level with an exclusive `flock`
    (`<stateDir>/start.lock`), acquired strictly top-down so concurrent
    starts can't deadlock.
-5. **Reconciles** — reuse a healthy parent as-is; restart on drift
+6. **Reconciles** — reuse a healthy parent as-is; restart on drift
    (config hash changed) or for the invocation level.
-6. **Spawns / configures** `alpha` and streams its event log until
+7. **Spawns / configures** `alpha` and streams its event log until
    every service is READY, then detaches.
 
 The resolver lives in `internal/alphasfile` and is intentionally

@@ -27,6 +27,12 @@ const MainWorkspace = "main"
 // authoritative, so removing the marker can't un-workspace one.
 const WorkspaceMarker = ".workspace"
 
+// AlphasfileName is the manifest filename resolution walks up to find. It lives
+// here (not just in the CLI) because ResolveInvocation locates the project root
+// by it — locating where state lives is this package's job, even though the
+// manifest's *content* identity (ConfigHash) stays a caller concern.
+const AlphasfileName = "Alphasfile"
+
 // WorkspaceName is the identifier of a workspace — "main" for the
 // implicit project-root workspace, or a user-chosen label for a side
 // checkout under <root>/workspaces/<name>. Implements
@@ -158,57 +164,65 @@ func (i *InvocationState) SocketPath() string {
 func (i *InvocationState) LockPath() string     { return filepath.Join(i.StateDir, "start.lock") }
 func (i *InvocationState) AlphaLogPath() string { return filepath.Join(i.StateDir, "alpha.log") }
 
-// projectRootAndWorkspace decides, purely from a directory, whether it is a
-// workspace dir (<X>/workspaces/<name>) and returns the project root
-// <X> plus the workspace name. Otherwise the dir itself is the project root
-// and the workspace is "main".
-func projectRootAndWorkspace(dir string) (root, workspace string) {
-	clean := filepath.Clean(dir)
-	parent := filepath.Dir(clean) // .../workspaces
-	// <root>/workspaces/<name>/. The path is authoritative; the .workspace
-	// marker create drops there is an equivalent positive signal, so a
-	// conventional workspace stays one even if the marker is removed.
-	if filepath.Base(parent) == "workspaces" || zfs.Exists(filepath.Join(clean, WorkspaceMarker)) {
-		return filepath.Dir(parent), filepath.Base(clean)
-	}
-	return clean, MainWorkspace
-}
-
-// Resolve reports the project root and workspace name a directory belongs to.
-// It is the exported form of the rule NewInvocationState applies, so callers
-// that must decide "is this a legal place to run from" (the CLI's invocation
-// gate) share one definition with the state builder instead of re-deriving it.
-func Resolve(dir string) (root, workspace string) {
-	return projectRootAndWorkspace(dir)
-}
-
-// EnclosingCheckout reports whether dir lies at or under a zordon-managed
-// per-service checkout — <outerRoot>/workspaces/<ws>/src/<svc> — and returns
-// the enclosing project root plus the workspace and service that own it.
+// workspaceBoundary walks up from cwd to the nearest workspace boundary: a dir
+// directly under `workspaces/` (path-authoritative) or one carrying a
+// .workspace marker. Returns that dir and its name; ok=false (workspace "main")
+// if the filesystem root is reached without crossing one.
 //
-// The answer is derived from path shape (plus the .workspace marker for
-// workspaces that live outside the conventional <root>/workspaces/ dir), NOT
-// from the presence of a manifest: this package deliberately knows nothing
-// about the Alphasfile's name. Callers that need "…and the outer project is
-// real" check for the manifest themselves.
-func EnclosingCheckout(dir string) (outerRoot, workspace, service string, ok bool) {
-	d := filepath.Clean(dir)
-	for {
-		if filepath.Base(filepath.Dir(d)) == "src" {
-			svcDir := d
-			wsDir := filepath.Dir(filepath.Dir(svcDir))
-			// outerRoot mirrors projectRootAndWorkspace(wsDir): the root is the
-			// grandparent of the workspace dir in BOTH layouts — the
-			// conventional <root>/workspaces/<ws> and a .workspace-marked dir
-			// two levels below its root. Only the trigger differs.
-			if filepath.Base(filepath.Dir(wsDir)) == "workspaces" ||
-				zfs.Exists(filepath.Join(wsDir, WorkspaceMarker)) {
-				return filepath.Dir(filepath.Dir(wsDir)), filepath.Base(wsDir), filepath.Base(svcDir), true
-			}
+// The boundary is what makes `.workspace` load-bearing: it is checked at EVERY
+// level of the climb, not just at cwd, so running from anywhere inside a
+// workspace subtree (a service checkout, a nested dir) resolves to that
+// workspace — and, being the first boundary hit, it shadows any Alphasfile that
+// lives deeper (e.g. one a checked-out service repo carries).
+func workspaceBoundary(cwd string) (wsDir, workspace string, ok bool) {
+	for d := filepath.Clean(cwd); ; {
+		if filepath.Base(filepath.Dir(d)) == "workspaces" || zfs.Exists(filepath.Join(d, WorkspaceMarker)) {
+			return d, filepath.Base(d), true
 		}
 		parent := filepath.Dir(d)
 		if parent == d {
-			return "", "", "", false
+			return "", MainWorkspace, false
+		}
+		d = parent
+	}
+}
+
+// ResolveInvocation walks up from cwd to determine the run's identity, the way
+// git resolves a repo from any subdir:
+//
+//   - workspace: the nearest ancestor workspace boundary (workspaceBoundary);
+//     "main" if none.
+//   - root: the nearest Alphasfile AT OR ABOVE that boundary (or at/above cwd
+//     when there is no boundary). Searching from the boundary — never below it
+//     — is what stops a service checkout's own Alphasfile from being adopted as
+//     a project root and materializing a nested stack (issue #73).
+//   - invocationDir: the instance-identity seed (FsHash). It is the workspace
+//     dir when in a workspace, else the root — so EVERY subdir of a project
+//     resolves to the same instance instead of forking one per cwd.
+//
+// Errors only when no Alphasfile exists at or above the resolved start.
+func ResolveInvocation(cwd string) (root, workspace, invocationDir string, err error) {
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", "", "", err
+	}
+	wsDir, ws, inWorkspace := workspaceBoundary(abs)
+	start := abs
+	invocationDir = abs
+	if inWorkspace {
+		start = wsDir
+		invocationDir = wsDir
+	}
+	for d := start; ; {
+		if zfs.Exists(filepath.Join(d, AlphasfileName)) {
+			if !inWorkspace {
+				invocationDir = d
+			}
+			return d, ws, invocationDir, nil
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return "", "", "", fmt.Errorf("invocation: no %s at or above %s", AlphasfileName, start)
 		}
 		d = parent
 	}
@@ -228,17 +242,19 @@ func shortSum(parts ...[]byte) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// NewInvocationState builds the invocation for a leaf Alphasfile. invocationDir is the
-// directory the user ran zordon from (normalized CWD). Pure directory facts:
-// the manifest identity (ConfigHash) is NOT here — it is the resolved
-// Alphasfile's concern (see ConfigHash + alphasfile.Alphasfile.CfgHash).
-func NewInvocationState(invocationDir string) (*InvocationState, error) {
-	abs, err := filepath.Abs(invocationDir)
+// NewInvocationState builds the leaf invocation for a run started from cwd. It
+// walks up (ResolveInvocation) to the workspace boundary and project Alphasfile,
+// so a run from any subdir resolves to the SAME instance as one from the root —
+// the identity (FsHash, StateDir) comes from the resolved root/workspace, never
+// from the raw cwd, which is what kept a subdir from forking a nested stack.
+// Pure directory facts: the manifest identity (ConfigHash) is NOT here — it is
+// the resolved Alphasfile's concern (see ConfigHash + alphasfile.Alphasfile.CfgHash).
+func NewInvocationState(cwd string) (*InvocationState, error) {
+	root, ws, invocationDir, err := ResolveInvocation(cwd)
 	if err != nil {
 		return nil, err
 	}
-	root, ws := projectRootAndWorkspace(abs)
-	return build(abs, root, ws), nil
+	return build(invocationDir, root, ws), nil
 }
 
 // NewInvocationStateAt builds the invocation for an Alphasfile addressed by its own
