@@ -316,16 +316,24 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	return rootCmd, agent
 }
 
-// walkUp climbs from cwd toward / looking for an Alphasfile.
+// walkUp climbs from cwd toward / looking for an Alphasfile, then enforces
+// the invocation gate: zordon runs in exactly two places — the directory that
+// holds the Alphasfile (workspace "main"), or a workspace directory
+// (<root>/workspaces/<name>, or a .workspace-marked dir). Running from any
+// other subdirectory would otherwise make that subdir a fresh project root
+// with its own state dir, ports and per-service checkouts — and running from
+// inside a service checkout that carries its own Alphasfile builds a whole
+// nested stack whose branches collide with the real one (issue #73).
 func walkUp() (string, error) {
-	dir, err := zfs.Getwd()
+	cwd, err := zfs.Getwd()
 	if err != nil {
 		return "", err
 	}
+	dir := cwd
 	for {
 		candidate := filepath.Join(dir, "Alphasfile")
 		if zfs.Exists(candidate) {
-			return candidate, nil
+			return candidate, gateInvocationDir(cwd, dir)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -333,6 +341,37 @@ func walkUp() (string, error) {
 		}
 		dir = parent
 	}
+}
+
+// gateInvocationDir rejects a cwd that is neither the Alphasfile's own
+// directory nor a workspace directory of it. root is the dir the Alphasfile
+// was found in (the resolved leaf). The check is on cwd, not root, so a run
+// from a deep subdir is refused even though walkUp found a valid Alphasfile
+// above it.
+func gateInvocationDir(cwd, root string) error {
+	// An Alphasfile physically inside a managed checkout
+	// (<outer>/workspaces/<ws>/src/<svc>/…) is source carried by the service
+	// repo, not config for a run — adopting it roots a nested stack. Refuse
+	// and point at the two real invocation dirs of the OUTER project.
+	if outer, ws, svc, ok := invocation.EnclosingCheckout(root); ok &&
+		zfs.Exists(filepath.Join(outer, "Alphasfile")) {
+		return fmt.Errorf(
+			"%s is inside workspace %q's checkout of service %q — a managed checkout cannot be a project root.\n"+
+				"Its Alphasfile is that service's source, not config for this run. Run from:\n"+
+				"  %s   (workspace \"main\")\n"+
+				"  %s   (workspace %q)",
+			root, ws, svc, outer, filepath.Join(outer, "workspaces", ws), ws)
+	}
+
+	resolvedRoot, _ := invocation.Resolve(cwd)
+	if resolvedRoot == root {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s is not a zordon invocation dir. Alphasfile lives in %s. Run from:\n"+
+			"  %s   (workspace \"main\")\n"+
+			"  %s   (a named workspace)",
+		cwd, root, root, filepath.Join(root, "workspaces", "<name>"))
 }
 
 // pushConfigure streams one level's bringup and, on success, returns the

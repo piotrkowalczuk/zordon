@@ -1110,6 +1110,11 @@ func (r *resolver) finishService(st *svcState) error {
 			// checkout under <wtdir>/src/<svc>). Alpha builds/runs from
 			// src as-is — no git worktree add, no HEAD reset.
 			InPlace: srcLocalPath != "" && !r.inv.OwnsService(sb.Name),
+			// Editable: this (workspace, service) was picked, so it earns an
+			// editable git worktree on branch zordon/<ws>/<svc>. Unpicked
+			// git-source services are third-party — alpha clones them at their
+			// ref with no branch (see Package.Editable).
+			Editable: r.inv.OwnsService(sb.Name),
 		},
 		Debugger: dbg,
 		Agent:    agent,

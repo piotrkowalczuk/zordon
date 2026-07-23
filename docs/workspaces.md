@@ -20,15 +20,9 @@ zordon workspace service rm  --workspace=feature --services=api  # drop one
 zordon workspace rm feature
 ```
 
-**`create` vs `start`.** `zordon workspace create <name> [svc[@rev] …]`
-materializes the editable source: it `git worktree add`s each picked
-service (or *all* workspace-able services with no args) into
-`workspaces/<name>/src/<svc>` on a branch `zordon/<name>`. For a
-`git` primary this bare-clones first; for a `src` primary it adds a
-workspace from your local repo (registered in *your* repo's `.git`, so
-your IDE / `git worktree list` sees it). `zordon start` then runs the
-whole stack, reusing those checkouts (and lazily creating any missing
-ones).
+**`create` vs `start`.** `zordon workspace create <name> [svc[@rev] …]` materializes the editable source: it `git worktree add`s each picked service (or *all* workspace-able services with no args) into `workspaces/<name>/src/<svc>` on a per-service branch `zordon/<name>/<svc>`.
+For a `git` primary this bare-clones first; for a `src` primary it adds a worktree from your local repo (registered in *your* repo's `.git`, so your IDE / `git worktree list` sees it).
+`zordon start` then runs the whole stack, reusing those checkouts and lazily materializing anything missing — a worktree for a picked service, a plain clone for an unpicked git-source one (see below).
 
 **Per-service add/rm.** To adjust an existing workspace without recreating it, `zordon workspace service add --workspace=<name> --services=<svc[@rev],…>` materializes more service checkouts (on the same branch and path `start` expects), and `zordon workspace service rm --workspace=<name> --services=<svc,…>` detaches them (the git worktree is removed and its tree deleted).
 Both reject `--workspace=main`, which has no per-service checkout.
@@ -47,13 +41,32 @@ different invocation. Every level carries two short hashes:
 
 `zordon status` shows each level's `fs::hash()`.
 
-Each workspace-able service is materialized via `git worktree add` from
-its primary and built there, so editing code in one workspace's checkout
-doesn't touch another's. If the branch `zordon/<name>` is already
-checked out at a different path, you get a clear error (remove that
-workspace or point this one elsewhere) instead of a raw git failure.
-Federation parents (below) are *reused* across workspaces — only the
-leaf forks.
+Federation parents (below) are *reused* across workspaces — only the leaf forks.
+
+### How a service's source is materialized
+
+How a service's code lands in a workspace depends on whether it has a local source and whether you **picked** it (named it at `workspace create` / `workspace service add`).
+Picking a service is what declares "I intend to edit this here":
+
+| Service | Materialization | Branch |
+|---|---|---|
+| local `src {}`, **not** picked | built from the live source tree in place — your uncommitted edits just work | — |
+| local `src {}` or `git {}`, **picked** | its own `git worktree` at `workspaces/<name>/src/<svc>`, so your IDE lists it and edits stay isolated | `zordon/<name>/<svc>` |
+| `git {}`, **not** picked | third-party code: a plain `git clone` checked out at its ref — no branch, no worktree registration | — |
+| no source (`install` / `pkg`) | a prebuilt binary / mise package — nothing is checked out | — |
+
+The distinction that matters: an **unpicked** git-source service is third-party code you only run, so it is cloned, not worktree'd.
+Because its clone carries no `zordon/<name>/<svc>` branch and registers no worktree, two workspaces (or an aborted / nested run) can never collide on a shared branch or admin dir.
+To edit a git-source service, pick it — `zordon workspace create <name> <svc>` — and it graduates to an editable worktree.
+`main` never picks anything, so in `main` every git-source service is a plain clone.
+
+When a **picked** service's branch `zordon/<name>/<svc>` is already checked out elsewhere, you get a clear error (remove that workspace or point this one elsewhere) instead of a raw git failure.
+A checkout left half-built, stale, or cross-linked by an interrupted run is detected and rebuilt rather than silently reused.
+
+### Where you can run zordon
+
+`zordon` runs from exactly two kinds of directory: the project root (the one holding the `Alphasfile` — workspace `main`) and a workspace dir (`workspaces/<name>`).
+Running from any other subdir, or from inside a service checkout that happens to carry its own `Alphasfile`, is refused with a message pointing at the two valid dirs — otherwise that subdir would become a shadow project root and materialize a whole nested stack under it.
 
 ### The `.workspace` marker
 

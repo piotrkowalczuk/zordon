@@ -131,8 +131,8 @@ func TestPrimary_AddWorktree_reusesCompletedWorktree(t *testing.T) {
 	if err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
 		t.Fatalf("first AddWorktree: %v", err)
 	}
-	if worktreeLocked(ctx, dest) {
-		t.Fatal("completed worktree is still locked")
+	if !worktreeHealthy(ctx, dest, "zordon/main/app") {
+		t.Fatal("completed worktree is not healthy (should be unlocked and on its branch)")
 	}
 
 	sentinel := filepath.Join(dest, "sentinel")

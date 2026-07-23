@@ -108,6 +108,19 @@ func expandAbs(dir string) (string, error) {
 
 func (p Primary) cloneURL() string { return "https://" + p.Repo + ".git" }
 
+// cloneSource is what `git clone` (Clone) reads from: the upstream URL for a
+// git primary, the local repo path for a dir primary. Mirrors primaryPath's
+// per-kind split.
+func (p Primary) cloneSource() string {
+	switch p.Kind {
+	case KindGit:
+		return p.cloneURL()
+	case KindDir:
+		return p.Repo
+	}
+	return ""
+}
+
 // BarePath is where the zordon-owned bare primary lives (KindGit only).
 // The base dir is resolved at primary construction (see NewPrimary).
 // Falls back to ".zordon" if zordonHome wasn't supplied — keeps the
@@ -219,24 +232,78 @@ func branchWorktreePath(ctx context.Context, gitDir, branch string) (string, boo
 	return "", false
 }
 
-// worktreeLocked reports whether the worktree at dest is locked. AddWorktree
-// creates worktrees locked and clears the lock only once the checkout
-// finishes, so a still-locked worktree means a prior setup (e.g. one killed
-// by failfast) never completed — the tree is incomplete and must be rebuilt,
-// not reused.
+// worktreeHealthy reports whether the worktree at dest is a COMPLETE, correctly
+// registered checkout of branch — the only state safe to reuse as-is. Every
+// condition must hold; any failure means the tree is unreadable, half-built, on
+// the wrong branch, or (under prune/re-add churn across workspaces)
+// cross-linked to a DIFFERENT workspace's admin dir and silently on its branch
+// (the issue #73 comment). Such a tree is rebuilt, never trusted.
 //
-// Detection reads the `locked` marker file in the worktree's admin dir,
-// which git has written since worktree locking landed (2.7). It deliberately
-// does NOT parse `git worktree list --porcelain`: that output only grew a
-// `locked` line in git 2.36, so on the older distro gits in CI it would
-// always report "not locked" and the heal would silently no-op.
-func worktreeLocked(ctx context.Context, dest string) bool {
+//  1. dest/.git resolves to an admin dir — git can read the worktree at all.
+//     (This is what the old bare "does .git exist" check missed: a .git gitlink
+//     dangling into a reassigned admin dir still "exists" but is unreadable.)
+//  2. that admin dir is a worktree admin dir (its parent is `worktrees/`), not
+//     the bare/repo git-dir itself.
+//  3. the admin dir's `gitdir` back-pointer names dest/.git — the gitlink and
+//     the registration agree. This is the invariant a cross-link violates: the
+//     orphaned checkout's .git points at an admin dir whose gitdir names a
+//     DIFFERENT working tree.
+//  4. HEAD is `ref: refs/heads/<branch>` — on the branch we expect (AddWorktree
+//     always creates with -B, so a healthy reuse target is never detached).
+//  5. no `locked` marker — AddWorktree clears it only on a finished checkout,
+//     so a lingering lock means a killed init never completed.
+//
+// The `locked`/back-pointer/HEAD facts are read as files, NOT parsed from
+// `git worktree list --porcelain`, whose `locked`/HEAD columns only landed in
+// git 2.36 — the older distro gits in CI would silently pass.
+func worktreeHealthy(ctx context.Context, dest, branch string) bool {
 	out, err := exec.CommandContext(ctx, "git", "-C", dest, "rev-parse", "--absolute-git-dir").Output()
 	if err != nil {
 		return false
 	}
 	adminDir := strings.TrimSpace(string(out))
-	return zfs.Exists(filepath.Join(adminDir, "locked"))
+	if filepath.Base(filepath.Dir(adminDir)) != "worktrees" {
+		return false
+	}
+	if zfs.Exists(filepath.Join(adminDir, "locked")) {
+		return false
+	}
+	back, err := zfs.Read(filepath.Join(adminDir, "gitdir"))
+	if err != nil || !samePath(strings.TrimSpace(string(back)), filepath.Join(dest, ".git")) {
+		return false
+	}
+	head, err := zfs.Read(filepath.Join(adminDir, "HEAD"))
+	if err != nil || strings.TrimSpace(string(head)) != "ref: refs/heads/"+branch {
+		return false
+	}
+	return true
+}
+
+// samePath reports whether two paths name the same location, tolerating
+// symlinked ancestors (macOS /var → /private/var) and un-cleaned forms.
+func samePath(a, b string) bool {
+	return normPath(a) == normPath(b)
+}
+
+// normPath canonicalizes p by resolving symlinks on its deepest EXISTING
+// ancestor and re-attaching the missing tail. A plain EvalSymlinks returns
+// empty for a path whose leaf is gone — e.g. a worktree dir already `rm`-ed
+// (#40) — which would then fail to normalize /var → /private/var and read as a
+// spurious mismatch against git's /private/var registration.
+func normPath(p string) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for cur := p; ; {
+		if r, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(r, rest)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
 }
 
 // AddWorktree creates (or reuses) a working tree at dest, on branch
@@ -251,10 +318,11 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 		return errors.New("source.AddWorktree: nil runner")
 	}
 	gitDir := p.primaryPath()
-	// A finished worktree is reused as-is: the lock is cleared only on
-	// success (below), so a present, unlocked .git means the checkout
-	// completed. Anything else falls through to reclaim + rebuild.
-	if zfs.Exists(filepath.Join(dest, ".git")) && !worktreeLocked(ctx, dest) {
+	// A complete, correctly-registered worktree on this branch is reused as-is
+	// (worktreeHealthy validates the full gitlink↔admin↔branch chain, not just
+	// that .git exists). Anything else — half-built, cross-linked, on the wrong
+	// branch — falls through to reclaim + rebuild.
+	if worktreeHealthy(ctx, dest, branch) {
 		return nil
 	}
 	if err := zfs.EnsureDir(filepath.Dir(dest)); err != nil {
@@ -277,9 +345,17 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 	// <branch> is STILL registered afterwards, it's a live worktree
 	// elsewhere — a real collision, surfaced clearly. Matching is by branch,
 	// never by path, to stay immune to /var↔/private/var symlink differences.
-	if _, registered := branchWorktreePath(ctx, gitDir, branch); registered {
-		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "unlock", dest))
-		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "remove", "--force", dest))
+	if regPath, registered := branchWorktreePath(ctx, gitDir, branch); registered {
+		// Only unlock+remove when <branch> is registered at THIS dest — a
+		// killed init (#38) or an out-of-band `rm -rf` of the tree (#40). When
+		// it points elsewhere, `remove --force dest` would log a misleading
+		// "fatal: '<dest>' is not a working tree" (issue #73 logs); prune alone
+		// clears a stale dir-gone entry, and a surviving one is a real
+		// collision surfaced below.
+		if samePath(regPath, dest) {
+			_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "unlock", dest))
+			_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "remove", "--force", dest))
+		}
 		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "prune"))
 		if other, still := branchWorktreePath(ctx, gitDir, branch); still {
 			return fmt.Errorf("branch %q is already checked out at %s; "+
@@ -321,6 +397,109 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 		return fmt.Errorf("git worktree unlock: %w", err)
 	}
 	return nil
+}
+
+// cloneRefFile is the completion sentinel Clone drops inside a finished
+// clone's .git dir, recording the ref the tree was checked out at. It lives
+// under .git so it never shows up as an untracked file in the working tree,
+// and RemoveTree(dest) wipes it along with the rest on a rebuild.
+const cloneRefFile = "zordon-clone-ref"
+
+// Clone materializes a third-party (unpicked git-source) service at dest by
+// cloning its primary directly and checking it out DETACHED at ref. Unlike
+// AddWorktree it registers no worktree and creates no branch, so nested or
+// parallel checkouts of the same service across workspaces can never collide on
+// a shared admin dir or a `zordon/<ws>/<svc>` branch (issue #73). This is the
+// non-editable path: a service becomes editable (and gets a real worktree) only
+// by being picked at `workspace create`.
+//
+// In production only KindGit reaches here (a KindDir service that is not picked
+// runs in place; a picked service of either kind goes through AddWorktree), and
+// it clones the upstream URL. The method is defined over any workspaceable
+// primary — cloning a KindDir repo by path is the same operation — so the whole
+// clone/reuse/rebuild path is exercisable without network.
+func (p Primary) Clone(ctx context.Context, dest, ref string, run Runner) error {
+	if !p.Workspaceable() {
+		return fmt.Errorf("source.Clone: service has no git/dir primary; nothing to clone")
+	}
+	if run == nil {
+		return errors.New("source.Clone: nil runner")
+	}
+	want := ref
+	if want == "" {
+		want = "HEAD"
+	}
+	// A finished clone at the same ref is reused as-is (the sentinel is
+	// written last, on success). A different ref, a half-done clone, or a
+	// worktree left by an older zordon all fall through to a clean rebuild:
+	// `git clone` + `checkout --detach <ref>` handles branch/tag/rev
+	// uniformly, so re-materializing is simpler and more robust than trying
+	// to fetch-and-move an existing tree onto an arbitrary ref.
+	if cur, ok := readCloneRef(dest); ok && cur == want {
+		return nil
+	}
+	if err := p.clearStaleCheckout(ctx, dest, run); err != nil {
+		return err
+	}
+	if err := zfs.EnsureDir(filepath.Dir(dest)); err != nil {
+		return fmt.Errorf("mkdir checkout parent: %w", err)
+	}
+	// --filter=blob:none keeps origin as a promisor remote, so the detached
+	// checkout lazily fetches blobs from the source. (A `git clone --local` off
+	// zordon's own partial bare would NOT carry the promisor and would fail to
+	// read any blob — hence cloning the upstream directly.)
+	if err := run(ctx, exec.CommandContext(ctx, "git", "clone",
+		"--filter=blob:none", "--no-checkout", p.cloneSource(), dest)); err != nil {
+		return fmt.Errorf("git clone: %w", err)
+	}
+	if p.Workspace != nil && len(p.Workspace.Sparse) > 0 {
+		if err := run(ctx, exec.CommandContext(ctx, "git", "-C", dest, "sparse-checkout", "init")); err != nil {
+			return fmt.Errorf("git sparse-checkout init: %w", err)
+		}
+		sparseArgs := append([]string{"-C", dest, "sparse-checkout", "set"}, p.Workspace.Sparse...)
+		if err := run(ctx, exec.CommandContext(ctx, "git", sparseArgs...)); err != nil {
+			return fmt.Errorf("git sparse-checkout set: %w", err)
+		}
+	}
+	if err := run(ctx, exec.CommandContext(ctx, "git", "-C", dest, "checkout", "--detach", want)); err != nil {
+		return fmt.Errorf("git checkout: %w", err)
+	}
+	// Commit point: record the ref so the next start reuses the tree instead
+	// of re-cloning.
+	if err := zfs.AtomicWrite(filepath.Join(dest, ".git", cloneRefFile), []byte(want)); err != nil {
+		return fmt.Errorf("write clone sentinel: %w", err)
+	}
+	return nil
+}
+
+// clearStaleCheckout removes whatever currently sits at dest so Clone can
+// rebuild. A checkout left by an older zordon is a registered worktree (its
+// .git is a gitlink into the bare), so before deleting the tree we de-register
+// it from the bare — otherwise the bare keeps the branch "held" and a later
+// `workspace create` of the same service would hit "already checked out". Both
+// git calls are best-effort: they no-op cleanly when dest is a plain clone or
+// absent.
+func (p Primary) clearStaleCheckout(ctx context.Context, dest string, run Runner) error {
+	if gd := p.primaryPath(); zfs.Exists(gd) {
+		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gd, "worktree", "remove", "--force", dest))
+		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gd, "worktree", "prune"))
+	}
+	if !zfs.Exists(dest) {
+		return nil
+	}
+	if err := zfs.RemoveTree(dest); err != nil {
+		return fmt.Errorf("clear stale checkout %s: %w", dest, err)
+	}
+	return nil
+}
+
+// readCloneRef returns the ref recorded by a finished Clone, if present.
+func readCloneRef(dest string) (string, bool) {
+	b, err := zfs.Read(filepath.Join(dest, ".git", cloneRefFile))
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(b)), true
 }
 
 // RemoveWorktree detaches a worktree from its primary and deletes the tree.

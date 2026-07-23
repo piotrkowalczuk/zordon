@@ -21,10 +21,16 @@ Stateless. For one `zordon start` it:
 1. **Discovers the chain** — walks the invocation dir up to `$HOME`,
    collecting every `Alphasfile`, plus the optional global
    `~/.zordon/Alphasfile`; root-first, leaf last.
+   The invocation dir is **gated**: zordon runs only from the directory
+   that holds the Alphasfile (workspace `main`) or from a workspace dir
+   (`workspaces/<name>`). A run from any other subdir — or from inside a
+   service checkout that carries its own Alphasfile — is refused, so a
+   subdir can never become a shadow project root with its own nested stack.
 2. **Builds an Invocation per level** — `Dir`, `Workspace`, `StateDir`,
-   `Hash`, `TmpDir`. The leaf's identity comes from the CWD (so a run
-   from `workspaces/<name>/` is that workspace); parents are
-   always `main` rooted at their own dir.
+   `Hash`, `TmpDir`. The leaf's identity comes from the CWD, which the gate
+   above has pinned to the root or a workspace dir (so a run from
+   `workspaces/<name>/` is that workspace); parents are always `main`
+   rooted at their own dir.
 3. **Resolves** each Alphasfile (pure: HCL2 parse → DAG → interpolate;
    no process spawn, no clone). Parent results feed the child's
    evaluation context.

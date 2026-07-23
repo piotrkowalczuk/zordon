@@ -174,6 +174,46 @@ func projectRootAndWorkspace(dir string) (root, workspace string) {
 	return clean, MainWorkspace
 }
 
+// Resolve reports the project root and workspace name a directory belongs to.
+// It is the exported form of the rule NewInvocationState applies, so callers
+// that must decide "is this a legal place to run from" (the CLI's invocation
+// gate) share one definition with the state builder instead of re-deriving it.
+func Resolve(dir string) (root, workspace string) {
+	return projectRootAndWorkspace(dir)
+}
+
+// EnclosingCheckout reports whether dir lies at or under a zordon-managed
+// per-service checkout — <outerRoot>/workspaces/<ws>/src/<svc> — and returns
+// the enclosing project root plus the workspace and service that own it.
+//
+// The answer is derived from path shape (plus the .workspace marker for
+// workspaces that live outside the conventional <root>/workspaces/ dir), NOT
+// from the presence of a manifest: this package deliberately knows nothing
+// about the Alphasfile's name. Callers that need "…and the outer project is
+// real" check for the manifest themselves.
+func EnclosingCheckout(dir string) (outerRoot, workspace, service string, ok bool) {
+	d := filepath.Clean(dir)
+	for {
+		if filepath.Base(filepath.Dir(d)) == "src" {
+			svcDir := d
+			wsDir := filepath.Dir(filepath.Dir(svcDir))
+			// outerRoot mirrors projectRootAndWorkspace(wsDir): the root is the
+			// grandparent of the workspace dir in BOTH layouts — the
+			// conventional <root>/workspaces/<ws> and a .workspace-marked dir
+			// two levels below its root. Only the trigger differs.
+			if filepath.Base(filepath.Dir(wsDir)) == "workspaces" ||
+				zfs.Exists(filepath.Join(wsDir, WorkspaceMarker)) {
+				return filepath.Dir(filepath.Dir(wsDir)), filepath.Base(wsDir), filepath.Base(svcDir), true
+			}
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return "", "", "", false
+		}
+		d = parent
+	}
+}
+
 // shortSum returns the first 16 hex chars of sha256(parts joined by 0-byte).
 // Joining with NUL keeps boundaries unambiguous so two distinct inputs can
 // never collide by concatenation.
