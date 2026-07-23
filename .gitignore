@@ -18,6 +18,8 @@ bin
 # generated MkDocs site (make gen / CI docs build)
 _site
 site
+# goreleaser build output
+dist
 *.out
 alpha.log
 /app

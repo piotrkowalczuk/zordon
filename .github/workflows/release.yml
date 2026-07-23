@@ -1,0 +1,71 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # Dry run: builds and notarizes for real, publishes nothing.
+  workflow_dispatch:
+
+# No cancel-in-progress here, unlike ci.yml: a superseded test matrix is just
+# wasted compute, but a cancelled release can leave a GitHub Release created
+# and the Homebrew tap un-pushed.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # checkout can leave the tag object shallow, and the changelog needs the
+      # full range between tags.
+      - run: git fetch --force --tags
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+          cache: true
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && 'release --clean --snapshot --skip=publish'
+                || 'release --clean' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+      - name: Verify every archive carries all three binaries
+        # The runtime requires zordon, alpha and tommy to land in one
+        # directory; an archive missing one produces a stack that either
+        # cannot start or silently runs services unwrapped.
+        run: |
+          set -euo pipefail
+          # Platform archives are zordon_<version>_<os>_<arch>.tar.gz; the
+          # source archive is zordon-<version>.tar.gz, and the underscore is
+          # what keeps it out of this glob.
+          for archive in dist/zordon_*.tar.gz; do
+            for binary in zordon alpha tommy; do
+              tar -tzf "$archive" | grep -qx "$binary" \
+                || { echo "$archive is missing $binary"; exit 1; }
+            done
+            echo "ok $archive"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dist
+          path: dist/*.tar.gz
+          retention-days: 7

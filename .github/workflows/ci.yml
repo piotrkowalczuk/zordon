@@ -37,6 +37,14 @@ jobs:
           cache: true
       - name: Run lint
         run: make lint
+      - name: Validate release config
+        # Catches a broken .goreleaser.yaml on the PR rather than at tag time,
+        # when a failure would leave a half-published release behind.
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: check
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
