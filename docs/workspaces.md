@@ -61,7 +61,8 @@ To edit a git-source service, pick it — `zordon workspace create <name> <svc>`
 `main` never picks anything, so in `main` every git-source service is a plain clone.
 
 When a **picked** service's branch `zordon/<name>/<svc>` is already checked out elsewhere, you get a clear error (remove that workspace or point this one elsewhere) instead of a raw git failure.
-A checkout left half-built, stale, or cross-linked by an interrupted run is detected and rebuilt rather than silently reused.
+
+zordon never overwrites code it finds in a checkout: a clean worktree on `zordon/<name>/<svc>` is reused silently, and its OWN init that a kill interrupted is rebuilt (there is no work in a checkout that never finished) — but a checkout you have taken onto another branch, or any tree it doesn't recognize as its own, is **reused as-is with a warning**, never reset or deleted. So switching branches in a workspace checkout, or leaving uncommitted work there, can't be lost to a `zordon start`. `zordon status` shows each service's checkout path and current branch, and flags one that isn't on its canonical `zordon/<name>/<svc>` branch.
 
 ### Where you can run zordon
 

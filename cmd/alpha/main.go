@@ -3559,8 +3559,12 @@ func prepareWorkspace(ctx context.Context, svc *alphasfile.Service, name, wsName
 		// "branch already checked out". Slashes are valid in ref names.
 		branch := "zordon/" + wsName + "/" + name
 		log.Info("alpha", "prepare %s: worktree -> %s (branch %s)", name, checkout, branch)
-		if err := p.AddWorktree(ctx, checkout, branch, runner); err != nil {
+		warn, err := p.AddWorktree(ctx, checkout, branch, runner)
+		if err != nil {
 			return "", fmt.Errorf("git worktree: %w", err)
+		}
+		if warn != "" {
+			log.Warn("alpha", "prepare %s: %s", name, warn)
 		}
 		return dest, nil
 	default:

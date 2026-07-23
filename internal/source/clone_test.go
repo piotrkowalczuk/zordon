@@ -90,7 +90,7 @@ func TestPrimary_Clone_migratesFromRegisteredWorktree(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "src", "app")
 
 	// Old-world state: a real worktree on zordon/main/app at dest.
-	if err := p.AddWorktree(t.Context(), dest, "zordon/main/app", run); err != nil {
+	if _, err := p.AddWorktree(t.Context(), dest, "zordon/main/app", run); err != nil {
 		t.Fatalf("seed worktree: %v", err)
 	}
 	if list := worktreeList(t, repo); !strings.Contains(list, dest) {
@@ -104,7 +104,7 @@ func TestPrimary_Clone_migratesFromRegisteredWorktree(t *testing.T) {
 		t.Errorf("migration left a registered worktree behind:\n%s", list)
 	}
 	// The freed branch can be re-added elsewhere without a collision.
-	if err := p.AddWorktree(t.Context(), filepath.Join(t.TempDir(), "again"), "zordon/main/app", run); err != nil {
+	if _, err := p.AddWorktree(t.Context(), filepath.Join(t.TempDir(), "again"), "zordon/main/app", run); err != nil {
 		t.Errorf("branch not freed by migration: %v", err)
 	}
 }
@@ -194,7 +194,7 @@ func freshWorktree(t *testing.T, branch string) string {
 	t.Helper()
 	p := mustDirPrimary(t, commitFileRepo(t, "pkg/app/main.go", "package app\n"), "")
 	dest := filepath.Join(t.TempDir(), "src", "app")
-	if err := p.AddWorktree(t.Context(), dest, branch, run); err != nil {
+	if _, err := p.AddWorktree(t.Context(), dest, branch, run); err != nil {
 		t.Fatalf("AddWorktree: %v", err)
 	}
 	return dest

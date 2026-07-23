@@ -232,12 +232,13 @@ func branchWorktreePath(ctx context.Context, gitDir, branch string) (string, boo
 	return "", false
 }
 
-// worktreeHealthy reports whether the worktree at dest is a COMPLETE, correctly
-// registered checkout of branch — the only state safe to reuse as-is. Every
-// condition must hold; any failure means the tree is unreadable, half-built, on
-// the wrong branch, or (under prune/re-add churn across workspaces)
-// cross-linked to a DIFFERENT workspace's admin dir and silently on its branch
-// (the issue #73 comment). Such a tree is rebuilt, never trusted.
+// worktreeHealthy reports whether the worktree at dest is zordon's CANONICAL
+// checkout for branch — complete, correctly registered, and on the expected
+// branch — the state AddWorktree reuses silently. A failure does NOT by itself
+// mean "destroy and rebuild": inspectDest only rebuilds our own interrupted
+// init; any other non-canonical content (a checkout on another branch, a
+// cross-linked or foreign tree) is reused in place with a warning, never
+// overwritten. This predicate is just the "reuse silently?" gate.
 //
 //  1. dest/.git resolves to an admin dir — git can read the worktree at all.
 //     (This is what the old bare "does .git exist" check missed: a .git gitlink
@@ -306,27 +307,142 @@ func normPath(p string) string {
 	}
 }
 
-// AddWorktree creates (or reuses) a working tree at dest, on branch
-// `branch`, starting from p.Ref (or the primary's HEAD). A finished worktree
-// is reused as-is so parallel invocations stay stable across restarts; one
-// left half-built by a killed init is reclaimed and rebuilt.
-func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runner) error {
+// destState classifies what currently occupies a worktree destination, driving
+// AddWorktree's reuse / heal / respect decision. zordon NEVER force-overwrites
+// content it does not own: only its OWN unfinished init is rebuilt; anything
+// else is reused in place (built as-is) with a warning, never destroyed.
+type destState int
+
+const (
+	destEmpty          destState = iota // no content — create a fresh worktree
+	destCanonical                       // our clean worktree on the expected branch — reuse silently
+	destOurInterrupted                  // our own init a kill interrupted (locked) — safe to rebuild
+	destForeign                         // content we don't own cleanly — reuse as-is, warn, never overwrite
+)
+
+// inspectDest classifies dest for AddWorktree. The reason string is non-empty
+// only for destForeign — it explains, for the user's warning, why the existing
+// content is not zordon's canonical worktree.
+func (p Primary) inspectDest(ctx context.Context, dest, branch string) (destState, string) {
+	if !dirHasContent(dest) {
+		return destEmpty, ""
+	}
+	if worktreeHealthy(ctx, dest, branch) {
+		return destCanonical, ""
+	}
+	// The `locked` marker is zordon's completion sentinel (AddWorktree unlocks
+	// only after checkout finishes). Our own dest still carrying it is an init a
+	// failfast kill interrupted — there is no user work in a checkout that never
+	// completed, so it is the ONE non-canonical state we rebuild (#38/#40).
+	if p.isOurInterruptedInit(ctx, dest) {
+		return destOurInterrupted, ""
+	}
+	return destForeign, p.foreignReason(ctx, dest, branch)
+}
+
+// isOurInterruptedInit reports whether dest is a worktree of THIS primary that
+// is still locked — an init that never finished.
+func (p Primary) isOurInterruptedInit(ctx context.Context, dest string) bool {
+	adminDir, ok := worktreeAdminDir(ctx, dest)
+	if !ok || !p.ownsAdminDir(ctx, adminDir) {
+		return false
+	}
+	return zfs.Exists(filepath.Join(adminDir, "locked"))
+}
+
+// foreignReason describes why the existing content at dest is not zordon's
+// clean worktree for branch, for the reuse warning.
+func (p Primary) foreignReason(ctx context.Context, dest, branch string) string {
+	adminDir, ok := worktreeAdminDir(ctx, dest)
+	if !ok {
+		return "it is not a git worktree (plain files, or a foreign checkout)"
+	}
+	if !p.ownsAdminDir(ctx, adminDir) {
+		return "it is a checkout of a different repository"
+	}
+	if back, err := zfs.Read(filepath.Join(adminDir, "gitdir")); err != nil ||
+		!samePath(strings.TrimSpace(string(back)), filepath.Join(dest, ".git")) {
+		return "its git wiring is inconsistent (cross-linked to another workspace's checkout)"
+	}
+	switch head := headBranchRef(adminDir); head {
+	case branch:
+		return "it is in an unexpected state" // unreachable: that would be canonical
+	case "":
+		return "it is on a detached commit, not branch " + branch
+	default:
+		return "it is on branch " + head + ", not " + branch
+	}
+}
+
+// dirHasContent reports whether dest exists and holds at least one entry.
+func dirHasContent(dest string) bool {
+	entries, err := zfs.ReadDir(dest)
+	return err == nil && len(entries) > 0
+}
+
+// worktreeAdminDir returns the git admin dir backing the worktree at dest, or
+// ok=false when git cannot read dest as a repository at all.
+func worktreeAdminDir(ctx context.Context, dest string) (string, bool) {
+	out, err := exec.CommandContext(ctx, "git", "-C", dest, "rev-parse", "--absolute-git-dir").Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}
+
+// ownsAdminDir reports whether adminDir is one of THIS primary's worktree admin
+// dirs (<primary git dir>/worktrees/*), distinguishing our own worktrees from a
+// checkout of some other repository sitting at the same path.
+func (p Primary) ownsAdminDir(ctx context.Context, adminDir string) bool {
+	out, err := exec.CommandContext(ctx, "git", "-C", p.primaryPath(), "rev-parse", "--absolute-git-dir").Output()
+	if err != nil {
+		return false
+	}
+	return samePath(filepath.Dir(adminDir), filepath.Join(strings.TrimSpace(string(out)), "worktrees"))
+}
+
+// headBranchRef returns the branch an admin dir's HEAD points at, or "" when it
+// is detached (a raw commit, not a refs/heads ref).
+func headBranchRef(adminDir string) string {
+	b, err := zfs.Read(filepath.Join(adminDir, "HEAD"))
+	if err != nil {
+		return ""
+	}
+	const p = "ref: refs/heads/"
+	if s := strings.TrimSpace(string(b)); strings.HasPrefix(s, p) {
+		return strings.TrimPrefix(s, p)
+	}
+	return ""
+}
+
+// AddWorktree materializes an editable working tree at dest on `branch`,
+// starting from p.Ref (or the primary's HEAD). It NEVER force-overwrites
+// existing content it does not own: a clean worktree on `branch` is reused
+// silently; our own interrupted init is rebuilt; ANY other existing content
+// (a checkout on a different branch, a cross-linked or foreign tree, plain
+// files) is reused in place and a warning is returned describing it — the tree
+// is left untouched so the user can never lose work to a start. The returned
+// string is that warning ("" when none); the caller surfaces it.
+func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runner) (string, error) {
 	if !p.Workspaceable() {
-		return fmt.Errorf("service has no git/dir primary; not workspaceable")
+		return "", fmt.Errorf("service has no git/dir primary; not workspaceable")
 	}
 	if run == nil {
-		return errors.New("source.AddWorktree: nil runner")
+		return "", errors.New("source.AddWorktree: nil runner")
 	}
 	gitDir := p.primaryPath()
-	// A complete, correctly-registered worktree on this branch is reused as-is
-	// (worktreeHealthy validates the full gitlink↔admin↔branch chain, not just
-	// that .git exists). Anything else — half-built, cross-linked, on the wrong
-	// branch — falls through to reclaim + rebuild.
-	if worktreeHealthy(ctx, dest, branch) {
-		return nil
+	switch state, reason := p.inspectDest(ctx, dest, branch); state {
+	case destCanonical:
+		return "", nil
+	case destForeign:
+		// Respect the user's checkout: build what is there, warn, do not touch.
+		return fmt.Sprintf("checkout at %s reused as-is — %s; zordon did not overwrite it. "+
+			"Remove or move it aside for a clean worktree on %s.", dest, reason, branch), nil
+	case destEmpty, destOurInterrupted:
+		// (re)create below.
 	}
 	if err := zfs.EnsureDir(filepath.Dir(dest)); err != nil {
-		return fmt.Errorf("mkdir worktree parent: %w", err)
+		return "", fmt.Errorf("mkdir worktree parent: %w", err)
 	}
 	start := p.Ref
 	if start == "" {
@@ -358,7 +474,7 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 		}
 		_ = run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "prune"))
 		if other, still := branchWorktreePath(ctx, gitDir, branch); still {
-			return fmt.Errorf("branch %q is already checked out at %s; "+
+			return "", fmt.Errorf("branch %q is already checked out at %s; "+
 				"remove that worktree first (e.g. `zordon workspace rm`) or point this one elsewhere",
 				branch, other)
 		}
@@ -373,30 +489,30 @@ func (p Primary) AddWorktree(ctx context.Context, dest, branch string, run Runne
 	// on success below.
 	args := []string{"-C", gitDir, "worktree", "add", "--lock", "--no-checkout", "--force", "-B", branch, dest, start}
 	if err := run(ctx, exec.CommandContext(ctx, "git", args...)); err != nil {
-		return fmt.Errorf("git worktree add: %w", err)
+		return "", fmt.Errorf("git worktree add: %w", err)
 	}
 
 	if p.Workspace != nil && len(p.Workspace.Sparse) > 0 {
 		if err := run(ctx, exec.CommandContext(ctx, "git", "-C", dest, "sparse-checkout", "init")); err != nil {
-			return fmt.Errorf("git sparse-checkout init: %w", err)
+			return "", fmt.Errorf("git sparse-checkout init: %w", err)
 		}
 		sparseArgs := append([]string{"-C", dest, "sparse-checkout", "set"}, p.Workspace.Sparse...)
 		if err := run(ctx, exec.CommandContext(ctx, "git", sparseArgs...)); err != nil {
-			return fmt.Errorf("git sparse-checkout set: %w", err)
+			return "", fmt.Errorf("git sparse-checkout set: %w", err)
 		}
 	}
 
 	if err := run(ctx, exec.CommandContext(ctx, "git", "-C", dest, "checkout", branch)); err != nil {
-		return fmt.Errorf("git checkout: %w", err)
+		return "", fmt.Errorf("git checkout: %w", err)
 	}
 
 	// Checkout finished; clear the lock so the next start reuses the tree
 	// instead of rebuilding it. This unlock is the commit point — until it
 	// runs, the worktree reads as not-yet-finished.
 	if err := run(ctx, exec.CommandContext(ctx, "git", "-C", gitDir, "worktree", "unlock", dest)); err != nil {
-		return fmt.Errorf("git worktree unlock: %w", err)
+		return "", fmt.Errorf("git worktree unlock: %w", err)
 	}
-	return nil
+	return "", nil
 }
 
 // cloneRefFile is the completion sentinel Clone drops inside a finished
