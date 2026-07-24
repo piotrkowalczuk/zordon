@@ -114,6 +114,7 @@ gen:
 	go generate ./...
 	mkdocs build --strict --site-dir _site
 	python3 scripts/agent-skills-index.py _site
+	mkdir -p _site/.well-known && cp .well-known/ai-catalog.json _site/.well-known/
 
 release.check:
 	goreleaser check

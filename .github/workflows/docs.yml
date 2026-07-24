@@ -7,6 +7,7 @@ on:
       - "docs/**"
       - "skills/**"
       - "scripts/agent-skills-index.py"
+      - ".well-known/**"
       - "mkdocs.yml"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -37,6 +38,9 @@ jobs:
       - run: pip install mkdocs-material mkdocs-llmstxt
       - run: mkdocs build --strict --site-dir _site
       - run: python3 scripts/agent-skills-index.py _site
+      # MkDocs skips dot-directories, so .well-known files are copied into the
+      # built site directly (same reason the agent-skills index is written here).
+      - run: mkdir -p _site/.well-known && cp .well-known/ai-catalog.json _site/.well-known/
       - name: Verify IndexNow key file is published
         run: |
           test -f "_site/${INDEXNOW_KEY}.txt"
@@ -55,6 +59,24 @@ jobs:
               digest = 'sha256:' + hashlib.sha256(served.read_bytes()).hexdigest()
               assert digest == skill['digest'], f\"{skill['name']}: digest does not match served file\"
           print(f\"agent-skills: verified {len(index['skills'])} skills\")
+          "
+      - name: Verify the ARD catalog is published
+        run: |
+          python3 -c "
+          import json, pathlib, re
+          catalog = json.loads((pathlib.Path('_site') / '.well-known/ai-catalog.json').read_text())
+          assert catalog['specVersion'] == '1.0', 'unexpected specVersion'
+          entries = catalog['entries']
+          assert entries, 'catalog has no entries'
+          urn = re.compile(r'^urn:air:[a-zA-Z0-9.-]+(:[a-zA-Z0-9._-]+)+\$')
+          for entry in entries:
+              for field in ('identifier', 'displayName', 'type'):
+                  assert entry.get(field), f'entry missing {field}'
+              assert urn.match(entry['identifier']), f\"bad URN: {entry['identifier']}\"
+              assert ('url' in entry) ^ ('data' in entry), 'entry needs exactly one of url/data'
+              queries = entry.get('representativeQueries', [])
+              assert 2 <= len(queries) <= 5, 'representativeQueries must hold 2-5 items'
+          print(f'ard: verified {len(entries)} catalog entrie(s)')
           "
       - uses: actions/upload-pages-artifact@v3
         with:
