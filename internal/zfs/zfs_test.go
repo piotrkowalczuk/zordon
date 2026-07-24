@@ -13,6 +13,35 @@ func TestZordonHome_overrideWins(t *testing.T) {
 	}
 }
 
+// Not parallel: it mutates the process working directory.
+func TestChdir(t *testing.T) {
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	target := t.TempDir()
+	if err := Chdir(target); err != nil {
+		t.Fatalf("Chdir(%q): %v", target, err)
+	}
+
+	got, err := Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// macOS temp dirs are behind symlinks; compare resolved paths.
+	gotResolved, _ := filepath.EvalSymlinks(got)
+	wantResolved, _ := filepath.EvalSymlinks(target)
+	if gotResolved != wantResolved {
+		t.Errorf("after Chdir, Getwd = %q; want %q", gotResolved, wantResolved)
+	}
+
+	if err := Chdir(filepath.Join(target, "does-not-exist")); err == nil {
+		t.Error("Chdir to a nonexistent dir returned nil; want an error")
+	}
+}
+
 func TestZordonHome_defaultsToUserHomeZordon(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
