@@ -70,9 +70,35 @@ jobs:
             done
             echo "ok $archive"
           done
+      - name: Build MCP bundles
+        # Repackage the signed release binaries as one .mcpb per platform, so
+        # zordon's MCP server is installable in any mcpb-supporting client.
+        # Reads from the tarballs above, so a bundle can never contain a
+        # differently-built binary than the tarball for its platform.
+        run: python3 scripts/build-mcpb.py --dist dist
+      - name: Verify every bundle carries manifest and all three binaries
+        run: |
+          set -euo pipefail
+          for bundle in dist/zordon_*.mcpb; do
+            listing=$(unzip -Z1 "$bundle")
+            for entry in manifest.json server/zordon server/alpha server/tommy; do
+              grep -qx "$entry" <<<"$listing" \
+                || { echo "$bundle is missing $entry"; exit 1; }
+            done
+            echo "ok $bundle"
+          done
+      - name: Upload bundles to the release
+        # goreleaser already created the release; attach the bundles to it.
+        # Skipped on the workflow_dispatch dry run, which publishes nothing.
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/*.mcpb --clobber
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: dist
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.mcpb
           retention-days: 7

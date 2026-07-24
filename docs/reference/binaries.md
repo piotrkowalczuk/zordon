@@ -41,6 +41,7 @@ Every supported install puts all three in one directory:
 - Homebrew places them together under `$(brew --prefix)/bin`.
 - A release tarball holds all three at its root; extract them into a single directory on your `$PATH`.
 - `go install github.com/piotrkowalczuk/zordon/cmd/...@latest` puts them in a shared `$GOBIN`.
+- An [MCP bundle](../how-to/install-the-mcp-bundle.md) (`.mcpb`) carries all three internally and launches `zordon mcp` for a client, so nothing needs to be on `$PATH`.
 
 Mixing sources is the one thing to avoid.
 A `zordon` from Homebrew with a stale `alpha` still earlier on `$PATH` from an old `go install` is the common case; `zordon` warns when the pair does not match.

@@ -49,6 +49,7 @@ nav:
       - Clean up provision side effects: how-to/clean-up-provision-side-effects.md
       - Filter noisy service logs: how-to/filter-noisy-logs.md
       - Install the Claude Code plugin: how-to/install-the-claude-code-plugin.md
+      - Install the MCP bundle: how-to/install-the-mcp-bundle.md
   - Reference:
       - Binaries and layout: reference/binaries.md
       - zordon mcp: reference/mcp.md
