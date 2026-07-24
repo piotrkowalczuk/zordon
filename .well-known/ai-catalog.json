@@ -1,0 +1,30 @@
+{
+  "specVersion": "1.0",
+  "host": {
+    "displayName": "Zordon",
+    "identifier": "did:web:zordon.io",
+    "documentationUrl": "https://zordon.io"
+  },
+  "entries": [
+    {
+      "identifier": "urn:air:zordon.io:runtime:zordon",
+      "displayName": "Zordon — local dev-stack supervisor",
+      "type": "text/markdown",
+      "url": "https://zordon.io/llms.txt",
+      "description": "Local supervisor for the databases, brokers and services a coding agent's stack needs — declared in an Alphasfile, run as host processes. Exposes an MCP server over stdio via `zordon mcp`. Install with `brew install piotrkowalczuk/tap/zordon`, an .mcpb bundle, or the Claude Code plugin.",
+      "capabilities": [
+        "dev-environment-provisioning",
+        "local-service-supervision",
+        "mcp-stdio-server",
+        "workspace-isolation",
+        "provision-execution"
+      ],
+      "representativeQueries": [
+        "spin up a local dev stack for my coding agent",
+        "run databases and services for an AI agent to test against",
+        "provision an isolated workspace for an agent",
+        "manage a local MCP-driven development environment"
+      ]
+    }
+  ]
+}
