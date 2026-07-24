@@ -107,7 +107,7 @@ An invoke also runs immediately (no `after` wait): the parent service is assumed
 
 ## Requirements and scope
 
-- The server resolves the chain from its working directory; launch it inside the project.
+- The server resolves the chain from its working directory — launch it inside the project, or point it at one with `zordon mcp --dir DIR` (also `ZORDON_DIR`).
 - Provision invocation requires a running alpha for that level; the server does not auto-start one.
 - Re-invoking an auto-run provision is allowed (re-run a migration or smoke test on demand); idempotent provisions short-circuit via their `check`.
 

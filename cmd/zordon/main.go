@@ -296,12 +296,19 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 
 	// mcp
 	mcpFlags := ff.NewFlagSet("mcp").SetParent(rootFlags)
+	var mcpDir zfs.DirName
+	mcpFlags.Value(0, "dir", &mcpDir, "project directory to serve — where the tools look for an Alphasfile (env: ZORDON_DIR; defaults to the current directory). Lets a client that does not launch in your project (e.g. a desktop MCP host) still target it.")
 	mcpCmd := &ff.Command{
 		Name:      "mcp",
-		Usage:     "zordon mcp",
+		Usage:     "zordon mcp [--dir DIR]",
 		ShortHelp: "serve an MCP server over stdio: every command plus every provision as a tool",
 		Flags:     mcpFlags,
 		Exec: func(ctx context.Context, args []string) error {
+			if dir := mcpDir.Path(); dir != "" {
+				if err := zfs.Chdir(dir); err != nil {
+					return fmt.Errorf("mcp --dir: %w", err)
+				}
+			}
 			return runMCP(ctx, stdio, zfs.ZordonHome(home.Path()), *agent, testCfg())
 		},
 	}

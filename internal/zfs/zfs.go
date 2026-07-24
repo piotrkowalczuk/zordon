@@ -313,6 +313,10 @@ func ReadDir(name string) ([]os.DirEntry, error) { return os.ReadDir(name) }
 // can drop `import "os"` for this one call.
 func Getwd() (string, error) { return os.Getwd() }
 
+// Chdir changes the current working dir. Thin chokepoint, same reason
+// as Getwd. Errors if dir does not exist or is not a directory.
+func Chdir(dir string) error { return os.Chdir(dir) }
+
 // SystemTempDir returns the OS-wide temp dir ($TMPDIR or /tmp). This
 // is NOT the per-invocation tmp dir — that lives at
 // <SystemTempDir>/zordon-<fsHash>/ and is computed at the call site.

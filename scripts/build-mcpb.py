@@ -95,6 +95,18 @@ def _manifest(version: str, server: dict, platforms: list[str]) -> dict:
         "server": server,
         "tools": TOOLS,
         "tools_generated": True,
+        # A client installing the bundle usually does not launch inside the
+        # project, so the tools would otherwise find no Alphasfile in the
+        # working directory. The project directory is collected at install time
+        # and passed as `zordon mcp --dir`.
+        "user_config": {
+            "project": {
+                "type": "directory",
+                "title": "Project directory",
+                "description": "A directory containing an Alphasfile (the local dev stack to manage).",
+                "required": True,
+            }
+        },
         "compatibility": {"platforms": platforms},
     }
 
@@ -110,7 +122,7 @@ def manifest(version: str, mcpb_platform: str) -> dict:
             "entry_point": "server/zordon",
             "mcp_config": {
                 "command": "${__dirname}/server/zordon",
-                "args": ["mcp"],
+                "args": ["mcp", "--dir", "${user_config.project}"],
                 "env": {
                     "ZORDON_ALPHA": "${__dirname}/server/alpha",
                     "ZORDON_TOMMY_BIN": "${__dirname}/server/tommy",
@@ -130,7 +142,7 @@ def mono_manifest(version: str) -> dict:
         {
             "type": "binary",
             "entry_point": "server/launch",
-            "mcp_config": {"command": "${__dirname}/server/launch", "args": ["mcp"], "env": {}},
+            "mcp_config": {"command": "${__dirname}/server/launch", "args": ["mcp", "--dir", "${user_config.project}"], "env": {}},
         },
         ["darwin", "linux"],
     )

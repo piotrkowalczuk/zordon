@@ -23,11 +23,16 @@ The bundle launches `zordon mcp` as a stdio server.
 
 ## Point it at your project
 
-zordon's MCP tools operate on the `Alphasfile`-managed project in the server's **working directory**.
+zordon's MCP tools operate on one `Alphasfile`-managed project.
 
-Launch the server from a client that runs in your project root.
-When it does, `status`, `start`, and the rest act on that project.
-From a client with no project context, the tools report that no `Alphasfile` was found — that is expected, not a failure.
+The bundle asks for a **project directory** when you install it, and passes it to the server as `zordon mcp --dir`.
+Set it to a directory that contains an `Alphasfile` (or sits under one), and `status`, `start`, and the rest act on that project — regardless of where your client launches the server.
+
+Driving the server yourself instead of through the bundle? Pass the directory explicitly, or omit it to use the current one:
+
+```sh
+zordon mcp --dir /path/to/project
+```
 
 ## Verify
 
