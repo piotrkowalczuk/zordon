@@ -15,6 +15,7 @@ concurrency:
 
 permissions:
   contents: write
+  id-token: write # OIDC auth for the MCP Registry publish (no secret needed)
 
 jobs:
   goreleaser:
@@ -104,6 +105,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${GITHUB_REF_NAME}" dist/*.mcpb --clobber
+      - name: Publish to the MCP Registry
+        # Stamp server.json with this release's version, the universal bundle's
+        # download URL, and its checksum, then publish. OIDC proves the
+        # io.github.piotrkowalczuk namespace, so no secret is needed. Runs after
+        # the bundle is on the release, since the registry fetches and verifies
+        # it. Skipped on the workflow_dispatch dry run.
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          bundle="zordon_${version}_universal.mcpb"
+          url="https://github.com/piotrkowalczuk/zordon/releases/download/${GITHUB_REF_NAME}/${bundle}"
+          sha="$(sha256sum "dist/${bundle}" | cut -d' ' -f1)"
+          jq --arg v "$version" --arg url "$url" --arg sha "$sha" \
+            '.version=$v | .packages[0].identifier=$url | .packages[0].fileSha256=$sha' \
+            server.json > server.published.json && mv server.published.json server.json
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
       - uses: actions/upload-artifact@v4
         if: always()
         with:
