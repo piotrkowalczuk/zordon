@@ -121,6 +121,7 @@ release.check:
 # Full release build into dist/ without tagging or publishing anything.
 release.snapshot:
 	goreleaser release --snapshot --clean
+	python3 scripts/build-mcpb.py --dist dist
 
 
 clean:
