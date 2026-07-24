@@ -12,6 +12,8 @@ Grab the matching `.mcpb` from the [latest release](https://github.com/piotrkowa
 - `zordon_<version>_linux_amd64.mcpb`
 - `zordon_<version>_linux_arm64.mcpb`
 
+Or grab `zordon_<version>_universal.mcpb` — one larger bundle that carries every platform and picks the right one at launch, if you would rather not match your platform by hand.
+
 Each bundle is self-contained: it carries the `zordon`, `alpha`, and `tommy` binaries, so nothing else needs to be on your `$PATH`.
 
 ## Install it into your client

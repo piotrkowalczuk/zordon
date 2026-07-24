@@ -71,17 +71,27 @@ jobs:
             echo "ok $archive"
           done
       - name: Build MCP bundles
-        # Repackage the signed release binaries as one .mcpb per platform, so
-        # zordon's MCP server is installable in any mcpb-supporting client.
-        # Reads from the tarballs above, so a bundle can never contain a
-        # differently-built binary than the tarball for its platform.
+        # Repackage the signed release binaries into .mcpb: one per platform
+        # plus one universal bundle for the MCP Registry. Reads from the
+        # tarballs above, so a bundle can never contain a differently-built
+        # binary than the tarball for its platform.
         run: python3 scripts/build-mcpb.py --dist dist
-      - name: Verify every bundle carries manifest and all three binaries
+      - name: Verify every bundle carries manifest and all binaries
         run: |
           set -euo pipefail
+          platforms="darwin_arm64 darwin_amd64 linux_amd64 linux_arm64"
           for bundle in dist/zordon_*.mcpb; do
             listing=$(unzip -Z1 "$bundle")
-            for entry in manifest.json server/zordon server/alpha server/tommy; do
+            case "$bundle" in
+              *_universal.mcpb)
+                entries="manifest.json server/launch"
+                for p in $platforms; do
+                  for b in zordon alpha tommy; do entries="$entries server/$p/$b"; done
+                done ;;
+              *)
+                entries="manifest.json server/zordon server/alpha server/tommy" ;;
+            esac
+            for entry in $entries; do
               grep -qx "$entry" <<<"$listing" \
                 || { echo "$bundle is missing $entry"; exit 1; }
             done
