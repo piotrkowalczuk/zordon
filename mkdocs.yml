@@ -25,6 +25,25 @@ theme:
         icon: material/weather-sunny
         name: Switch to light mode
 
+# Analytics loads only once consent is granted; the copyright link below is how
+# a visitor withdraws it afterwards.
+copyright: >
+  <a href="#__consent">Change cookie settings</a>
+
+extra:
+  analytics:
+    provider: google
+    property: G-HSVQ91KVP2
+  consent:
+    title: Cookie consent
+    description: >-
+      We use cookies to measure how this documentation is used and whether
+      readers find what they came for. Analytics stay off until you accept.
+    actions:
+      - accept
+      - reject
+      - manage
+
 nav:
   - Overview: index.md
   - Getting started: getting-started.md

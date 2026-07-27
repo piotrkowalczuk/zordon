@@ -45,6 +45,19 @@ jobs:
         run: |
           test -f "_site/${INDEXNOW_KEY}.txt"
           test "$(cat "_site/${INDEXNOW_KEY}.txt")" = "$INDEXNOW_KEY"
+      # The gate is the point: without it the tag would load before consent.
+      - name: Verify the analytics tag is published and consent-gated
+        run: |
+          python3 -c "
+          import pathlib, re
+          tag = re.search(r'property: (G-[A-Z0-9]+)', pathlib.Path('mkdocs.yml').read_text()).group(1)
+          pages = list(pathlib.Path('_site').rglob('*.html'))
+          assert pages, 'site has no HTML pages'
+          for what, needle in (('analytics tag', tag), ('consent gate', 'consent.analytics&&__md_analytics()'), ('consent banner', 'md-consent')):
+              missing = [str(p) for p in pages if needle not in p.read_text()]
+              assert not missing, f'{what} missing from: {missing}'
+          print(f'analytics: verified {tag} is consent-gated on {len(pages)} page(s)')
+          "
       - name: Verify agent-facing artifacts are published
         run: |
           test -s _site/llms.txt
