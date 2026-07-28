@@ -1,3 +1,9 @@
+---
+description: "Run several isolated copies of one stack side by side, each with its own state dir, its own picked ports and its own per-service git worktrees."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/workspaces/">https://zordon.io/workspaces/</a></div>
+
 # Workspaces
 
 Every run of zordon happens in a *workspace*. The project root is the

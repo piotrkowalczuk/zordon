@@ -1,3 +1,9 @@
+---
+description: "Declare a standalone CLI such as atlas under `toolchain { pkg { tools } }`, put it on PATH, and drive it from a provision."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/how-to/install-a-cli-tool-with-mise/">https://zordon.io/how-to/install-a-cli-tool-with-mise/</a></div>
+
 # Install a CLI tool from a mise package (e.g. atlas)
 
 You need a command-line tool — `atlas`, `sqlc`, `golang-migrate`, `dbmate` — during setup, but it is neither a service you supervise nor a tool of some language runtime.

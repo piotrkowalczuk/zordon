@@ -1,3 +1,9 @@
+---
+description: "Declare a `clean` snippet beside a provision's `cmd` so `zordon clean` can drop the databases, topics and files that provision created."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/how-to/clean-up-provision-side-effects/">https://zordon.io/how-to/clean-up-provision-side-effects/</a></div>
+
 # Clean up a provision's side effects
 
 A provision's `cmd` often creates state that outlives the stack: a database, a Kafka topic, generated files, a marker.

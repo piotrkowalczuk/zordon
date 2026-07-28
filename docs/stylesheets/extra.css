@@ -1,0 +1,6 @@
+/* The canonical banner at the top of every page exists for GitHub, which
+   renders docs/*.md itself and cannot be given a rel=canonical. On the
+   built site it is redundant — the page already IS the canonical URL. */
+.gh-canonical {
+  display: none;
+}

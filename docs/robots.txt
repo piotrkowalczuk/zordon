@@ -1,0 +1,13 @@
+User-agent: *
+Allow: /
+
+# The llms.txt corpus reproduces every page's content as one plain-text
+# document, which cannot carry a canonical tag. Left crawlable it competes
+# with the pages it mirrors. Agents fetch it directly via the
+# `link: rel="service-doc"` header, which robots.txt does not affect.
+Disallow: /llms.txt
+Disallow: /llms-full.txt
+
+Sitemap: https://zordon.io/sitemap.xml
+
+# Cloudflare appends its managed content-signals block below this line.

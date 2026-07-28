@@ -1,3 +1,9 @@
+---
+description: "The chain, the level, the workspace and the invocation — the implicit entities zordon is built from, none of which appear in the Alphasfile itself."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/concepts/">https://zordon.io/concepts/</a></div>
+
 # Concepts
 
 Most of what shapes a run never appears in the Alphasfile. These are the

@@ -5,8 +5,12 @@ repo_url: https://github.com/piotrkowalczuk/zordon
 repo_name: piotrkowalczuk/zordon
 edit_uri: edit/main/docs/
 
+extra_css:
+  - stylesheets/extra.css
+
 theme:
   name: material
+  custom_dir: overrides
   features:
     - navigation.instant
     - navigation.sections

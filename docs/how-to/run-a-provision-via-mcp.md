@@ -1,3 +1,9 @@
+---
+description: "Expose a latent provision as an MCP tool and invoke it on demand inside the live supervisor, without restarting the stack."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/how-to/run-a-provision-via-mcp/">https://zordon.io/how-to/run-a-provision-via-mcp/</a></div>
+
 # How to run a provision via MCP
 
 This recipe runs a single provision on demand from an MCP client, without bringing the rest of the stack up or down.

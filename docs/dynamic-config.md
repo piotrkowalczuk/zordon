@@ -1,3 +1,9 @@
+---
+description: "Alphasfile expressions evaluate as a DAG, so one service can read another's resolved port, path or generated file with no shell glue."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/dynamic-config/">https://zordon.io/dynamic-config/</a></div>
+
 # Dynamic configuration
 
 The `Alphasfile` is evaluated as a DAG before bringup: expressions in one
