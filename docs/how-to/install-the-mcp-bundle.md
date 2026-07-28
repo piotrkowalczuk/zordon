@@ -1,3 +1,9 @@
+---
+description: "Register zordon's MCP server in an MCP client other than Claude Code by installing the `.mcpb` bundle for your platform."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/how-to/install-the-mcp-bundle/">https://zordon.io/how-to/install-the-mcp-bundle/</a></div>
+
 # How to install the MCP bundle
 
 Use this to register zordon's MCP server in a client that is not Claude Code but supports MCP Bundles (`.mcpb`) — for example an editor agent that runs in your project.

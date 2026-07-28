@@ -1,3 +1,9 @@
+---
+description: "Register the zordon plugin marketplace in Claude Code so the MCP server and its skill load without hand-editing `.mcp.json`."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/how-to/install-the-claude-code-plugin/">https://zordon.io/how-to/install-the-claude-code-plugin/</a></div>
+
 # How to install the zordon Claude Code plugin
 
 Make sure you have `zordon` on your `PATH` first — `brew install piotrkowalczuk/tap/zordon` on macOS, or a release tarball elsewhere.

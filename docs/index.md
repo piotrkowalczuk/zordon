@@ -1,6 +1,9 @@
 ---
 title: A process supervisor for local agentic workflows
+description: "Zordon supervises your local stack — databases, brokers, proxies, services — as ordinary host processes instead of containers, declared in one Alphasfile."
 ---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/">https://zordon.io/</a></div>
 
 # Overview
 

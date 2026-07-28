@@ -1,3 +1,9 @@
+---
+description: "Ruby services install their gems into a per-checkout vendor path with bundler, then run through an explicit command — there is no binary to infer."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/services/ruby/">https://zordon.io/services/ruby/</a></div>
+
 # Ruby services
 
 ```hcl

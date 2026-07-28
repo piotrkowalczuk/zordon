@@ -1,3 +1,9 @@
+---
+description: "Source a Go service from git or a local checkout, point `exe` at the main package, and let zordon build and supervise the binary."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/services/go/">https://zordon.io/services/go/</a></div>
+
 # Go services
 
 ```hcl

@@ -1,3 +1,9 @@
+---
+description: "The HCL2 document declaring every service — block labels, source shapes, arguments, readiness probes, provisions and generated files."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/alphasfile/">https://zordon.io/alphasfile/</a></div>
+
 # Alphasfile
 
 The `Alphasfile` is a single HCL2 document. Each service is a two-label

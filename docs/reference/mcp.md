@@ -1,3 +1,9 @@
+---
+description: "Reference for the MCP server zordon serves over stdio — transport, discoverability, and the tools generated from declared provisions."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/reference/mcp/">https://zordon.io/reference/mcp/</a></div>
+
 # `zordon mcp`
 
 `zordon mcp` serves a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio.

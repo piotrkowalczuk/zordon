@@ -1,3 +1,9 @@
+---
+description: "Grammar of the per-service log filter: the variables, operators, severity comparisons and functions available inside a predicate."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/reference/log-filter/">https://zordon.io/reference/log-filter/</a></div>
+
 # Log filter DSL
 
 A per-service `log { filter = "<expression>" }` drops log lines at the source.

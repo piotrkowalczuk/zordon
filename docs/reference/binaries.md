@@ -1,3 +1,9 @@
+---
+description: "What zordon, alpha and tommy each do, how they resolve one another through PATH, and why all three must share a single directory."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/reference/binaries/">https://zordon.io/reference/binaries/</a></div>
+
 # Binaries and layout
 
 A zordon installation is three executables.

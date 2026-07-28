@@ -1,3 +1,9 @@
+---
+description: "Three binaries and a unix control socket, with a strict split between resolving configuration purely and running it effectfully."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/architecture/">https://zordon.io/architecture/</a></div>
+
 # Architecture
 
 Three binaries, a unix-domain control socket, and a strict split between

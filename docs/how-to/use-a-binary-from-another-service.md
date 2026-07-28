@@ -1,3 +1,9 @@
+---
+description: "Reach a binary shipped by a different service's package or another toolchain using `fs::service::bin` and `env::prepend`."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/how-to/use-a-binary-from-another-service/">https://zordon.io/how-to/use-a-binary-from-another-service/</a></div>
+
 # Use a binary from another service or toolchain
 
 A provision runs with only its own service's toolchain bin dir on `PATH`.

@@ -1,3 +1,9 @@
+---
+description: "Node.js services build from a repo or local directory, infer their run command from `package.json` scripts, and take their port from env."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/services/nodejs/">https://zordon.io/services/nodejs/</a></div>
+
 # Node.js services
 
 ```hcl

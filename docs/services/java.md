@@ -1,3 +1,9 @@
+---
+description: "Java services clone a repository, build through its committed Maven or Gradle wrapper, and run the resulting jar under a mise-installed JDK."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/services/java/">https://zordon.io/services/java/</a></div>
+
 # Java services
 
 ```hcl

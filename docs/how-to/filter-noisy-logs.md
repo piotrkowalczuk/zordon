@@ -1,3 +1,9 @@
+---
+description: "Drop stack-trace frames, debug chatter and health-check noise at the source with a per-service log filter expression."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/how-to/filter-noisy-logs/">https://zordon.io/how-to/filter-noisy-logs/</a></div>
+
 # Filter noisy service logs
 
 A talkative service can bury the output you care about.

@@ -1,3 +1,9 @@
+---
+description: "Install zordon, alpha and tommy, write a first Alphasfile, and bring a real two-service stack up with a single command."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/getting-started/">https://zordon.io/getting-started/</a></div>
+
 # Getting started
 
 ## Install

@@ -1,3 +1,9 @@
+---
+description: "Shared infrastructure lives above your project: zordon walks up from the invocation directory and brings the whole Alphasfile chain up root-first."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/federation/">https://zordon.io/federation/</a></div>
+
 # Federation
 
 A project rarely needs its stack in isolation. Shared infrastructure —

@@ -1,3 +1,9 @@
+---
+description: "Two source shapes for Rust — a crate installed from a registry or git URL, or a zordon-managed checkout built with `cargo install --path`."
+---
+
+<div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/services/rust/">https://zordon.io/services/rust/</a></div>
+
 # Rust services
 
 Rust has two source shapes — a **crate** (`cargo install` from a
