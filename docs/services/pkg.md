@@ -1,11 +1,11 @@
 ---
-title: "Package (pkg) services"
+title: "Run a native package as a supervised service"
 description: "Run an off-the-shelf native binary — redis, postgres, etcd — installed by mise and supervised as an ordinary child process, with no container."
 ---
 
 <div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/services/pkg/">https://zordon.io/services/pkg/</a></div>
 
-# Package (`pkg`) services
+# Run a native package as a supervised service
 
 ```hcl
 service "pkg" "redis" {

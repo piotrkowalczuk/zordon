@@ -1,11 +1,11 @@
 ---
-title: "Java services"
+title: "Define a Java service built by its wrapper"
 description: "Java services clone a repository, build through its committed Maven or Gradle wrapper, and run the resulting jar under a mise-installed JDK."
 ---
 
 <div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/services/java/">https://zordon.io/services/java/</a></div>
 
-# Java services
+# Define a Java service built by its wrapper
 
 ```hcl
 toolchain { java { version = "temurin-21.0.5+11.0.LTS" } }
