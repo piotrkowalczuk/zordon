@@ -1,4 +1,5 @@
 ---
+title: "Package (pkg) services"
 description: "Run an off-the-shelf native binary — redis, postgres, etcd — installed by mise and supervised as an ordinary child process, with no container."
 ---
 

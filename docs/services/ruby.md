@@ -1,4 +1,5 @@
 ---
+title: "Ruby services"
 description: "Ruby services install their gems into a per-checkout vendor path with bundler, then run through an explicit command — there is no binary to infer."
 ---
 

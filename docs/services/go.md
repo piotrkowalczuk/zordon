@@ -1,4 +1,5 @@
 ---
+title: "Go services"
 description: "Source a Go service from git or a local checkout, point `exe` at the main package, and let zordon build and supervise the binary."
 ---
 

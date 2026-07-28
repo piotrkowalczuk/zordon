@@ -1,4 +1,5 @@
 ---
+title: "Rust services"
 description: "Two source shapes for Rust — a crate installed from a registry or git URL, or a zordon-managed checkout built with `cargo install --path`."
 ---
 
