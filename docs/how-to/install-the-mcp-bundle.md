@@ -1,5 +1,5 @@
 ---
-description: "Register zordon's MCP server in an MCP client other than Claude Code by installing the `.mcpb` bundle for your platform."
+description: "Register zordon's MCP server in an MCP client other than Claude Code by installing the .mcpb bundle for your platform."
 ---
 
 <div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/how-to/install-the-mcp-bundle/">https://zordon.io/how-to/install-the-mcp-bundle/</a></div>

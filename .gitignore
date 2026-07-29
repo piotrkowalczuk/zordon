@@ -27,3 +27,6 @@ alpha.log
 /zordon
 /alpha
 /tommy
+
+# Python bytecode from the MkDocs build hook.
+__pycache__/

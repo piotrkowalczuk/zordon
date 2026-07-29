@@ -1,5 +1,5 @@
 ---
-description: "Declare a `clean` snippet beside a provision's `cmd` so `zordon clean` can drop the databases, topics and files that provision created."
+description: "Declare a clean snippet beside a provision's cmd so zordon clean can drop the databases, topics and files that provision created."
 ---
 
 <div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/how-to/clean-up-provision-side-effects/">https://zordon.io/how-to/clean-up-provision-side-effects/</a></div>
