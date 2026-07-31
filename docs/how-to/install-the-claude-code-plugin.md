@@ -1,5 +1,5 @@
 ---
-description: "Register the zordon plugin marketplace in Claude Code so the MCP server and its skill load without hand-editing `.mcp.json`."
+description: "Register the zordon plugin marketplace in Claude Code so the MCP server and its skill load without hand-editing .mcp.json."
 ---
 
 <div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/how-to/install-the-claude-code-plugin/">https://zordon.io/how-to/install-the-claude-code-plugin/</a></div>

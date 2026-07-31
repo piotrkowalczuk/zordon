@@ -1,5 +1,5 @@
 ---
-description: "What happens between `zordon start` and a READY stack: chain discovery, per-level locks, the Configure handshake, then reconfigure and stop."
+description: "What happens between zordon start and a READY stack: chain discovery, per-level locks, the Configure handshake, then reconfigure and stop."
 ---
 
 <div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/lifecycle/">https://zordon.io/lifecycle/</a></div>

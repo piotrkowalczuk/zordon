@@ -1,5 +1,5 @@
 ---
-description: "Declare a standalone CLI such as atlas under `toolchain { pkg { tools } }`, put it on PATH, and drive it from a provision."
+description: "Declare a standalone CLI such as atlas under the toolchain pkg tools block, put it on PATH, and drive it from a provision."
 ---
 
 <div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/how-to/install-a-cli-tool-with-mise/">https://zordon.io/how-to/install-a-cli-tool-with-mise/</a></div>

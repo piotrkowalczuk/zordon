@@ -1,3 +1,7 @@
+# Cloudflare PREPENDS its managed content-signals block above everything here
+# (it blocks AI crawlers; Googlebot is not among them). That leaves two
+# `User-agent: *` groups in the served file — Google merges same-agent groups
+# per RFC 9309, so the rules below do apply.
 User-agent: *
 Allow: /
 
@@ -9,5 +13,3 @@ Disallow: /llms.txt
 Disallow: /llms-full.txt
 
 Sitemap: https://zordon.io/sitemap.xml
-
-# Cloudflare appends its managed content-signals block below this line.
