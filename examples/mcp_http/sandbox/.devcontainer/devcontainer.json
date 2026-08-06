@@ -10,18 +10,40 @@
     "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
   },
 
-  // Pins one hostname for the host across runtimes, so ../.mcp.json never has
-  // to change. Docker Desktop provides host.docker.internal on its own; on
-  // Linux this is what creates it.
-  "runArgs": ["--add-host=host.docker.internal:host-gateway"],
+  "runArgs": [
+    // Pins one hostname for the host across runtimes, so ../.mcp.json never
+    // has to change. Docker Desktop provides host.docker.internal on its own;
+    // on Linux this is what creates it.
+    "--add-host=host.docker.internal:host-gateway",
+
+    // Credential pass-through for non-interactive use (CI, or a machine that
+    // has already exported one). `--env NAME` with no value forwards the
+    // variable only when the host has it set, and leaves it unset otherwise —
+    // unlike containerEnv, which would inject an empty string and mask the
+    // interactive OAuth path.
+    "--env",
+    "ANTHROPIC_API_KEY",
+    "--env",
+    "CLAUDE_CODE_OAUTH_TOKEN"
+  ],
 
   "containerEnv": {
     // Read by the SessionStart preflight hook; keep in step with ../.mcp.json.
     "ZORDON_MCP_URL": "http://host.docker.internal:7391/mcp",
+
     // Keeps .claude.json — which holds MCP approvals and per-project trust —
-    // inside the mounted volume, so a rebuild does not throw them away.
+    // inside the volume below, instead of the container's throwaway home.
+    //
+    // This path and the mount target must match remoteUser's home, and the
+    // spec offers no way to derive it: ${containerEnv:HOME} is legal only in
+    // remoteEnv, not in mounts. So both are spelled out, and both have to
+    // change together if you swap the base image or remoteUser.
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
   },
+
+  // Local convenience only: it saves signing in again after every rebuild.
+  // A CI runner starts from nothing, so the volume is empty there and the
+  // credential pass-through above is what authenticates instead.
   "mounts": [
     "source=claude-code-config-${devcontainerId},target=/home/vscode/.claude,type=volume"
   ],

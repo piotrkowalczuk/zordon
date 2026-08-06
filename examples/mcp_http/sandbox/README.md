@@ -46,11 +46,20 @@ zordon mcp --transport=http --listen 127.0.0.1:7391 --allow-host host.docker.int
 `--allow-host` is required.
 A loopback listener otherwise accepts only a loopback `Host` header (DNS-rebinding protection) and this container dials by name, so every request would come back `403`.
 
+## Authentication
+
+Two paths, and the config supports both without a file to maintain:
+
+- **Interactively** — run `claude` and sign in once. The named volume keeps `~/.claude` (and `.claude.json` with it, via `CLAUDE_CONFIG_DIR`) across rebuilds, so you do not repeat it.
+- **Non-interactively, including CI** — export `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` on the host or runner. `runArgs` forwards them with `--env NAME`, which passes a variable through only when it is actually set and leaves it unset otherwise. An empty value would be worse than none: it would mask the interactive path.
+
+The volume is local convenience, not a requirement. A CI runner starts from nothing, so it is empty there and the token is what authenticates.
+
 ## Adjusting it
 
 - **Your own project** — copy this directory's contents to your project root. The default project dir is the folder holding `.devcontainer`, and zordon walks up from there for an `Alphasfile`, so it needs no edit. Override with `ZORDON_MCP_DIR` if you want another.
 - **Port or hostname** — `ZORDON_MCP_PORT` and `ZORDON_MCP_ALLOW_HOST` steer the host script; keep the url in `.mcp.json` and `ZORDON_MCP_URL` in `devcontainer.json` in step with them.
-- **Home directory** — `containerEnv` and `mounts` assume `remoteUser: vscode`. Change both paths together if you switch the base image.
+- **Home directory** — `CLAUDE_CONFIG_DIR` and the mount target both spell out `/home/vscode`, the home of this image's `remoteUser`. They **must change together** if you switch image or user, and the spec offers no way to derive it: `${containerEnv:HOME}` is legal only in `remoteEnv`, not in `mounts`.
 - **Egress firewall** — if you adopt the reference container's `init-firewall.sh`, allowlist the host address, or the container will not reach this endpoint.
 
 ## Caveats
