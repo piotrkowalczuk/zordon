@@ -41,7 +41,7 @@ func TestExample_mcpHTTP(t *testing.T) {
 		t.Fatalf("vars resolved empty: seed=%q port=%q", seedPath, port)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
 
 	// Port 0: the server binds an ephemeral port and announces the resolved
@@ -147,11 +147,15 @@ func startMCPHTTP(t *testing.T, p *zordontest.Project, listen string) (string, f
 		if m := listenURLRe.FindString(errBuf.String()); m != "" {
 			return m, errBuf.String
 		}
-		// A server that died (stale binary on $PATH, port taken, bad flag) has
-		// already said why on stderr — report that instead of the deadline.
+		// A server that died (port taken, bad flag, binary too old) has already
+		// said why on stderr — report that instead of waiting out the deadline.
 		select {
 		case <-exited:
-			t.Fatalf("zordon mcp exited before announcing its URL: %v\nstderr:\n%s", waitErr, errBuf.String())
+			hint := ""
+			if strings.Contains(errBuf.String(), "unknown flag") {
+				hint = "\n\nthat binary predates this test's flags — run `make build`, or point $ZORDON_BIN at a current build."
+			}
+			t.Fatalf("zordon mcp (%s) exited before announcing its URL: %v%s\nstderr:\n%s", cmd.Path, waitErr, hint, errBuf.String())
 		default:
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -261,14 +265,23 @@ func thisDir() string {
 	return filepath.Dir(here)
 }
 
+// zordonBin resolves the binary under test, preferring the repo's own build
+// over anything installed globally. A `zordon` on $PATH is easily older than
+// the tree being tested, and the resulting failure reads as a broken feature
+// rather than a stale binary — so $PATH is the last resort, not the first.
+// This mirrors ZORDON_TEST_ENV in the Makefile, which is what `make test.unit`
+// sets.
 func zordonBin(t *testing.T) string {
 	t.Helper()
 	if v, ok := zenv.Lookup("ZORDON_BIN"); ok && v != "" {
 		return v
 	}
+	if repoBin := filepath.Join(thisDir(), "..", "..", "bin", "zordon"); zfs.IsExecutableFile(repoBin) {
+		return repoBin
+	}
 	bin, err := exec.LookPath("zordon")
 	if err != nil {
-		t.Fatalf("zordon binary not found: set $ZORDON_BIN or `go install ./cmd/zordon`")
+		t.Fatalf("zordon binary not found: run `make build`, or set $ZORDON_BIN")
 	}
 	return bin
 }

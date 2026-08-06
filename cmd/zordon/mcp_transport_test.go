@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"io"
 	"strings"
 	"testing"
@@ -169,5 +168,5 @@ func TestMCP_listenWildcard(t *testing.T) {
 func runMCPArgs(t *testing.T, args ...string) error {
 	t.Helper()
 	root, _ := buildRootCommand(commandIO{Stdout: io.Discard, Stderr: io.Discard})
-	return root.ParseAndRun(context.Background(), append([]string{"mcp"}, args...), ff.WithEnvVarPrefix("ZORDON"))
+	return root.ParseAndRun(t.Context(), append([]string{"mcp"}, args...), ff.WithEnvVarPrefix("ZORDON"))
 }
