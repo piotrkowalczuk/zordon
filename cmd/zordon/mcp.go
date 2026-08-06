@@ -158,13 +158,6 @@ func validateMCPAllowHosts(transport string, allowHosts []string) error {
 // spawn host processes nor reach alpha's unix socket — can drive the stack with
 // nothing but a URL. Every tool still executes here, host-side.
 func serveMCPHTTP(ctx context.Context, log *zlog.Logger, srv *mcp.Server, addr string, allowHosts []string) error {
-	handler := mcp.NewStreamableHTTPHandler(
-		func(*http.Request) *mcp.Server { return srv },
-		// The SDK's own guard is replaced by checkHost below, which enforces
-		// the same rule and additionally honors --allow-host.
-		&mcp.StreamableHTTPOptions{SessionTimeout: mcpSessionTimeout, DisableLocalhostProtection: true},
-	)
-
 	// Bind before announcing: --listen with port 0 only learns its port here,
 	// and the logged URL is what the operator pastes into a client config.
 	ln, err := net.Listen("tcp", addr)
@@ -173,9 +166,6 @@ func serveMCPHTTP(ctx context.Context, log *zlog.Logger, srv *mcp.Server, addr s
 	}
 	boundHost := hostOnly(ln.Addr().String())
 	loopback := isLoopbackHost(boundHost)
-
-	mux := http.NewServeMux()
-	mux.Handle(mcpHTTPPath, checkHost(handler, loopback, allowHosts))
 
 	log.Info("mcp", "serving over http on http://%s%s", ln.Addr(), mcpHTTPPath)
 	if !loopback {
@@ -189,7 +179,7 @@ func serveMCPHTTP(ctx context.Context, log *zlog.Logger, srv *mcp.Server, addr s
 	// streams and either would sever one mid-provision. ReadHeaderTimeout is
 	// what bounds a slow-header client.
 	httpSrv := &http.Server{
-		Handler:           mux,
+		Handler:           mcpHandler(srv, loopback, allowHosts),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -211,6 +201,21 @@ func serveMCPHTTP(ctx context.Context, log *zlog.Logger, srv *mcp.Server, addr s
 		return fmt.Errorf("mcp http: %w", err)
 	}
 	return nil
+}
+
+// mcpHandler is the served HTTP surface: the streamable transport at /mcp,
+// behind the Host guard, and nothing else. Kept apart from binding and serving
+// so the guard can be exercised over a test server rather than a real listener.
+func mcpHandler(srv *mcp.Server, listenerLoopback bool, allowHosts []string) http.Handler {
+	handler := mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return srv },
+		// The SDK's own guard is switched off in favour of checkHost, which
+		// enforces the same rule and additionally honors --allow-host.
+		&mcp.StreamableHTTPOptions{SessionTimeout: mcpSessionTimeout, DisableLocalhostProtection: true},
+	)
+	mux := http.NewServeMux()
+	mux.Handle(mcpHTTPPath, checkHost(handler, listenerLoopback, allowHosts))
+	return mux
 }
 
 // checkHost is DNS-rebinding protection, widened by --allow-host. A browser on

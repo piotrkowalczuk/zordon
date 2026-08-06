@@ -285,11 +285,23 @@ func resolveZordonBinary(t *testing.T) string {
 	if v := os.Getenv("ZORDON_BIN"); v != "" {
 		return v
 	}
+	// Prefer this tree's own build over a globally installed zordon, which is
+	// easily older: a bare `go test` would otherwise drive a stale binary and
+	// the failure reads as a broken feature rather than an outdated install.
+	// Mirrors ZORDON_TEST_ENV, which is what `make test.unit` already sets.
+	if repoBin := filepath.Join(repoRoot(t), "bin", "zordon"); isExecutable(repoBin) {
+		return repoBin
+	}
 	bin, err := exec.LookPath("zordon")
 	if err != nil {
-		t.Fatalf("zordon binary not found: set $ZORDON_BIN or `go install ./cmd/zordon` first")
+		t.Fatalf("zordon binary not found: run `make build`, or set $ZORDON_BIN")
 	}
 	return bin
+}
+
+func isExecutable(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
 }
 
 // DefaultHome is the shared ZORDON_HOME path the harness gives every

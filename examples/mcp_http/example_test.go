@@ -1,31 +1,27 @@
-// Package example_test runs the mcp_http example as a conformance test: it
+// Package example_test runs the mcp_http example against a live stack: it
 // brings the example up, then drives `zordon mcp --transport=http` with a real
-// MCP client over the streamable-HTTP transport and asserts the contracts the
-// Alphasfile claims —
+// MCP client and asserts the contracts the Alphasfile claims —
 //
 //   - a client holding nothing but a URL gets the same tool set as a stdio
 //     client: every zordon command plus every provision in the resolved chain;
 //   - typed provision arguments survive the HTTP hop and reach the shell;
 //   - a failed invoke over HTTP is reported WITHOUT tearing alpha down, the
 //     same guarantee the stdio server makes.
+//
+// The transport's own contract — the address it announces, the /mcp mount and
+// the Host guard — needs no stack and lives in tests/conformance/mcp_http_test.go.
 package example_test
 
 import (
 	"context"
-	"net/http"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
-	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
 )
@@ -44,14 +40,14 @@ func TestExample_mcpHTTP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
 
-	// Port 0: the server binds an ephemeral port and announces the resolved
-	// URL, which is the only thing a remote client needs.
-	url, stderr := startMCPHTTP(t, p, "127.0.0.1:0")
+	// The harness binds an ephemeral port and hands back the announced URL —
+	// the only thing a remote client ever needs.
+	srv := p.MCPHTTP(t)
 
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "zordon-test", Version: "0.0.1"}, nil).
-		Connect(ctx, &mcp.StreamableClientTransport{Endpoint: url}, nil)
+		Connect(ctx, &mcp.StreamableClientTransport{Endpoint: srv.URL()}, nil)
 	if err != nil {
-		t.Fatalf("connect mcp over http: %v\nstderr:\n%s", err, stderr())
+		t.Fatalf("connect mcp over http: %v\nstderr:\n%s", err, srv.Stderr())
 	}
 	defer cs.Close()
 
@@ -65,7 +61,7 @@ func TestExample_mcpHTTP(t *testing.T) {
 	tools := listTools(ctx, t, cs)
 	for _, want := range []string{"start", "status", "stop", "get", "plan", "workspace", "sudo", "clean"} {
 		if tools[want] == nil {
-			t.Errorf("tools/list missing command tool %q\n%s", want, stderr())
+			t.Errorf("tools/list missing command tool %q\n%s", want, srv.Stderr())
 		}
 	}
 	if tools["mcp"] != nil {
@@ -73,7 +69,7 @@ func TestExample_mcpHTTP(t *testing.T) {
 	}
 	for _, want := range []string{"provision__go_app__seed-data", "provision__go_app__boom"} {
 		if tools[want] == nil {
-			t.Errorf("tools/list missing provision tool %q\n%s", want, stderr())
+			t.Errorf("tools/list missing provision tool %q\n%s", want, srv.Stderr())
 		}
 	}
 
@@ -101,89 +97,6 @@ func TestExample_mcpHTTP(t *testing.T) {
 	if st := callTool(ctx, t, cs, "status", nil); st.IsError || !strings.Contains(resultText(st), "app") {
 		t.Errorf("alpha not healthy after a FAILING invoke (failfast leaked into invoke?):\n%s", resultText(st))
 	}
-
-	// (5) The handler is mounted at /mcp only; anything else is a 404, so a
-	// misconfigured client URL fails loudly instead of hanging.
-	assertNotFound(ctx, t, strings.TrimSuffix(url, "/mcp")+"/")
-}
-
-// startMCPHTTP spawns `zordon mcp --transport=http` against the project (same
-// ZORDON_HOME and cwd as the running alpha) and returns the URL it announced
-// plus a getter for its stderr. Learning the URL from the log is what makes an
-// ephemeral port usable, and it pins the announcement as a contract.
-func startMCPHTTP(t *testing.T, p *zordontest.Project, listen string) (string, func() string) {
-	t.Helper()
-	cmd := exec.Command(zordonBin(t), "mcp", "--transport=http", "--listen", listen)
-	cmd.Dir = p.Dir()
-	cmd.Env = mcpEnv(p.Home())
-	errBuf := &syncBuffer{}
-	cmd.Stderr = errBuf
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start zordon mcp --transport=http: %v", err)
-	}
-
-	// One owner for Wait; closing exited publishes waitErr to every reader.
-	var waitErr error
-	exited := make(chan struct{})
-	go func() {
-		waitErr = cmd.Wait()
-		close(exited)
-	}()
-
-	t.Cleanup(func() {
-		// SIGTERM first so the server takes its graceful-shutdown path; fall
-		// back to a kill if it does not go.
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case <-exited:
-		case <-time.After(10 * time.Second):
-			_ = cmd.Process.Kill()
-			<-exited
-		}
-	})
-
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if m := listenURLRe.FindString(errBuf.String()); m != "" {
-			return m, errBuf.String
-		}
-		// A server that died (port taken, bad flag, binary too old) has already
-		// said why on stderr — report that instead of waiting out the deadline.
-		select {
-		case <-exited:
-			hint := ""
-			if strings.Contains(errBuf.String(), "unknown flag") {
-				hint = "\n\nthat binary predates this test's flags — run `make build`, or point $ZORDON_BIN at a current build."
-			}
-			t.Fatalf("zordon mcp (%s) exited before announcing its URL: %v%s\nstderr:\n%s", cmd.Path, waitErr, hint, errBuf.String())
-		default:
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("zordon mcp never announced its URL within 30s\nstderr:\n%s", errBuf.String())
-	return "", errBuf.String
-}
-
-// listenURLRe matches the address line serveMCPHTTP logs once bound.
-var listenURLRe = regexp.MustCompile(`http://[^\s]+/mcp`)
-
-// syncBuffer collects the server's stderr while the test polls it for the
-// announced URL, so the writing and reading goroutines do not race.
-type syncBuffer struct {
-	mu sync.Mutex
-	b  strings.Builder
-}
-
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.String()
 }
 
 func listTools(ctx context.Context, t *testing.T, cs *mcp.ClientSession) map[string]*mcp.Tool {
@@ -210,23 +123,6 @@ func callTool(ctx context.Context, t *testing.T, cs *mcp.ClientSession, name str
 	return res
 }
 
-func assertNotFound(ctx context.Context, t *testing.T, url string) {
-	t.Helper()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatalf("build request for %s: %v", url, err)
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	res, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusNotFound {
-		t.Errorf("GET %s = %d; want 404 (the handler is mounted at /mcp only)", url, res.StatusCode)
-	}
-}
-
 func resultText(res *mcp.CallToolResult) string {
 	var b strings.Builder
 	for _, c := range res.Content {
@@ -235,20 +131,6 @@ func resultText(res *mcp.CallToolResult) string {
 		}
 	}
 	return b.String()
-}
-
-// mcpEnv is the host env with ZORDON_HOME forced to the project's home so the
-// MCP server resolves the same federation chain and alpha socket as `start`.
-func mcpEnv(home string) []string {
-	host := zenv.Environ()
-	out := make([]string, 0, len(host)+1)
-	for _, kv := range host {
-		if strings.HasPrefix(kv, "ZORDON_HOME=") {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return append(out, "ZORDON_HOME="+home)
 }
 
 func readFile(t *testing.T, path string) string {
@@ -271,17 +153,3 @@ func thisDir() string {
 // rather than a stale binary — so $PATH is the last resort, not the first.
 // This mirrors ZORDON_TEST_ENV in the Makefile, which is what `make test.unit`
 // sets.
-func zordonBin(t *testing.T) string {
-	t.Helper()
-	if v, ok := zenv.Lookup("ZORDON_BIN"); ok && v != "" {
-		return v
-	}
-	if repoBin := filepath.Join(thisDir(), "..", "..", "bin", "zordon"); zfs.IsExecutableFile(repoBin) {
-		return repoBin
-	}
-	bin, err := exec.LookPath("zordon")
-	if err != nil {
-		t.Fatalf("zordon binary not found: run `make build`, or set $ZORDON_BIN")
-	}
-	return bin
-}
