@@ -1,0 +1,66 @@
+# examples/mcp_http — driving the stack over MCP's HTTP transport.
+#
+# `zordon mcp --transport=http --listen HOST:PORT` serves the same tool set as
+# the stdio server, but as a host-side network service. That is what lets an
+# MCP client running in a container or sandbox drive this stack: it holds no
+# zordon binary and no alpha socket, only the URL. Every tool still executes
+# here, on the host.
+#
+# The service binary is borrowed from examples/mcp — this example is about the
+# transport, not about what is being supervised.
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  go {
+    version = "1.26.5"
+  }
+}
+
+service "go" "app" {
+  src {
+    path = "../.."
+    exe  = "./examples/mcp/src/app"
+  }
+
+  vars = {
+    port = net::pickport()
+    # Marker file the provisions write to. Baked to a concrete path at eval
+    # time; the test reads it back via `zordon get service.go.app.vars.seed`.
+    seed = "${fs::tmp()}/mcp-http-seed.txt"
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    # Latent (`after = never`): only ever runs when a client invokes it. The
+    # declared `key` argument is what proves a typed input survives the HTTP
+    # transport and reaches the shell.
+    provision "seed-data" {
+      description = "Write the seed marker file from the `key` argument (run on demand over MCP)"
+      after       = never
+      argument "key" {
+        type        = "string"
+        required    = true
+        description = "value written to the seed marker file"
+      }
+      cmd = "echo ${self.runtime.provision.seed-data.arguments.key} > ${self.vars.seed}"
+    }
+
+    # Latent failure case: an invoke that exits non-zero must be reported as an
+    # error result while alpha keeps running — the same guarantee over HTTP as
+    # over stdio.
+    provision "boom" {
+      after = never
+      cmd   = "echo boom && exit 1"
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

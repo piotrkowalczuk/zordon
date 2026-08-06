@@ -1,0 +1,35 @@
+{
+  "name": "zordon agent sandbox",
+
+  // Stock base image plus the Claude Code dev container feature — no custom
+  // Dockerfile. A stdio MCP server would have forced one, because its binary
+  // would have to be installed in here; an http server needs only the url in
+  // ../.mcp.json.
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+  },
+
+  // Pins one hostname for the host across runtimes, so ../.mcp.json never has
+  // to change. Docker Desktop provides host.docker.internal on its own; on
+  // Linux this is what creates it.
+  "runArgs": ["--add-host=host.docker.internal:host-gateway"],
+
+  "containerEnv": {
+    // Read by the SessionStart preflight hook; keep in step with ../.mcp.json.
+    "ZORDON_MCP_URL": "http://host.docker.internal:7391/mcp",
+    // Keeps .claude.json — which holds MCP approvals and per-project trust —
+    // inside the mounted volume, so a rebuild does not throw them away.
+    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
+  },
+  "mounts": [
+    "source=claude-code-config-${devcontainerId},target=/home/vscode/.claude,type=volume"
+  ],
+
+  // Runs on the HOST, before the container exists — the one hook that can
+  // reach across the boundary. Nothing inside a container can start a host
+  // process, which is exactly why `zordon mcp` has to live out there.
+  "initializeCommand": "${localWorkspaceFolder}/.devcontainer/host-zordon-mcp.sh",
+
+  "remoteUser": "vscode"
+}

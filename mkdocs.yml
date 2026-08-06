@@ -68,6 +68,7 @@ nav:
   - Federation: federation.md
   - How-to:
       - Run a provision via MCP: how-to/run-a-provision-via-mcp.md
+      - Drive a host stack from a container: how-to/drive-a-host-stack-from-a-container.md
       - Use a binary from another service: how-to/use-a-binary-from-another-service.md
       - Install a CLI tool from a mise package: how-to/install-a-cli-tool-with-mise.md
       - Clean up provision side effects: how-to/clean-up-provision-side-effects.md

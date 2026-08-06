@@ -109,7 +109,7 @@ See the [docs](https://zordon.io) for everything else.
 
 ## Use with Claude (MCP)
 
-`zordon mcp` runs an [MCP](https://modelcontextprotocol.io) server over stdio.
+`zordon mcp` runs an [MCP](https://modelcontextprotocol.io) server, over stdio by default or over HTTP with `--transport=http`.
 It exposes every zordon command — and every provision — as a tool, so an agent can drive your stack and run provisions on demand.
 
 The fastest path is the Claude Code plugin — no manual config:
@@ -138,6 +138,14 @@ Or add it to your client's MCP config (e.g. `.mcp.json`):
 
 The server resolves the chain from its working directory, so launch the client from the project tree (or pass `-e ZORDON_HOME=…`).
 Provisions run inside the live `alpha`, so `zordon start` first — or let the agent call the `start` tool.
+
+To let an agent confined to a container or sandbox drive a host-side stack, serve it over HTTP instead — the client then needs only a URL, with no zordon binary inside the box:
+
+```sh
+zordon mcp --transport=http --listen 127.0.0.1:7391
+```
+
+See the [how-to](https://zordon.io/how-to/drive-a-host-stack-from-a-container/); note the endpoint is not authenticated yet.
 
 The server advertises its purpose to the agent via MCP `instructions` (when to reach for these tools), so it should pick them up on its own.
 To nudge it harder in a zordon-managed repo, add a line to your `CLAUDE.md` (or `AGENTS.md`): *"this project's local stack is managed by zordon — use the `zordon` MCP tools to bring it up, inspect it, and run provisions."*

@@ -298,18 +298,38 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	mcpFlags := ff.NewFlagSet("mcp").SetParent(rootFlags)
 	var mcpDir zfs.DirName
 	mcpFlags.Value(0, "dir", &mcpDir, "project directory to serve — where the tools look for an Alphasfile (env: ZORDON_DIR; defaults to the current directory). Lets a client that does not launch in your project (e.g. a desktop MCP host) still target it.")
+	mcpTransport := mcpFlags.StringLong("transport", transportStdio, "MCP transport, `stdio|http`: stdio is a client-launched subprocess; http is a host-side network service an isolated client reaches by URL (env: ZORDON_TRANSPORT)")
+	// No ff-level default: an empty value is how Exec tells "unset" from "the
+	// user asked for an address", which makes --listen with stdio an error
+	// instead of a silently ignored flag.
+	mcpListen := mcpFlags.StringLong("listen", "", "address to bind when --transport=http, as `host:port` (env: ZORDON_LISTEN; defaults to "+defaultMCPListen+"). Wildcard hosts are refused — name the interface the client reaches you on.")
+	mcpAllowHost := mcpFlags.StringSetLong("allow-host", "extra `hostname` accepted in the Host header on a loopback --listen, repeatable (env: ZORDON_ALLOW_HOST). Needed when a sandbox dials this host by name rather than by loopback, e.g. --allow-host host.docker.internal.")
 	mcpCmd := &ff.Command{
 		Name:      "mcp",
-		Usage:     "zordon mcp [--dir DIR]",
-		ShortHelp: "serve an MCP server over stdio: every command plus every provision as a tool",
+		Usage:     "zordon mcp [--dir DIR] [--transport stdio|http] [--listen ADDR] [--allow-host HOST]",
+		ShortHelp: "serve an MCP server over stdio or HTTP: every command plus every provision as a tool",
 		Flags:     mcpFlags,
 		Exec: func(ctx context.Context, args []string) error {
+			listen, err := resolveMCPListen(*mcpTransport, *mcpListen)
+			if err != nil {
+				return err
+			}
+			if err := validateMCPAllowHosts(*mcpTransport, *mcpAllowHost); err != nil {
+				return err
+			}
 			if dir := mcpDir.Path(); dir != "" {
 				if err := zfs.Chdir(dir); err != nil {
 					return fmt.Errorf("mcp --dir: %w", err)
 				}
 			}
-			return runMCP(ctx, stdio, zfs.ZordonHome(home.Path()), *agent, testCfg())
+			return runMCP(ctx, stdio, mcpConfig{
+				Transport:  *mcpTransport,
+				Listen:     listen,
+				AllowHosts: *mcpAllowHost,
+				Home:       zfs.ZordonHome(home.Path()),
+				Agent:      *agent,
+				Test:       testCfg(),
+			})
 		},
 	}
 

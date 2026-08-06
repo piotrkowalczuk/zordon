@@ -1,20 +1,77 @@
 ---
-description: "Reference for the MCP server zordon serves over stdio — transport, discoverability, and the tools generated from declared provisions."
+description: "Reference for the MCP server zordon serves over stdio or HTTP — transports, discoverability, and the tools generated from declared provisions."
 ---
 
 <div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/reference/mcp/">https://zordon.io/reference/mcp/</a></div>
 
 # `zordon mcp`
 
-`zordon mcp` serves a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio.
+`zordon mcp` serves a [Model Context Protocol](https://modelcontextprotocol.io) server.
 It is an additional surface on the same CLI, not a replacement: zordon stays a CLI, and the MCP server exposes that CLI to agents.
 Run it from a project directory (one containing an `Alphasfile`, or nested under one); it resolves the same federation chain the CLI would.
 
-## Transport
+## Transports
+
+`--transport` selects how clients reach the server.
+The tool set is identical either way — the transport changes only who may connect and from where.
+
+| Flag | Env | Default |
+| --- | --- | --- |
+| `--transport stdio\|http` | `ZORDON_TRANSPORT` | `stdio` |
+| `--listen HOST:PORT` | `ZORDON_LISTEN` | `127.0.0.1:7391` (only with `--transport=http`) |
+| `--allow-host HOST` (repeatable) | `ZORDON_ALLOW_HOST` | none (only with `--transport=http`) |
+
+### stdio (default)
 
 The server speaks newline-delimited JSON-RPC 2.0 over stdin/stdout (the standard local MCP transport).
 Diagnostics go to stderr; stdout carries only the protocol.
 Launch it the way an MCP client launches any local server — as a subprocess whose stdin/stdout it owns.
+
+Passing `--listen` with `--transport=stdio` is an error rather than a silently ignored flag.
+
+### http
+
+`zordon mcp --transport=http` serves the [streamable-HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) — the standard remote-MCP shape — at `http://HOST:PORT/mcp`.
+Any other path returns 404.
+The process runs in the foreground until interrupted; `SIGINT`/`SIGTERM` drain in-flight requests before it exits.
+
+This is what lets an MCP client that is *isolated from the host* drive the stack.
+A container or OS sandbox cannot spawn host processes, stdio does not cross the boundary, and a bind-mounted unix socket is inert inside a VM-backed container — so the stdio model requires the agent to run on the host with full host access.
+Over HTTP the agent needs nothing but the URL: no zordon binary and no alpha socket inside the sandbox.
+The supervisor, the service processes, and the whole stack stay host-side, and the agent only sends control messages that the host executes.
+Because the URL selects the stack, one client image or config can target different hosts by changing it.
+
+Once bound, the server logs the resolved URL to stderr:
+
+```
+[…] mcp [INFO ] - serving over http on http://127.0.0.1:7391/mcp
+```
+
+Port `0` binds an ephemeral port, which that line then reports.
+
+!!! warning "The HTTP endpoint has no authentication yet"
+    Anything that can reach the address can drive the host stack — start and stop services, run provisions, execute every declared operation.
+    Authentication is planned; until it lands, treat reachability as authorization and expose the endpoint only to the sandbox you intend to trust.
+
+Two guardrails follow from that:
+
+- **Wildcard binds are refused.** `0.0.0.0`, `::`, and a bare `:PORT` are rejected; name the interface the client reaches you on. Binding a non-loopback address is allowed and logs a warning.
+- **DNS-rebinding protection is on.** On a loopback bind, a request whose `Host` header is not itself loopback is rejected with `403 Forbidden: invalid Host header`. This is what stops a web page open on this machine from being talked into driving your stack through `127.0.0.1`.
+
+### `--allow-host`
+
+A container usually dials the host by *name*, not by loopback — `host.docker.internal` on Docker Desktop — so the rule above would reject it.
+`--allow-host` widens the accepted `Host` headers without giving up the protection for everything else:
+
+```sh
+zordon mcp --transport=http --listen 127.0.0.1:7391 --allow-host host.docker.internal
+```
+
+The flag is repeatable, takes a hostname without a port, and only applies to a loopback `--listen` (a non-loopback bind was already a deliberate act and imposes no `Host` rule).
+Anything not loopback and not named is still refused, and the 403 body names the flag that would admit it.
+Passing it with `--transport=stdio` is an error.
+
+See [How to drive a host stack from a container](../how-to/drive-a-host-stack-from-a-container.md) for the full recipe, and `examples/mcp_http/sandbox/` for a ready-made containerized client config.
 
 ## Discoverability
 
@@ -114,11 +171,13 @@ An invoke also runs immediately (no `after` wait): the parent service is assumed
 ## Requirements and scope
 
 - The server resolves the chain from its working directory — launch it inside the project, or point it at one with `zordon mcp --dir DIR` (also `ZORDON_DIR`).
+- The chain is resolved once, at startup. A long-running server does not pick up later `Alphasfile` edits; restart it to refresh the provision tools.
 - Provision invocation requires a running alpha for that level; the server does not auto-start one.
 - Re-invoking an auto-run provision is allowed (re-run a migration or smoke test on demand); idempotent provisions short-circuit via their `check`.
 
 ## Related
 
+- [How to drive a host stack from a container](../how-to/drive-a-host-stack-from-a-container.md) — the HTTP transport end to end.
 - [How to run a provision via MCP](../how-to/run-a-provision-via-mcp.md) — a step-by-step recipe.
 - [Lifecycle](../lifecycle.md) — provision states (`scheduled` → `running` → `success`/`failure`) and `after` barriers.
 - [Alphasfile](../alphasfile.md) — declaring provisions, including latent (`after = never`) ones.
