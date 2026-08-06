@@ -39,7 +39,8 @@ Wildcard addresses — `0.0.0.0`, `::`, a bare `:7391` — are refused: name the
 Add `--dir /path/to/project` if you start the server somewhere other than the project directory.
 
 !!! tip "Or let the container start it for you"
-    A dev container's `initializeCommand` runs **on the host, before the container exists** — the one hook in the whole setup that crosses the boundary.
+    A dev container's [`initializeCommand`](https://containers.dev/implementors/json_reference/) runs *"on the host machine during initialization, including during container creation and on subsequent starts"* — the one hook in the whole setup that crosses the boundary.
+    Every other lifecycle script, and every [Claude Code hook](https://code.claude.com/docs/en/hooks), runs inside the container and cannot reach the host.
     Point it at a script that starts this server when nothing is serving yet, and reopening the container is the only thing you ever do by hand.
     `examples/mcp_http/sandbox/.devcontainer/` does exactly that.
 
@@ -148,3 +149,5 @@ The one worth internalising is the third: an endpoint answering `200` with no pr
 - `examples/mcp_http/sandbox/` — this recipe as a ready-to-open dev container, with the host-side server started from `initializeCommand`.
 - `examples/mcp_http/` — the server side, driven end-to-end by `examples/mcp_http/example_test.go`.
 - [`zordon mcp` reference](../reference/mcp.md) — transports, tool families, and the `OpInvoke` wire format.
+- [Claude Code in a dev container](https://code.claude.com/docs/en/devcontainer) — installing the CLI, persisting `~/.claude` across rebuilds, and restricting network egress. Its MCP section is the counterpart to this page: it says to install a stdio server's binaries in your Dockerfile, which is exactly the cost an http server removes.
+- [devcontainer.json reference](https://containers.dev/implementors/json_reference/) — `initializeCommand`, `runArgs`, `containerEnv`, and the rest of the spec.
