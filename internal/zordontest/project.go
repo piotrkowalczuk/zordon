@@ -104,6 +104,12 @@ func (p *Project) TestLog() []string {
 // resolved against this.
 func (p *Project) Dir() string { return p.root }
 
+// ZordonBin is the binary the harness drives, for a test that has to spawn it
+// itself (a long-lived server, say) rather than go through Zordon or Start.
+// Always prefer this over looking one up: the harness's resolution prefers
+// this tree's build to a stale global install.
+func (p *Project) ZordonBin() string { return p.binZ }
+
 // Home returns the ZORDON_HOME the project's zordon invocations see.
 // Useful for asserting on registry.json, toolchain cache contents,
 // etc.

@@ -14,8 +14,6 @@ package example_test
 
 import (
 	"context"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -27,8 +25,7 @@ import (
 )
 
 func TestExample_mcpHTTP(t *testing.T) {
-	exampleDir := thisDir()
-	p := zordontest.NewProject(t, zordontest.WithExistingRoot(exampleDir))
+	p := zordontest.NewProject(t, zordontest.WithCallerRoot())
 	p.Start(t).OK()
 
 	seedPath := p.Get(t, "service.go.app.vars.seed").String()
@@ -141,15 +138,3 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(b)
 }
-
-func thisDir() string {
-	_, here, _, _ := runtime.Caller(0)
-	return filepath.Dir(here)
-}
-
-// zordonBin resolves the binary under test, preferring the repo's own build
-// over anything installed globally. A `zordon` on $PATH is easily older than
-// the tree being tested, and the resulting failure reads as a broken feature
-// rather than a stale binary — so $PATH is the last resort, not the first.
-// This mirrors ZORDON_TEST_ENV in the Makefile, which is what `make test.unit`
-// sets.
