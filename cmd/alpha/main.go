@@ -3552,6 +3552,17 @@ func prepareWorkspace(ctx context.Context, svc *alphasfile.Service, name, wsName
 		if err != nil {
 			return "", err
 		}
+		// A service that was NOT picked at `workspace create` is third-party
+		// code: clone it directly at its ref, DETACHED — no shared bare, no
+		// branch, no worktree registration (issue #73). Only a picked
+		// (editable) service earns a real worktree on zordon/<ws>/<svc>.
+		if !svc.Package.Editable {
+			log.Info("alpha", "prepare %s: clone -> %s @ %s (third-party, no worktree)", name, checkout, svc.Ref())
+			if err := p.Clone(ctx, checkout, svc.Ref(), runner); err != nil {
+				return "", fmt.Errorf("git clone: %w", err)
+			}
+			return dest, nil
+		}
 		log.Info("alpha", "prepare %s: ensuring primary (%s)", name, p.Kind)
 		if err := p.Ensure(ctx, runner); err != nil {
 			return "", fmt.Errorf("ensure primary: %w", err)
@@ -3562,8 +3573,12 @@ func prepareWorkspace(ctx context.Context, svc *alphasfile.Service, name, wsName
 		// "branch already checked out". Slashes are valid in ref names.
 		branch := "zordon/" + wsName + "/" + name
 		log.Info("alpha", "prepare %s: worktree -> %s (branch %s)", name, checkout, branch)
-		if err := p.AddWorktree(ctx, checkout, branch, runner); err != nil {
+		warn, err := p.AddWorktree(ctx, checkout, branch, runner)
+		if err != nil {
 			return "", fmt.Errorf("git worktree: %w", err)
+		}
+		if warn != "" {
+			log.Warn("alpha", "prepare %s: %s", name, warn)
 		}
 		return dest, nil
 	default:

@@ -145,6 +145,15 @@ type Package struct {
 	// InPlace: src-only in the "main" workspace — build/run from src as-is,
 	// no git worktree add, no HEAD reset (the edit→start loop).
 	InPlace bool `json:"in_place,omitempty"`
+	// Editable: this (workspace, service) was picked at `workspace create` /
+	// `workspace service add`, so it gets its own editable git worktree on a
+	// per-workspace branch (zordon/<ws>/<svc>) — the IDE-ergonomics case. A
+	// git-source service that was NOT picked is third-party code with no such
+	// benefit: alpha materializes it with a plain `git clone` at its ref, no
+	// branch, no worktree registration (so nested/parallel checkouts of the
+	// same service never collide, issue #73). Always false in "main" (nothing
+	// is picked there) and for InPlace services.
+	Editable bool `json:"editable,omitempty"`
 }
 
 type Workspace struct {

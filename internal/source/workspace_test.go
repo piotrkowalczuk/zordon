@@ -48,7 +48,7 @@ func TestMonorepoPerServiceBranches(t *testing.T) {
 	// Two services off the SAME primary, distinct per-service branches.
 	for _, svc := range []string{"svc-a", "svc-b"} {
 		dest := filepath.Join(wt, "src", svc)
-		if err := p.AddWorktree(ctx, dest, "zordon/main/"+svc, run); err != nil {
+		if _, err := p.AddWorktree(ctx, dest, "zordon/main/"+svc, run); err != nil {
 			t.Fatalf("monorepo workspace %s: %v", svc, err)
 		}
 		if !zfs.Exists(filepath.Join(dest, ".git")) {
@@ -58,10 +58,93 @@ func TestMonorepoPerServiceBranches(t *testing.T) {
 
 	// Same branch reused at a different path still errors clearly (the
 	// guard must remain — it's now per-service, not per-workspace).
-	err = p.AddWorktree(ctx, filepath.Join(wt, "elsewhere"), "zordon/main/svc-a", run)
+	_, err = p.AddWorktree(ctx, filepath.Join(wt, "elsewhere"), "zordon/main/svc-a", run)
 	if err == nil || !strings.Contains(err.Error(), "already checked out") {
 		t.Fatalf("want already-checked-out error for reused branch, got %v", err)
 	}
+}
+
+// A checkout the user has taken onto a different branch (with uncommitted work)
+// must be REUSED as-is, never force-rebuilt: zordon warns and builds what is
+// there instead of resetting the branch and deleting the tree. Losing a
+// developer's work to a start is the outcome this guards against.
+func TestPrimary_AddWorktree_respectsUserBranchSwitch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := commitFileRepo(t, "app/main.go", "package app\n")
+	git(t, repo, "branch", "mine")
+	p, err := NewPrimary("", "", repo, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	dest := filepath.Join(t.TempDir(), "src", "app")
+	branch := "zordon/feature/app"
+	if _, err := p.AddWorktree(ctx, dest, branch, run); err != nil {
+		t.Fatalf("first AddWorktree: %v", err)
+	}
+
+	// User switches the checkout to their own branch and edits without committing.
+	git(t, dest, "checkout", "-q", "mine")
+	edit := filepath.Join(dest, "app", "main.go")
+	if err := zfs.AtomicWrite(edit, []byte("package app // WIP\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	warn, err := p.AddWorktree(ctx, dest, branch, run)
+	if err != nil {
+		t.Fatalf("second AddWorktree must not error over the user's checkout: %v", err)
+	}
+	if warn == "" || !strings.Contains(warn, "mine") {
+		t.Errorf("want a warning naming branch %q; got %q", "mine", warn)
+	}
+	// The user's branch and uncommitted edit survive untouched.
+	if got := currentBranch(t, dest); got != "mine" {
+		t.Errorf("checkout was reset to %q; user's branch %q must be preserved", got, "mine")
+	}
+	if b, _ := zfs.Read(edit); !strings.Contains(string(b), "WIP") {
+		t.Error("uncommitted edit was lost — AddWorktree overwrote the user's tree")
+	}
+}
+
+// Content that is not a git worktree at all (a plain directory the user
+// populated) is likewise reused with a warning, never wiped.
+func TestPrimary_AddWorktree_respectsPlainDirectory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	p, err := NewPrimary("", "", commitFileRepo(t, "app/main.go", "package app\n"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "src", "app")
+	if err := zfs.EnsureDir(dest); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(dest, "notes.txt")
+	if err := zfs.AtomicWrite(keep, []byte("my notes\n")); err != nil {
+		t.Fatal(err)
+	}
+	warn, err := p.AddWorktree(t.Context(), dest, "zordon/feature/app", run)
+	if err != nil {
+		t.Fatalf("AddWorktree over a plain dir must not error: %v", err)
+	}
+	if warn == "" {
+		t.Error("want a warning that existing content was reused as-is")
+	}
+	if !zfs.Exists(keep) {
+		t.Error("plain-directory content was deleted — must be preserved")
+	}
+}
+
+func currentBranch(t *testing.T, dir string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // failfast can kill a service mid-bringup. `git worktree add` writes
@@ -92,7 +175,7 @@ func TestPrimary_AddWorktree_rebuildsInterruptedSparseCheckout(t *testing.T) {
 		}
 		return c.Run()
 	}
-	if err := p.AddWorktree(ctx, dest, "zordon/main/app", killed); err == nil {
+	if _, err := p.AddWorktree(ctx, dest, "zordon/main/app", killed); err == nil {
 		t.Fatal("interrupted setup: want error from AddWorktree, got nil")
 	}
 	if !zfs.Exists(filepath.Join(dest, ".git")) {
@@ -104,7 +187,7 @@ func TestPrimary_AddWorktree_rebuildsInterruptedSparseCheckout(t *testing.T) {
 
 	// Next start must heal the half-initialized tree and materialize the
 	// source — not return nil on the bare existence of dest/.git.
-	if err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
+	if _, err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
 		t.Fatalf("second AddWorktree: %v", err)
 	}
 	if !zfs.Exists(src) {
@@ -128,18 +211,18 @@ func TestPrimary_AddWorktree_reusesCompletedWorktree(t *testing.T) {
 	ctx := t.Context()
 	dest := filepath.Join(t.TempDir(), "src", "app")
 
-	if err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
+	if _, err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
 		t.Fatalf("first AddWorktree: %v", err)
 	}
-	if worktreeLocked(ctx, dest) {
-		t.Fatal("completed worktree is still locked")
+	if !worktreeHealthy(ctx, dest, "zordon/main/app") {
+		t.Fatal("completed worktree is not healthy (should be unlocked and on its branch)")
 	}
 
 	sentinel := filepath.Join(dest, "sentinel")
 	if err := zfs.AtomicWrite(sentinel, []byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
+	if _, err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
 		t.Fatalf("second AddWorktree: %v", err)
 	}
 	if !zfs.Exists(sentinel) {
@@ -163,7 +246,7 @@ func TestPrimary_AddWorktree_rebuildsLockedWorktree(t *testing.T) {
 	ctx := t.Context()
 	dest := filepath.Join(t.TempDir(), "src", "app")
 
-	if err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
+	if _, err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
 		t.Fatalf("first AddWorktree: %v", err)
 	}
 	sentinel := filepath.Join(dest, "sentinel")
@@ -172,7 +255,7 @@ func TestPrimary_AddWorktree_rebuildsLockedWorktree(t *testing.T) {
 	}
 	git(t, repo, "worktree", "lock", dest)
 
-	if err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
+	if _, err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
 		t.Fatalf("second AddWorktree: %v", err)
 	}
 	if zfs.Exists(sentinel) {
@@ -213,7 +296,7 @@ func TestPrimary_AddWorktree_reclaimsOrphanedLockedRegistration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
+	if _, err := p.AddWorktree(ctx, dest, "zordon/main/app", run); err != nil {
 		t.Fatalf("AddWorktree over orphaned locked registration: %v", err)
 	}
 	if !zfs.Exists(src) {

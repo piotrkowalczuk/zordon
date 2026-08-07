@@ -1,0 +1,31 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+service "go" "app" {
+  src {
+    path = "../.."
+    exe  = "./examples/nested_root/src/app"
+  }
+
+  runtime {
+    cmd = [
+      "${fs::bin()}/app",
+      "-addr", "127.0.0.1:${self.vars.port}",
+      "-tag", "${fs::hash()}",
+    ]
+  }
+
+  vars = {
+    port = net::pickport()
+  }
+
+  print = "http://127.0.0.1:${self.vars.port}/  (app, workspace ${fs::hash()})"
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

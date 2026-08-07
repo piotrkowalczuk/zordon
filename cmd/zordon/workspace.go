@@ -290,8 +290,12 @@ func checkoutServices(ctx context.Context, log *zlog.Logger, name, wsdir string,
 		}
 		branch := "zordon/" + name + "/" + svc
 		log.Info("zordon", "%s: git worktree add %s @ %s (branch %s)", svc, dest, refMsg, branch)
-		if err := p.AddWorktree(ctx, dest, branch, runner); err != nil {
+		warn, err := p.AddWorktree(ctx, dest, branch, runner)
+		if err != nil {
 			return fmt.Errorf("%s: %w", svc, err)
+		}
+		if warn != "" {
+			log.Warn("zordon", "%s: %s", svc, warn)
 		}
 	}
 	return nil

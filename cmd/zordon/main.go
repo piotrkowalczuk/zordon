@@ -332,23 +332,23 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	return rootCmd, agent
 }
 
-// walkUp climbs from cwd toward / looking for an Alphasfile.
+// walkUp resolves the project Alphasfile for the current run. It does NOT stop
+// at the nearest Alphasfile blindly: it walks up to the nearest workspace
+// boundary (a workspaces/<name> dir or a .workspace marker) first, so an
+// Alphasfile buried in a service checkout below that boundary is shadowed, and
+// the boundary's project Alphasfile (at or above it) is adopted instead. A run
+// from any subdir therefore resolves to the enclosing project/workspace — like
+// git from a subdir — instead of forking a nested stack (issue #73).
 func walkUp() (string, error) {
-	dir, err := zfs.Getwd()
+	cwd, err := zfs.Getwd()
 	if err != nil {
 		return "", err
 	}
-	for {
-		candidate := filepath.Join(dir, "Alphasfile")
-		if zfs.Exists(candidate) {
-			return candidate, nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", errors.New("no Alphasfile found in cwd or any parent")
-		}
-		dir = parent
+	root, _, _, err := invocation.ResolveInvocation(cwd)
+	if err != nil {
+		return "", err
 	}
+	return filepath.Join(root, invocation.AlphasfileName), nil
 }
 
 // pushConfigure streams one level's bringup and, on success, returns the
@@ -816,12 +816,55 @@ func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome 
 				// string; the terminal linkifies any URL itself.
 				fmt.Fprintf(out, "        %s\n", s.Runtime.Print)
 			}
+			if co := checkoutStatus(ctx, s, lv.inv.Workspace); co != "" {
+				fmt.Fprintf(out, "        %s\n", co)
+			}
 		}
 	}
 	if !anyRunning {
 		return errors.New("no alpha running in the federation chain")
 	}
 	return nil
+}
+
+// checkoutStatus renders a service's on-disk source state for `zordon status`:
+// where its code is checked out and what branch/revision it currently sits on.
+// It reads the working tree directly (client-side), so it also reveals when a
+// developer has switched an editable worktree onto another branch — the case
+// zordon reuses-with-a-warning rather than overwriting. Returns "" for services
+// with no source checkout (use-only / pkg) or whose checkout isn't a git tree.
+func checkoutStatus(ctx context.Context, s *alphasfile.Service, workspace string) string {
+	if s.Runtime == nil || s.Package == nil {
+		return ""
+	}
+	co := s.Runtime.Checkout
+	if co == "" || !zfs.Exists(filepath.Join(co, ".git")) {
+		return ""
+	}
+	head, err := exec.CommandContext(ctx, "git", "-C", co, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	rel := co
+	if wd, e := zfs.Getwd(); e == nil {
+		if r, e := filepath.Rel(wd, co); e == nil && !strings.HasPrefix(r, "..") {
+			rel = r
+		}
+	}
+	ref := strings.TrimSpace(string(head))
+	if ref == "HEAD" { // detached (a clone or a user checkout of a tag/commit)
+		sha, _ := exec.CommandContext(ctx, "git", "-C", co, "rev-parse", "--short", "HEAD").Output()
+		return fmt.Sprintf("checkout: %s (detached @ %s)", rel, strings.TrimSpace(string(sha)))
+	}
+	// An editable worktree is expected on zordon/<ws>/<svc>; flag a mismatch so
+	// the user sees they are building their own branch, not the canonical one.
+	if s.Package.Editable {
+		want := "zordon/" + workspace + "/" + s.Name()
+		if ref != want {
+			return fmt.Sprintf("checkout: %s (branch %s ⚠ not %s — building your branch)", rel, ref, want)
+		}
+	}
+	return fmt.Sprintf("checkout: %s (branch %s)", rel, ref)
 }
 
 // serviceState renders one service's state cell for `zordon status` out of
