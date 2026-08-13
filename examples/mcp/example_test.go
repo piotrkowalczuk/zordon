@@ -13,8 +13,6 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -25,8 +23,7 @@ import (
 )
 
 func TestExample_mcp(t *testing.T) {
-	exampleDir := thisDir()
-	p := zordontest.NewProject(t, zordontest.WithExistingRoot(exampleDir))
+	p := zordontest.NewProject(t, zordontest.WithCallerRoot())
 	p.Start(t).OK()
 
 	seedPath := p.Get(t, "service.go.app.vars.seed").String()
@@ -149,7 +146,7 @@ func TestExample_mcp(t *testing.T) {
 // for the server's stderr (diagnostics, surfaced on failure).
 func connectMCP(ctx context.Context, t *testing.T, p *zordontest.Project) (*mcp.ClientSession, func() string) {
 	t.Helper()
-	cmd := exec.Command(zordonBin(t), "mcp")
+	cmd := exec.Command(p.ZordonBin(), "mcp")
 	cmd.Dir = p.Dir()
 	cmd.Env = mcpEnv(p.Home())
 	var errBuf strings.Builder
@@ -236,21 +233,4 @@ func readFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(b)
-}
-
-func thisDir() string {
-	_, here, _, _ := runtime.Caller(0)
-	return filepath.Dir(here)
-}
-
-func zordonBin(t *testing.T) string {
-	t.Helper()
-	if v := os.Getenv("ZORDON_BIN"); v != "" {
-		return v
-	}
-	bin, err := exec.LookPath("zordon")
-	if err != nil {
-		t.Fatalf("zordon binary not found: set $ZORDON_BIN or `go install ./cmd/zordon`")
-	}
-	return bin
 }

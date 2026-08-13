@@ -1,0 +1,17 @@
+{
+  "enabledMcpjsonServers": ["zordon"],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/zordon-preflight.sh\"",
+            "timeout": 15,
+            "statusMessage": "checking the zordon endpoint…"
+          }
+        ]
+      }
+    ]
+  }
+}

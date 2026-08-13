@@ -9,8 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -26,12 +24,11 @@ import (
 //     port (proves the wrap actually started a debugger, not just
 //     prefixed argv with /usr/bin/false).
 //
-// We run zordon IN PLACE via WithExistingRoot rather than copying to a
+// We run zordon IN PLACE via WithCallerRoot rather than copying to a
 // tmpdir — the example uses `src = "../.."` (the surrounding repo)
 // and the test wants to exercise the real wiring.
 func TestExample_go_delve(t *testing.T) {
-	exampleDir := thisDir()
-	p := zordontest.NewProject(t, zordontest.WithExistingRoot(exampleDir))
+	p := zordontest.NewProject(t, zordontest.WithCallerRoot())
 
 	// Cold-cache budget: cargo install mise (first run) + mise install
 	// go@1.25.6 + first install of dlv + mcp-dap-server + first compile.
@@ -104,11 +101,6 @@ func dapInitialize(addr string) error {
 		return fmt.Errorf("unexpected reply, want DAP frame header: %q", buf[:n])
 	}
 	return nil
-}
-
-func thisDir() string {
-	_, here, _, _ := runtime.Caller(0)
-	return filepath.Dir(here)
 }
 
 func httpGet(t *testing.T, url string) string {

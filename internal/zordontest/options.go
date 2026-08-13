@@ -1,5 +1,10 @@
 package zordontest
 
+import (
+	"path/filepath"
+	"runtime"
+)
+
 // Option configures a Project at construction time. Functional-options
 // pattern keeps NewProject's signature stable as we add knobs (agent
 // mode, isolated cache, federation depth, etc.) without breaking
@@ -44,6 +49,27 @@ func WithIsolatedHome(path string) Option {
 // Alphasfile and source files are untouched.
 func WithExistingRoot(path string) Option {
 	return func(c *config) { c.root = path }
+}
+
+// WithCallerRoot is WithExistingRoot for the common case: the tree under test
+// is the directory this test's own source file lives in, as every
+// `examples/<name>/example_test.go` needs.
+//
+// It cannot be derived from the working directory — `go test ./examples/x` and
+// `go test ./...` from the repo root leave different CWDs — so the anchor is
+// the caller's source file. That is resolved here, at the call site: the
+// runtime.Caller frame below is the file invoking WithCallerRoot, which is
+// why this must stay a function called by the test rather than a value the
+// harness computes for itself.
+func WithCallerRoot() Option {
+	_, here, _, ok := runtime.Caller(1)
+	if !ok {
+		// Only reachable if the caller's frame was inlined away, which cannot
+		// happen for an exported call — so this is a broken build, not a
+		// runtime condition a test should try to handle.
+		panic("zordontest: WithCallerRoot could not determine the caller's source file")
+	}
+	return WithExistingRoot(filepath.Dir(here))
 }
 
 // WithExpectedLeftovers declares that this test, by its very nature,

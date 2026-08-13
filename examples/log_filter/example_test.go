@@ -6,8 +6,6 @@ package example_test
 
 import (
 	"fmt"
-	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -24,9 +22,9 @@ import (
 // Not parallel and not cheap: it builds the pinned Go toolchain and the
 // example on a cold cache (~minutes), like the other example tests.
 func TestExample_logFilter(t *testing.T) {
-	p := zordontest.NewProject(t, zordontest.WithExistingRoot(thisDir()))
+	p := zordontest.NewProject(t, zordontest.WithCallerRoot())
 
-	// WithExistingRoot keeps alpha.log in the example dir, where it would
+	// WithCallerRoot keeps alpha.log in the example dir, where it would
 	// otherwise accumulate across runs; start from a clean file so the
 	// "dropped lines are absent" assertions see only this run's output.
 	if err := zfs.RemoveIfPresent(p.AlphaLogPath()); err != nil {
@@ -67,9 +65,4 @@ func waitFor(t *testing.T, p *zordontest.Project, substr string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("alpha log never contained %q", substr)
-}
-
-func thisDir() string {
-	_, here, _, _ := runtime.Caller(0)
-	return filepath.Dir(here)
 }

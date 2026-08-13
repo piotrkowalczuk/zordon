@@ -6,7 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -28,7 +35,9 @@ type commandToolInput struct {
 	Args []string `json:"args,omitempty" jsonschema:"command-line flags and positional arguments for the subcommand, e.g. [\"--failfast=false\",\"web\"]; pass [\"-h\"] for full help"`
 }
 
-// runMCP serves an MCP server over stdio. Two tool families:
+// runMCP serves an MCP server over the configured transport — stdio for a
+// client that launches zordon as a subprocess, HTTP for one that cannot. The
+// tool set is identical either way. Two tool families:
 //
 //   - command tools — one per zordon subcommand (except `mcp` itself),
 //     generated from the same ff tree the CLI uses, so the MCP surface can
@@ -51,18 +60,203 @@ Use these tools when the task involves that stack: bring it up or down (start, s
 
 Prefer these tools over shelling out to ` + "`zordon`" + ` in the terminal — they return structured results and run provisions in the live supervisor. If the working directory has no Alphasfile, this project is not zordon-managed and these tools do not apply.`
 
-func runMCP(ctx context.Context, stdio commandIO, zordonHome string, agent bool, testCfg alphasfile.TestConfig) error {
-	log := zlog.New(stdio.Stderr, agent)
+func runMCP(ctx context.Context, stdio commandIO, cfg mcpConfig) error {
+	log := zlog.New(stdio.Stderr, cfg.Agent)
 	srv := mcp.NewServer(
 		mcpImplementation(),
 		&mcp.ServerOptions{Instructions: serverInstructions},
 	)
 
-	registerCommandTools(srv, zordonHome, agent, testCfg)
-	registerProvisionTools(ctx, srv, log, zordonHome, testCfg)
+	registerCommandTools(srv, cfg.Home, cfg.Agent, cfg.Test)
+	registerProvisionTools(ctx, srv, log, cfg.Home, cfg.Test)
 
+	if cfg.Transport == transportHTTP {
+		return serveMCPHTTP(ctx, log, srv, cfg.Listen, cfg.AllowHosts)
+	}
 	log.Info("mcp", "serving over stdio")
 	return srv.Run(ctx, &mcp.StdioTransport{})
+}
+
+// mcpConfig is the typed config `zordon mcp` carries. Every value is resolved
+// at flag-parse time from a flag, its ZORDON_-prefixed env var, or the
+// documented default; nothing below main reads the environment again.
+type mcpConfig struct {
+	Transport  string
+	Listen     string   // resolved bind address; empty under stdio
+	AllowHosts []string // extra Host headers accepted on a loopback listener
+	Home       string
+	Agent      bool
+	Test       alphasfile.TestConfig
+}
+
+const (
+	transportStdio = "stdio"
+	transportHTTP  = "http"
+
+	// defaultMCPListen is loopback on purpose: the endpoint drives the host
+	// stack and carries no authentication yet, so reaching it from elsewhere
+	// has to be a deliberate --listen.
+	defaultMCPListen = "127.0.0.1:7391"
+
+	// mcpHTTPPath is where the streamable-HTTP handler is mounted; the client's
+	// URL is http://<listen>/mcp.
+	mcpHTTPPath = "/mcp"
+
+	// mcpSessionTimeout closes sessions that stop making requests. stdio has one
+	// session for the process lifetime, but an HTTP server outlives its clients
+	// and would otherwise retain a session per client that walked away.
+	mcpSessionTimeout = 30 * time.Minute
+
+	mcpShutdownGrace = 5 * time.Second
+)
+
+// resolveMCPListen validates the transport/listen pair and returns the address
+// to bind — empty under stdio, where there is nothing to bind.
+func resolveMCPListen(transport, listen string) (string, error) {
+	switch transport {
+	case transportStdio:
+		if listen != "" {
+			return "", errors.New("mcp --listen: only valid with --transport=http")
+		}
+		return "", nil
+	case transportHTTP:
+	default:
+		return "", fmt.Errorf("mcp --transport: unknown transport %q (want %s or %s)", transport, transportStdio, transportHTTP)
+	}
+
+	if listen == "" {
+		listen = defaultMCPListen
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return "", fmt.Errorf("mcp --listen: %q is not a host:port address", listen)
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return "", fmt.Errorf("mcp --listen: %q is not a valid port", port)
+	}
+	// A wildcard bind would expose host-stack control on every interface, and
+	// there is no authentication yet. Naming the interface is the guardrail
+	// until there is.
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return "", fmt.Errorf("mcp --listen: refusing to bind the wildcard address %q; name the interface the client reaches you on", listen)
+	}
+	return listen, nil
+}
+
+// validateMCPAllowHosts rejects --allow-host where it would do nothing, so a
+// misplaced flag fails instead of leaving the operator to wonder why their
+// sandbox still gets a 403.
+func validateMCPAllowHosts(transport string, allowHosts []string) error {
+	if len(allowHosts) == 0 || transport == transportHTTP {
+		return nil
+	}
+	return errors.New("mcp --allow-host: only valid with --transport=http")
+}
+
+// serveMCPHTTP serves the same server over the streamable-HTTP transport, so an
+// MCP client isolated from this host — a container or sandbox that can neither
+// spawn host processes nor reach alpha's unix socket — can drive the stack with
+// nothing but a URL. Every tool still executes here, host-side.
+func serveMCPHTTP(ctx context.Context, log *zlog.Logger, srv *mcp.Server, addr string, allowHosts []string) error {
+	// Bind before announcing: --listen with port 0 only learns its port here,
+	// and the logged URL is what the operator pastes into a client config.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("mcp --listen: %w", err)
+	}
+	boundHost := hostOnly(ln.Addr().String())
+	loopback := isLoopbackHost(boundHost)
+
+	log.Info("mcp", "serving over http on http://%s%s", ln.Addr(), mcpHTTPPath)
+	if !loopback {
+		log.Warn("mcp", "%s is not loopback: this endpoint controls the host stack and has no authentication", boundHost)
+	}
+	for _, h := range allowHosts {
+		log.Info("mcp", "accepting Host header %q", h)
+	}
+
+	// WriteTimeout/ReadTimeout stay unset: streamable HTTP holds long-lived SSE
+	// streams and either would sever one mid-provision. ReadHeaderTimeout is
+	// what bounds a slow-header client.
+	httpSrv := &http.Server{
+		Handler:           mcpHandler(srv, loopback, allowHosts),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	// stdio ends when the client closes the pipe; HTTP has no such signal, so
+	// the process has to take one.
+	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-sigCtx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(sigCtx), mcpShutdownGrace)
+		defer cancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			_ = httpSrv.Close()
+		}
+	}()
+
+	if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("mcp http: %w", err)
+	}
+	return nil
+}
+
+// mcpHandler is the served HTTP surface: the streamable transport at /mcp,
+// behind the Host guard, and nothing else. Kept apart from binding and serving
+// so the guard can be exercised over a test server rather than a real listener.
+func mcpHandler(srv *mcp.Server, listenerLoopback bool, allowHosts []string) http.Handler {
+	handler := mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return srv },
+		// The SDK's own guard is switched off in favour of checkHost, which
+		// enforces the same rule and additionally honors --allow-host.
+		&mcp.StreamableHTTPOptions{SessionTimeout: mcpSessionTimeout, DisableLocalhostProtection: true},
+	)
+	mux := http.NewServeMux()
+	mux.Handle(mcpHTTPPath, checkHost(handler, listenerLoopback, allowHosts))
+	return mux
+}
+
+// checkHost is DNS-rebinding protection, widened by --allow-host. A browser on
+// this machine can be talked into POSTing to 127.0.0.1, so a loopback listener
+// accepts only a loopback Host header — unless the operator named the hostname
+// their sandbox dials (`host.docker.internal` and friends), which no browser
+// would send by accident. A non-loopback bind was already a deliberate act, so
+// it imposes nothing further.
+func checkHost(next http.Handler, listenerLoopback bool, allowHosts []string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hostAllowed(listenerLoopback, r.Host, allowHosts) {
+			http.Error(w, fmt.Sprintf("Forbidden: invalid Host header %q (pass --allow-host %s to accept it)", r.Host, hostOnly(r.Host)), http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func hostAllowed(listenerLoopback bool, reqHost string, allowHosts []string) bool {
+	if !listenerLoopback {
+		return true
+	}
+	host := hostOnly(reqHost)
+	return isLoopbackHost(host) || slices.Contains(allowHosts, host)
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// hostOnly strips the port from a `host:port`, tolerating a bare host (a Host
+// header carries no port when the client used the scheme's default).
+func hostOnly(hostport string) string {
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		return h
+	}
+	return strings.Trim(hostport, "[]")
 }
 
 func registerCommandTools(srv *mcp.Server, zordonHome string, agent bool, testCfg alphasfile.TestConfig) {

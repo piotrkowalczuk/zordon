@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -27,10 +25,9 @@ import (
 //
 // The example's Alphasfile keeps `src = "../.."` so it depends on
 // the surrounding repo layout — we run zordon IN PLACE via
-// WithExistingRoot rather than copying to a tmpdir.
+// WithCallerRoot rather than copying to a tmpdir.
 func TestExample_go(t *testing.T) {
-	exampleDir := thisDir()
-	p := zordontest.NewProject(t, zordontest.WithExistingRoot(exampleDir))
+	p := zordontest.NewProject(t, zordontest.WithCallerRoot())
 
 	// Cold-cache budget: cargo install mise (first run, ~800 crates)
 	// + mise install go@1.25.6 + first compile of the example. ~10
@@ -61,16 +58,6 @@ func TestExample_go(t *testing.T) {
 	if !p.AlphaLog().Contains(wantLog) {
 		t.Errorf("alpha log missing startup line %q", wantLog)
 	}
-}
-
-// thisDir returns the absolute directory of the file invoking it —
-// i.e. examples/go/. Used so the test can locate its own example
-// tree without depending on the CWD `go test` happens to run from
-// (`go test ./examples/go/...` runs with CWD=examples/go/, but
-// `go test ./...` from repo root doesn't — runtime.Caller decouples).
-func thisDir() string {
-	_, here, _, _ := runtime.Caller(0)
-	return filepath.Dir(here)
 }
 
 func httpGet(t *testing.T, url string) string {
