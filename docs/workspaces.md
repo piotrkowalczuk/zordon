@@ -138,6 +138,9 @@ It has the resolved graph, so it can write a real port; and alpha *removes* the 
 
 In `main` the workspace directory is the project root, so the whole `workspaces/` tree sits underneath it; none of it is main's to write into either.
 
+A symlinked target is written *through*, so a link stays a link — but only when it still lands inside the workspace.
+A `.claude/settings.json` pointing into a dotfiles repo elsewhere is refused with a message naming where it resolves, rather than being quietly replaced by a regular file while the dotfiles copy keeps the old content.
+
 ### Branch naming
 
 The branch a picked service is checked out on comes from a template:

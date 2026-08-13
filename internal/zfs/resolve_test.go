@@ -41,16 +41,18 @@ func TestResolve(t *testing.T) {
 	}
 }
 
-// TestResolve_isLexicalOnly documents a real limit rather than a behaviour to
-// rely on: Resolve and Within compare cleaned STRINGS and never touch the
-// filesystem. A symlink inside the base that points out of it therefore
-// resolves to ok=true, and on a case-insensitive filesystem a differently
-// cased path escapes a comparison that a case-sensitive one would catch.
+// TestResolve_isLexicalOnly pins the DIVISION OF LABOUR, not a shortcoming:
+// Resolve and Within compare cleaned strings and never touch the filesystem, so
+// a symlink inside the base that points out of it still resolves to ok=true.
 //
-// That is acceptable for the manifest paths these guard — they come from a
-// file the developer wrote, not from an untrusted caller — but anything that
-// starts accepting hostile input needs filepath.EvalSymlinks on the deepest
-// existing ancestor first. Pinned so the limitation cannot be forgotten.
+// Seeing through links is EvalExisting's job, and callers that need it compose
+// the two — cmd/zordon's workspace guard resolves before it compares, which is
+// what stops a link becoming a way past every rule it enforces (see
+// TestWorkspaceFilePath_symlinkEscapingTheWorkspace).
+//
+// Keeping the primitive lexical is deliberate: it is total, needs no I/O, and
+// works on paths that do not exist. This test fails if that ever changes
+// quietly, since anything composing it would then be resolving twice.
 func TestResolve_isLexicalOnly(t *testing.T) {
 	base := t.TempDir()
 	outside := t.TempDir()

@@ -309,6 +309,129 @@ func TestApplyWorkspaceFiles_preservesModeOfForeignFiles(t *testing.T) {
 	}
 }
 
+// TestApplyWorkspaceFiles_writesThroughASymlink: a link whose target is still
+// inside the workspace is written THROUGH, not over.
+//
+// AtomicWrite renames over its target, so writing to the link itself would
+// replace the link with a regular file and leave the real file holding stale
+// content — the edit lands somewhere the user is not looking.
+func TestApplyWorkspaceFiles_writesThroughASymlink(t *testing.T) {
+	root := t.TempDir()
+	inv := namedWorkspaceInv(root, "feature")
+	mustDir(t, inv.Dir)
+
+	realFile := filepath.Join(inv.Dir, "shared", "settings.json")
+	mustWrite(t, realFile, `{"model":"opus"}`)
+
+	link := filepath.Join(inv.Dir, ".claude", "settings.json")
+	mustDir(t, filepath.Dir(link))
+	if err := os.Symlink(realFile, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	apply(t, specWith(&alphasfile.WorkspaceFile{
+		Name: "settings", Path: ".claude/settings.json", Op: alphasfile.OpMerge,
+		Format: zdoc.FormatJSON, Data: map[string]any{"env": map[string]any{"A": "b"}},
+	}), inv)
+
+	fi, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink was replaced by a regular file")
+	}
+	got := readBack(t, realFile)
+	for _, want := range []string{`"model": "opus"`, `"A": "b"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the symlink target is missing %q — the write did not go through the link:\n%s", want, got)
+		}
+	}
+}
+
+// TestApplyWorkspaceFiles_symlinkOutOfTheWorkspaceIsRefused is the dotfiles
+// case, and the common one: a link into ~/dotfiles points OUT of the workspace
+// by definition.
+//
+// zordon will not write there, and the interesting part is that it says so.
+// Previously the rename simply replaced the link with a regular file, the
+// dotfiles copy kept the old content, and nothing reported anything.
+func TestApplyWorkspaceFiles_symlinkOutOfTheWorkspaceIsRefused(t *testing.T) {
+	root := t.TempDir()
+	elsewhere := t.TempDir()
+	inv := namedWorkspaceInv(root, "feature")
+	mustDir(t, inv.Dir)
+
+	realFile := filepath.Join(elsewhere, "settings.json")
+	mustWrite(t, realFile, `{"model":"opus"}`)
+
+	link := filepath.Join(inv.Dir, ".claude", "settings.json")
+	mustDir(t, filepath.Dir(link))
+	if err := os.Symlink(realFile, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// Control: a plain file in the same workspace must still go through, so a
+	// blanket refusal cannot masquerade as this rule working.
+	apply(t, specWith(&alphasfile.WorkspaceFile{
+		Name: "claude", Path: "CLAUDE.md", Op: alphasfile.OpCreate, Body: "ok\n",
+	}), inv)
+
+	var out strings.Builder
+	err := applyWorkspaceFiles(specWith(&alphasfile.WorkspaceFile{
+		Name: "settings", Path: ".claude/settings.json", Op: alphasfile.OpMerge,
+		Format: zdoc.FormatJSON, Data: map[string]any{"env": map[string]any{"A": "b"}},
+	}), inv, nil, discardLogger(), &out)
+
+	if err == nil {
+		t.Fatal("applyWorkspaceFiles succeeded, want the write outside the workspace refused")
+	}
+	if !strings.Contains(err.Error(), "resolves to") {
+		t.Errorf("error = %v, want it to say where the path actually lands", err)
+	}
+	if fi, lerr := os.Lstat(link); lerr == nil && fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink was replaced even though the write was refused")
+	}
+	if got := readBack(t, realFile); got != `{"model":"opus"}` {
+		t.Errorf("the file outside the workspace was modified: %q", got)
+	}
+}
+
+// TestWorkspaceFilePath_symlinkEscapingTheWorkspace is the other half: writing
+// through a link is only safe because the guard re-runs on where the link
+// actually lands. A link out of the workspace must not become a way past every
+// rule the guard enforces.
+func TestWorkspaceFilePath_symlinkEscapingTheWorkspace(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	inv := namedWorkspaceInv(root, "feature")
+	mustDir(t, inv.Dir)
+
+	// Control: an ordinary path must still be accepted in this same setup.
+	// Without it the test would pass just as well against a guard that refuses
+	// everything, which is what a half-applied symlink fix looks like.
+	if _, err := workspaceFilePath(inv, nil, "CLAUDE.md"); err != nil {
+		t.Fatalf("control path was refused, so the assertions below prove nothing: %v", err)
+	}
+
+	if err := os.Symlink(outside, filepath.Join(inv.Dir, "escape")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := workspaceFilePath(inv, nil, "escape/x"); err == nil {
+		t.Fatal("a path through a symlink leaving the workspace was accepted")
+	}
+
+	// A link into a service checkout is the same hazard aimed at the rule that
+	// keeps generated files out of somebody's git tree.
+	mustDir(t, filepath.Join(inv.Dir, "src", "app"))
+	if err := os.Symlink(filepath.Join(inv.Dir, "src", "app"), filepath.Join(inv.Dir, "into-src")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := workspaceFilePath(inv, nil, "into-src/LEAKED.md"); err == nil {
+		t.Fatal("a path through a symlink into the service checkout was accepted")
+	}
+}
+
 // TestApplyWorkspaceFiles_rejectsDuplicateTargets: two blocks aimed at one
 // file would let declaration order decide the result, and a merge racing a
 // create on the same path is never what anybody meant. Distinct from the

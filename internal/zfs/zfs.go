@@ -385,6 +385,36 @@ func Resolve(base, rel string) (path string, ok bool) {
 	return path, Within(base, path)
 }
 
+// EvalExisting resolves symlinks in the deepest existing ancestor of path and
+// re-joins the components that do not exist yet.
+//
+// filepath.EvalSymlinks fails outright when the leaf is missing, which is the
+// normal case for a file about to be created — so a containment check that
+// wants to see through symlinks cannot use it directly. Pair this with Within
+// to ask "where does this path REALLY land?" rather than "what does it spell?".
+func EvalExisting(path string) (string, error) {
+	path = filepath.Clean(path)
+	rest := ""
+	for {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			if rest == "" {
+				return resolved, nil
+			}
+			return filepath.Join(resolved, rest), nil
+		}
+		if !IsMissingErr(err) {
+			return "", err
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return filepath.Join(path, rest), nil
+		}
+		rest = filepath.Join(filepath.Base(path), rest)
+		path = parent
+	}
+}
+
 // Within reports whether path is base itself or lies beneath it. Both are
 // cleaned first; neither is required to exist.
 func Within(base, path string) bool {

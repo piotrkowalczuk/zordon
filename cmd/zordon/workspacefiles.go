@@ -144,13 +144,38 @@ func workspaceFilePath(inv *invocation.InvocationState, protected []string, rel 
 	if !ok {
 		return "", fmt.Errorf("path %q escapes the workspace directory %s", rel, inv.Dir)
 	}
+
+	// From here on every comparison is made against where the path REALLY
+	// lands, not how it is spelled — on BOTH sides, since the workspace's own
+	// directory routinely sits behind a link too (/var → /private/var on
+	// macOS). Two things depend on that.
+	//
+	// A symlink inside the workspace would otherwise walk the guard straight
+	// past every rule below: the spelled path stays put while the write goes
+	// wherever the link points.
+	//
+	// And returning the resolved path is what keeps a symlinked target intact.
+	// AtomicWrite renames over its target, so writing to the link replaces the
+	// link with a regular file and leaves the real file — a dotfiles repo,
+	// usually — holding the old content. Writing through it is what the user
+	// meant by pointing it there.
+	abs, err := zfs.EvalExisting(abs)
+	if err != nil {
+		return "", fmt.Errorf("path %q: %w", rel, err)
+	}
+	dir := realPath(inv.Dir)
+	if !zfs.Within(dir, abs) {
+		return "", fmt.Errorf("path %q resolves to %s, outside the workspace directory %s", rel, abs, dir)
+	}
+
 	for _, src := range protected {
 		// Only source trees that sit strictly INSIDE the workspace count. One
 		// that contains it — a monorepo primary at ../.., or a service rooted
 		// at the project itself — is not somewhere the workspace writes
 		// "into": the workspace lives within it by design, and the checkouts
 		// it does own are guarded by the state-dir rules below.
-		if !zfs.Within(inv.Dir, src) || filepath.Clean(src) == filepath.Clean(inv.Dir) {
+		src = realPath(src)
+		if !zfs.Within(dir, src) || src == dir {
 			continue
 		}
 		if zfs.Within(src, abs) {
@@ -161,21 +186,31 @@ func workspaceFilePath(inv *invocation.InvocationState, protected []string, rel 
 	// In main the workspace dir is the project root, so the whole workspaces/
 	// tree sits underneath it — and none of it is main's to write to.
 	if inv.Workspace == invocation.MainWorkspace {
-		if wsRoot := filepath.Join(inv.ProjectRoot(), "workspaces"); zfs.Within(wsRoot, abs) {
+		if wsRoot := realPath(filepath.Join(inv.ProjectRoot(), "workspaces")); zfs.Within(wsRoot, abs) {
 			return "", fmt.Errorf("path %q writes into %s, which belongs to the workspaces themselves", rel, wsRoot)
 		}
 	}
 	for _, sub := range reservedStateDirs {
-		if zfs.Within(filepath.Join(inv.StateDir, sub), abs) {
+		if zfs.Within(realPath(filepath.Join(inv.StateDir, sub)), abs) {
 			return "", fmt.Errorf("path %q writes into %s/, which zordon and its services own; declare a file{} block inside the service instead", rel, sub)
 		}
 	}
 	for _, name := range reservedStateFiles {
-		if abs == filepath.Join(inv.StateDir, name) {
+		if abs == realPath(filepath.Join(inv.StateDir, name)) {
 			return "", fmt.Errorf("path %q is zordon's own %s", rel, name)
 		}
 	}
 	return abs, nil
+}
+
+// realPath is EvalExisting with the error folded away: a path zordon derived
+// itself either resolves or is simply not there yet, and in both cases the
+// lexical form is the right thing to compare against.
+func realPath(p string) string {
+	if r, err := zfs.EvalExisting(p); err == nil {
+		return r
+	}
+	return filepath.Clean(p)
 }
 
 func readIfPresent(path string) (body []byte, existed bool, err error) {
