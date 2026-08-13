@@ -373,3 +373,112 @@ Validation errors raised at Alphasfile parse time:
 Cross-links: flags pass through [`arguments`](#flags--arguments)
 unchanged; the toolchain tool installs join [`toolchain.tools`](#phases-build-runtime-agent)
 under the same pinned Go.
+
+## Top-level `workspace {}` — preparing a workspace directory
+
+Alongside the `service` blocks, one top-level `workspace {}` block says how to
+prepare a workspace *directory*: which files to put in it, and what to call the
+branch each picked service is checked out on.
+
+It is a different block from the service-level `workspace { sparse }`, which
+says how to cut one service's checkout. Same word, different scope.
+
+```hcl
+workspace {
+  branch = "zordon/${workspace.name}/${service.name}"   # the default
+
+  file "claude" {
+    path = "CLAUDE.md"
+    create { source = "templates/CLAUDE.md" }
+  }
+
+  file "devcontainer" {
+    path = ".devcontainer/devcontainer.json"
+    create { body = enc::json({ name = "zordon-${workspace.name}" }) }
+  }
+
+  file "settings" {
+    path = ".claude/settings.json"
+    merge { data = { env = { ZORDON_WORKSPACE = workspace.name } } }
+  }
+
+  file "ignore" {
+    path = ".gitignore"
+    region { body = ".devcontainer/" }
+  }
+}
+```
+
+Each `file` block takes a `path` and exactly one operation, which is what
+decides who owns the file:
+
+| Operation | Ownership | Payload |
+| --- | --- | --- |
+| `create` | zordon owns the whole file | `body` or `source` (exactly one) |
+| `merge` | zordon owns a fragment of a structured file you own | `data`, plus optional `format` |
+| `region` | zordon owns a marked span of a text file you own | `body` or `source`, plus optional `comment` |
+
+`merge` applies [RFC 7386](https://www.rfc-editor.org/rfc/rfc7386) JSON Merge
+Patch to JSON, YAML or TOML: objects merge key by key, any other value replaces
+what was there, and a `null` deletes its key. `format` is inferred from the
+path's extension. Arrays are replaced wholesale rather than appended to — that
+is what makes a repeated apply a no-op, and the trade is that a patch owns a
+list or does not touch it. YAML and TOML round-trip through Go libraries that
+drop comments and original formatting; JSON has neither to lose.
+
+`region` maintains a `# >>> zordon: <name>` … `# <<< zordon: <name>` span,
+appending it when absent and replacing it when present. `comment` defaults to
+`#`. It is refused on `.json`, which has no comment syntax — use `merge` there.
+
+`source` names a file inside the project root. It is rendered as an HCL
+template, not copied, so it can interpolate the same values a `body` can; a
+literal `${` or `%{` that is not meant as interpolation must be escaped `$${`
+or `%%{`.
+
+### When these are written, and what that rules out
+
+The files are materialized by `zordon workspace create` and
+`zordon workspace apply` — **before** anything is built or started, because an
+agent or a dev container has to find them already in place.
+
+That timing decides the evaluation context. Available:
+
+- `workspace.name`, `.dir`, `.root`, `.hash`, `.port`
+- `fs::hash()`, `fs::state()`, `fs::tmp()`, `fs::bin()`
+- `os::env()`
+- `enc::json()`, `enc::yaml()`, `enc::toml()`
+
+Deliberately unavailable, each with an error naming the alternative:
+`net::pickport()`, `self.*`, `service.<tc>.<svc>.*`, `src::hash()`,
+`cfg::hash()`, `fs::src()`, `fs::exe()`, `fs::etc()`, `fs::var()`.
+
+None of them can answer truthfully before the stack exists — a port drawn here
+would simply not be the one alpha draws later. Values that depend on a running
+service belong in that service's own [`file {}`](#generated-files) block, which
+alpha materializes at start with the whole resolved graph in scope.
+
+`workspace.port` is the exception that makes static files useful: it is derived
+from `workspace.hash`, so it is stable across runs of a given workspace and can
+name a server that is started afterwards.
+
+See [Workspaces](workspaces.md) for where a generated file may not go, and for
+the branch template.
+
+### `enc::json` / `enc::yaml` / `enc::toml`
+
+The `enc::` namespace serializes an HCL value into a document:
+
+```hcl
+body = enc::json({
+  mcpServers = {
+    zordon = { type = "stdio", command = "zordon", args = ["mcp", "--dir", "."] }
+  }
+})
+```
+
+Building a document from structure rather than from a hand-quoted heredoc is
+what keeps an interpolated path or name carrying a quote or a backslash from
+corrupting it silently. Every encoder sorts object keys and keeps integers
+integral, so the output is a pure function of the input — which is what makes
+`workspace apply` idempotent. They are available in service-level `file {}`
+bodies too.

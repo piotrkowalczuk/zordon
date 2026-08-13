@@ -347,6 +347,37 @@ func ZordonHome(override string) string {
 	return filepath.Join(h, ".zordon")
 }
 
+// Resolve joins a manifest-supplied relative path onto base and reports
+// whether the result stays inside base. It is the containment primitive for
+// every path that comes out of an Alphasfile: a generated file's target, a
+// template's source. An absolute rel, a "../" climb and a symlink-free
+// traversal all resolve to ok=false.
+//
+// base is assumed already trustworthy (an invocation dir, a project root).
+// The returned path is cleaned and absolute whenever base is.
+func Resolve(base, rel string) (path string, ok bool) {
+	if rel == "" || filepath.IsAbs(rel) {
+		return "", false
+	}
+	base = filepath.Clean(base)
+	path = filepath.Clean(filepath.Join(base, rel))
+	return path, Within(base, path)
+}
+
+// Within reports whether path is base itself or lies beneath it. Both are
+// cleaned first; neither is required to exist.
+func Within(base, path string) bool {
+	base, path = filepath.Clean(base), filepath.Clean(path)
+	if path == base {
+		return true
+	}
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // ServiceCwd is the canonical "where does this service work from?"
 // answer: the checkout root joined with the service's exe offset.
 // Single source of truth across the codebase — the resolved value is

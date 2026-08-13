@@ -266,8 +266,24 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 				parsePicks(append(strings.Fields(*wsRmServices), args...)), zfs.ZordonHome(home.Path()))
 		},
 	}
+	// workspace apply: re-render the top-level `workspace { file ... }` block
+	// into an existing workspace. `create` already does this for a new one;
+	// this is how an edited Alphasfile reaches an existing workspace, and the
+	// only way the project root ("main") ever gets its files at all.
+	wsApplyFlags := ff.NewFlagSet("apply").SetParent(wsFlags)
+	wsApplyWorkspace := invocation.WorkspaceName(invocation.MainWorkspace)
+	wsApplyFlags.Value(0, "workspace", &wsApplyWorkspace, "target workspace (default: main, the project root)")
+	wsApplyCmd := &ff.Command{
+		Name:      "apply",
+		Usage:     "zordon workspace apply [--workspace <name>]",
+		ShortHelp: "write the declared workspace files into an existing workspace",
+		Flags:     wsApplyFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runWorkspaceApply(zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsApplyWorkspace)
+		},
+	}
 	wsServiceCmd.Subcommands = []*ff.Command{wsServiceAddCmd, wsServiceRmCmd}
-	wsCmd.Subcommands = []*ff.Command{wsCreateCmd, wsListCmd, wsRmCmd, wsServiceCmd}
+	wsCmd.Subcommands = []*ff.Command{wsCreateCmd, wsListCmd, wsRmCmd, wsApplyCmd, wsServiceCmd}
 
 	// plan
 	planFlags := ff.NewFlagSet("plan").SetParent(rootFlags)
@@ -876,10 +892,14 @@ func checkoutStatus(ctx context.Context, s *alphasfile.Service, workspace string
 		sha, _ := exec.CommandContext(ctx, "git", "-C", co, "rev-parse", "--short", "HEAD").Output()
 		return fmt.Sprintf("checkout: %s (detached @ %s)", rel, strings.TrimSpace(string(sha)))
 	}
-	// An editable worktree is expected on zordon/<ws>/<svc>; flag a mismatch so
-	// the user sees they are building their own branch, not the canonical one.
+	// An editable worktree is expected on its resolved workspace branch; flag a
+	// mismatch so the user sees they are building their own branch, not the
+	// canonical one.
 	if s.Package.Editable {
-		want := "zordon/" + workspace + "/" + s.Name()
+		want := s.Package.WorkspaceBranch
+		if want == "" {
+			want = alphasfile.DefaultBranchFor(workspace, s.Name())
+		}
 		if ref != want {
 			return fmt.Sprintf("checkout: %s (branch %s ⚠ not %s — building your branch)", rel, ref, want)
 		}

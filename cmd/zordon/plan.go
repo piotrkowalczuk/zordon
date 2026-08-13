@@ -11,6 +11,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/zdoc"
 )
 
 // runPlan resolves every Alphasfile in the federation chain statically
@@ -60,8 +61,63 @@ func runPlan(_ context.Context, w io.Writer, zordonHome string, picks []string, 
 		if _, err := w.Write(renderState(lv.state)); err != nil {
 			return err
 		}
+		// Workspace files belong to the level you are actually in: they are
+		// written into the invocation's own directory and never travel to a
+		// federation parent. They also never reach alpha, so they are resolved
+		// here rather than read back out of StateInfo.
+		if !lv.isInvocation {
+			continue
+		}
+		spec, err := alphasfile.RenderWorkspace(lv.afPath, lv.inv)
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write(renderWorkspaceBlock(spec)); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// renderWorkspaceBlock writes the resolved top-level workspace block: the
+// branch template as written, and each file with its content already
+// substituted — what `zordon workspace apply` would put on disk.
+func renderWorkspaceBlock(spec *alphasfile.WorkspaceSpec) []byte {
+	f := hclwrite.NewFile()
+	// Nothing declared ⇒ nothing to render. Emitting the default template into
+	// every plan would be noise in projects that never asked for a workspace
+	// block at all.
+	if spec == nil || (len(spec.Files) == 0 && spec.BranchTemplate() == alphasfile.DefaultBranchTemplate) {
+		return f.Bytes()
+	}
+	body := f.Body()
+	wb := body.AppendNewBlock("workspace", nil).Body()
+	wb.SetAttributeValue("branch", cty.StringVal(spec.BranchTemplate()))
+	for _, wf := range spec.Files {
+		fb := wb.AppendNewBlock("file", []string{wf.Name}).Body()
+		fb.SetAttributeValue("path", cty.StringVal(wf.Path))
+		ob := fb.AppendNewBlock(string(wf.Op), nil).Body()
+		switch wf.Op {
+		case alphasfile.OpCreate:
+			ob.SetAttributeValue("body", cty.StringVal(wf.Body))
+		case alphasfile.OpRegion:
+			ob.SetAttributeValue("body", cty.StringVal(wf.Body))
+			if wf.Comment != "" {
+				ob.SetAttributeValue("comment", cty.StringVal(wf.Comment))
+			}
+		case alphasfile.OpMerge:
+			ob.SetAttributeValue("format", cty.StringVal(string(wf.Format)))
+			// data is rendered as the encoded document rather than as an HCL
+			// object: it is what actually gets merged, and it round-trips
+			// through a golden diff unambiguously.
+			encoded, err := zdoc.Encode(wf.Data, wf.Format)
+			if err != nil {
+				encoded = fmt.Appendf(nil, "<unencodable: %v>", err)
+			}
+			ob.SetAttributeValue("data", cty.StringVal(string(encoded)))
+		}
+	}
+	return f.Bytes()
 }
 
 // renderState writes a resolved StateInfo back as HCL bytes, every
