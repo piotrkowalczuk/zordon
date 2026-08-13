@@ -101,12 +101,24 @@ assert_contains "$(cat "$WS/CLAUDE.md")" "EDITED BY THE USER" "service add left 
 zordon workspace apply --workspace=feature
 
 # apply on an unchanged manifest is a no-op, byte for byte.
-before="$(cat "$WS/CLAUDE.md" "$WS/.claude/settings.json" "$WS/.gitignore" | shasum | cut -d' ' -f1)"
+#
+# Compared with `git diff --no-index` rather than a hash or cmp: shasum is a
+# perl script absent from debian:11, and cmp (diffutils) is absent from the
+# fedora image — both were tried and both broke a distro. git is already a hard
+# prerequisite of this example, and its comparison is byte-exact.
+generated="CLAUDE.md .claude/settings.json .gitignore"
+snap="$(mktemp -d)"
+for f in $generated; do
+	mkdir -p "$snap/$(dirname "$f")"
+	cp "$WS/$f" "$snap/$f"
+done
 zordon workspace apply --workspace=feature
-after="$(cat "$WS/CLAUDE.md" "$WS/.claude/settings.json" "$WS/.gitignore" | shasum | cut -d' ' -f1)"
-[ "$before" = "$after" ] \
-	&& pass "workspace apply is idempotent" \
-	|| fail "workspace apply changed the files on an unchanged manifest"
+for f in $generated; do
+	git diff --no-index --quiet -- "$snap/$f" "$WS/$f" \
+		|| fail "workspace apply rewrote $f on an unchanged manifest"
+done
+rm -rf "$snap"
+pass "workspace apply is idempotent"
 
 # The files exist before anything runs — that is the whole point — but the
 # stack must still come up normally afterwards.

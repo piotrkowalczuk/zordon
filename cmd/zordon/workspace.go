@@ -187,7 +187,14 @@ func renderWorkspaceHere(name string) (*alphasfile.WorkspaceSpec, error) {
 	if err != nil {
 		return nil, err
 	}
-	inv, err := workspaceInvocation(root, invocation.WorkspaceName(name))
+	return renderWorkspaceFor(root, invocation.WorkspaceName(name))
+}
+
+// renderWorkspaceFor is renderWorkspaceHere with the project root supplied
+// rather than discovered, so the "resolves but writes nothing" contract can be
+// asserted without a cwd or a git primary.
+func renderWorkspaceFor(root string, ws invocation.WorkspaceName) (*alphasfile.WorkspaceSpec, error) {
+	inv, err := workspaceInvocation(root, ws)
 	if err != nil {
 		return nil, err
 	}

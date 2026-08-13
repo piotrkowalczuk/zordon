@@ -77,6 +77,37 @@ func TestResolve_isLexicalOnly(t *testing.T) {
 	}
 }
 
+// TestWithin_isCaseSensitive is the other half of the lexical limitation, and
+// the one that actually bites on macOS. Within compares byte-for-byte, so on a
+// case-insensitive filesystem "SRC/app" and "src/app" name the same directory
+// while comparing unequal — a guard keyed on one spelling does not see the
+// other.
+//
+// Same reasoning as TestResolve_isLexicalOnly: these paths come from a
+// manifest the developer wrote, not from an attacker, so the trade is
+// deliberate. Written down because a limitation nobody recorded is one
+// somebody later assumes away.
+func TestWithin_isCaseSensitive(t *testing.T) {
+	base := filepath.FromSlash("/proj/workspaces/feature/src")
+	other := filepath.FromSlash("/proj/workspaces/feature/SRC/app")
+
+	if Within(base, other) {
+		t.Fatalf("Within(%q, %q) = true — the comparison has become case-insensitive; update this test and the docs", base, other)
+	}
+
+	// And confirm the filesystem really would treat them as one, so the note
+	// is about a live hazard rather than a hypothetical.
+	dir := t.TempDir()
+	if err := EnsureDir(filepath.Join(dir, "src")); err != nil {
+		t.Fatalf("EnsureDir: %v", err)
+	}
+	if _, err := Stat(filepath.Join(dir, "SRC")); err == nil {
+		t.Log("filesystem is case-insensitive here: SRC and src are the same directory, and Within cannot tell")
+	} else {
+		t.Log("filesystem is case-sensitive here: the mismatch is only reachable on macOS/Windows")
+	}
+}
+
 func TestWithin(t *testing.T) {
 	cases := map[string]struct {
 		base, path string

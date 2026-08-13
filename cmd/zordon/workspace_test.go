@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -87,6 +88,110 @@ service "go" "app" {
 	}
 	if zfs.Exists(filepath.Join(root, "src", "app", "LEAKED.md")) {
 		t.Error("the file was written into the service's source tree")
+	}
+}
+
+// TestRenderWorkspaceFor_writesNothing is the fast-feedback guard on what
+// `workspace service add` uses. Adding a checkout is no reason to rewrite the
+// workspace's files, and an agent that has edited CLAUDE.md must not lose that
+// edit to an unrelated command.
+//
+// The example asserts the same thing end to end, but only `make e2e` runs it;
+// this fails in `go test ./...` instead, which is where a regression gets
+// noticed.
+func TestRenderWorkspaceFor_writesNothing(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, invocation.AlphasfileName), `
+workspace {
+  file "claude" {
+    path = "CLAUDE.md"
+    create { body = "generated for ${workspace.name}\n" }
+  }
+  file "settings" {
+    path = ".claude/settings.json"
+    merge { data = { env = { A = "b" } } }
+  }
+}
+`)
+	wsDir := filepath.Join(root, "workspaces", "feature")
+	mustDir(t, wsDir)
+	mustWrite(t, filepath.Join(wsDir, invocation.WorkspaceMarker), "")
+
+	edited := filepath.Join(wsDir, "CLAUDE.md")
+	mustWrite(t, edited, "EDITED BY THE USER\n")
+
+	spec, err := renderWorkspaceFor(root, "feature")
+	if err != nil {
+		t.Fatalf("renderWorkspaceFor: %v", err)
+	}
+	if len(spec.Files) != 2 {
+		t.Fatalf("got %d files, want the block resolved", len(spec.Files))
+	}
+
+	if got := readBack(t, edited); got != "EDITED BY THE USER\n" {
+		t.Errorf("the edited file was rewritten: %q", got)
+	}
+	if zfs.Exists(filepath.Join(wsDir, ".claude", "settings.json")) {
+		t.Error("a file that did not exist was created")
+	}
+}
+
+// TestRunWorkspaceServiceAdd_leavesGeneratedFilesAlone covers the WIRING that
+// TestRenderWorkspaceFor_writesNothing cannot: swapping the call back to
+// applyWorkspaceHere would leave that test green while the command started
+// overwriting files again. It does real git work, which is why it is the one
+// heavier test here — the alternative was leaving this to `make e2e`.
+func TestRunWorkspaceServiceAdd_leavesGeneratedFilesAlone(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, invocation.AlphasfileName), `
+workspace {
+  file "claude" {
+    path = "CLAUDE.md"
+    create { body = "generated for ${workspace.name}\n" }
+  }
+}
+
+service "go" "app" {
+  src { path = "." }
+  runtime { cmd = ["./app"] }
+}
+`)
+	mustWrite(t, filepath.Join(root, "main.go"), "package main\n")
+	gitRun(t, root, "init", "-q", "-b", "main")
+	gitRun(t, root, "add", "-A")
+	gitRun(t, root, "-c", "user.email=a@b", "-c", "user.name=z", "commit", "-q", "-m", "init")
+
+	wsDir := filepath.Join(root, "workspaces", "feature")
+	mustDir(t, wsDir)
+	mustWrite(t, filepath.Join(wsDir, invocation.WorkspaceMarker), "")
+
+	edited := filepath.Join(wsDir, "CLAUDE.md")
+	mustWrite(t, edited, "EDITED BY THE USER\n")
+
+	t.Chdir(root)
+	err := runWorkspaceServiceAdd(t.Context(), discardLogger(), io.Discard,
+		invocation.WorkspaceName("feature"), []string{"app"}, t.TempDir())
+	if err != nil {
+		t.Fatalf("runWorkspaceServiceAdd: %v", err)
+	}
+
+	if got := readBack(t, edited); got != "EDITED BY THE USER\n" {
+		t.Errorf("service add rewrote the edited file: %q", got)
+	}
+	if !zfs.Exists(filepath.Join(wsDir, "src", "app", ".git")) {
+		t.Error("the service was not actually checked out, so the assertion above proves nothing")
+	}
+}
+
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	c := exec.Command("git", args...)
+	c.Dir = dir
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
 
