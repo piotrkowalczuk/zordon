@@ -83,6 +83,13 @@ dirty="$(git -C "$WS/src/app" status --porcelain)"
 	&& pass "service checkout left clean" \
 	|| fail "workspace files leaked into src/app: $dirty"
 
+# Porcelain misses a leak into a path the checked-out repo itself ignores, so
+# also name a file only this feature creates. .devcontainer/ exists nowhere in
+# the repo, so finding one under the checkout can only mean a leak. (CLAUDE.md
+# would NOT work as a marker: a sparse cone materializes the repo's own
+# top-level files, so it is there legitimately.)
+assert_absent "$WS/src/app/.devcontainer"
+
 # apply on an unchanged manifest is a no-op, byte for byte.
 before="$(cat "$WS/CLAUDE.md" "$WS/.claude/settings.json" "$WS/.gitignore" | shasum | cut -d' ' -f1)"
 zordon workspace apply --workspace=feature
