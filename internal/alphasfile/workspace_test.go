@@ -300,18 +300,23 @@ func TestWorkspacePort_stable(t *testing.T) {
 			t.Fatalf("WorkspacePort(%q) = %d then %d, want a stable value", hash, first, got)
 		}
 	}
-	// Below Linux's ephemeral floor (32768): the kernel must not be able to
-	// hand this number to an unrelated socket while the workspace is idle.
-	if first < 20000 || first >= 32768 {
-		t.Errorf("WorkspacePort = %d, want it below the ephemeral range", first)
-	}
-	for _, h := range []string{"0", "ffffffffffffffff", "abcd1234ef567891", "zzzz"} {
-		if p := WorkspacePort(h); p < 20000 || p >= 32768 {
-			t.Errorf("WorkspacePort(%q) = %d, outside the safe range", h, p)
-		}
-	}
 	if other := WorkspacePort("0000000000000000"); other == first {
 		t.Errorf("two workspaces share port %d", first)
+	}
+}
+
+// TestWorkspacePort_range keeps the derivation below Linux's ephemeral floor
+// (32768) and above the privileged ports: inside that range the kernel could
+// hand the same number to an unrelated socket while the workspace is idle, and
+// the generated file would point at somebody else's listener.
+func TestWorkspacePort_range(t *testing.T) {
+	for _, h := range []string{
+		"", "0", "ffffffffffffffff", "abcd1234ef567890", "abcd1234ef567891", "zzzz",
+		"0000000000000000", "7f7f7f7f7f7f7f7f",
+	} {
+		if p := WorkspacePort(h); p < 20000 || p >= 32768 {
+			t.Errorf("WorkspacePort(%q) = %d, outside 20000..32767", h, p)
+		}
 	}
 }
 
@@ -420,6 +425,38 @@ func TestWorkspaceSpec_BranchesFor_skipsNonWorkspaceable(t *testing.T) {
 	}
 	if len(got) != 1 || got["api"] != "zordon/feature/api" {
 		t.Errorf("BranchesFor = %v, want only the checkout-able service", got)
+	}
+}
+
+// TestWorkspaceSpec_BranchesFor_collisionIsDeterministic needs TWO colliding
+// groups: with only one, map iteration order has nothing to choose between and
+// a missing sort passes by luck. The same manifest must always accuse the same
+// group, or the error text changes between identical runs.
+func TestWorkspaceSpec_BranchesFor_collisionIsDeterministic(t *testing.T) {
+	spec := mustRenderWorkspace(t, `workspace { branch = "zordon/${service.toolchain}" }`, nil)
+	metas := []*ServiceMeta{
+		{Name: "api", Toolchain: "go", Package: &Package{Src: "/proj/api"}},
+		{Name: "web", Toolchain: "go", Package: &Package{Src: "/proj/web"}},
+		{Name: "cli", Toolchain: "rust", Package: &Package{Src: "/proj/cli"}},
+		{Name: "job", Toolchain: "rust", Package: &Package{Src: "/proj/job"}},
+	}
+
+	_, err := spec.BranchesFor(metas)
+	if err == nil {
+		t.Fatal("BranchesFor succeeded, want a collision error")
+	}
+	first := err.Error()
+	if !strings.Contains(first, `"zordon/go"`) {
+		t.Errorf("error = %v, want the first group in branch-name order (zordon/go before zordon/rust)", err)
+	}
+	for i := range 30 {
+		_, err := spec.BranchesFor(metas)
+		if err == nil {
+			t.Fatalf("run %d: BranchesFor succeeded", i)
+		}
+		if err.Error() != first {
+			t.Fatalf("run %d reported a different collision:\nfirst:  %s\nlater:  %s", i, first, err)
+		}
 	}
 }
 

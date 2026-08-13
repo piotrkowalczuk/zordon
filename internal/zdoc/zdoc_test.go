@@ -271,6 +271,111 @@ func TestRegion_customComment(t *testing.T) {
 	}
 }
 
+// TestRegion_rejectsMultilineMarkers: a newline anywhere in the marker makes a
+// marker that can never be matched again, so the next apply appends a second
+// copy instead of replacing the first. Rejecting beats writing a region that
+// grows on every run.
+func TestRegion_rejectsMultilineMarkers(t *testing.T) {
+	cases := map[string]struct{ name, comment string }{
+		"newline in the name":       {name: "a\nb", comment: "#"},
+		"newline in the comment":    {name: "ws", comment: "#\n#"},
+		"carriage return in name":   {name: "a\rb", comment: "#"},
+		"carriage return in prefix": {name: "ws", comment: "#\r"},
+	}
+
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			if _, err := Region(nil, c.name, "x", c.comment); err == nil {
+				t.Fatalf("Region(name=%q, comment=%q) succeeded, want it refused", c.name, c.comment)
+			}
+		})
+	}
+}
+
+// TestMerge_output pins what merge actually WRITES for each format, not just
+// that writing it twice is stable — an encoder that dropped a key would still
+// be idempotent.
+func TestMerge_output(t *testing.T) {
+	patch := map[string]any{"added": "yes", "nested": map[string]any{"k": int64(2)}}
+
+	cases := map[string]struct {
+		format   Format
+		existing string
+		want     []string
+	}{
+		"json": {
+			format:   FormatJSON,
+			existing: `{"kept":"original","nested":{"other":1}}`,
+			want:     []string{`"kept": "original"`, `"added": "yes"`, `"other": 1`, `"k": 2`},
+		},
+		"yaml": {
+			format:   FormatYAML,
+			existing: "kept: original\nnested:\n  other: 1\n",
+			// `added: "yes"` and not `added: yes`: bare yes is a YAML 1.1
+			// boolean, so the encoder has to quote it or the value comes back
+			// as true. Asserted deliberately — it is the encoder protecting a
+			// string, not noise.
+			want: []string{"kept: original", `added: "yes"`, "other: 1", "k: 2"},
+		},
+		"toml": {
+			format:   FormatTOML,
+			existing: "kept = \"original\"\n\n[nested]\nother = 1\n",
+			want:     []string{`kept = "original"`, `added = "yes"`, "other = 1", "k = 2"},
+		},
+	}
+
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			got, err := Merge([]byte(c.existing), patch, c.format)
+			if err != nil {
+				t.Fatalf("Merge: %v", err)
+			}
+			for _, want := range c.want {
+				if !strings.Contains(string(got), want) {
+					t.Errorf("merged %s is missing %q:\n%s", c.format, want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestMerge_dropsCommentsInYAMLAndTOML pins the documented cost of the
+// fragment modes. It is a real limitation, not an accident, so it should fail
+// loudly if a future encoder change makes the docs wrong in either direction.
+func TestMerge_dropsCommentsInYAMLAndTOML(t *testing.T) {
+	cases := map[string]struct {
+		format   Format
+		existing string
+	}{
+		"yaml": {format: FormatYAML, existing: "# a comment the user wrote\nkept: original\n"},
+		"toml": {format: FormatTOML, existing: "# a comment the user wrote\nkept = \"original\"\n"},
+	}
+
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			got, err := Merge([]byte(c.existing), map[string]any{"added": "yes"}, c.format)
+			if err != nil {
+				t.Fatalf("Merge: %v", err)
+			}
+			if strings.Contains(string(got), "a comment the user wrote") {
+				t.Errorf("the comment survived — the documented caveat is now wrong:\n%s", got)
+			}
+			if !strings.Contains(string(got), "original") {
+				t.Errorf("the value was lost along with the comment:\n%s", got)
+			}
+		})
+	}
+
+	// JSON has no comments to lose, which is why it is the safe format here.
+	got, err := Merge([]byte(`{"kept":"original"}`), map[string]any{"added": "yes"}, FormatJSON)
+	if err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if !strings.Contains(string(got), `"kept": "original"`) {
+		t.Errorf("json merge lost the original value:\n%s", got)
+	}
+}
+
 func TestRegion_unterminated(t *testing.T) {
 	_, err := Region([]byte("# >>> zordon: ws\nstuff\n"), "ws", "x", "#")
 	if err == nil {

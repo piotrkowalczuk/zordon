@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,14 +18,14 @@ func TestWorkspaceFilePath_accepts(t *testing.T) {
 	inv := namedWorkspaceInv("/proj", "feature")
 
 	cases := map[string]string{
-		"top level":            "CLAUDE.md",
-		"nested dotdir":        ".claude/settings.json",
-		"devcontainer":         ".devcontainer/devcontainer.json",
-		"deeply nested":        "a/b/c/d.txt",
-		"interior climb":       "a/../CLAUDE.md",
-		"name resembling src":  "srcnotes.md",
-		"name resembling etc":  "etcetera.txt",
-		"src as a file, not a": "src.md",
+		"top level":                    "CLAUDE.md",
+		"nested dotdir":                ".claude/settings.json",
+		"devcontainer":                 ".devcontainer/devcontainer.json",
+		"deeply nested":                "a/b/c/d.txt",
+		"interior climb":               "a/../CLAUDE.md",
+		"name resembling src":          "srcnotes.md",
+		"name resembling etc":          "etcetera.txt",
+		"src as a filename, not a dir": "src.md",
 	}
 
 	for hint, rel := range cases {
@@ -272,6 +273,72 @@ func TestApplyWorkspaceFiles_idempotent(t *testing.T) {
 	}
 }
 
+// TestApplyWorkspaceFiles_preservesModeOfForeignFiles is the wiring half of
+// zfs.AtomicWriteKeepingMode: that function can be correct and still unused.
+// merge and region edit files somebody else created, so demoting a 0644 config
+// to 0600 breaks whatever else on the machine reads it. create owns its files
+// outright and keeps zordon's private mode.
+func TestApplyWorkspaceFiles_preservesModeOfForeignFiles(t *testing.T) {
+	root := t.TempDir()
+	inv := namedWorkspaceInv(root, "feature")
+	mustDir(t, inv.Dir)
+
+	settings := filepath.Join(inv.Dir, ".claude", "settings.json")
+	ignore := filepath.Join(inv.Dir, ".gitignore")
+	mustWrite(t, settings, `{"model":"opus"}`)
+	mustWrite(t, ignore, "node_modules/\n")
+	mustChmod(t, settings, 0o644)
+	mustChmod(t, ignore, 0o664)
+
+	apply(t, specWith(
+		&alphasfile.WorkspaceFile{
+			Name: "settings", Path: ".claude/settings.json", Op: alphasfile.OpMerge,
+			Format: zdoc.FormatJSON, Data: map[string]any{"env": map[string]any{"A": "b"}},
+		},
+		&alphasfile.WorkspaceFile{Name: "ignore", Path: ".gitignore", Op: alphasfile.OpRegion, Body: "build/"},
+	), inv)
+
+	for path, want := range map[string]os.FileMode{settings: 0o644, ignore: 0o664} {
+		fi, err := zfs.Stat(path)
+		if err != nil {
+			t.Fatalf("Stat %s: %v", path, err)
+		}
+		if got := fi.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %v, want the mode the user's file already had (%v)", filepath.Base(path), got, want)
+		}
+	}
+}
+
+// TestApplyWorkspaceFiles_rejectsDuplicateTargets: two blocks aimed at one
+// file would let declaration order decide the result, and a merge racing a
+// create on the same path is never what anybody meant. Distinct from the
+// "declared twice" check in alphasfile, which catches a repeated block NAME —
+// these blocks have different names and the same target.
+func TestApplyWorkspaceFiles_rejectsDuplicateTargets(t *testing.T) {
+	root := t.TempDir()
+	inv := namedWorkspaceInv(root, "feature")
+	mustDir(t, inv.Dir)
+
+	spec := specWith(
+		&alphasfile.WorkspaceFile{Name: "first", Path: "CLAUDE.md", Op: alphasfile.OpCreate, Body: "a\n"},
+		&alphasfile.WorkspaceFile{Name: "second", Path: "./CLAUDE.md", Op: alphasfile.OpCreate, Body: "b\n"},
+	)
+
+	var out strings.Builder
+	err := applyWorkspaceFiles(spec, inv, nil, discardLogger(), &out)
+	if err == nil {
+		t.Fatal("applyWorkspaceFiles succeeded, want the duplicate target refused")
+	}
+	for _, want := range []string{"first", "second", "CLAUDE.md"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to name %q", err, want)
+		}
+	}
+	if zfs.Exists(filepath.Join(inv.Dir, "CLAUDE.md")) {
+		t.Error("a file was written despite the conflict")
+	}
+}
+
 // TestApplyWorkspaceFiles_validatesBeforeWriting keeps a manifest with one bad
 // path from leaving a half-written workspace behind.
 func TestApplyWorkspaceFiles_validatesBeforeWriting(t *testing.T) {
@@ -298,10 +365,6 @@ func TestApplyWorkspaceFiles_validatesBeforeWriting(t *testing.T) {
 }
 
 func discardLogger() *zlog.Logger { return zlog.New(io.Discard, false) }
-
-type discardWriter struct{}
-
-func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 func namedWorkspaceInv(root, name string) *invocation.InvocationState {
 	dir := filepath.Join(root, "workspaces", name)
@@ -335,6 +398,15 @@ func mustDir(t *testing.T, dir string) {
 	t.Helper()
 	if err := zfs.EnsureDir(dir); err != nil {
 		t.Fatalf("EnsureDir %s: %v", dir, err)
+	}
+}
+
+// mustChmod reaches for os directly: this is a test ABOUT file modes, and zfs
+// deliberately exposes no chmod — it owns one private mode by design.
+func mustChmod(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatalf("Chmod %s: %v", path, err)
 	}
 }
 

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
@@ -52,6 +54,70 @@ func TestApplyTarget(t *testing.T) {
 	}
 }
 
+// TestApplyWorkspaceTo_passesServiceSources closes the gap between a guard
+// that works and a guard that is wired up. workspaceFilePath is tested
+// directly, but nothing else proves the caller hands it the services' source
+// directories — pass nil there and the guard silently protects nothing, which
+// is exactly how the original hole looked.
+func TestApplyWorkspaceTo_passesServiceSources(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, invocation.AlphasfileName), `
+workspace {
+  file "leak" {
+    path = "src/app/LEAKED.md"
+    create { body = "should never be written\n" }
+  }
+}
+
+service "go" "app" {
+  src {
+    path = "./src/app"
+  }
+  runtime { cmd = ["./app"] }
+}
+`)
+	mustDir(t, filepath.Join(root, "src", "app"))
+
+	_, err := applyWorkspaceTo(discardLogger(), io.Discard, root, invocation.MainWorkspace)
+	if err == nil {
+		t.Fatal("applyWorkspaceTo succeeded, want the write into a service source refused")
+	}
+	if !strings.Contains(err.Error(), "source tree") {
+		t.Errorf("error = %v, want it to name the service's source tree", err)
+	}
+	if zfs.Exists(filepath.Join(root, "src", "app", "LEAKED.md")) {
+		t.Error("the file was written into the service's source tree")
+	}
+}
+
+// TestServiceSourceDirs pins what feeds that guard.
+func TestServiceSourceDirs(t *testing.T) {
+	root := t.TempDir()
+	af := filepath.Join(root, invocation.AlphasfileName)
+	mustWrite(t, af, `
+service "go" "app" {
+  src { path = "./src/app" }
+  runtime { cmd = ["./app"] }
+}
+
+service "go" "tool" {
+  package = "example.com/tool@v1"
+  runtime { cmd = ["./tool"] }
+}
+`)
+
+	got, err := serviceSourceDirs(af)
+	if err != nil {
+		t.Fatalf("serviceSourceDirs: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %v, want only the service with a local source", got)
+	}
+	if want := filepath.Join(root, "src", "app"); got[0] != want {
+		t.Errorf("got %q, want the resolved absolute source %q", got[0], want)
+	}
+}
+
 // TestApplyTarget_writesIntoTheWorkspaceItIsIn is the end-to-end shape of the
 // same bug: a file declared for the workspace must land in the workspace, not
 // in the project root next to it.
@@ -77,7 +143,7 @@ workspace {
 	if err != nil {
 		t.Fatalf("applyTarget: %v", err)
 	}
-	if _, err := applyWorkspaceTo(discardLogger(), discardWriter{}, root, ws); err != nil {
+	if _, err := applyWorkspaceTo(discardLogger(), io.Discard, root, ws); err != nil {
 		t.Fatalf("applyWorkspaceTo: %v", err)
 	}
 

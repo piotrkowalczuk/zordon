@@ -90,6 +90,16 @@ dirty="$(git -C "$WS/src/app" status --porcelain)"
 # top-level files, so it is there legitimately.)
 assert_absent "$WS/src/app/.devcontainer"
 
+# Adding a service checkout is not a reason to rewrite the workspace's files.
+# An agent that has edited CLAUDE.md and then pulls in another service must not
+# lose that edit — `zordon workspace apply` is the command that rewrites files.
+printf 'EDITED BY THE USER\n' >"$WS/CLAUDE.md"
+zordon workspace service add --workspace=feature --services=app
+assert_contains "$(cat "$WS/CLAUDE.md")" "EDITED BY THE USER" "service add left the edited file alone"
+
+# Put the generated content back before the idempotency check below.
+zordon workspace apply --workspace=feature
+
 # apply on an unchanged manifest is a no-op, byte for byte.
 before="$(cat "$WS/CLAUDE.md" "$WS/.claude/settings.json" "$WS/.gitignore" | shasum | cut -d' ' -f1)"
 zordon workspace apply --workspace=feature
