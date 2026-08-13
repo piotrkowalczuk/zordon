@@ -201,6 +201,50 @@ func TestRegion_idempotent(t *testing.T) {
 	}
 }
 
+// TestRegion_prefixCollision pins marker matching to whole lines. A region
+// named "ignore" must not latch onto "ignore-extra"'s markers, which an
+// unanchored substring search does whenever the longer name is written first:
+// the sibling region is swallowed and its tail ("-extra") is left orphaned in
+// the file.
+func TestRegion_prefixCollision(t *testing.T) {
+	doc, err := Region(nil, "ignore-extra", "b/", "#")
+	if err != nil {
+		t.Fatalf("Region: %v", err)
+	}
+	doc, err = Region(doc, "ignore", "a/", "#")
+	if err != nil {
+		t.Fatalf("Region: %v", err)
+	}
+
+	want := "# >>> zordon: ignore-extra\nb/\n# <<< zordon: ignore-extra\n" +
+		"# >>> zordon: ignore\na/\n# <<< zordon: ignore\n"
+	if string(doc) != want {
+		t.Fatalf("writing \"ignore\" damaged the \"ignore-extra\" region:\ngot:\n%s\nwant:\n%s", doc, want)
+	}
+
+	again, err := Region(doc, "ignore", "a/", "#")
+	if err != nil {
+		t.Fatalf("Region: %v", err)
+	}
+	if string(again) != want {
+		t.Errorf("re-applying \"ignore\" changed the file:\ngot:\n%s\nwant:\n%s", again, want)
+	}
+}
+
+// TestRegion_markerIsWholeLine guards the other half of anchoring: a line that
+// merely contains the marker text must not be mistaken for the marker.
+func TestRegion_markerIsWholeLine(t *testing.T) {
+	existing := "see '# >>> zordon: ws' in the docs\n"
+	doc, err := Region([]byte(existing), "ws", "x", "#")
+	if err != nil {
+		t.Fatalf("Region: %v", err)
+	}
+	want := existing + "# >>> zordon: ws\nx\n# <<< zordon: ws\n"
+	if string(doc) != want {
+		t.Errorf("prose mentioning the marker was treated as one:\ngot:\n%s\nwant:\n%s", doc, want)
+	}
+}
+
 func TestRegion_independentNames(t *testing.T) {
 	first, err := Region(nil, "one", "a/", "#")
 	if err != nil {

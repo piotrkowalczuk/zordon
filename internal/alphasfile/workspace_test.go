@@ -300,8 +300,15 @@ func TestWorkspacePort_stable(t *testing.T) {
 			t.Fatalf("WorkspacePort(%q) = %d then %d, want a stable value", hash, first, got)
 		}
 	}
-	if first < 20000 || first >= 40000 {
-		t.Errorf("WorkspacePort = %d, want it inside the documented range", first)
+	// Below Linux's ephemeral floor (32768): the kernel must not be able to
+	// hand this number to an unrelated socket while the workspace is idle.
+	if first < 20000 || first >= 32768 {
+		t.Errorf("WorkspacePort = %d, want it below the ephemeral range", first)
+	}
+	for _, h := range []string{"0", "ffffffffffffffff", "abcd1234ef567891", "zzzz"} {
+		if p := WorkspacePort(h); p < 20000 || p >= 32768 {
+			t.Errorf("WorkspacePort(%q) = %d, outside the safe range", h, p)
+		}
 	}
 	if other := WorkspacePort("0000000000000000"); other == first {
 		t.Errorf("two workspaces share port %d", first)
@@ -348,11 +355,44 @@ func TestDefaultBranchFor_matchesTemplate(t *testing.T) {
 	}
 }
 
+// TestWorkspaceSpec_BranchTemplate reports the template SOURCE, for plan
+// output. Slicing the expression's range verbatim picks up the surrounding
+// double quotes of a quoted template, which renders as a doubly-quoted string
+// in plan and never compares equal to DefaultBranchTemplate.
+func TestWorkspaceSpec_BranchTemplate(t *testing.T) {
+	cases := map[string]struct {
+		block string
+		want  string
+	}{
+		"unset falls back to the default": {
+			block: "workspace {\n}\n",
+			want:  DefaultBranchTemplate,
+		},
+		"custom template, unquoted": {
+			block: "workspace {\n  branch = \"wip/${workspace.name}/${service.name}\"\n}\n",
+			want:  "wip/${workspace.name}/${service.name}",
+		},
+		"default written out explicitly": {
+			block: "workspace {\n  branch = \"" + DefaultBranchTemplate + "\"\n}\n",
+			want:  DefaultBranchTemplate,
+		},
+	}
+
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			spec := mustRenderWorkspace(t, c.block, nil)
+			if got := spec.BranchTemplate(); got != c.want {
+				t.Errorf("BranchTemplate() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestWorkspaceSpec_BranchesFor_collision(t *testing.T) {
 	spec := mustRenderWorkspace(t, `workspace { branch = "zordon/${workspace.name}" }`, nil)
 	_, err := spec.BranchesFor([]*ServiceMeta{
-		{Name: "api", Toolchain: "go"},
-		{Name: "web", Toolchain: "go"},
+		{Name: "api", Toolchain: "go", Package: &Package{Src: "/proj/api"}},
+		{Name: "web", Toolchain: "go", Package: &Package{Src: "/proj/web"}},
 	})
 	if err == nil {
 		t.Fatal("BranchesFor succeeded, want a collision error")
@@ -361,6 +401,25 @@ func TestWorkspaceSpec_BranchesFor_collision(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %v, want it to contain %q", err, want)
 		}
+	}
+}
+
+// TestWorkspaceSpec_BranchesFor_skipsNonWorkspaceable keeps the two validation
+// paths agreeing on which services need a branch. eval only branches services
+// with a git/src primary; if BranchesFor counted use-only and pkg services too,
+// a manifest could pass `zordon plan` and fail `workspace create`.
+func TestWorkspaceSpec_BranchesFor_skipsNonWorkspaceable(t *testing.T) {
+	spec := mustRenderWorkspace(t, "workspace {\n}\n", nil)
+	got, err := spec.BranchesFor([]*ServiceMeta{
+		{Name: "api", Toolchain: "go", Package: &Package{Src: "/proj/api"}},
+		{Name: "tool", Toolchain: "go", Package: &Package{Install: "example.com/tool@v1"}},
+		{Name: "redis", Toolchain: "pkg", Package: nil},
+	})
+	if err != nil {
+		t.Fatalf("BranchesFor: %v", err)
+	}
+	if len(got) != 1 || got["api"] != "zordon/feature/api" {
+		t.Errorf("BranchesFor = %v, want only the checkout-able service", got)
 	}
 }
 

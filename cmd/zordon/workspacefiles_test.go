@@ -29,7 +29,7 @@ func TestWorkspaceFilePath_accepts(t *testing.T) {
 
 	for hint, rel := range cases {
 		t.Run(hint, func(t *testing.T) {
-			got, err := workspaceFilePath(inv, rel)
+			got, err := workspaceFilePath(inv, nil, rel)
 			if err != nil {
 				t.Fatalf("workspaceFilePath(%q) = %v, want it accepted", rel, err)
 			}
@@ -65,7 +65,7 @@ func TestWorkspaceFilePath_rejects(t *testing.T) {
 
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
-			_, err := workspaceFilePath(inv, c.rel)
+			_, err := workspaceFilePath(inv, nil, c.rel)
 			if err == nil {
 				t.Fatalf("workspaceFilePath(%q) succeeded, want it refused", c.rel)
 			}
@@ -82,7 +82,7 @@ func TestWorkspaceFilePath_rejects(t *testing.T) {
 func TestWorkspaceFilePath_mainRejectsWorkspacesTree(t *testing.T) {
 	inv := mainWorkspaceInv("/proj")
 
-	if _, err := workspaceFilePath(inv, "CLAUDE.md"); err != nil {
+	if _, err := workspaceFilePath(inv, nil, "CLAUDE.md"); err != nil {
 		t.Fatalf("main should accept a plain project file: %v", err)
 	}
 	for _, rel := range []string{
@@ -90,10 +90,54 @@ func TestWorkspaceFilePath_mainRejectsWorkspacesTree(t *testing.T) {
 		"workspaces/main/src/api/x",
 		"workspaces/other",
 	} {
-		_, err := workspaceFilePath(inv, rel)
+		_, err := workspaceFilePath(inv, nil, rel)
 		if err == nil {
 			t.Errorf("workspaceFilePath(%q) succeeded in main, want it refused", rel)
 		}
+	}
+}
+
+// TestWorkspaceFilePath_mainRejectsServiceSources is the hole the named-
+// workspace tests could not see. In a named workspace every checkout lives
+// under <StateDir>/src, so a guard keyed on StateDir covers them. In main
+// there are no checkouts — services build IN PLACE from the developer's own
+// tree — so that guard matches nothing and a declared path walks straight into
+// a service's working tree.
+func TestWorkspaceFilePath_mainRejectsServiceSources(t *testing.T) {
+	inv := mainWorkspaceInv("/proj")
+	protected := []string{
+		filepath.FromSlash("/proj/src/app"),
+		filepath.FromSlash("/proj/services/api"),
+	}
+
+	for hint, rel := range map[string]string{
+		"inside a service source":       "src/app/LEAKED.md",
+		"the service source dir itself": "src/app",
+		"deep inside a service source":  "src/app/internal/x/y.go",
+		"a second service":              "services/api/CLAUDE.md",
+	} {
+		t.Run(hint, func(t *testing.T) {
+			_, err := workspaceFilePath(inv, protected, rel)
+			if err == nil {
+				t.Fatalf("workspaceFilePath(%q) succeeded, want it refused", rel)
+			}
+			if !strings.Contains(err.Error(), "source") {
+				t.Errorf("error = %v, want it to say the path is a service's source", err)
+			}
+		})
+	}
+
+	// Neighbours that merely share a prefix are none of the guard's business.
+	for hint, rel := range map[string]string{
+		"sibling of a service dir": "src/other/x",
+		"prefix impostor":          "src/appendix/x",
+		"unrelated top level":      "docs/README.md",
+	} {
+		t.Run(hint, func(t *testing.T) {
+			if _, err := workspaceFilePath(inv, protected, rel); err != nil {
+				t.Errorf("workspaceFilePath(%q) = %v, want it accepted", rel, err)
+			}
+		})
 	}
 }
 
@@ -194,7 +238,7 @@ func TestApplyWorkspaceFiles_idempotent(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if err := applyWorkspaceFiles(spec, inv, zlog.New(io.Discard, false), &out); err != nil {
+	if err := applyWorkspaceFiles(spec, inv, nil, zlog.New(io.Discard, false), &out); err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
 	for rel, want := range first {
@@ -220,7 +264,7 @@ func TestApplyWorkspaceFiles_validatesBeforeWriting(t *testing.T) {
 	)
 
 	var out strings.Builder
-	err := applyWorkspaceFiles(spec, inv, zlog.New(io.Discard, false), &out)
+	err := applyWorkspaceFiles(spec, inv, nil, zlog.New(io.Discard, false), &out)
 	if err == nil {
 		t.Fatal("applyWorkspaceFiles succeeded, want the bad path refused")
 	}
@@ -231,6 +275,12 @@ func TestApplyWorkspaceFiles_validatesBeforeWriting(t *testing.T) {
 		t.Error("the valid file was written even though another path was refused")
 	}
 }
+
+func discardLogger() *zlog.Logger { return zlog.New(io.Discard, false) }
+
+type discardWriter struct{}
+
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 func namedWorkspaceInv(root, name string) *invocation.InvocationState {
 	dir := filepath.Join(root, "workspaces", name)
@@ -255,7 +305,7 @@ func specWith(files ...*alphasfile.WorkspaceFile) *alphasfile.WorkspaceSpec {
 func apply(t *testing.T, spec *alphasfile.WorkspaceSpec, inv *invocation.InvocationState) {
 	t.Helper()
 	var out strings.Builder
-	if err := applyWorkspaceFiles(spec, inv, zlog.New(io.Discard, false), &out); err != nil {
+	if err := applyWorkspaceFiles(spec, inv, nil, zlog.New(io.Discard, false), &out); err != nil {
 		t.Fatalf("applyWorkspaceFiles: %v", err)
 	}
 }

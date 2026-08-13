@@ -26,6 +26,27 @@ import (
 // is what stops two services (or two workspaces) colliding on one branch.
 const DefaultBranchTemplate = "zordon/${workspace.name}/${service.name}"
 
+// WorkspacePort derives a stable TCP port from a workspace's FsHash. Stable is
+// the whole point: a generated file can carry the port of a server started
+// later, which net::pickport (a fresh draw every evaluation) cannot do.
+//
+// The range sits below Linux's default ephemeral range (32768-60999) and above
+// the privileged ports, so the kernel will not hand the same number to an
+// unrelated socket while this one is idle. It is still only a derivation, not
+// a reservation: two workspaces on one machine could in principle collide, and
+// whoever binds second gets the error.
+func WorkspacePort(fsHash string) int {
+	const (
+		base = 20000
+		span = 12000 // 20000-31999, clear of the ephemeral floor at 32768
+	)
+	var sum uint32
+	for _, c := range []byte(fsHash) {
+		sum = sum*31 + uint32(c)
+	}
+	return base + int(sum%span)
+}
+
 // DefaultBranchFor renders DefaultBranchTemplate directly. It is the fallback
 // for a resolved service that carries no WorkspaceBranch — an Alphasfile
 // resolved before this field existed, or a federation parent that predates it.
@@ -103,7 +124,7 @@ func RenderWorkspace(path string, inv *invocation.InvocationState) (*WorkspaceSp
 	}
 	if attrSet(root.Workspace.Branch) {
 		spec.branch = root.Workspace.Branch
-		spec.branchTemplate = string(root.Workspace.Branch.Range().SliceBytes(b))
+		spec.branchTemplate = templateSource(root.Workspace.Branch, b)
 	}
 
 	ctx := workspaceCtx(inv)
@@ -134,6 +155,13 @@ func (s *WorkspaceSpec) BranchFor(service, toolchain string) (string, error) {
 func (s *WorkspaceSpec) BranchesFor(metas []*ServiceMeta) (map[string]string, error) {
 	out := make(map[string]string, len(metas))
 	for _, m := range metas {
+		// Only services that can have a checkout get a branch — the same set
+		// eval validates. Including use-only and pkg services here would make
+		// a manifest legal under `zordon plan` and illegal under
+		// `workspace create`, or the reverse.
+		if !m.Workspaceable() {
+			continue
+		}
 		br, err := s.BranchFor(m.Name, m.Toolchain)
 		if err != nil {
 			return nil, err
@@ -144,6 +172,19 @@ func (s *WorkspaceSpec) BranchesFor(metas []*ServiceMeta) (map[string]string, er
 		return nil, err
 	}
 	return out, nil
+}
+
+// templateSource recovers an attribute's template text from the manifest
+// bytes. The expression's range spans the whole quoted literal, so the
+// surrounding quotes come along and have to go: left in, `zordon plan` renders
+// a doubly-quoted string and the value never compares equal to
+// DefaultBranchTemplate.
+func templateSource(expr hcl.Expression, src []byte) string {
+	s := string(expr.Range().SliceBytes(src))
+	if len(s) >= 2 && strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`) {
+		s = s[1 : len(s)-1]
+	}
+	return s
 }
 
 // BranchTemplate reports the manifest's template source, for `zordon plan`.
@@ -500,12 +541,21 @@ func defaultBranchExpr() (hcl.Expression, error) {
 	return expr, nil
 }
 
+// checkBranchesUnique reports the FIRST collision in branch-name order, not in
+// map order: a manifest that collapses several groups must always name the
+// same one, or the error changes between identical runs.
 func checkBranchesUnique(byService map[string]string) error {
 	owners := map[string][]string{}
 	for svc, br := range byService {
 		owners[br] = append(owners[br], svc)
 	}
-	for br, svcs := range owners {
+	branches := make([]string, 0, len(owners))
+	for br := range owners {
+		branches = append(branches, br)
+	}
+	sort.Strings(branches)
+	for _, br := range branches {
+		svcs := owners[br]
 		if len(svcs) < 2 {
 			continue
 		}
@@ -554,20 +604,4 @@ func validateBranchName(b string) error {
 		}
 	}
 	return nil
-}
-
-// WorkspacePort derives a stable TCP port from a workspace's FsHash. Stable
-// is the whole point: a generated file can carry the port of a server that is
-// started later, which net::pickport (a fresh draw every evaluation) cannot
-// do. The range avoids both privileged ports and the usual ephemeral range.
-func WorkspacePort(fsHash string) int {
-	const (
-		base = 20000
-		span = 20000
-	)
-	var sum uint32
-	for _, c := range []byte(fsHash) {
-		sum = sum*31 + uint32(c)
-	}
-	return base + int(sum%span)
 }

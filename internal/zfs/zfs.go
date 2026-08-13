@@ -347,6 +347,27 @@ func ZordonHome(override string) string {
 	return filepath.Join(h, ".zordon")
 }
 
+// AtomicWriteKeepingMode is AtomicWrite that leaves an existing file's
+// permissions alone. AtomicWrite always lands on filePerm, which is right for
+// the private state zordon owns but wrong when it is editing a fragment of a
+// file somebody else created: a 0644 config silently becoming 0600 can break
+// whatever else reads it.
+//
+// A file that does not exist yet is created with AtomicWrite's own mode.
+func AtomicWriteKeepingMode(path string, data []byte) error {
+	mode := os.FileMode(0)
+	if fi, err := os.Stat(path); err == nil && fi.Mode().IsRegular() {
+		mode = fi.Mode().Perm()
+	}
+	if err := AtomicWrite(path, data); err != nil {
+		return err
+	}
+	if mode == 0 || mode == filePerm {
+		return nil
+	}
+	return os.Chmod(path, mode)
+}
+
 // Resolve joins a manifest-supplied relative path onto base and reports
 // whether the result stays inside base. It is the containment primitive for
 // every path that comes out of an Alphasfile: a generated file's target, a

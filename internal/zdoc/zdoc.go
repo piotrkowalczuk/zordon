@@ -150,6 +150,9 @@ func Region(existing []byte, name, body, comment string) ([]byte, error) {
 	if strings.ContainsAny(name, "\r\n") {
 		return nil, fmt.Errorf("region name %q contains a newline", name)
 	}
+	if strings.ContainsAny(comment, "\r\n") {
+		return nil, fmt.Errorf("region comment prefix %q contains a newline", comment)
+	}
 	openMark := fmt.Sprintf("%s >>> zordon: %s", comment, name)
 	closeMark := fmt.Sprintf("%s <<< zordon: %s", comment, name)
 
@@ -159,23 +162,39 @@ func Region(existing []byte, name, body, comment string) ([]byte, error) {
 	}
 	block += closeMark + "\n"
 
-	text := string(existing)
-	start := strings.Index(text, openMark)
+	// Markers match whole LINES, never substrings. An unanchored search would
+	// let region "ignore" latch onto "ignore-extra"'s markers and swallow that
+	// region whole, and would mistake prose quoting a marker for the real one.
+	lines := strings.Split(string(existing), "\n")
+	start, end := -1, -1
+	for i := range lines {
+		switch strings.TrimRight(lines[i], "\r") {
+		case openMark:
+			if start < 0 {
+				start = i
+			}
+		case closeMark:
+			if start >= 0 && end < 0 {
+				end = i
+			}
+		}
+	}
+
 	if start < 0 {
+		text := string(existing)
 		if text != "" && !strings.HasSuffix(text, "\n") {
 			text += "\n"
 		}
 		return []byte(text + block), nil
 	}
-	end := strings.Index(text[start:], closeMark)
 	if end < 0 {
 		return nil, fmt.Errorf("region %q has an opening marker but no %q", name, closeMark)
 	}
-	end += start + len(closeMark)
-	if end < len(text) && text[end] == '\n' {
-		end++
-	}
-	return []byte(text[:start] + block + text[end:]), nil
+	out := make([]string, 0, len(lines))
+	out = append(out, lines[:start]...)
+	out = append(out, strings.Split(strings.TrimSuffix(block, "\n"), "\n")...)
+	out = append(out, lines[end+1:]...)
+	return []byte(strings.Join(out, "\n")), nil
 }
 
 func mergePatch(target map[string]any, patch map[string]any) map[string]any {

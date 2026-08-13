@@ -72,6 +72,29 @@ func TestEncodeFuncs_deterministic(t *testing.T) {
 	}
 }
 
+// TestEncodeFuncs_outOfRangeInteger pins the accuracy check: big.Float.Int64
+// clamps a value beyond int64 while still reporting IsInt, so ignoring its
+// accuracy result writes a silently wrong number into a generated document.
+func TestEncodeFuncs_outOfRangeInteger(t *testing.T) {
+	src := `
+service "go" "api" {
+  git { url = "github.com/acme/api" }
+  file "f" {
+    path = "/tmp/f"
+    body = enc::json({ n = 99999999999999999999999999 })
+  }
+  runtime { cmd = ["./api"] }
+}
+`
+	_, err := Compile("test.hcl", []byte(src), testInv(), nil, testCfgHash, TestConfig{})
+	if err == nil {
+		t.Fatal("Compile succeeded, want an error for a number that does not fit")
+	}
+	if !strings.Contains(err.Error(), "does not fit") {
+		t.Errorf("error = %v, want it to say the number does not fit", err)
+	}
+}
+
 func TestEncodeFuncs_tomlRejectsNonObject(t *testing.T) {
 	src := `
 service "go" "api" {

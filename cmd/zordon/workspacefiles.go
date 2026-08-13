@@ -33,16 +33,21 @@ var reservedStateFiles = []string{invocation.WorkspaceMarker, "start.lock", "alp
 //
 // Paths are validated up front, before a single byte is written: a manifest
 // with one bad path leaves the workspace untouched rather than half-written.
-func applyWorkspaceFiles(spec *alphasfile.WorkspaceSpec, inv *invocation.InvocationState, log *zlog.Logger, out io.Writer) error {
+func applyWorkspaceFiles(spec *alphasfile.WorkspaceSpec, inv *invocation.InvocationState, protected []string, log *zlog.Logger, out io.Writer) error {
 	if spec == nil || len(spec.Files) == 0 {
 		return nil
 	}
 	targets := make([]string, len(spec.Files))
+	seen := make(map[string]string, len(spec.Files))
 	for i, f := range spec.Files {
-		abs, err := workspaceFilePath(inv, f.Path)
+		abs, err := workspaceFilePath(inv, protected, f.Path)
 		if err != nil {
 			return fmt.Errorf("workspace.file %q: %w", f.Name, err)
 		}
+		if prev, dup := seen[abs]; dup {
+			return fmt.Errorf("workspace.file %q and %q both target %s; declaration order would decide the result", prev, f.Name, abs)
+		}
+		seen[abs] = f.Name
 		targets[i] = abs
 	}
 
@@ -93,7 +98,13 @@ func writeWorkspaceFile(f *alphasfile.WorkspaceFile, abs string, log *zlog.Logge
 	if err := zfs.EnsureDir(filepath.Dir(abs)); err != nil {
 		return false, err
 	}
-	if err := zfs.AtomicWrite(abs, next); err != nil {
+	// merge and region edit a file somebody else created, so its mode is not
+	// zordon's to change; create owns the whole file either way.
+	write := zfs.AtomicWrite
+	if f.Op != alphasfile.OpCreate {
+		write = zfs.AtomicWriteKeepingMode
+	}
+	if err := write(abs, next); err != nil {
 		return false, err
 	}
 	fmt.Fprintf(out, "  %s %s\n", changeVerb(f.Op, existed), abs)
@@ -119,14 +130,24 @@ func changeVerb(op alphasfile.WorkspaceFileOp, existed bool) string {
 
 // workspaceFilePath resolves a manifest path against the directory the user
 // actually works in, and refuses everything that belongs to zordon or to a
-// service's git checkout.
-func workspaceFilePath(inv *invocation.InvocationState, rel string) (string, error) {
+// service's source tree.
+//
+// protected carries the services' resolved source directories. They cannot be
+// derived from the layout: in a named workspace every checkout sits under
+// <StateDir>/src, but in main there are no checkouts at all — services build
+// in place from the developer's own tree, wherever the manifest says that is.
+func workspaceFilePath(inv *invocation.InvocationState, protected []string, rel string) (string, error) {
 	if filepath.IsAbs(rel) {
 		return "", fmt.Errorf("path %q must be relative to the workspace directory", rel)
 	}
 	abs, ok := zfs.Resolve(inv.Dir, rel)
 	if !ok {
 		return "", fmt.Errorf("path %q escapes the workspace directory %s", rel, inv.Dir)
+	}
+	for _, src := range protected {
+		if zfs.Within(src, abs) {
+			return "", fmt.Errorf("path %q writes into %s, a service's source tree; declare a file{} block inside that service instead", rel, src)
+		}
 	}
 
 	// In main the workspace dir is the project root, so the whole workspaces/

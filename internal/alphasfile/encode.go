@@ -3,6 +3,7 @@ package alphasfile
 import (
 	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
@@ -67,11 +68,16 @@ func ctyToGo(v cty.Value) (any, error) {
 		return v.True(), nil
 	case t == cty.Number:
 		f := v.AsBigFloat()
-		if f.IsInt() {
-			i, _ := f.Int64()
+		// Int64's accuracy matters: an integer beyond int64 is still IsInt,
+		// and Int64 clamps it. ctyToAny already checks this; silently writing
+		// a clamped number into a generated document would be worse there.
+		if i, acc := f.Int64(); f.IsInt() && acc == big.Exact {
 			return i, nil
 		}
-		g, _ := f.Float64()
+		g, acc := f.Float64()
+		if acc != big.Exact && f.IsInt() {
+			return nil, fmt.Errorf("number %s does not fit any supported numeric type", f.Text('g', -1))
+		}
 		return g, nil
 	case t.IsListType(), t.IsSetType(), t.IsTupleType():
 		out := []any{}

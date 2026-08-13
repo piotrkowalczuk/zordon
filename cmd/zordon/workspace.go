@@ -119,10 +119,37 @@ func runWorkspaceCreate(ctx context.Context, log *zlog.Logger, out io.Writer, ar
 	return nil
 }
 
+// applyTarget picks the workspace `workspace apply` acts on: the --workspace
+// flag when given, otherwise whichever workspace the current directory is in.
+//
+// Deriving from cwd is not a convenience, it is the safe default. The
+// documented way to work in a workspace is to cd into it, and main's directory
+// is the project root — the developer's real repository. A plain `apply` that
+// assumed main would rewrite tracked files from inside a workspace that was
+// never touched.
+func applyTarget(flag invocation.WorkspaceName, cwd string) (invocation.WorkspaceName, error) {
+	if flag != "" {
+		return flag, nil
+	}
+	inv, err := invocation.NewInvocationState(cwd)
+	if err != nil {
+		return "", err
+	}
+	return invocation.WorkspaceName(inv.Workspace), nil
+}
+
 // runWorkspaceApply re-renders the declared files for an existing workspace.
 // It is also the only way the project root ("main") ever gets them: main is
 // never created, so it has no create step to hang them off.
-func runWorkspaceApply(log *zlog.Logger, out io.Writer, ws invocation.WorkspaceName) error {
+func runWorkspaceApply(log *zlog.Logger, out io.Writer, flag invocation.WorkspaceName) error {
+	cwd, err := zfs.Getwd()
+	if err != nil {
+		return err
+	}
+	ws, err := applyTarget(flag, cwd)
+	if err != nil {
+		return err
+	}
 	root, base, err := workspaceBase()
 	if err != nil {
 		return err
@@ -152,6 +179,31 @@ func applyWorkspaceHere(log *zlog.Logger, out io.Writer, name string) (*alphasfi
 	return applyWorkspaceTo(log, out, root, invocation.WorkspaceName(name))
 }
 
+// renderWorkspaceHere resolves the block WITHOUT writing anything, for callers
+// that only need the branch template. `workspace service add` is one: adding a
+// checkout is no reason to overwrite a CLAUDE.md the user has since edited.
+func renderWorkspaceHere(name string) (*alphasfile.WorkspaceSpec, error) {
+	root, err := projectRoot()
+	if err != nil {
+		return nil, err
+	}
+	inv, err := workspaceInvocation(root, invocation.WorkspaceName(name))
+	if err != nil {
+		return nil, err
+	}
+	return alphasfile.RenderWorkspace(filepath.Join(root, invocation.AlphasfileName), inv)
+}
+
+// workspaceInvocation resolves the invocation for one workspace of the project
+// at root, from that workspace's own directory rather than from cwd.
+func workspaceInvocation(root string, ws invocation.WorkspaceName) (*invocation.InvocationState, error) {
+	dir := root
+	if !ws.IsMain() {
+		dir = filepath.Join(root, "workspaces", ws.Name())
+	}
+	return invocation.NewInvocationState(dir)
+}
+
 // applyWorkspaceTo renders and writes the files for one workspace of the
 // project at root.
 //
@@ -161,22 +213,40 @@ func applyWorkspaceHere(log *zlog.Logger, out io.Writer, name string) (*alphasfi
 // marker exist, so the ordinary walk-up sees exactly what it would see after
 // a `cd` into it.
 func applyWorkspaceTo(log *zlog.Logger, out io.Writer, root string, ws invocation.WorkspaceName) (*alphasfile.WorkspaceSpec, error) {
-	dir := root
-	if !ws.IsMain() {
-		dir = filepath.Join(root, "workspaces", ws.Name())
-	}
-	inv, err := invocation.NewInvocationState(dir)
+	inv, err := workspaceInvocation(root, ws)
 	if err != nil {
 		return nil, err
 	}
-	spec, err := alphasfile.RenderWorkspace(filepath.Join(root, invocation.AlphasfileName), inv)
+	af := filepath.Join(root, invocation.AlphasfileName)
+	spec, err := alphasfile.RenderWorkspace(af, inv)
 	if err != nil {
 		return nil, err
 	}
-	if err := applyWorkspaceFiles(spec, inv, log, out); err != nil {
+	protected, err := serviceSourceDirs(af)
+	if err != nil {
+		return nil, err
+	}
+	if err := applyWorkspaceFiles(spec, inv, protected, log, out); err != nil {
 		return nil, err
 	}
 	return spec, nil
+}
+
+// serviceSourceDirs lists the trees the services build from, so a generated
+// file can be kept out of them. In main those are the developer's own
+// directories, which no path convention can identify — only the manifest can.
+func serviceSourceDirs(afPath string) ([]string, error) {
+	metas, err := alphasfile.ParseServices(afPath)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, m := range metas {
+		if m.Package != nil && m.Package.Src != "" {
+			out = append(out, m.Package.Src)
+		}
+	}
+	return out, nil
 }
 
 func runWorkspaceRm(log *zlog.Logger, args []string) error {
@@ -223,7 +293,10 @@ func runWorkspaceServiceAdd(ctx context.Context, log *zlog.Logger, out io.Writer
 	if !zfs.Exists(dir) {
 		return fmt.Errorf("no such workspace %q; create it with: zordon workspace create %s", ws.Name(), ws.Name())
 	}
-	spec, err := applyWorkspaceHere(log, out, ws.Name())
+	// Render only: `service add` needs the branch template, but rewriting the
+	// workspace's files is not part of adding a checkout — run
+	// `zordon workspace apply` for that.
+	spec, err := renderWorkspaceHere(ws.Name())
 	if err != nil {
 		return err
 	}

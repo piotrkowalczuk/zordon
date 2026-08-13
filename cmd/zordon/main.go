@@ -271,8 +271,11 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	// this is how an edited Alphasfile reaches an existing workspace, and the
 	// only way the project root ("main") ever gets its files at all.
 	wsApplyFlags := ff.NewFlagSet("apply").SetParent(wsFlags)
-	wsApplyWorkspace := invocation.WorkspaceName(invocation.MainWorkspace)
-	wsApplyFlags.Value(0, "workspace", &wsApplyWorkspace, "target workspace (default: main, the project root)")
+	// Left at its zero value on purpose: unset means "the workspace I am in"
+	// (see applyTarget). Pre-seeding it with main would make a plain `apply`
+	// from inside a workspace rewrite the project root instead.
+	var wsApplyWorkspace invocation.WorkspaceName
+	wsApplyFlags.Value(0, "workspace", &wsApplyWorkspace, "target workspace (default: the one the current directory is in)")
 	wsApplyCmd := &ff.Command{
 		Name:      "apply",
 		Usage:     "zordon workspace apply [--workspace <name>]",
