@@ -16,6 +16,9 @@ Otherwise the project is not zordon-managed — ignore this skill and the zordon
 Default to an isolated workspace rather than the project's main/shared stack: a workspace is a disposable copy with its own ports and state, so your work never disturbs the developer's running stack.
 Unless the user explicitly wants the main stack, ask — before `start`ing from the project root — whether to create and use a workspace instead.
 Create one with `zordon workspace create <name>` and work from `workspaces/<name>/` (recognizable by its `.workspace` marker).
+If the project declares a top-level `workspace { file ... }` block, `create` also writes those files (a `CLAUDE.md`, a dev container, hooks) into the new directory before checking anything out — so read them once you are in there.
+They are generated at create time, never at start, so they can never carry a live port; use `get` or the MCP tools for that.
+`zordon workspace apply --workspace=<name>` re-writes them after the Alphasfile changes.
 Entering a workspace is by directory: the MCP tools act on the directory the server runs in, so `cd workspaces/<name>` and drive it with the `zordon` CLI there — a directory-independent `--workspace` selector for the MCP tools does not exist yet.
 
 ## Prefer the tools, not the shell

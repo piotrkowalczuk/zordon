@@ -101,14 +101,159 @@ func runWorkspaceCreate(ctx context.Context, log *zlog.Logger, out io.Writer, ar
 	}
 	log.Info("zordon", "created workspace %q", name)
 
+	// Generated files land BEFORE the checkouts: an agent or a dev container
+	// reads them the moment the directory exists, and while src/ is still
+	// absent nothing can accidentally be written into a service's git tree.
+	spec, err := applyWorkspaceHere(log, out, name)
+	if err != nil {
+		return err
+	}
+
 	// Materialize source checkouts. With no service args, every workspaceable
 	// service gets a working tree (so the whole project is editable in this
 	// workspace); pass names (optionally svc@rev) to scope it down.
-	if err := checkoutServices(ctx, log, name, dir, args[1:], zordonHome); err != nil {
+	if err := checkoutServices(ctx, log, spec, dir, args[1:], zordonHome); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "workspace ready. Bring it up with:\n  cd %s && zordon start\n", dir)
 	return nil
+}
+
+// applyTarget picks the workspace `workspace apply` acts on: the --workspace
+// flag when given, otherwise whichever workspace the current directory is in.
+//
+// Deriving from cwd is not a convenience, it is the safe default. The
+// documented way to work in a workspace is to cd into it, and main's directory
+// is the project root — the developer's real repository. A plain `apply` that
+// assumed main would rewrite tracked files from inside a workspace that was
+// never touched.
+func applyTarget(flag invocation.WorkspaceName, cwd string) (invocation.WorkspaceName, error) {
+	if flag != "" {
+		return flag, nil
+	}
+	inv, err := invocation.NewInvocationState(cwd)
+	if err != nil {
+		return "", err
+	}
+	return invocation.WorkspaceName(inv.Workspace), nil
+}
+
+// runWorkspaceApply re-renders the declared files for an existing workspace.
+// It is also the only way the project root ("main") ever gets them: main is
+// never created, so it has no create step to hang them off.
+func runWorkspaceApply(log *zlog.Logger, out io.Writer, flag invocation.WorkspaceName) error {
+	cwd, err := zfs.Getwd()
+	if err != nil {
+		return err
+	}
+	ws, err := applyTarget(flag, cwd)
+	if err != nil {
+		return err
+	}
+	root, base, err := workspaceBase()
+	if err != nil {
+		return err
+	}
+	if !ws.IsMain() {
+		if dir := filepath.Join(base, ws.Name()); !zfs.Exists(dir) {
+			return fmt.Errorf("no such workspace %q; create it with: zordon workspace create %s", ws.Name(), ws.Name())
+		}
+	}
+	spec, err := applyWorkspaceTo(log, out, root, ws)
+	if err != nil {
+		return err
+	}
+	if len(spec.Files) == 0 {
+		fmt.Fprintf(out, "no workspace files declared (add a top-level workspace { file ... } block)\n")
+	}
+	return nil
+}
+
+// applyWorkspaceHere renders and writes the files for a named workspace of the
+// project the current invocation belongs to.
+func applyWorkspaceHere(log *zlog.Logger, out io.Writer, name string) (*alphasfile.WorkspaceSpec, error) {
+	root, err := projectRoot()
+	if err != nil {
+		return nil, err
+	}
+	return applyWorkspaceTo(log, out, root, invocation.WorkspaceName(name))
+}
+
+// renderWorkspaceHere resolves the block WITHOUT writing anything, for callers
+// that only need the branch template. `workspace service add` is one: adding a
+// checkout is no reason to overwrite a CLAUDE.md the user has since edited.
+func renderWorkspaceHere(name string) (*alphasfile.WorkspaceSpec, error) {
+	root, err := projectRoot()
+	if err != nil {
+		return nil, err
+	}
+	return renderWorkspaceFor(root, invocation.WorkspaceName(name))
+}
+
+// renderWorkspaceFor is renderWorkspaceHere with the project root supplied
+// rather than discovered, so the "resolves but writes nothing" contract can be
+// asserted without a cwd or a git primary.
+func renderWorkspaceFor(root string, ws invocation.WorkspaceName) (*alphasfile.WorkspaceSpec, error) {
+	inv, err := workspaceInvocation(root, ws)
+	if err != nil {
+		return nil, err
+	}
+	return alphasfile.RenderWorkspace(filepath.Join(root, invocation.AlphasfileName), inv)
+}
+
+// workspaceInvocation resolves the invocation for one workspace of the project
+// at root, from that workspace's own directory rather than from cwd.
+func workspaceInvocation(root string, ws invocation.WorkspaceName) (*invocation.InvocationState, error) {
+	dir := root
+	if !ws.IsMain() {
+		dir = filepath.Join(root, "workspaces", ws.Name())
+	}
+	return invocation.NewInvocationState(dir)
+}
+
+// applyWorkspaceTo renders and writes the files for one workspace of the
+// project at root.
+//
+// The invocation is resolved from the workspace's own directory rather than
+// from cwd: `workspace create feature` runs in the project root, where cwd
+// would resolve to "main". By this point the directory and its .workspace
+// marker exist, so the ordinary walk-up sees exactly what it would see after
+// a `cd` into it.
+func applyWorkspaceTo(log *zlog.Logger, out io.Writer, root string, ws invocation.WorkspaceName) (*alphasfile.WorkspaceSpec, error) {
+	inv, err := workspaceInvocation(root, ws)
+	if err != nil {
+		return nil, err
+	}
+	af := filepath.Join(root, invocation.AlphasfileName)
+	spec, err := alphasfile.RenderWorkspace(af, inv)
+	if err != nil {
+		return nil, err
+	}
+	protected, err := serviceSourceDirs(af)
+	if err != nil {
+		return nil, err
+	}
+	if err := applyWorkspaceFiles(spec, inv, protected, log, out); err != nil {
+		return nil, err
+	}
+	return spec, nil
+}
+
+// serviceSourceDirs lists the trees the services build from, so a generated
+// file can be kept out of them. In main those are the developer's own
+// directories, which no path convention can identify — only the manifest can.
+func serviceSourceDirs(afPath string) ([]string, error) {
+	metas, err := alphasfile.ParseServices(afPath)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, m := range metas {
+		if m.Package != nil && m.Package.Src != "" {
+			out = append(out, m.Package.Src)
+		}
+	}
+	return out, nil
 }
 
 func runWorkspaceRm(log *zlog.Logger, args []string) error {
@@ -155,7 +300,14 @@ func runWorkspaceServiceAdd(ctx context.Context, log *zlog.Logger, out io.Writer
 	if !zfs.Exists(dir) {
 		return fmt.Errorf("no such workspace %q; create it with: zordon workspace create %s", ws.Name(), ws.Name())
 	}
-	if err := checkoutServices(ctx, log, ws.Name(), dir, picks, zordonHome); err != nil {
+	// Render only: `service add` needs the branch template, but rewriting the
+	// workspace's files is not part of adding a checkout — run
+	// `zordon workspace apply` for that.
+	spec, err := renderWorkspaceHere(ws.Name())
+	if err != nil {
+		return err
+	}
+	if err := checkoutServices(ctx, log, spec, dir, picks, zordonHome); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "added %s to workspace %q\n", strings.Join(picks, ", "), ws.Name())
@@ -223,11 +375,11 @@ func runWorkspaceServiceRm(ctx context.Context, log *zlog.Logger, out io.Writer,
 // <wsdir>/src/<svc> for each picked service ("svc" or "svc@rev"). For a
 // `dir` primary it `git worktree add`s from the user's repo; for a `git`
 // primary it bare-clones into ~/.zordon/src on first use, then worktree-adds
-// from that. The dest path and per-service branch (zordon/<name>/<svc>)
-// match exactly what alpha computes at `zordon start`, so start reuses
-// these checkouts (and monorepo services sharing one primary don't
-// collide on a shared branch).
-func checkoutServices(ctx context.Context, log *zlog.Logger, name, wsdir string, picks []string, zordonHome string) error {
+// from that. The dest path and per-service branch match exactly what alpha
+// resolves at `zordon start` — both come from the same
+// `workspace { branch }` template — so start reuses these checkouts (and
+// monorepo services sharing one primary don't collide on a shared branch).
+func checkoutServices(ctx context.Context, log *zlog.Logger, spec *alphasfile.WorkspaceSpec, wsdir string, picks []string, zordonHome string) error {
 	af, err := walkUp()
 	if err != nil {
 		return err
@@ -239,6 +391,13 @@ func checkoutServices(ctx context.Context, log *zlog.Logger, name, wsdir string,
 	byName := make(map[string]*alphasfile.ServiceMeta, len(metas))
 	for _, m := range metas {
 		byName[m.Name] = m
+	}
+	// Rendering every branch up front also validates the template: a
+	// collision surfaces here, before the first worktree exists, rather than
+	// as a git failure partway through.
+	branches, err := spec.BranchesFor(metas)
+	if err != nil {
+		return err
 	}
 	explicit := len(picks) > 0
 	if !explicit {
@@ -288,7 +447,7 @@ func checkoutServices(ctx context.Context, log *zlog.Logger, name, wsdir string,
 		if refMsg == "" {
 			refMsg = "HEAD"
 		}
-		branch := "zordon/" + name + "/" + svc
+		branch := branches[svc]
 		log.Info("zordon", "%s: git worktree add %s @ %s (branch %s)", svc, dest, refMsg, branch)
 		warn, err := p.AddWorktree(ctx, dest, branch, runner)
 		if err != nil {

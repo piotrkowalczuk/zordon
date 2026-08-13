@@ -347,6 +347,88 @@ func ZordonHome(override string) string {
 	return filepath.Join(h, ".zordon")
 }
 
+// AtomicWriteKeepingMode is AtomicWrite that leaves an existing file's
+// permissions alone. AtomicWrite always lands on filePerm, which is right for
+// the private state zordon owns but wrong when it is editing a fragment of a
+// file somebody else created: a 0644 config silently becoming 0600 can break
+// whatever else reads it.
+//
+// A file that does not exist yet is created with AtomicWrite's own mode.
+func AtomicWriteKeepingMode(path string, data []byte) error {
+	mode := os.FileMode(0)
+	if fi, err := os.Stat(path); err == nil && fi.Mode().IsRegular() {
+		mode = fi.Mode().Perm()
+	}
+	if err := AtomicWrite(path, data); err != nil {
+		return err
+	}
+	if mode == 0 || mode == filePerm {
+		return nil
+	}
+	return os.Chmod(path, mode)
+}
+
+// Resolve joins a manifest-supplied relative path onto base and reports
+// whether the result stays inside base. It is the containment primitive for
+// every path that comes out of an Alphasfile: a generated file's target, a
+// template's source. An absolute rel, a "../" climb and a symlink-free
+// traversal all resolve to ok=false.
+//
+// base is assumed already trustworthy (an invocation dir, a project root).
+// The returned path is cleaned and absolute whenever base is.
+func Resolve(base, rel string) (path string, ok bool) {
+	if rel == "" || filepath.IsAbs(rel) {
+		return "", false
+	}
+	base = filepath.Clean(base)
+	path = filepath.Clean(filepath.Join(base, rel))
+	return path, Within(base, path)
+}
+
+// EvalExisting resolves symlinks in the deepest existing ancestor of path and
+// re-joins the components that do not exist yet.
+//
+// filepath.EvalSymlinks fails outright when the leaf is missing, which is the
+// normal case for a file about to be created — so a containment check that
+// wants to see through symlinks cannot use it directly. Pair this with Within
+// to ask "where does this path REALLY land?" rather than "what does it spell?".
+func EvalExisting(path string) (string, error) {
+	path = filepath.Clean(path)
+	rest := ""
+	for {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			if rest == "" {
+				return resolved, nil
+			}
+			return filepath.Join(resolved, rest), nil
+		}
+		if !IsMissingErr(err) {
+			return "", err
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return filepath.Join(path, rest), nil
+		}
+		rest = filepath.Join(filepath.Base(path), rest)
+		path = parent
+	}
+}
+
+// Within reports whether path is base itself or lies beneath it. Both are
+// cleaned first; neither is required to exist.
+func Within(base, path string) bool {
+	base, path = filepath.Clean(base), filepath.Clean(path)
+	if path == base {
+		return true
+	}
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // ServiceCwd is the canonical "where does this service work from?"
 // answer: the checkout root joined with the service's exe offset.
 // Single source of truth across the codebase — the resolved value is

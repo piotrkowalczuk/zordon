@@ -57,7 +57,7 @@ Picking a service is what declares "I intend to edit this here":
 | Service | Materialization | Branch |
 |---|---|---|
 | local `src {}`, **not** picked | built from the live source tree in place — your uncommitted edits just work | — |
-| local `src {}` or `git {}`, **picked** | its own `git worktree` at `workspaces/<name>/src/<svc>`, so your IDE lists it and edits stay isolated | `zordon/<name>/<svc>` |
+| local `src {}` or `git {}`, **picked** | its own `git worktree` at `workspaces/<name>/src/<svc>`, so your IDE lists it and edits stay isolated | from `workspace { branch }`, by default `zordon/<name>/<svc>` |
 | `git {}`, **not** picked | third-party code: a plain `git clone` checked out at its ref — no branch, no worktree registration | — |
 | no source (`install` / `pkg`) | a prebuilt binary / mise package — nothing is checked out | — |
 
@@ -87,6 +87,76 @@ The `<root>/workspaces/<name>/` path stays authoritative, so editing or
 deleting the marker never un-workspaces a conventional workspace; the marker
 is an additive signal, not a single point of failure.
 `main` is the project root and carries no marker.
+
+### Generated workspace files
+
+A workspace usually needs more than source: a `CLAUDE.md` for an agent, a `.devcontainer/`, a hook in `.claude/settings.json`.
+Declare them once in the top-level `workspace {}` block and every workspace gets them.
+
+```hcl
+workspace {
+  file "claude" {
+    path = "CLAUDE.md"
+    create { source = "templates/CLAUDE.md" }
+  }
+
+  file "settings" {
+    path = ".claude/settings.json"
+    merge { data = { env = { ZORDON_WORKSPACE = workspace.name } } }
+  }
+
+  file "ignore" {
+    path = ".gitignore"
+    region { body = ".devcontainer/" }
+  }
+}
+```
+
+Do not confuse this block with the service-level `workspace { sparse }` below.
+This one prepares the workspace **directory**; that one says how to cut one service's **checkout**.
+
+**They are written at `workspace create` and `workspace apply`, never at `zordon start`.**
+That is the whole point — the files have to exist before an agent or a dev container reads them, which happens before the stack comes up.
+It is also a hard limit: nothing in this block can name a port or any other value that only exists once alpha is running.
+`net::pickport()`, `service.<tc>.<svc>.*` and `self.*` are all rejected here with an error pointing at the alternative, which is a `file {}` block inside the service itself — those are materialized by alpha at start, with the whole resolved graph in scope.
+
+Available instead: `workspace.name`, `workspace.dir`, `workspace.root`, `workspace.hash`, `workspace.port`, plus `os::env()` and the `enc::` encoders.
+`workspace.port` is derived from `workspace.hash`, so it is the same on every run of a given workspace — which is what lets a static file carry the address of a server started later.
+
+`main` is never created, so `zordon workspace apply` is the only way the project root gets its files.
+Run it there deliberately: unlike a workspace directory, the project root is your real repository.
+
+### Where a generated file may not go
+
+A declared `path` is relative to the workspace directory and may not leave it.
+Four subtrees are refused outright, for two different reasons.
+
+`src/` and `bin/` belong to somebody else: `src/<svc>` is a git working tree, where a generated file would show up in that service's `git status` and risk being committed to its branch, and `bin/` is build output alpha recreates.
+
+`etc/` and `var/` are refused even though they are exactly where generated config belongs — because the service-level `file {}` block already owns that space, on better terms.
+It has the resolved graph, so it can write a real port; and alpha *removes* the files it wrote there when it stops, which would silently delete anything `workspace apply` had put in the same place.
+
+In `main` the workspace directory is the project root, so the whole `workspaces/` tree sits underneath it; none of it is main's to write into either.
+
+A symlinked target is written *through*, so a link stays a link — but only when it still lands inside the workspace.
+A `.claude/settings.json` pointing into a dotfiles repo elsewhere is refused with a message naming where it resolves, rather than being quietly replaced by a regular file while the dotfiles copy keeps the old content.
+
+### Branch naming
+
+The branch a picked service is checked out on comes from a template:
+
+```hcl
+workspace {
+  branch = "zordon/${workspace.name}/${service.name}"   # the default
+}
+```
+
+`workspace.name` and `service.name` (plus `service.toolchain`) are available.
+A template that renders the same name for two services is rejected — per-service branches are what stop parallel checkouts colliding, so a constant template is a manifest error, not a git failure later.
+The rendered name is checked against git's ref rules before anything runs.
+
+To carry a ticket number, name the workspace after it: `zordon workspace create PROJ-123` with `branch = "feature/${workspace.name}/${service.name}"`.
+To work through a series of branches on one service, either make each one its own workspace, or just `git switch -c` inside the checkout — zordon reuses a checkout it finds on another branch as-is and `zordon status` flags the difference.
 
 ### Partial checkout (`sparse`)
 

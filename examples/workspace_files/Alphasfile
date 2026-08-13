@@ -1,0 +1,91 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+# The top-level workspace block says how to PREPARE a workspace directory:
+# which files to put in it, and what to call the branch each picked service is
+# checked out on. Not to be confused with the service-level workspace block
+# below, which says how to cut that service's checkout.
+#
+# These files are written by `zordon workspace create` and `zordon workspace
+# apply` — before anything is built or started. Nothing here can name a port:
+# see the runtime-only values rejected by the block (net::pickport, service.*).
+workspace {
+  branch = "zordon/${workspace.name}/${service.name}"
+
+  # create: zordon owns the whole file. source is an HCL template rendered
+  # with the workspace context, so it can reach workspace.* too.
+  file "claude" {
+    path = "CLAUDE.md"
+    create { source = "templates/CLAUDE.md" }
+  }
+
+  # enc::json builds the document from structure, so an interpolated value
+  # carrying a quote or a backslash cannot corrupt it.
+  file "devcontainer" {
+    path = ".devcontainer/devcontainer.json"
+    create {
+      body = enc::json({
+        name  = "zordon-${workspace.name}"
+        image = "mcr.microsoft.com/devcontainers/go:1"
+        features = {
+          "ghcr.io/anthropics/devcontainer-features/claude-code:1.0" = {}
+        }
+        # initializeCommand is the one devcontainer hook that runs on the HOST
+        # before the container exists — the only place that can start a server
+        # the container will then talk to. The port is derived from the
+        # workspace hash, so several workspaces can serve side by side and each
+        # one's address is the same on every run.
+        initializeCommand = "zordon mcp --transport=http --listen 127.0.0.1:${workspace.port} --allow-host host.docker.internal"
+      })
+    }
+  }
+
+  # merge: zordon owns a fragment of a file somebody else owns. RFC 7386, so
+  # sibling keys survive and applying twice changes nothing.
+  file "settings" {
+    path = ".claude/settings.json"
+    merge {
+      data = {
+        env = {
+          ZORDON_WORKSPACE = workspace.name
+        }
+      }
+    }
+  }
+
+  # region: the text-file counterpart of merge — zordon owns the marked span
+  # and nothing else.
+  file "ignore" {
+    path = ".gitignore"
+    region { body = ".devcontainer/\nCLAUDE.md" }
+  }
+}
+
+service "go" "app" {
+  src {
+    path = "../.."
+    exe  = "./examples/workspace_files/src/app"
+  }
+
+  vars = {
+    port = net::pickport()
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  print = "http://127.0.0.1:${self.vars.port}/  (app, workspace ${fs::hash()})"
+
+  workspace {
+    sparse = ["examples/workspace_files/src/app"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

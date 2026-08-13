@@ -325,6 +325,12 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	if err := validateProvisionArgRefs(r.resolvedServices); err != nil {
 		return nil, err
 	}
+	// Post-pass: the per-workspace branch is a whole-file property (its
+	// template lives at the top level and its uniqueness is a claim about all
+	// services at once), so it is resolved here rather than per service.
+	if err := r.resolveWorkspaceBranches(); err != nil {
+		return nil, err
+	}
 	return &Alphasfile{
 		CfgHash:   r.cfgHash,
 		Dotenv:    gdot,
@@ -1787,7 +1793,7 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 			},
 		})
 	}
-	return map[string]function.Function{
+	fns := map[string]function.Function{
 		// fs:: namespace — per-invocation filesystem coordinates and identity.
 		"fs::tmp":   str(func() string { return r.inv.TmpDir }),   // generated files
 		"fs::src":   str(func() string { return dirs.root }),      // src.path: checkout root (service scope only)
@@ -1827,6 +1833,8 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 		"test::log":  testLogFunc(r.testCfg),
 		"test::fail": testFailFunc(r.testCfg),
 	}
+	maps.Copy(fns, encodeFuncs())
+	return fns
 }
 
 // evalStaticSrcPath evaluates a src{path} expression without a live
