@@ -11,6 +11,8 @@ Goal: `zordon workspace create feature` produces a directory you can drop a cont
 This assumes you already have an Alphasfile that starts.
 See [Workspaces](../workspaces.md) for the model.
 
+This recipe is the *declarative* half of [Drive a host stack from a container](drive-a-host-stack-from-a-container.md): that page explains the HTTP MCP server and its flags, this one puts the files that start and address it into every workspace automatically.
+
 ## 1. Declare the files
 
 Add one top-level `workspace {}` block.
@@ -31,7 +33,7 @@ workspace {
         features = {
           "ghcr.io/anthropics/devcontainer-features/claude-code:1.0" = {}
         }
-        initializeCommand = "zordon mcp --http --port ${workspace.port} --allow-host"
+        initializeCommand = "zordon mcp --transport=http --listen 127.0.0.1:${workspace.port} --allow-host host.docker.internal"
         containerEnv = {
           ZORDON_WORKSPACE = workspace.name
         }
@@ -46,7 +48,7 @@ workspace {
         mcpServers = {
           zordon = {
             type = "http"
-            url  = "http://host.docker.internal:${workspace.port}"
+            url  = "http://host.docker.internal:${workspace.port}/mcp"
           }
         }
       }
@@ -54,6 +56,8 @@ workspace {
   }
 }
 ```
+
+Two details that are easy to get wrong and only fail once the container is running: the endpoint path is `/mcp`, not the bare address, and `--allow-host` is required rather than cosmetic — a loopback listener rejects a `Host:` header naming anything else, which is exactly what a container dialling `host.docker.internal` sends.
 
 ## 2. Understand which hook runs where
 

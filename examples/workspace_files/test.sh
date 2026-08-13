@@ -29,13 +29,21 @@ assert_contains "$(cat "$WS/CLAUDE.md")" "Workspace feature" "source template in
 assert_present "$WS/.devcontainer/devcontainer.json"
 dc="$(cat "$WS/.devcontainer/devcontainer.json")"
 assert_contains "$dc" '"name": "zordon-feature"' "devcontainer names the workspace"
-assert_contains "$dc" "zordon mcp --http --port" "devcontainer starts the MCP server on the host"
+assert_contains "$dc" "zordon mcp --transport=http" "devcontainer starts the MCP server on the host"
 
-# The derived port must be a real number, not an unresolved expression.
-port="$(printf '%s' "$dc" | sed -n 's/.*--port \([0-9][0-9]*\)".*/\1/p')"
-[ -n "$port" ] && [ "$port" -ge 20000 ] && [ "$port" -lt 40000 ] \
+# The derived port must be a real number, not an unresolved expression, and it
+# must sit below Linux's ephemeral floor so the kernel cannot hand the same
+# number to an unrelated socket.
+port="$(printf '%s' "$dc" | sed -n 's/.*--listen 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p')"
+[ -n "$port" ] && [ "$port" -ge 20000 ] && [ "$port" -lt 32768 ] \
 	&& pass "workspace port derived as $port" \
-	|| fail "expected a derived port in 20000..40000, got '$port' from: $dc"
+	|| fail "expected a derived port in 20000..32767, got '$port' from: $dc"
+
+# The flags the devcontainer emits have to be ones zordon actually accepts —
+# an invented flag would only surface when somebody ran the container.
+"$ZORDON" mcp -h 2>&1 | grep -q -- "--transport" \
+	&& pass "zordon mcp accepts --transport" \
+	|| fail "zordon mcp has no --transport flag; the devcontainer command is wrong"
 
 # merge and region wrote their own fragment into a file that did not exist.
 assert_contains "$(cat "$WS/.claude/settings.json")" '"ZORDON_WORKSPACE": "feature"' "merge injected its key"

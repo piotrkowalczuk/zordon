@@ -32,8 +32,9 @@ workspace {
         # initializeCommand is the one devcontainer hook that runs on the HOST
         # before the container exists — the only place that can start a server
         # the container will then talk to. The port is derived from the
-        # workspace hash, so it is the same on every run.
-        initializeCommand = "zordon mcp --http --port ${workspace.port}"
+        # workspace hash, so several workspaces can serve side by side and each
+        # one's address is the same on every run.
+        initializeCommand = "zordon mcp --transport=http --listen 127.0.0.1:${workspace.port} --allow-host host.docker.internal"
       })
     }
   }

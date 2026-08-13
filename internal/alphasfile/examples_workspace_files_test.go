@@ -56,7 +56,7 @@ func TestExampleWorkspaceFilesResolves(t *testing.T) {
 		t.Errorf("devcontainer body = %s", dc.Body)
 	}
 	port := WorkspacePort("abcd1234ef567890")
-	if want := "--port " + strconv.Itoa(port); !strings.Contains(dc.Body, want) {
+	if want := "--listen 127.0.0.1:" + strconv.Itoa(port); !strings.Contains(dc.Body, want) {
 		t.Errorf("devcontainer body = %s, want it to contain %q", dc.Body, want)
 	}
 

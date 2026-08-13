@@ -129,15 +129,36 @@ func TestWorkspaceFilePath_mainRejectsServiceSources(t *testing.T) {
 
 	// Neighbours that merely share a prefix are none of the guard's business.
 	for hint, rel := range map[string]string{
-		"sibling of a service dir": "src/other/x",
-		"prefix impostor":          "src/appendix/x",
-		"unrelated top level":      "docs/README.md",
+		"sibling of a service dir":             "src/other/x",
+		"prefix impostor":                      "src/appendix/x",
+		"unrelated top level":                  "docs/README.md",
+		"service rooted at the project itself": "CLAUDE.md",
 	} {
 		t.Run(hint, func(t *testing.T) {
 			if _, err := workspaceFilePath(inv, protected, rel); err != nil {
 				t.Errorf("workspaceFilePath(%q) = %v, want it accepted", rel, err)
 			}
 		})
+	}
+}
+
+// TestWorkspaceFilePath_sourceTreeContainingTheWorkspace is the other side of
+// the guard. A monorepo service declares src{path="../.."} — the repo root —
+// and a named workspace lives at <root>/workspaces/<name>, INSIDE it. Treating
+// that as "writing into a service's source" would refuse every workspace file
+// there is; the checkouts the workspace actually owns are guarded separately.
+func TestWorkspaceFilePath_sourceTreeContainingTheWorkspace(t *testing.T) {
+	inv := namedWorkspaceInv("/proj", "feature")
+	protected := []string{filepath.FromSlash("/proj")}
+
+	for _, rel := range []string{"CLAUDE.md", ".claude/settings.json", ".devcontainer/devcontainer.json"} {
+		if _, err := workspaceFilePath(inv, protected, rel); err != nil {
+			t.Errorf("workspaceFilePath(%q) = %v, want it accepted", rel, err)
+		}
+	}
+	// The workspace's own checkout stays refused, by the state-dir rule.
+	if _, err := workspaceFilePath(inv, protected, "src/app/x"); err == nil {
+		t.Error("a path into the workspace's own checkout was accepted")
 	}
 }
 

@@ -145,6 +145,14 @@ func workspaceFilePath(inv *invocation.InvocationState, protected []string, rel 
 		return "", fmt.Errorf("path %q escapes the workspace directory %s", rel, inv.Dir)
 	}
 	for _, src := range protected {
+		// Only source trees that sit strictly INSIDE the workspace count. One
+		// that contains it — a monorepo primary at ../.., or a service rooted
+		// at the project itself — is not somewhere the workspace writes
+		// "into": the workspace lives within it by design, and the checkouts
+		// it does own are guarded by the state-dir rules below.
+		if !zfs.Within(inv.Dir, src) || filepath.Clean(src) == filepath.Clean(inv.Dir) {
+			continue
+		}
 		if zfs.Within(src, abs) {
 			return "", fmt.Errorf("path %q writes into %s, a service's source tree; declare a file{} block inside that service instead", rel, src)
 		}
