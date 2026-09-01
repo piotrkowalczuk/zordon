@@ -22,7 +22,8 @@
       "representativeQueries": [
         "spin up a local dev stack for my coding agent",
         "run databases and services for an AI agent to test against",
-        "provision an isolated workspace for an agent",
+        "give each parallel coding agent its own database and ports",
+        "run several coding agents in parallel without port conflicts",
         "manage a local MCP-driven development environment"
       ]
     }

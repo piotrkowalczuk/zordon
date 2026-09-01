@@ -75,10 +75,16 @@ nav:
       - Filter noisy service logs: how-to/filter-noisy-logs.md
       - Install the Claude Code plugin: how-to/install-the-claude-code-plugin.md
       - Install the MCP bundle: how-to/install-the-mcp-bundle.md
+      - Run parallel agents with workspaces: how-to/run-parallel-agents-with-workspaces.md
   - Reference:
       - Binaries and layout: reference/binaries.md
       - zordon mcp: reference/mcp.md
       - Log filter DSL: reference/log-filter.md
+  - Compare:
+      - Overview: compare/index.md
+      - vs Docker Compose: compare/docker-compose.md
+      - vs a container per agent: compare/devcontainers.md
+  - Blog: blog/index.md
 
 markdown_extensions:
   - admonition
@@ -92,6 +98,14 @@ markdown_extensions:
 
 plugins:
   - search
+  # Acquisition content lives outside the Diátaxis tree: these pages address
+  # people who do not use zordon yet, which documentation deliberately does not.
+  - blog:
+      blog_dir: blog
+      post_url_format: "{slug}"
+      archive: false
+      categories: false
+      authors: false
   - llmstxt:
       markdown_description: >-
         Zordon supervises the supporting stack local agentic and development
@@ -116,5 +130,9 @@ plugins:
           - services/*.md
         How-to:
           - how-to/*.md
+        Compare:
+          - compare/*.md
+        Guides:
+          - blog/posts/*.md
         Reference:
           - reference/*.md
