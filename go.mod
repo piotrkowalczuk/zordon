@@ -1,6 +1,6 @@
 module github.com/piotrkowalczuk/zordon
 
-go 1.26.5
+go 1.27.0
 
 require (
 	github.com/creack/pty v1.1.24
@@ -84,7 +84,7 @@ require (
 	google.golang.org/grpc v1.79.3 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	honnef.co/go/tools v0.7.0 // indirect
+	honnef.co/go/tools v0.8.1 // indirect
 )
 
 tool (
