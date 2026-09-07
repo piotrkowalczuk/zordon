@@ -119,3 +119,5 @@ Main use case: an AI agent gets a sandbox next to the developer's stack;
 derivatives: parallel experiments, A/B-testing two revisions. For async
 isolation, keep the broker (NATS/Kafka/…) in the **project** Alphasfile,
 not the global parent — then each workspace gets its own bus.
+
+→ [Run parallel coding agents against isolated stacks](how-to/run-parallel-agents-with-workspaces.md) — the step-by-step recipe for one workspace per agent.
