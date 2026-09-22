@@ -5,6 +5,7 @@ import (
 	"io"
 	"path/filepath"
 
+	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
@@ -19,13 +20,15 @@ import (
 // Idempotent: if the shims and refreshed corepack already exist (e.g.
 // a previous alpha run materialized this toolchain), we skip the
 // install + enable. The caller must hold the per-(tool, version) lock
-// from Acquire to guard concurrent first-runs.
+// from Acquire to guard concurrent first-runs. host is the closed world
+// the npm/corepack subprocesses run under (sysenv + the nodejs layer-3
+// defaults, so npm's cache and userconfig are already relocated).
 //
 // On success, mutates env: prepends the shim dir AND the refreshed-
 // corepack bin dir to PATH so service spawns find the zordon-managed
 // shims ahead of node's own bundled corepack. The user's host PATH
 // stays untouched.
-func EnsureNodeCorepack(binPath, dataDir, version string, env map[string]string, logOut io.Writer) error {
+func EnsureNodeCorepack(binPath, dataDir, version string, host zenv.EnvironmentVariables, env map[string]string, logOut io.Writer) error {
 	refreshRoot := filepath.Join(dataDir, "node-corepack", version)
 	shimDir := filepath.Join(refreshRoot, "shims")
 	corepackBin := filepath.Join(refreshRoot, "bin", "corepack")
@@ -49,7 +52,7 @@ func EnsureNodeCorepack(binPath, dataDir, version string, env map[string]string,
 	// layout). isolatedEnv puts the mise binary on PATH so the
 	// mise-installed node's npm wrapper, which calls `mise reshim`
 	// post-install, can find mise itself.
-	install := miseCommand(binPath, dataDir, "exec", spec, "--",
+	install := miseCommand(binPath, dataDir, host, "exec", spec, "--",
 		"npm", "install", "-g",
 		"--prefix", refreshRoot,
 		"--no-fund", "--no-audit",
@@ -62,7 +65,7 @@ func EnsureNodeCorepack(binPath, dataDir, version string, env map[string]string,
 
 	// `corepack enable` writes pnpm/pnpx/yarn/yarnpkg shims to shimDir.
 	// Run via mise exec so the refreshed corepack finds node on PATH.
-	enable := miseCommand(binPath, dataDir, "exec", spec, "--",
+	enable := miseCommand(binPath, dataDir, host, "exec", spec, "--",
 		corepackBin, "enable",
 		"--install-directory", shimDir)
 	enable.Stdout = logOut

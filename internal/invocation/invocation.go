@@ -147,6 +147,14 @@ func (i *InvocationState) BinDir() string {
 	return filepath.Join(i.StateDir, "bin")
 }
 
+// BundleDir is where a Ruby service's gems are installed for this
+// invocation (its BUNDLE_PATH) — per service, since each resolves its own
+// Gemfile, and like BinDir outside the checkout so `bundle install` never
+// dirties a `dir` primary's worktree.
+func (i *InvocationState) BundleDir(svc string) string {
+	return filepath.Join(i.StateDir, "bundle", svc)
+}
+
 // ProjectRoot is the directory the leaf Alphasfile lives in (the workspace's
 // <X>). Relative `dir` primaries resolve against this.
 func (i *InvocationState) ProjectRoot() string {
