@@ -133,6 +133,25 @@ func TestIsolatedEnv_pinsRustHomes(t *testing.T) {
 	}
 }
 
+// mise authenticates its GitHub API lookups with a token from alpha's own
+// environment — MISE_GITHUB_TOKEN first, GITHUB_TOKEN as the CI-shaped
+// fallback — without the Alphasfile having to declare it: it is the
+// installer's credential and never reaches a service.
+func TestIsolatedEnv_passesGithubTokenToMise(t *testing.T) {
+	t.Setenv("MISE_GITHUB_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "ghs_ci")
+	if got := envMap(isolatedEnv(zenv.FromHost(nil), "/z/toolchain", ""))["MISE_GITHUB_TOKEN"]; got != "ghs_ci" {
+		t.Errorf("MISE_GITHUB_TOKEN = %q, want GITHUB_TOKEN fallback", got)
+	}
+	t.Setenv("MISE_GITHUB_TOKEN", "ghp_dev")
+	if got := envMap(isolatedEnv(zenv.FromHost(nil), "/z/toolchain", ""))["MISE_GITHUB_TOKEN"]; got != "ghp_dev" {
+		t.Errorf("MISE_GITHUB_TOKEN = %q, want the explicit mise token", got)
+	}
+	if _, ok := envMap(isolatedEnv(zenv.FromHost(nil), "/z/toolchain", ""))["GITHUB_TOKEN"]; ok {
+		t.Error("raw GITHUB_TOKEN leaked into the install env")
+	}
+}
+
 // `gem install` skips ~/.gemrc: a `gem: --user-install` line there would
 // divert the declared bundler into ~/.gem/ruby/<abi>, outside the pinned
 // ruby, and the runtime GEM_PATH pin would then never see it.

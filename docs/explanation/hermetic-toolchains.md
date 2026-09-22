@@ -18,9 +18,11 @@ That was always true for services, builds and provisions.
 It is now equally true for the installs that materialize a toolchain: every `mise` invocation, and every installer it runs (`gem install`, `npm install -g`, `go install`, `cargo install`, `mise install`), sees the sysenv-filtered environment plus zordon's own pins.
 A `GEM_HOME`, `NPM_CONFIG_REGISTRY`, `GOFLAGS` or `CARGO_HOME` exported by the shell cannot decide where a declared tool lands or which registry it comes from, because it never reaches the installer.
 
-`PATH` is the one deliberate exception.
+`PATH` is one deliberate exception.
 When `sysenv` does not declare it, mise still needs to find `git`, `curl` and `tar`, so the host `PATH` is used for the install.
 Declaring `PATH` in `sysenv` makes that explicit and is what every shipped example does.
+The other is mise's own GitHub credential: `MISE_GITHUB_TOKEN` (or `GITHUB_TOKEN`) from the environment zordon was started in is handed to mise, because ruby, rust and aqua releases are resolved through the GitHub API and its anonymous limit is exhausted within minutes on shared CI runners.
+It reaches mise only, never a service, so it is the installer's credential rather than a hole in the closed world.
 
 ## Relocating what lives in HOME
 

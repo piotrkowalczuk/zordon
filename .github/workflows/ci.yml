@@ -96,6 +96,12 @@ jobs:
     env:
       CGO_ENABLED: "1"
       GO_VERSION: "1.27.0"
+      # mise resolves ruby/rust/aqua releases through the GitHub API; the
+      # anonymous per-IP limit is exhausted within minutes on shared
+      # runners (ruby then falls back to a source build, rust reports
+      # "ready" without cargo). zordon hands this to mise as
+      # MISE_GITHUB_TOKEN for its own calls only — services never see it.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Install dependencies
         run: |
@@ -190,6 +196,12 @@ jobs:
     env:
       CGO_ENABLED: "1"
       GO_VERSION: "1.27.0"
+      # mise resolves ruby/rust/aqua releases through the GitHub API; the
+      # anonymous per-IP limit is exhausted within minutes on shared
+      # runners (ruby then falls back to a source build, rust reports
+      # "ready" without cargo). zordon hands this to mise as
+      # MISE_GITHUB_TOKEN for its own calls only — services never see it.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Install dependencies
         run: |

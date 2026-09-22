@@ -142,6 +142,11 @@ func ResolveDataDir(from, defaultDataDir, tool, version string) string {
 //     ~/.rustup and puts `cargo install` output into ~/.cargo/bin;
 //   - PATH falls back to the host PATH when the Alphasfile did not declare
 //     it, since mise still has to find git/curl/tar to install anything;
+//   - MISE_GITHUB_TOKEN (or GITHUB_TOKEN) from alpha's own environment is
+//     handed to mise as MISE_GITHUB_TOKEN. mise resolves ruby/rust/aqua
+//     releases through the GitHub API, whose anonymous limit CI runners
+//     exhaust in minutes; the token is the installer's credential, never
+//     part of a service's env, so it does not go through sysenv;
 //   - the mise binary's dir is prepended to PATH so subprocesses that reach
 //     back to call `mise` resolve to the zordon-owned binary.
 //
@@ -168,10 +173,22 @@ func isolatedEnv(host zenv.EnvironmentVariables, dataDir, miseBin string) []stri
 	env["MISE_CACHE_DIR"] = filepath.Join(cfgRoot, "mise-cache")
 	env["MISE_CARGO_HOME"] = filepath.Join(dataDir, "cargo-home")
 	env["MISE_RUSTUP_HOME"] = filepath.Join(dataDir, "rustup-home")
+	if token := githubToken(); token != "" {
+		env["MISE_GITHUB_TOKEN"] = token
+	}
 	if miseBin != "" {
 		env = env.PrependPath("PATH", []string{filepath.Dir(miseBin)})
 	}
 	return env.Slice()
+}
+
+func githubToken() string {
+	for _, k := range []string{"MISE_GITHUB_TOKEN", "GITHUB_TOKEN"} {
+		if v, ok := zenv.Lookup(k); ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // miseCommand builds an *exec.Cmd for a mise subcommand with zordon's
