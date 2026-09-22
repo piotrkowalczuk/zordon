@@ -128,53 +128,50 @@ func ResolveDataDir(from, defaultDataDir, tool, version string) string {
 	}
 }
 
-// isolatedEnv returns the env-var slice that pins mise to a zordon-
-// owned location regardless of user's home mise installation. The
-// mise binary's dir is also prepended to PATH so subprocesses that
-// reach back to call `mise` resolve to the zordon-owned binary.
+// isolatedEnv returns the env-var slice every mise invocation runs under.
+// host is the sysenv-filtered host environment — the same closed world
+// alpha hands to services — so an install sees exactly what the Alphasfile
+// declared and nothing else: a developer's GEM_HOME / BUNDLE_* / NPM_CONFIG_*
+// / GOFLAGS / CARGO_HOME cannot steer where `gem install bundler`, `npm -g`
+// or `cargo install` land. On top of that closed world:
 //
-// The recursive-mise case is real: when mise installs node, it
-// replaces node's `npm` script with a wrapper that runs `mise reshim`
-// post-install. Without mise on PATH, that hook fails with exit 127
-// ("mise: command not found"). Whether the same wrapping happens for
-// other toolchains (ruby's gem, python's pip) is mise-internal and
-// version-dependent, so this is unconditional rather than gated per
-// language — the PATH addition is harmless when nothing in the
-// subprocess tree ever invokes mise.
+//   - every MISE_* is dropped and the MISE_*_DIR set pinned to zordon-owned
+//     locations, so the user's mise state is never read or written;
+//   - MISE_CARGO_HOME / MISE_RUSTUP_HOME are pinned under dataDir — mise's
+//     rust backend otherwise installs rustup into the user's real
+//     ~/.rustup and puts `cargo install` output into ~/.cargo/bin;
+//   - PATH falls back to the host PATH when the Alphasfile did not declare
+//     it, since mise still has to find git/curl/tar to install anything;
+//   - the mise binary's dir is prepended to PATH so subprocesses that reach
+//     back to call `mise` resolve to the zordon-owned binary.
 //
-// alpha's host PATH may not have ~/.zordon/bin on it (zordon installs
-// mise into its own bin dir, not a system location), which is why we
-// inject it here rather than relying on the parent environment.
-func isolatedEnv(dataDir, miseBin string) []string {
+// The recursive-mise case is real: when mise installs node, it replaces
+// node's `npm` script with a wrapper that runs `mise reshim` post-install.
+// Without mise on PATH, that hook fails with exit 127.
+func isolatedEnv(host zenv.EnvironmentVariables, dataDir, miseBin string) []string {
 	cfgRoot := filepath.Dir(dataDir) // e.g. ~/.zordon
-	// Drop every host MISE_* first so a developer's MISE_ENV / MISE_*_DIR /
-	// MISE_IDIOMATIC_* can neither leak into nor duplicate the controlled set
-	// below — os.Environ() can carry a host MISE_DATA_DIR that would otherwise
-	// survive as an earlier (winning) duplicate of ours.
-	var env []string
-	for _, kv := range zenv.Environ() {
-		if strings.HasPrefix(kv, "MISE_") {
+	env := make(zenv.EnvironmentVariables, len(host)+8)
+	for k, v := range host {
+		if strings.HasPrefix(k, "MISE_") {
 			continue
 		}
-		env = append(env, kv)
+		env[k] = v
 	}
-	env = append(env,
-		"MISE_DATA_DIR="+dataDir,
-		"MISE_CONFIG_DIR="+filepath.Join(cfgRoot, "mise-config"),
-		"MISE_STATE_DIR="+filepath.Join(cfgRoot, "mise-state"),
-		"MISE_CACHE_DIR="+filepath.Join(cfgRoot, "mise-cache"),
-	)
-	if miseBin == "" {
-		return env
-	}
-	miseDir := filepath.Dir(miseBin)
-	for i, kv := range env {
-		if strings.HasPrefix(kv, "PATH=") {
-			env[i] = "PATH=" + miseDir + string(zfs.PathListSeparator) + kv[len("PATH="):]
-			return env
+	if env["PATH"] == "" {
+		if p, ok := zenv.Lookup("PATH"); ok {
+			env["PATH"] = p
 		}
 	}
-	return append(env, "PATH="+miseDir)
+	env["MISE_DATA_DIR"] = dataDir
+	env["MISE_CONFIG_DIR"] = filepath.Join(cfgRoot, "mise-config")
+	env["MISE_STATE_DIR"] = filepath.Join(cfgRoot, "mise-state")
+	env["MISE_CACHE_DIR"] = filepath.Join(cfgRoot, "mise-cache")
+	env["MISE_CARGO_HOME"] = filepath.Join(dataDir, "cargo-home")
+	env["MISE_RUSTUP_HOME"] = filepath.Join(dataDir, "rustup-home")
+	if miseBin != "" {
+		env = env.PrependPath("PATH", []string{filepath.Dir(miseBin)})
+	}
+	return env.Slice()
 }
 
 // miseCommand builds an *exec.Cmd for a mise subcommand with zordon's
@@ -183,13 +180,13 @@ func isolatedEnv(dataDir, miseBin string) []string {
 // (e.g. left by `mise use`), any ancestor mise.toml walked up to /, the
 // global ~/.config/mise/*, or ~/.tool-versions. zordon supplies every
 // tool@version explicitly on the CLI, so no config is ever needed, and a
-// discovered one would only pollute toolchain resolution. Env is pinned to
-// zordon-owned MISE_*_DIR locations via isolatedEnv. Callers set
-// Stdout/Stderr and may append to cmd.Env.
-func miseCommand(binPath, dataDir string, args ...string) *exec.Cmd {
+// discovered one would only pollute toolchain resolution. Env is the closed
+// world from isolatedEnv(host, ...). Callers set Stdout/Stderr and may
+// append to cmd.Env.
+func miseCommand(binPath, dataDir string, host zenv.EnvironmentVariables, args ...string) *exec.Cmd {
 	full := append([]string{"--no-config"}, args...)
 	cmd := exec.Command(binPath, full...)
-	cmd.Env = isolatedEnv(dataDir, binPath)
+	cmd.Env = isolatedEnv(host, dataDir, binPath)
 	return cmd
 }
 
@@ -207,8 +204,8 @@ func miseCommand(binPath, dataDir string, args ...string) *exec.Cmd {
 // dataDir; stderr is piped so progress shows on first install. Callers
 // must hold the per-(tool, version) lock from Acquire — auto-install
 // races otherwise.
-func MiseEnv(binPath, dataDir, tool, version string, logOut io.Writer) (map[string]string, error) {
-	env, _, err := MiseEnvWithBinDirs(binPath, dataDir, tool, version, logOut)
+func MiseEnv(binPath, dataDir, tool, version string, host zenv.EnvironmentVariables, logOut io.Writer) (map[string]string, error) {
+	env, _, err := MiseEnvWithBinDirs(binPath, dataDir, tool, version, host, logOut)
 	return env, err
 }
 
@@ -218,9 +215,9 @@ func MiseEnv(binPath, dataDir, tool, version string, logOut io.Writer) (map[stri
 // tool's executables — e.g. postgres's bin with pg_dump/initdb — which alpha
 // layers onto a *different* service's PATH so a provision can find a binary
 // that ships with another service's package. Same locking contract as MiseEnv.
-func MiseEnvWithBinDirs(binPath, dataDir, tool, version string, logOut io.Writer) (map[string]string, []string, error) {
+func MiseEnvWithBinDirs(binPath, dataDir, tool, version string, host zenv.EnvironmentVariables, logOut io.Writer) (map[string]string, []string, error) {
 	spec := miseToolName(tool) + "@" + version
-	cmd := miseCommand(binPath, dataDir, "env", "--json", spec)
+	cmd := miseCommand(binPath, dataDir, host, "env", "--json", spec)
 	base := cmd.Env
 	cmd.Stderr = logOut
 	out, err := cmd.Output()
@@ -254,13 +251,13 @@ func MiseEnvWithBinDirs(binPath, dataDir, tool, version string, logOut io.Writer
 // Download/compile progress goes to logOut (some backends build from
 // source on first install). Callers hold the per-(name, version)
 // Acquire lock, since the install writes under dataDir.
-func EnsurePackage(binPath, dataDir, name, version string, buildEnv zenv.EnvironmentVariables, logOut io.Writer) error {
+func EnsurePackage(binPath, dataDir, name, version string, host, buildEnv zenv.EnvironmentVariables, logOut io.Writer) error {
 	spec := name + "@" + version
-	cmd := miseCommand(binPath, dataDir, "install", spec)
+	cmd := miseCommand(binPath, dataDir, host, "install", spec)
 	// buildEnv (the pkg service's `build { env }`) overlays the install
 	// environment — configure flags / build vars a source-compiled
 	// backend needs, e.g. POSTGRES_EXTRA_CONFIGURE_OPTIONS=--without-icu
-	// or PKG_CONFIG_PATH. Appended last so it wins over the host env.
+	// or PKG_CONFIG_PATH. Appended last so it wins over the closed world.
 	for k, v := range buildEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -278,18 +275,22 @@ func EnsurePackage(binPath, dataDir, name, version string, buildEnv zenv.Environ
 // must be re-installed per pinned version.
 //
 // Runs through `mise exec <tool>@<version> -- <installer> ...` so each
-// install lands in the right interpreter's world. Idempotent in the
-// sense the underlying installer decides: gem/pip/cargo no-op on a
-// matching name+version that's already present.
+// install lands in the right interpreter's world. host is the closed
+// world the installer runs under; callers pass the sysenv-filtered env
+// joined with the language's layer-3 defaults (LangEnv), so e.g. `go
+// install` already runs with GOTOOLCHAIN=local and `gem install` with
+// GEM_HOME pinned. Idempotent in the sense the underlying installer
+// decides: gem/pip/cargo no-op on a matching name+version that's already
+// present.
 //
 // Returns the first install error or nil. Output (progress, warnings)
 // goes to logOut so the user can see what's happening on first run.
-func EnsureTools(binPath, dataDir, toolchain, version string, items map[string]string, logOut io.Writer) error {
+func EnsureTools(binPath, dataDir, toolchain, version string, items map[string]string, host zenv.EnvironmentVariables, logOut io.Writer) error {
 	if len(items) == 0 {
 		return nil
 	}
 	for name, ver := range items {
-		cmd, err := toolInstallCmd(binPath, dataDir, toolchain, version, name, ver)
+		cmd, err := toolInstallCmd(binPath, dataDir, toolchain, version, name, ver, host)
 		if err != nil {
 			return err
 		}
@@ -305,13 +306,15 @@ func EnsureTools(binPath, dataDir, toolchain, version string, items map[string]s
 // toolInstallCmd builds the `mise exec` line for one language-native
 // tool install. The actual install verb is per-toolchain because each
 // language has its own package-manager idiom.
-func toolInstallCmd(binPath, dataDir, toolchain, version, name, ver string) (*exec.Cmd, error) {
+func toolInstallCmd(binPath, dataDir, toolchain, version, name, ver string, host zenv.EnvironmentVariables) (*exec.Cmd, error) {
 	spec := miseToolName(toolchain) + "@" + version
 	var argv []string
 	switch toolchain {
 	case "ruby":
-		// --no-document skips docs (faster install, fewer files).
-		argv = []string{"gem", "install", name, "--version", ver, "--no-document"}
+		// --no-document skips docs (faster install, fewer files). --norc
+		// skips ~/.gemrc: a `gem: --user-install` line there would divert
+		// the install into ~/.gem/ruby/<abi>, outside the pinned ruby.
+		argv = []string{"gem", "install", name, "--version", ver, "--no-document", "--norc"}
 	case "python":
 		argv = []string{"pip", "install", name + "==" + ver}
 	case "rust":
@@ -326,9 +329,9 @@ func toolInstallCmd(binPath, dataDir, toolchain, version, name, ver string) (*ex
 		// (installs/node/<ver>) — so installed globals stay isolated
 		// per pinned node, mirroring gem/cargo's per-version tool world.
 		// --no-fund/--no-audit silences npm's nag banners (the runtime
-		// env's NPM_CONFIG_FUND/AUDIT in postMiseNode covers the same
-		// at service-spawn time; here we still need the flag because
-		// that env isn't applied at tool-install).
+		// env's NPM_CONFIG_FUND/AUDIT covers the same at service-spawn
+		// time; here we still need the flag because that env isn't
+		// applied at tool-install).
 		argv = []string{"npm", "install", "-g", "--no-fund", "--no-audit", name + "@" + ver}
 	case "java":
 		// The JDK has no per-toolchain tool world (no gem/npm-global
@@ -339,7 +342,7 @@ func toolInstallCmd(binPath, dataDir, toolchain, version, name, ver string) (*ex
 		return nil, fmt.Errorf("toolchain %q: no tool installer wired", toolchain)
 	}
 	full := append([]string{"exec", spec, "--"}, argv...)
-	return miseCommand(binPath, dataDir, full...), nil
+	return miseCommand(binPath, dataDir, host, full...), nil
 }
 
 // Acquire takes a process-wide exclusive lock on a lock file scoped to
