@@ -3,6 +3,8 @@
 package conformance_test
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
@@ -10,14 +12,19 @@ import (
 
 // A developer's Go config never reaches a zordon build: the user env file
 // (`go env -w`, read from the platform config dir under HOME), ~/.netrc
-// and the host GOFLAGS/GOPROXY/GOTOOLCHAIN are all poisoned so that any of
-// them being read fails the build — `-mod=vendor` against a module with
-// no vendor dir is a hard error, `GOTOOLCHAIN=go1.0` would try to fetch a
-// toolchain that does not exist.
+// and the host env are all poisoned with the exports developers really
+// carry around, each chosen so that being read fails the build or yields a
+// binary that cannot run — `-mod=vendor` against a module with no vendor
+// dir is a hard error, `GO111MODULE=off` makes a module build GOPATH-mode,
+// `GOOS=linux` (a cross-compile leftover) yields a binary macOS/Linux
+// x86 cannot exec, a stale `GOROOT` from another install breaks the
+// standard library lookup, `GOTOOLCHAIN=go1.0` would fetch a toolchain
+// that does not exist, and a shell-activated version manager (`MISE_*`,
+// `GVM_ROOT`) would redirect where the toolchain is looked up.
 func TestGoService_hermetic_hostConfigIgnored(t *testing.T) {
 	home := poisonedHome(t,
-		homeFile{".config/go/env", "GOFLAGS=-mod=vendor\n"},
-		homeFile{"Library/Application Support/go/env", "GOFLAGS=-mod=vendor\n"},
+		homeFile{".config/go/env", "GOFLAGS=-mod=vendor\nGOPROXY=http://127.0.0.1:1\n"},
+		homeFile{"Library/Application Support/go/env", "GOFLAGS=-mod=vendor\nGOPROXY=http://127.0.0.1:1\n"},
 		homeFile{".netrc", "machine proxy.golang.org login poison password poison\n"},
 	)
 
@@ -55,14 +62,33 @@ service "go" "svc1" {
 `)
 
 	startPoisoned(t, p, home, map[string]string{
-		"GOFLAGS":     "-mod=vendor",
-		"GOPROXY":     "http://127.0.0.1:1" + poisonSentinel,
-		"GOTOOLCHAIN": "go1.0",
+		"GOFLAGS":       "-mod=vendor",
+		"GOPROXY":       "http://127.0.0.1:1" + poisonSentinel,
+		"GONOSUMDB":     "*",
+		"GOPRIVATE":     "*",
+		"GOTOOLCHAIN":   "go1.0",
+		"GO111MODULE":   "off",
+		"GOOS":          "linux",
+		"GOARCH":        "mips",
+		"CGO_ENABLED":   "0",
+		"GOROOT":        poisonSentinel + "/goroot",
+		"GOPATH":        poisonSentinel + "/gopath",
+		"GOBIN":         poisonSentinel + "/gobin",
+		"GOMODCACHE":    poisonSentinel + "/modcache",
+		"GOCACHE":       poisonSentinel + "/gocache",
+		"GOENV":         poisonSentinel + "/goenv",
+		"GOWORK":        poisonSentinel + "/go.work",
+		"MISE_DATA_DIR": poisonSentinel + "/mise",
+		"MISE_SHELL":    "zsh",
+		"GVM_ROOT":      poisonSentinel + "/gvm",
 	})
 
 	port := p.Get(t, "service.go.svc1.vars.port").Int()
 	echo := mustDecodeEcho(t, port)
-	assertNoPoison(t, echo.Env, "GOFLAGS", "GOPROXY")
+	assertNoPoison(t, echo.Env, "GOFLAGS", "GOPROXY", "GONOSUMDB", "GOPRIVATE", "GO111MODULE", "GOOS", "GOARCH", "CGO_ENABLED", "GOWORK", "MISE_DATA_DIR", "MISE_SHELL", "GVM_ROOT")
+	if !strings.HasPrefix(echo.Env["GOROOT"], filepath.Join(p.Home(), "toolchain", "installs", "go")) {
+		t.Errorf("GOROOT = %q, want the mise install", echo.Env["GOROOT"])
+	}
 	if echo.Env["GOENV"] != "off" {
 		t.Errorf("GOENV = %q, want off (the user env file must be ignored)", echo.Env["GOENV"])
 	}
@@ -130,9 +156,14 @@ service "go" "app" {
 `)
 
 	startPoisoned(t, p, home, map[string]string{
-		"HTTPS_PROXY":   "http://127.0.0.1:1" + poisonSentinel,
-		"HTTP_PROXY":    "http://127.0.0.1:1" + poisonSentinel,
-		"ASDF_DATA_DIR": poisonSentinel,
+		"HTTPS_PROXY":     "http://127.0.0.1:1" + poisonSentinel,
+		"HTTP_PROXY":      "http://127.0.0.1:1" + poisonSentinel,
+		"ALL_PROXY":       "socks5://127.0.0.1:1" + poisonSentinel,
+		"ASDF_DATA_DIR":   poisonSentinel,
+		"ASDF_DIR":        poisonSentinel + "/asdf",
+		"MISE_DATA_DIR":   poisonSentinel + "/mise",
+		"MISE_CONFIG_DIR": poisonSentinel + "/mise-config",
+		"AQUA_ROOT_DIR":   poisonSentinel + "/aqua",
 	})
 
 	dump := p.Get(t, "service.go.app.vars.dump").String()
@@ -140,5 +171,5 @@ service "go" "app" {
 	if err != nil {
 		t.Fatalf("provision env dump: %v", err)
 	}
-	assertNoPoison(t, envFromDump(body), "HTTPS_PROXY", "HTTP_PROXY", "ASDF_DATA_DIR")
+	assertNoPoison(t, envFromDump(body), "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "ASDF_DATA_DIR", "ASDF_DIR", "MISE_DATA_DIR", "MISE_CONFIG_DIR", "AQUA_ROOT_DIR")
 }

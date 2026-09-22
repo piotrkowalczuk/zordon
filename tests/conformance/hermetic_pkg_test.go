@@ -60,9 +60,17 @@ service "pkg" "etcd" {
 	startPoisoned(t, p, home, map[string]string{
 		"HTTPS_PROXY":     "http://127.0.0.1:1" + poisonSentinel,
 		"HTTP_PROXY":      "http://127.0.0.1:1" + poisonSentinel,
+		"ALL_PROXY":       "socks5://127.0.0.1:1" + poisonSentinel,
 		"ASDF_DATA_DIR":   poisonSentinel,
+		"ASDF_DIR":        poisonSentinel + "/asdf",
+		"MISE_DATA_DIR":   poisonSentinel + "/mise",
+		"MISE_CONFIG_DIR": poisonSentinel + "/mise-config",
+		"MISE_ENV":        "poison",
+		"AQUA_ROOT_DIR":   poisonSentinel + "/aqua",
 		"PKG_CONFIG_PATH": poisonSentinel,
 		"CFLAGS":          "-poison",
+		"LDFLAGS":         "-L" + poisonSentinel,
+		"CC":              poisonSentinel + "/cc",
 	})
 
 	dump := p.Get(t, "service.pkg.etcd.vars.dump").String()
@@ -70,5 +78,5 @@ service "pkg" "etcd" {
 	if err != nil {
 		t.Fatalf("provision env dump: %v", err)
 	}
-	assertNoPoison(t, envFromDump(body), "HTTPS_PROXY", "HTTP_PROXY", "ASDF_DATA_DIR", "PKG_CONFIG_PATH", "CFLAGS")
+	assertNoPoison(t, envFromDump(body), "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "ASDF_DATA_DIR", "ASDF_DIR", "MISE_DATA_DIR", "MISE_CONFIG_DIR", "MISE_ENV", "AQUA_ROOT_DIR", "PKG_CONFIG_PATH", "CFLAGS", "LDFLAGS", "CC")
 }
