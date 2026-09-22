@@ -1,0 +1,4 @@
+# Empty on purpose: the fixture is stdlib-only, so `bundle install` has
+# nothing to fetch and the conformance suite stays offline-capable. The
+# lockfile's BUNDLED WITH is what the bundler-pin tests read.
+source "https://rubygems.org"
