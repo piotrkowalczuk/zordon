@@ -17,11 +17,7 @@
 sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 service "pkg" "postgres" {
-  package = "asdf:mise-plugins/mise-postgres@16.4"
-
-  build {
-    env = { POSTGRES_EXTRA_CONFIGURE_OPTIONS = "--without-icu" }
-  }
+  package = "ubi:theseus-rs/postgresql-binaries[extract_all=true,bin_path=bin]@16.4.0"
 
   vars = {
     port = net::pickport()

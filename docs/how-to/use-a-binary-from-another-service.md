@@ -22,7 +22,7 @@ Use `fs::service::bin(<service-ref>)` when the binary ships with another [`pkg` 
 
 ```hcl
 service "pkg" "postgres" {
-  package = "asdf:mise-plugins/mise-postgres@16.4"
+  package = "ubi:theseus-rs/postgresql-binaries[extract_all=true,bin_path=bin]@16.4.0"
   vars    = { port = net::pickport(), data = "${fs::tmp()}/pgdata" }
   runtime {
     after = [self.runtime.provision.initdb.success]

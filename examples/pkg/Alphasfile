@@ -6,8 +6,9 @@
 # Because the package runs as a normal child of the supervisor, the same
 # tommy/pgid/registry machinery reaps it — no daemon, no orphan window.
 #
-# First start may take a while: mise builds redis/postgres from source
-# (vfox/asdf backends). Subsequent starts reuse the install.
+# First start may take a while: mise builds redis from source (vfox/asdf
+# backend) and downloads prebuilt postgres. Subsequent starts reuse the
+# install.
 sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 service "pkg" "redis" {
@@ -30,14 +31,13 @@ service "pkg" "redis" {
 }
 
 service "pkg" "postgres" {
-  # asdf backend + --without-icu so postgres builds without pkg-config/ICU
-  # (the default vfox backend forces ICU and needs a system pkg-config).
-  # build{env} is injected straight into `mise install`.
-  package = "asdf:mise-plugins/mise-postgres@16.4"
-
-  build {
-    env = { POSTGRES_EXTRA_CONFIGURE_OPTIONS = "--without-icu" }
-  }
+  # Prebuilt binaries from theseus-rs/postgresql-binaries via the ubi
+  # backend: extract_all unpacks the whole tarball (not one executable),
+  # bin_path puts its bin/ on PATH, and the tag must be exact (16.4.0).
+  # The asdf/vfox plugins compile from a tarball on ftp.postgresql.org,
+  # which is often unreachable; a source build would also need
+  # `build { env = { POSTGRES_EXTRA_CONFIGURE_OPTIONS = "--without-icu" } }`.
+  package = "ubi:theseus-rs/postgresql-binaries[extract_all=true,bin_path=bin]@16.4.0"
 
   vars = {
     port = net::pickport()

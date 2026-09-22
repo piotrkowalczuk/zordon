@@ -81,7 +81,7 @@ The mechanism is that ports and paths are **functions, not literals**:
 
 ```hcl
 service "pkg" "postgres" {
-  package = "asdf:mise-plugins/mise-postgres@16.4"
+  package = "ubi:theseus-rs/postgresql-binaries[extract_all=true,bin_path=bin]@16.4.0"
 
   vars = { port = net::pickport() }          # resolved per run, never pinned
 
