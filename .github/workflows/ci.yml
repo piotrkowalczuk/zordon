@@ -84,6 +84,9 @@ jobs:
           # java installs a JDK and builds the golden Maven + Gradle fixtures
           # through their committed wrappers (golden/java/echo-{maven,gradle}).
           - java
+          # ruby installs a precompiled ruby via mise plus the declared
+          # bundler, and proves the hermetic gem/bundler env (golden/ruby/echo).
+          - ruby
     container:
       image: ${{ matrix.distro }}
       # tini as pid 1 to reap zombies; GitHub's bare `tail` pid 1
@@ -123,19 +126,20 @@ jobs:
       - name: Cache Go + toolchain
         # Per-(distro, toolchain): each cache holds a single mise-installed
         # toolchain, so it stays small (well under GitHub's 10GB cap) even
-        # across 24 legs. .zordon/toolchain/installs is MISE_DATA_DIR — the
-        # dir a cold run reinstalls go/rust/node/etc. into from scratch today.
-        # The key busts on go.sum / golden / conformance changes (that's where
-        # the pinned tool versions live); restore-keys warm-starts otherwise.
+        # across the matrix. .zordon/toolchain is MISE_DATA_DIR plus the
+        # zordon-owned homes next to it (cargo-home, rustup-home, node-home,
+        # java-home, ruby-home): every toolchain's install AND its relocated
+        # caches live there now, so nothing under /root/.cargo, /root/.npm or
+        # /root/.m2 is written by the suite any more. The key busts on
+        # go.sum / golden / conformance changes (that's where the pinned tool
+        # versions live); restore-keys warm-starts otherwise.
         uses: actions/cache@v4
         with:
           path: |
             /root/go/pkg/mod
             /root/.cache/go-build
-            .zordon/toolchain/installs
+            .zordon/toolchain
             .zordon/mise-cache
-            /root/.cargo
-            /root/.npm
           key: ${{ matrix.distro }}-${{ matrix.toolchain }}-${{ hashFiles('go.sum', 'golden/**', 'tests/conformance/**') }}
           restore-keys: |
             ${{ matrix.distro }}-${{ matrix.toolchain }}-
@@ -174,7 +178,8 @@ jobs:
           - workspace
           # java clones spring-petclinic and runs its Maven wrapper: a
           # real (heavy, network-bound) JVM build per distro. The wrapper
-          # downloads Maven + deps into HOME's ~/.m2 on a cold cache.
+          # downloads Maven + deps into the zordon-owned java-home under
+          # .zordon/toolchain on a cold cache.
           - java
     container:
       image: ${{ matrix.distro }}

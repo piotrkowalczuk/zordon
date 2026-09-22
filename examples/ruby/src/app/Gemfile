@@ -1,0 +1,4 @@
+# Empty on purpose: the example app is stdlib-only, so the default
+# `bundle install` has nothing to fetch. The lockfile's BUNDLED WITH is
+# the bundler version the Alphasfile declares under toolchain.ruby.tools.
+source "https://rubygems.org"

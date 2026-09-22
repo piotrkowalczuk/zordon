@@ -1,5 +1,6 @@
-# Minimal stdlib-only HTTP server for examples/ruby — no gems, so it
-# runs offline with a no-op build.
+# Minimal stdlib-only HTTP server for examples/ruby — no gems, so the
+# empty Gemfile next to it installs offline. Runs under `bundle exec`, so
+# the body reports which bundler the pinned toolchain resolved.
 #
 # Note: no STDOUT.sync = true here. Alpha hands ruby services a PTY by
 # default (see Service.UseTTY in alphasfile), so isatty(STDOUT) is true
@@ -13,7 +14,7 @@ puts "up #{addr}"
 loop do
   conn = server.accept
   conn.gets
-  body = "ruby-example ok\n"
+  body = "ruby-example ok\nbundler #{Bundler::VERSION}\n"
   conn.print "HTTP/1.1 200 OK\r\nContent-Length: #{body.bytesize}\r\nConnection: close\r\n\r\n#{body}"
   conn.close
 end

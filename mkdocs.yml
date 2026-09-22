@@ -55,6 +55,7 @@ nav:
   - Concepts: concepts.md
   - Architecture: architecture.md
   - Lifecycle: lifecycle.md
+  - Hermetic toolchains: explanation/hermetic-toolchains.md
   - Alphasfile: alphasfile.md
   - Dynamic configuration: dynamic-config.md
   - Services:
@@ -71,6 +72,7 @@ nav:
       - Drive a host stack from a container: how-to/drive-a-host-stack-from-a-container.md
       - Use a binary from another service: how-to/use-a-binary-from-another-service.md
       - Install a CLI tool from a mise package: how-to/install-a-cli-tool-with-mise.md
+      - Authenticate to a private gem source: how-to/authenticate-to-a-private-gem-source.md
       - Clean up provision side effects: how-to/clean-up-provision-side-effects.md
       - Filter noisy service logs: how-to/filter-noisy-logs.md
       - Install the Claude Code plugin: how-to/install-the-claude-code-plugin.md

@@ -79,6 +79,12 @@ ships a stale signing-key set; without the refresh, `pnpm install`
 fails with `Cannot find matching keyid`. See
 `internal/tools/corepack_test.go` for the empirical matrix.
 
+npm's user config and every package manager's cache are zordon-owned:
+`NPM_CONFIG_USERCONFIG`, `NPM_CONFIG_CACHE`, `COREPACK_HOME`, the yarn 1
+cache, the pnpm store and the bun cache all point under
+`~/.zordon/toolchain/node-home`, so `~/.npmrc` and `~/.npm` on the host
+are never read or written (see [Hermetic toolchains](../explanation/hermetic-toolchains.md)).
+
 For reproducible PM version pinning, set `packageManager` in
 `package.json` (Corepack's standard mechanism, e.g.
 `"packageManager": "pnpm@9.12.0"`). Without that pin, Corepack uses
