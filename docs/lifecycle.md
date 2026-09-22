@@ -80,7 +80,10 @@ Lowest to highest, last wins:
 
 The toolchain is the **initial** environment: it lays down PATH /
 GOROOT / GEM_PATH / GOTOOLCHAIN / etc. so language tooling resolves to
-the pinned install. Per-service config (`dotenv`, `env`, phase env)
+the pinned install, and relocates each language's HOME-based config and
+caches to zordon-owned dirs (see [Hermetic toolchains](explanation/hermetic-toolchains.md)).
+The installs that materialize a toolchain run under the same `sysenv`
+closed world as the services. Per-service config (`dotenv`, `env`, phase env)
 layers on top, so users override toolchain defaults — never the other
 way around. A service's own `dotenv`/`env` likewise wins over the
 file-level `dotenv`/`env`: the global tier is a default, not an override.
