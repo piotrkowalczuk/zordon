@@ -908,6 +908,9 @@ func (r *resolver) finishService(st *svcState) error {
 		VarDir:    st.dirs.vardir,
 		Print:     printLine,
 	}
+	if sb.Toolchain == ToolchainRuby {
+		rt.BundleDir = r.inv.BundleDir(sb.Name)
+	}
 	// Resolve per-toolchain defaults so the wire-stable Service is fully
 	// populated — alpha can read rt.Log.TTY without knowing what
 	// "ruby" means.

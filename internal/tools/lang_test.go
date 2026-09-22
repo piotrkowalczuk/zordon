@@ -38,7 +38,6 @@ func TestLangEnv_node_relocatesAmbient(t *testing.T) {
 		"COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
 		"NPM_CONFIG_USERCONFIG":           "/z/toolchain/node-home/npmrc",
 		"NPM_CONFIG_CACHE":                "/z/toolchain/node-home/npm-cache",
-		"COREPACK_HOME":                   "/z/toolchain/node-home/corepack",
 		"YARN_CACHE_FOLDER":               "/z/toolchain/node-home/yarn-cache",
 		"npm_config_store_dir":            "/z/toolchain/node-home/pnpm-store",
 		"BUN_INSTALL_CACHE_DIR":           "/z/toolchain/node-home/bun-cache",
