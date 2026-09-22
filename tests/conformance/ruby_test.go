@@ -47,8 +47,10 @@ type rubyEcho struct {
 // to end and nothing under HOME was read or written.
 func TestRubyService_hermetic_hostRubyEnvIgnored(t *testing.T) {
 	home := poisonedHome(t,
-		homeFile{".bundle/config", "---\nBUNDLE_PATH: \"/poison/bundle\"\nBUNDLE_GEMFILE: \"/poison/Gemfile\"\n"},
-		homeFile{".gemrc", "gem: --user-install\n"},
+		homeFile{".bundle/config", "---\nBUNDLE_PATH: \"/poison/bundle\"\nBUNDLE_GEMFILE: \"/poison/Gemfile\"\nBUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/: \"http://127.0.0.1:1\"\nBUNDLE_GEMS__EXAMPLE__COM: \"poison:poison\"\n"},
+		homeFile{".gemrc", "gem: --user-install\n:sources:\n- http://127.0.0.1:1/\n"},
+		homeFile{".gem/credentials", "---\n:rubygems_api_key: poison\n"},
+		homeFile{".gem/ruby/3.3.0/gems/poison-0.0.1/lib/poison.rb", "raise 'a host user-install gem was activated'\n"},
 	)
 
 	p := zordontest.NewProject(t)
@@ -56,11 +58,24 @@ func TestRubyService_hermetic_hostRubyEnvIgnored(t *testing.T) {
 	p.WriteFile("Alphasfile", rubyAlphasfile("echo"))
 
 	startPoisoned(t, p, home, map[string]string{
-		"GEM_HOME":       poisonSentinel + "/gems",
-		"GEM_PATH":       poisonSentinel + "/gems",
-		"BUNDLE_PATH":    poisonSentinel + "/bundle",
-		"BUNDLE_GEMFILE": poisonSentinel + "/Gemfile",
-		"RUBYOPT":        "-r" + poisonSentinel + "/rc",
+		"GEM_HOME":          poisonSentinel + "/gems",
+		"GEM_PATH":          poisonSentinel + "/gems",
+		"GEMRC":             poisonSentinel + "/gemrc",
+		"RUBYLIB":           poisonSentinel + "/lib",
+		"RUBYOPT":           "-r" + poisonSentinel + "/rc",
+		"RUBYGEMS_GEMDEPS":  poisonSentinel + "/gem.deps.rb",
+		"BUNDLE_PATH":       poisonSentinel + "/bundle",
+		"BUNDLE_GEMFILE":    poisonSentinel + "/Gemfile",
+		"BUNDLE_APP_CONFIG": poisonSentinel + "/app-config",
+		"BUNDLE_USER_HOME":  poisonSentinel + "/bundle-home",
+		"BUNDLE_WITHOUT":    "default",
+		"BUNDLE_FROZEN":     "true",
+		"BUNDLE_DEPLOYMENT": "true",
+		"BUNDLER_VERSION":   "9.9.9",
+		"RBENV_VERSION":     "0.0.0",
+		"RBENV_ROOT":        poisonSentinel + "/rbenv",
+		"ASDF_RUBY_VERSION": "0.0.0",
+		"MISE_DATA_DIR":     poisonSentinel + "/mise",
 	})
 
 	port := p.Get(t, "service.ruby.echo.vars.port").Int()
@@ -79,7 +94,7 @@ func TestRubyService_hermetic_hostRubyEnvIgnored(t *testing.T) {
 			t.Errorf("gem_path reaches into HOME: %s", dir)
 		}
 	}
-	assertHomeUntouched(t, home, ".bundle/cache", ".gem", ".local/share/gem")
+	assertHomeUntouched(t, home, ".bundle/cache", ".gem/ruby/3.3.0/gems/bundler-"+bundlerVersion, ".gem/specs", ".local/share/gem")
 }
 
 // Canonical shape: default build + `bundle exec` runtime. The bundle lives
