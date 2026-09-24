@@ -107,20 +107,26 @@ type resolver struct {
 	// cfg::hash() returns and what the resolved Alphasfile carries.
 	cfgHash string
 
-	// Already-evaluated services, keyed by toolchain then name. Re-projected
-	// into the EvalContext under "service" before each new eval step. May be
-	// pre-seeded with parent services for federation (flat namespace).
-	serviceByTC map[string]map[string]cty.Value
+	// Already-evaluated services, keyed by module, then toolchain, then
+	// name. Re-projected into the EvalContext before each eval step: the
+	// current module's services under "service", every module under
+	// "module.<m>.service". May be pre-seeded with parent services for
+	// federation.
+	serviceByModule map[string]map[string]map[string]cty.Value
 
-	// toolchainCty is the projection of `toolchain { <lang> { ... } }`
-	// declarations into cty: `toolchain.<lang>.ready` etc. resolve to
-	// the canonical barrier-ref strings alpha then turns into real
-	// *barrier.Barrier handles. Populated before any service eval so
-	// service expressions can reference toolchain barriers.
-	toolchainCty map[string]cty.Value
+	// toolchainCty is the per-module projection of `toolchain { <lang> {
+	// ... } }` declarations into cty: `toolchain.<lang>.ready` etc. resolve
+	// to the canonical barrier-ref strings alpha then turns into real
+	// *barrier.Barrier handles. A module without its own pin sees the
+	// entrypoint's. Populated before any service eval.
+	toolchainCty map[string]map[string]cty.Value
 
-	// names already taken (parent or local); collision is an error.
-	taken map[string]string // "tc/name" → origin ("parent" | "local")
+	// toolchain is the merged pin map (parent + this level), keyed by
+	// ToolchainKey; finishService reads a service's key off it.
+	toolchain map[string]*ToolchainConfig
+
+	// service ids already taken (parent or local); collision is an error.
+	taken map[string]string // ServiceRef → origin ("parent" | "local")
 
 	// testCfg carries the conformance-harness gating + log path the
 	// test:: HCL functions need; zero value disables them.
@@ -148,12 +154,12 @@ type Plan struct {
 // src::hash) runs in Compute.
 func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg TestConfig) (*Plan, error) {
 	name, root := m.name, m.root
-	var seed map[string]map[string]cty.Value
+	var seed map[string]map[string]map[string]cty.Value
 	if parent != nil {
-		seed = parent.byTC
+		seed = parent.byModule
 	}
 	if seed == nil {
-		seed = map[string]map[string]cty.Value{}
+		seed = map[string]map[string]map[string]cty.Value{}
 	}
 	// Compute the Alphasfile's own dir for relative path resolution.
 	// Abs() is a no-op when the path is already absolute (the production
@@ -161,25 +167,28 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	// filename it makes paths predictable against the test's working dir.
 	absPath, _ := filepath.Abs(name)
 	r := &resolver{
-		path:        name,
-		afDir:       filepath.Dir(absPath),
-		root:        root,
-		inv:         m.inv,
-		cfgHash:     cfgHash,
-		serviceByTC: seed,
-		taken:       map[string]string{},
-		testCfg:     testCfg,
+		path:            name,
+		afDir:           filepath.Dir(absPath),
+		root:            root,
+		inv:             m.inv,
+		cfgHash:         cfgHash,
+		serviceByModule: seed,
+		taken:           map[string]string{},
+		testCfg:         testCfg,
 	}
 
 	parentKnown := map[string]struct{}{}
-	for tc, byName := range seed {
-		for name := range byName {
-			r.taken[tc+"/"+name] = "parent"
-			parentKnown[serviceID(tc, name)] = struct{}{}
+	for module, byTC := range seed {
+		for tc, byName := range byTC {
+			for name := range byName {
+				id := ServiceRef(module, tc, name)
+				r.taken[id] = "parent"
+				parentKnown[id] = struct{}{}
+			}
 		}
 	}
 
-	// Resolve toolchain block BEFORE services so each service's HCL can
+	// Resolve toolchain blocks BEFORE services so each service's HCL can
 	// reference `toolchain.<lang>.ready` etc. via the cty projection in
 	// r.toolchainCty. Toolchain values themselves don't depend on
 	// services, so ordering this first costs nothing.
@@ -187,60 +196,25 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	if parent != nil {
 		maps.Copy(toolchain, parent.toolchain)
 	}
-	if root.Toolchain != nil {
-		for lang, sub := range root.Toolchain.byLabel() {
-			envMap, err := r.evalMap(sub.Env, nil, "toolchain."+lang+".env", srcDirs{})
-			if err != nil {
-				return nil, err
-			}
-			toolsMap, err := r.evalMap(sub.Tools, nil, "toolchain."+lang+".tools", srcDirs{})
-			if err != nil {
-				return nil, err
-			}
-			toolchain[lang] = &ToolchainConfig{
-				Version: sub.Version,
-				Tools:   toStringMap(toolsMap),
-				Env:     toStringMap(envMap),
-			}
-		}
-		// pkg pseudo-toolchain: standalone mise-backend CLIs (e.g.
-		// aqua:ariga/atlas) that belong to no language. Stored under the
-		// ToolchainPkg key with an empty Version; alpha installs each via
-		// `mise install` and pools their bins behind
-		// fs::toolchain::bin(toolchain.pkg).
-		if root.Toolchain.Pkg != nil {
-			toolsMap, err := r.evalMap(root.Toolchain.Pkg.Tools, nil, "toolchain.pkg.tools", srcDirs{})
-			if err != nil {
-				return nil, err
-			}
-			tools := toStringMap(toolsMap)
-			if len(tools) == 0 {
-				return nil, fmt.Errorf("toolchain.pkg: tools is required and must be non-empty (e.g. tools = { \"aqua:ariga/atlas\" = \"0.29.0\" })")
-			}
-			for ref, version := range tools {
-				if strings.TrimSpace(version) == "" {
-					return nil, fmt.Errorf("toolchain.pkg.tools[%q]: a version is required (e.g. %q = \"0.29.0\")", ref, ref)
-				}
-			}
-			toolchain[ToolchainPkg] = &ToolchainConfig{Tools: tools}
+	if err := r.evalToolchainBlock(root.Toolchain, DefaultModule, toolchain); err != nil {
+		return nil, err
+	}
+	for _, mb := range root.Modules {
+		if err := r.evalToolchainBlock(mb.Toolchain, mb.Name, toolchain); err != nil {
+			return nil, err
 		}
 	}
-	// Project pinned toolchains into cty so HCL expressions like
-	// `toolchain.ruby.ready` resolve to the canonical barrier ref
-	// `toolchain.ruby@ready`. Same self-discoverability rule as
-	// service.runtime.* — the path mirrors the block nesting.
-	r.toolchainCty = map[string]cty.Value{}
-	for lang := range toolchain {
-		r.toolchainCty[lang] = cty.ObjectVal(buildBarrierAttrs("toolchain."+lang, ToolchainBarrierStates))
-	}
+	r.toolchain = toolchain
+	r.toolchainCty = projectToolchains(toolchain, root.Modules)
 
 	// Pre-pass: for each service, validate identity, compute dir, build
 	// the static slice of `self` (name/toolchain/dir + runtime/build
-	// barrier-attr objects), and publish it to r.serviceByTC. This makes
-	// barrier traversals like service.go.db.runtime.ready always
+	// barrier-attr objects), and publish it to r.serviceByModule. This
+	// makes barrier traversals like service.go.db.runtime.ready always
 	// resolvable, regardless of evaluation order — they're constants
 	// derived from labels, not expressions.
-	states, err := r.prepareServices(root.Services)
+	services := root.allServices()
+	states, err := r.prepareServices(services)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +225,7 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	// not a whole-service edge. A.env→B.vars and B.env→A.vars are
 	// independent and resolve cleanly; only a literal A.vars→B.vars
 	// while B.vars→A.vars is a cycle, and that's a real bug.
-	g, err := newGraph(root.Services, parentKnown)
+	g, err := newGraph(services, parentKnown)
 	if err != nil {
 		return nil, err
 	}
@@ -279,10 +253,10 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	}
 
 	// Sinks per service. Cross-service references in sinks reach into other
-	// services' fully-evaluated producers via r.serviceByTC; sink-to-sink
+	// services' fully-evaluated producers via r.serviceByModule; sink-to-sink
 	// references across services aren't supported, so sink order doesn't matter.
-	for _, sb := range root.Services {
-		sid := serviceID(sb.Toolchain, sb.Name)
+	for _, sb := range root.allServices() {
+		sid := ServiceRef(sb.module, sb.Toolchain, sb.Name)
 		if err := r.finishService(p.states[sid]); err != nil {
 			return nil, fmt.Errorf("%s: %w", sid, err)
 		}
@@ -352,9 +326,8 @@ func validateProvisionArgRefs(services []*Service) error {
 		if s == nil || s.Runtime == nil {
 			continue
 		}
-		sid := serviceID(s.Toolchain, s.Name())
 		for _, p := range s.Runtime.Provision {
-			byID[sid+".runtime.provision."+p.Name] = p
+			byID[ProvisionRef(s.Module, s.Toolchain, s.Runtime.Name, p.Name)] = p
 		}
 	}
 	for _, s := range services {
@@ -379,31 +352,118 @@ const (
 )
 
 func (r *resolver) injectDebuggerTools(toolchain map[string]*ToolchainConfig) error {
-	needs := false
 	for _, svc := range r.resolvedServices {
-		if svc.Debugger != nil && svc.Debugger.Enabled && svc.Toolchain == ToolchainGo {
-			needs = true
-			break
+		if svc.Debugger == nil || !svc.Debugger.Enabled || svc.Toolchain != ToolchainGo {
+			continue
+		}
+		tc, ok := toolchain[svc.ToolchainKey]
+		if svc.ToolchainKey == "" || !ok {
+			return fmt.Errorf("service %q: debugger { enabled = true } requires a `toolchain { go { version = … } }` block in scope (so dlv + mcp-dap-server can be installed into the pinned Go's tool world)", svc.Name())
+		}
+		if tc.Tools == nil {
+			tc.Tools = map[string]string{}
+		}
+		// Explicit user pins win.
+		if _, pinned := tc.Tools[debuggerToolDlv]; !pinned {
+			tc.Tools[debuggerToolDlv] = "latest"
+		}
+		if _, pinned := tc.Tools[debuggerToolMCP]; !pinned {
+			tc.Tools[debuggerToolMCP] = "latest"
 		}
 	}
-	if !needs {
+	return nil
+}
+
+// evalToolchainBlock evaluates one `toolchain {}` block (the entrypoint's
+// or a module's) into out, keyed by ToolchainKey(module, lang). A nil block
+// is a no-op.
+func (r *resolver) evalToolchainBlock(tb *toolchainBlock, module string, out map[string]*ToolchainConfig) error {
+	if tb == nil {
 		return nil
 	}
-	tc, ok := toolchain[ToolchainGo]
-	if !ok {
-		return fmt.Errorf("debugger { enabled = true } requires a `toolchain { go { version = … } }` block (so dlv + mcp-dap-server can be installed into the pinned Go's tool world)")
+	label := func(lang string) string {
+		if module == DefaultModule {
+			return "toolchain." + lang
+		}
+		return "module." + module + ".toolchain." + lang
 	}
-	if tc.Tools == nil {
-		tc.Tools = map[string]string{}
+	for lang, sub := range tb.byLabel() {
+		envMap, err := r.evalMap(sub.Env, nil, label(lang)+".env", srcDirs{})
+		if err != nil {
+			return err
+		}
+		toolsMap, err := r.evalMap(sub.Tools, nil, label(lang)+".tools", srcDirs{})
+		if err != nil {
+			return err
+		}
+		out[ToolchainKey(module, lang)] = &ToolchainConfig{
+			Version: sub.Version,
+			Tools:   toStringMap(toolsMap),
+			Env:     toStringMap(envMap),
+		}
 	}
-	// Explicit user pins win.
-	if _, pinned := tc.Tools[debuggerToolDlv]; !pinned {
-		tc.Tools[debuggerToolDlv] = "latest"
-	}
-	if _, pinned := tc.Tools[debuggerToolMCP]; !pinned {
-		tc.Tools[debuggerToolMCP] = "latest"
+	// pkg pseudo-toolchain: standalone mise-backend CLIs (e.g.
+	// aqua:ariga/atlas) that belong to no language. Stored under the
+	// ToolchainPkg key with an empty Version; alpha installs each via
+	// `mise install` and pools their bins behind
+	// fs::toolchain::bin(toolchain.pkg).
+	if tb.Pkg != nil {
+		toolsMap, err := r.evalMap(tb.Pkg.Tools, nil, label(ToolchainPkg)+".tools", srcDirs{})
+		if err != nil {
+			return err
+		}
+		tools := toStringMap(toolsMap)
+		if len(tools) == 0 {
+			return fmt.Errorf("%s: tools is required and must be non-empty (e.g. tools = { \"aqua:ariga/atlas\" = \"0.29.0\" })", label(ToolchainPkg))
+		}
+		for ref, version := range tools {
+			if strings.TrimSpace(version) == "" {
+				return fmt.Errorf("%s.tools[%q]: a version is required (e.g. %q = \"0.29.0\")", label(ToolchainPkg), ref, ref)
+			}
+		}
+		out[ToolchainKey(module, ToolchainPkg)] = &ToolchainConfig{Tools: tools}
 	}
 	return nil
+}
+
+// projectToolchains builds the per-module `toolchain.<lang>` cty view.
+// Every key resolves to the barrier entity `toolchain.<key>`, so
+// `toolchain.ruby.ready` is `toolchain.ruby@ready` at top level and
+// `toolchain.payments/ruby@ready` inside module payments. A module without
+// its own pin for a language inherits the entrypoint's entry.
+func projectToolchains(toolchain map[string]*ToolchainConfig, modules []*moduleBlock) map[string]map[string]cty.Value {
+	attrs := func(key string) cty.Value {
+		return cty.ObjectVal(buildBarrierAttrs("toolchain."+key, ToolchainBarrierStates))
+	}
+	base := map[string]cty.Value{}
+	for key := range toolchain {
+		if !strings.Contains(key, "/") {
+			base[key] = attrs(key)
+		}
+	}
+	out := map[string]map[string]cty.Value{DefaultModule: base}
+	for _, mb := range modules {
+		own := maps.Clone(base)
+		for key := range toolchain {
+			if m, lang, ok := strings.Cut(key, "/"); ok && m == mb.Name {
+				own[lang] = attrs(key)
+			}
+		}
+		out[mb.Name] = own
+	}
+	return out
+}
+
+// toolchainKeyFor picks the pin a service runs under: its module's own,
+// else the entrypoint's, else none.
+func (r *resolver) toolchainKeyFor(module, lang string) string {
+	if key := ToolchainKey(module, lang); r.toolchain[key] != nil {
+		return key
+	}
+	if r.toolchain[lang] != nil {
+		return lang
+	}
+	return ""
 }
 
 // svcState is the per-service evaluation scratch space. Built once
@@ -432,6 +492,7 @@ type srcDirs struct {
 	exe    string // <checkout>/<exe>      → fs::exe()
 	etc    string // <StateDir>/etc/<svc>  → fs::etc()
 	vardir string // <StateDir>/var/<svc>  → fs::var()
+	module string // scope of bare `service.*` / `toolchain.*` traversals
 }
 
 // prepareServices initializes one svcState per service: validates
@@ -449,10 +510,12 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 		// parent's in this level's namespace (and runs in this level's
 		// alpha). Two local blocks with the same name in one file is still
 		// a real mistake.
-		if origin := r.taken[sb.Toolchain+"/"+sb.Name]; origin == "local" {
-			return nil, fmt.Errorf("duplicate service %s.%s in this Alphasfile", sb.Toolchain, sb.Name)
+		sid := ServiceRef(sb.module, sb.Toolchain, sb.Name)
+		display := DisplayName(sb.module, sb.Name)
+		if origin := r.taken[sid]; origin == "local" {
+			return nil, fmt.Errorf("duplicate service %s.%s in this Alphasfile", sb.Toolchain, display)
 		}
-		r.taken[sb.Toolchain+"/"+sb.Name] = "local"
+		r.taken[sid] = "local"
 
 		// dir = where this service's code lives for this invocation.
 		//
@@ -489,10 +552,10 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 			srcExeFromSB = sb.Src.Exe
 		}
 		switch {
-		case srcPath != "" && gitURL == "" && !r.inv.OwnsService(sb.Name):
+		case srcPath != "" && gitURL == "" && !r.inv.OwnsService(display):
 			checkout = r.resolveDir(srcPath)
 		case gitURL != "" || srcPath != "":
-			checkout = r.inv.CheckoutPath(sb.Name)
+			checkout = r.inv.CheckoutPath(display)
 		}
 		// Exe-anchor: the canonical "service working directory" is
 		// `<checkout>/<exe>`, computed once via zfs.ServiceCwd and used
@@ -510,9 +573,9 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 		// Resolved scalars/maps that belong to the service entity
 		// itself (name, toolchain, dir, vars, arguments, file) stay at
 		// self.* because that's where they live in HCL too.
-		sid := serviceID(sb.Toolchain, sb.Name)
 		self := map[string]cty.Value{
 			"name":      cty.StringVal(sb.Name),
+			"module":    cty.StringVal(sb.module),
 			"toolchain": cty.StringVal(sb.Toolchain),
 			"dir":       cty.StringVal(dir),
 		}
@@ -541,8 +604,8 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 
 		var etcDir, varDir string
 		if r.inv != nil {
-			etcDir = filepath.Join(r.inv.StateDir, "etc", sb.Name)
-			varDir = filepath.Join(r.inv.StateDir, "var", sb.Name)
+			etcDir = filepath.Join(r.inv.StateDir, "etc", display)
+			varDir = filepath.Join(r.inv.StateDir, "var", display)
 		}
 		st := &svcState{
 			sb:       sb,
@@ -550,7 +613,7 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 			dir:      dir,
 			self:     self,
 			fileVals: map[string]cty.Value{},
-			dirs:     srcDirs{root: checkout, exe: dir, etc: etcDir, vardir: varDir},
+			dirs:     srcDirs{root: checkout, exe: dir, etc: etcDir, vardir: varDir, module: sb.module},
 			srcPath:  srcPath,
 		}
 		out[sid] = st
@@ -563,10 +626,15 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 // traversals see the latest partial. Called after each per-producer
 // eval (and once from prepareServices for the static slice).
 func (r *resolver) publishSelf(st *svcState) {
-	if r.serviceByTC[st.sb.Toolchain] == nil {
-		r.serviceByTC[st.sb.Toolchain] = map[string]cty.Value{}
+	byTC := r.serviceByModule[st.sb.module]
+	if byTC == nil {
+		byTC = map[string]map[string]cty.Value{}
+		r.serviceByModule[st.sb.module] = byTC
 	}
-	r.serviceByTC[st.sb.Toolchain][st.sb.Name] = cty.ObjectVal(st.self)
+	if byTC[st.sb.Toolchain] == nil {
+		byTC[st.sb.Toolchain] = map[string]cty.Value{}
+	}
+	byTC[st.sb.Toolchain][st.sb.Name] = cty.ObjectVal(st.self)
 }
 
 // evalProducerNode runs one node from the cross-service DAG: a single
@@ -1091,9 +1159,12 @@ func (r *resolver) finishService(st *svcState) error {
 	if install != "" && instGit != "" {
 		pkgGit, pkgBranch, pkgTag, pkgRev = instGit, instBranch, instTag, instRev
 	}
+	display := DisplayName(sb.module, sb.Name)
 	svc := &Service{
-		Toolchain: sb.Toolchain,
-		Runtime:   rt,
+		Toolchain:    sb.Toolchain,
+		Module:       sb.module,
+		ToolchainKey: r.toolchainKeyFor(sb.module, sb.Toolchain),
+		Runtime:      rt,
 		Package: &Package{
 			Toolchain: sb.Toolchain,
 			Git:       pkgGit,
@@ -1115,12 +1186,12 @@ func (r *resolver) finishService(st *svcState) error {
 			// workspace that did not pick this service (no per-workspace
 			// checkout under <wtdir>/src/<svc>). Alpha builds/runs from
 			// src as-is — no git worktree add, no HEAD reset.
-			InPlace: srcLocalPath != "" && !r.inv.OwnsService(sb.Name),
+			InPlace: srcLocalPath != "" && !r.inv.OwnsService(display),
 			// Editable: this (workspace, service) was picked, so it earns an
 			// editable git worktree on branch zordon/<ws>/<svc>. Unpicked
 			// git-source services are third-party — alpha clones them at their
 			// ref with no branch (see Package.Editable).
-			Editable: r.inv.OwnsService(sb.Name),
+			Editable: r.inv.OwnsService(display),
 		},
 		Debugger: dbg,
 		Agent:    agent,
@@ -1553,15 +1624,33 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 	// (`after = never`). Defined as a plain string so the bare
 	// identifier resolves; it never matches a real barrier ref ('@').
 	vars := map[string]cty.Value{"never": cty.StringVal(neverSentinel)}
-	if len(r.serviceByTC) > 0 {
-		toolchains := map[string]cty.Value{}
-		for tc, services := range r.serviceByTC {
-			toolchains[tc] = cty.ObjectVal(copyCtyMap(services))
-		}
-		vars["service"] = cty.ObjectVal(toolchains)
+	if own := r.serviceByModule[dirs.module]; len(own) > 0 {
+		vars["service"] = servicesCty(own)
 	}
-	if len(r.toolchainCty) > 0 {
-		vars["toolchain"] = cty.ObjectVal(copyCtyMap(r.toolchainCty))
+	tcs, ok := r.toolchainCty[dirs.module]
+	if !ok {
+		tcs = r.toolchainCty[DefaultModule]
+	}
+	if len(tcs) > 0 {
+		vars["toolchain"] = cty.ObjectVal(copyCtyMap(tcs))
+	}
+	// Every module is addressable as module.<m>.{service,toolchain} from
+	// anywhere; the default module has no such handle (it composes, it is
+	// not composed).
+	modules := map[string]cty.Value{}
+	for name := range r.serviceByModule {
+		if name == DefaultModule {
+			continue
+		}
+		modules[name] = r.moduleCty(name)
+	}
+	for name := range r.toolchainCty {
+		if _, done := modules[name]; !done && name != DefaultModule {
+			modules[name] = r.moduleCty(name)
+		}
+	}
+	if len(modules) > 0 {
+		vars["module"] = cty.ObjectVal(modules)
 	}
 	// fs::src / src::hash exist only in a SERVICE scope — they read `checkout`,
 	// which the caller passes as the current service's checkout, or "" at file
@@ -1574,6 +1663,27 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 		Variables: vars,
 		Functions: r.functions(dirs),
 	}
+}
+
+// moduleCty projects one module as `{ service = {tc = {name = …}},
+// toolchain = {lang = barrier attrs} }`.
+func (r *resolver) moduleCty(name string) cty.Value {
+	obj := map[string]cty.Value{}
+	if own := r.serviceByModule[name]; len(own) > 0 {
+		obj["service"] = servicesCty(own)
+	}
+	if tcs := r.toolchainCty[name]; len(tcs) > 0 {
+		obj["toolchain"] = cty.ObjectVal(copyCtyMap(tcs))
+	}
+	return cty.ObjectVal(obj)
+}
+
+func servicesCty(byTC map[string]map[string]cty.Value) cty.Value {
+	toolchains := make(map[string]cty.Value, len(byTC))
+	for tc, services := range byTC {
+		toolchains[tc] = cty.ObjectVal(copyCtyMap(services))
+	}
+	return cty.ObjectVal(toolchains)
 }
 
 func copyCtyMap(in map[string]cty.Value) map[string]cty.Value {
@@ -1874,16 +1984,11 @@ func svcBinFunc() function.Function {
 		Params: []function.Parameter{{Name: "service", Type: cty.DynamicPseudoType}},
 		Type:   function.StaticReturnType(cty.String),
 		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
-			v := args[0]
-			t := v.Type()
-			if v.IsNull() || !t.IsObjectType() || !t.HasAttribute("name") || !t.HasAttribute("toolchain") {
-				return cty.NilVal, fmt.Errorf("fs::service::bin: expected a service reference (self or service.<tc>.<name>), got %s", t.FriendlyName())
+			module, tc, name, err := serviceRefAttrs(args[0], "fs::service::bin")
+			if err != nil {
+				return cty.NilVal, err
 			}
-			tc, name := v.GetAttr("toolchain"), v.GetAttr("name")
-			if tc.Type() != cty.String || name.Type() != cty.String {
-				return cty.NilVal, errors.New("fs::service::bin: service reference has a non-string name/toolchain")
-			}
-			return cty.StringVal(BinSentinel("svc", serviceID(tc.AsString(), name.AsString()))), nil
+			return cty.StringVal(BinSentinel("svc", ServiceRef(module, tc, name))), nil
 		},
 	})
 }
@@ -1903,18 +2008,27 @@ func (r *resolver) svcPathFunc(sub string) function.Function {
 			if r.inv == nil || r.inv.StateDir == "" {
 				return cty.NilVal, fmt.Errorf("fs::service::%s() called but no invocation configured", sub)
 			}
-			v := args[0]
-			t := v.Type()
-			if v.IsNull() || !t.IsObjectType() || !t.HasAttribute("name") || !t.HasAttribute("toolchain") {
-				return cty.NilVal, fmt.Errorf("fs::service::%s: expected a service reference (self or service.<tc>.<name>), got %s", sub, t.FriendlyName())
+			module, _, name, err := serviceRefAttrs(args[0], "fs::service::"+sub)
+			if err != nil {
+				return cty.NilVal, err
 			}
-			name := v.GetAttr("name")
-			if name.Type() != cty.String {
-				return cty.NilVal, fmt.Errorf("fs::service::%s: service reference has a non-string name", sub)
-			}
-			return cty.StringVal(filepath.Join(r.inv.StateDir, sub, name.AsString())), nil
+			return cty.StringVal(filepath.Join(r.inv.StateDir, sub, DisplayName(module, name))), nil
 		},
 	})
+}
+
+// serviceRefAttrs reads the identity attributes off a service reference
+// object (`self`, `service.<tc>.<name>` or `module.<m>.service.<tc>.<name>`).
+func serviceRefAttrs(v cty.Value, fn string) (module, toolchain, name string, err error) {
+	t := v.Type()
+	if v.IsNull() || !t.IsObjectType() || !t.HasAttribute("name") || !t.HasAttribute("toolchain") || !t.HasAttribute("module") {
+		return "", "", "", fmt.Errorf("%s: expected a service reference (self, service.<tc>.<name> or module.<m>.service.<tc>.<name>), got %s", fn, t.FriendlyName())
+	}
+	m, tc, n := v.GetAttr("module"), v.GetAttr("toolchain"), v.GetAttr("name")
+	if m.Type() != cty.String || tc.Type() != cty.String || n.Type() != cty.String {
+		return "", "", "", fmt.Errorf("%s: service reference has a non-string module/toolchain/name", fn)
+	}
+	return m.AsString(), tc.AsString(), n.AsString(), nil
 }
 
 // tcBinFunc implements fs::toolchain::bin(toolchain.<lang>). The arg is a

@@ -81,7 +81,7 @@ func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph
 		if s.Toolchain == "" || s.Name == "" {
 			return nil, fmt.Errorf("service block missing toolchain or name label")
 		}
-		sid := serviceID(s.Toolchain, s.Name)
+		sid := ServiceRef(s.module, s.Toolchain, s.Name)
 		if _, dup := seen[sid]; dup {
 			return nil, fmt.Errorf("duplicate service %s", sid)
 		}
@@ -124,7 +124,7 @@ func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph
 				continue
 			}
 			for _, trav := range expr.Variables() {
-				_, depID, ok := producerNodeFromTrav(trav, n.svcID)
+				_, depID, ok := producerNodeFromTrav(trav, n.svcID, n.svc.module)
 				if !ok {
 					continue
 				}
@@ -144,13 +144,14 @@ func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph
 	return g, nil
 }
 
-// producerNodeFromTrav maps a `self.<f>...` or `service.<tc>.<svc>.<f>...`
-// traversal to the producer node id it depends on. Returns the target
-// service id and node id. Static traversals (barrier states under
-// runtime/build, scalar self.{name,toolchain,dir}, parent toolchain
-// refs) and non-service roots (fs::, cfg::, the `never` keyword, …)
-// produce no edge.
-func producerNodeFromTrav(t hcl.Traversal, selfSvcID string) (svc, id string, ok bool) {
+// producerNodeFromTrav maps a `self.<f>...`, `service.<tc>.<svc>.<f>...` or
+// `module.<m>.service.<tc>.<svc>.<f>...` traversal to the producer node id
+// it depends on. A bare `service.` traversal is scoped to selfModule, the
+// module the referencing block lives in. Returns the target service id and
+// node id. Static traversals (barrier states under runtime/build, scalar
+// self.{name,toolchain,dir}, parent toolchain refs) and non-service roots
+// (fs::, cfg::, the `never` keyword, …) produce no edge.
+func producerNodeFromTrav(t hcl.Traversal, selfSvcID, selfModule string) (svc, id string, ok bool) {
 	if len(t) < 2 {
 		return "", "", false
 	}
@@ -172,8 +173,21 @@ func producerNodeFromTrav(t hcl.Traversal, selfSvcID string) (svc, id string, ok
 		if !ok1 || !ok2 {
 			return "", "", false
 		}
-		svc = serviceID(tc, nm)
+		svc = ServiceRef(selfModule, tc, nm)
 		rest = t[3:]
+	case "module":
+		if len(t) < 6 {
+			return "", "", false
+		}
+		mod, ok0 := traverseAttrName(t[1])
+		kw, ok1 := traverseAttrName(t[2])
+		tc, ok2 := traverseAttrName(t[3])
+		nm, ok3 := traverseAttrName(t[4])
+		if !ok0 || !ok1 || !ok2 || !ok3 || kw != "service" {
+			return "", "", false
+		}
+		svc = ServiceRef(mod, tc, nm)
+		rest = t[5:]
 	default:
 		return "", "", false
 	}
@@ -270,4 +284,4 @@ func traverseAttrName(s hcl.Traverser) (string, bool) {
 	return a.Name, true
 }
 
-func serviceID(toolchain, name string) string { return "service." + toolchain + "." + name }
+func serviceID(toolchain, name string) string { return ServiceRef(DefaultModule, toolchain, name) }

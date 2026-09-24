@@ -116,7 +116,7 @@ func resolveSvcBin(serviceID string, state *alphaState, log *zlog.Logger) []stri
 	var svc *alphasfile.Service
 	if state.config != nil {
 		for _, s := range state.config.All() {
-			if "service."+s.Toolchain+"."+s.Name() == serviceID {
+			if s.ID() == serviceID {
 				svc = s
 				break
 			}
@@ -500,12 +500,10 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 	// Check before `.runtime` so a future `service.X.build.subblock`
 	// doesn't get misdispatched.
 	if before, ok := strings.CutSuffix(entityID, ".build"); ok {
-		svcID := before
-		parts := strings.SplitN(svcID, ".", 3)
-		if len(parts) != 3 || parts[0] != "service" {
+		svcName, ok := serviceNameOfRef(before)
+		if !ok {
 			return nil, fmt.Errorf("bad barrier entity ID %q", entityID)
 		}
-		svcName := parts[2]
 		s.mu.RLock()
 		sc := s.services[svcName]
 		s.mu.RUnlock()
@@ -520,12 +518,10 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 	}
 	// Service runtime ref: ends with `.runtime` (and isn't a provision).
 	if before, ok := strings.CutSuffix(entityID, ".runtime"); ok {
-		svcID := before
-		parts := strings.SplitN(svcID, ".", 3)
-		if len(parts) != 3 || parts[0] != "service" {
+		svcName, ok := serviceNameOfRef(before)
+		if !ok {
 			return nil, fmt.Errorf("bad barrier entity ID %q", entityID)
 		}
-		svcName := parts[2]
 		s.mu.RLock()
 		sc := s.services[svcName]
 		s.mu.RUnlock()
@@ -538,7 +534,7 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 		}
 		return &barrierTarget{target: t, fail: sc.TerminalFailure()}, nil
 	}
-	return nil, fmt.Errorf("bad barrier entity ID %q (expected toolchain.<lang> | service.<tc>.<n>.{build,runtime[.provision.<p>]})", entityID)
+	return nil, fmt.Errorf("bad barrier entity ID %q (expected toolchain.<key> | [module.<m>.]service.<tc>.<n>.{build,runtime[.provision.<p>]})", entityID)
 }
 
 // requestShutdown closes shutdownCh once and records why. The reason is
@@ -594,6 +590,11 @@ func (s *alphaState) drainedCh() <-chan struct{} {
 // — same lock that prevented the gem-install race when applyToolchain-
 // Env did this work inline.
 type toolchainCtx struct {
+	// key is the state.toolchains map key and barrier-ref segment
+	// (`toolchain.<key>@ready`): the language label for the entrypoint's
+	// pin, `<module>/<lang>` for a module's own pin. Empty means "same as
+	// lang" (pkg entities and pre-module callers).
+	key     string
 	lang    string
 	version string
 	// env is the result of `mise env --json <lang>@<version>`, set
@@ -828,8 +829,9 @@ func bringupPkgTools(tc *toolchainCtx, bin, zordonHome string, log *zlog.Logger)
 // at the natural transition points; status barriers are exposed to other
 // entities (provisions, cross-service waiters) via the barrierLookup.
 type serviceCtx struct {
-	name      string
+	name      string // display name (state.services key)
 	toolchain string
+	id        string // canonical id, the barrier entity prefix
 	// cmd belongs to the bringup goroutine alone — it is assigned only
 	// after cmd.Start() and read only by that same goroutine. Anything
 	// cross-goroutine (the OpState snapshot) reads pid instead, which is
@@ -894,10 +896,14 @@ type depSat struct {
 	at  time.Time
 }
 
+// newServiceCtx derives the canonical id from the display name; production
+// callers overwrite id with Service.ID(), the resolver's own answer.
 func newServiceCtx(name, toolchain string) *serviceCtx {
+	module, bare := alphasfile.SplitDisplayName(name)
 	sc := &serviceCtx{
 		name:         name,
 		toolchain:    toolchain,
+		id:           alphasfile.ServiceRef(module, toolchain, bare),
 		stopCh:       make(chan struct{}),
 		done:         make(chan struct{}),
 		lifecycle:    lifecycle.NewInstance(alphasfile.ServiceLifecycle),
@@ -1355,7 +1361,37 @@ func (s *alphaState) addToolchain(tc *toolchainCtx) {
 	if s.toolchains == nil {
 		s.toolchains = make(map[string]*toolchainCtx)
 	}
-	s.toolchains[tc.lang] = tc
+	key := tc.key
+	if key == "" {
+		key = tc.lang
+	}
+	s.toolchains[key] = tc
+}
+
+// pinnedToolchains allocates one toolchainCtx per pin in the resolved
+// Toolchain map: language pins (versioned) and the version-less `pkg`
+// pseudo-toolchains that carry standalone CLIs. Keys may be module-scoped
+// (`<module>/<lang>`); the language label is recovered for mise.
+func pinnedToolchains(toolchain map[string]*alphasfile.ToolchainConfig) []*toolchainCtx {
+	var out []*toolchainCtx
+	for key, tcCfg := range toolchain {
+		if tcCfg == nil {
+			continue
+		}
+		lang := alphasfile.ToolchainLang(key)
+		switch {
+		case tcCfg.Version != "":
+			tc := newToolchainCtx(lang, tcCfg.Version, tcCfg.Tools, tcCfg.Env)
+			tc.key = key
+			out = append(out, tc)
+		case lang == alphasfile.ToolchainPkg && len(tcCfg.Tools) > 0:
+			tc := newToolchainCtx(alphasfile.ToolchainPkg, "", nil, nil)
+			tc.key = key
+			tc.pkgTools = tcCfg.Tools
+			out = append(out, tc)
+		}
+	}
+	return out
 }
 
 func (s *alphaState) setReadiness(name, state string) {
@@ -1474,7 +1510,7 @@ func (s *alphaState) stopServices(names map[string]bool) {
 	var pickedProvs []*provisionCtx
 	for id, pc := range s.provisions {
 		for _, sc := range pickedSvcs {
-			prefix := "service." + sc.toolchain + "." + sc.name + ".runtime.provision."
+			prefix := sc.id + ".runtime.provision."
 			if strings.HasPrefix(id, prefix) {
 				pickedProvs = append(pickedProvs, pc)
 				delete(s.provisions, id)
@@ -1842,7 +1878,7 @@ func handleInvoke(req *protocol.Request, state *alphaState, cfg bringupConfig, e
 	var parent *serviceCtx
 	if target != nil {
 		for _, sc := range state.services {
-			if "service."+sc.toolchain+"."+sc.name == target.serviceID {
+			if sc.id == target.serviceID {
 				parent = sc
 				break
 			}
@@ -1956,17 +1992,7 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 	// runProvision's toolchainEnv blocks on the `ready` barrier, so spawning
 	// the goroutines here is enough — they short-circuit when the install is
 	// already cached in ZORDON_HOME.
-	for lang, tcCfg := range newConfig.Toolchain {
-		if tcCfg == nil || tcCfg.Version == "" {
-			continue
-		}
-		tc := newToolchainCtx(lang, tcCfg.Version, tcCfg.Tools, tcCfg.Env)
-		state.addToolchain(tc)
-		go bringupToolchain(tc, state.zordonHome, log)
-	}
-	if pkgTC := newConfig.Toolchain[alphasfile.ToolchainPkg]; pkgTC != nil && len(pkgTC.Tools) > 0 {
-		tc := newToolchainCtx(alphasfile.ToolchainPkg, "", nil, nil)
-		tc.pkgTools = pkgTC.Tools
+	for _, tc := range pinnedToolchains(newConfig.Toolchain) {
 		state.addToolchain(tc)
 		go bringupToolchain(tc, state.zordonHome, log)
 	}
@@ -1996,7 +2022,8 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 			continue
 		}
 		parent := newServiceCtx(svc.Name(), svc.Toolchain)
-		serviceID := "service." + svc.Toolchain + "." + svc.Name()
+		parent.id = svc.ID()
+		serviceID := svc.ID()
 		steps := svc.Runtime.Provision
 		for _, orig := range slices.Backward(steps) {
 			if strings.TrimSpace(orig.Clean) == "" {
@@ -2178,22 +2205,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	// bringupToolchain goroutine short-circuits to Reach("ready") in
 	// microseconds when the install is a no-op, and other entities can
 	// always resolve `toolchain.X@ready` as a barrier.
-	for lang, tcCfg := range newConfig.Toolchain {
-		if tcCfg == nil || tcCfg.Version == "" {
-			continue
-		}
-		tc := newToolchainCtx(lang, tcCfg.Version, tcCfg.Tools, tcCfg.Env)
-		state.addToolchain(tc)
-		go bringupToolchain(tc, state.zordonHome, log)
-	}
-
-	// pkg pseudo-toolchain: `toolchain { pkg { tools } }` carries no
-	// version (the loop above skips it), so materialize it here — one
-	// entity keyed "pkg" that installs every declared standalone CLI and
-	// pools their bins behind toolchain.pkg@ready / fs::toolchain::bin.
-	if pkgTC := newConfig.Toolchain[alphasfile.ToolchainPkg]; pkgTC != nil && len(pkgTC.Tools) > 0 {
-		tc := newToolchainCtx(alphasfile.ToolchainPkg, "", nil, nil)
-		tc.pkgTools = pkgTC.Tools
+	for _, tc := range pinnedToolchains(newConfig.Toolchain) {
 		state.addToolchain(tc)
 		go bringupToolchain(tc, state.zordonHome, log)
 	}
@@ -2237,6 +2249,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	serviceCtxs := map[string]*serviceCtx{}
 	for _, svc := range toBringup {
 		sc := newServiceCtx(svc.Name(), svc.Toolchain)
+		sc.id = svc.ID()
 		state.addService(sc)
 		serviceCtxs[svc.Name()] = sc
 	}
@@ -2247,7 +2260,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		}
 		parent := serviceCtxs[svc.Name()]
 		for _, step := range svc.Runtime.Provision {
-			pc := newProvisionCtx("service."+svc.Toolchain+"."+svc.Name(), step)
+			pc := newProvisionCtx(svc.ID(), step)
 			// Latent provisions (`after = never`) are registered so they
 			// resolve as barriers and can be used as CmdRef templates by
 			// other services, but no goroutine runs them at bringup —
@@ -2434,7 +2447,20 @@ func toolchainKey(svc *alphasfile.Service) string {
 	if svc.Toolchain == alphasfile.ToolchainPkg && svc.Pkg != nil {
 		return svc.Pkg.Name
 	}
+	if svc.ToolchainKey != "" {
+		return svc.ToolchainKey
+	}
 	return svc.Toolchain
+}
+
+// serviceNameOfRef maps a canonical service id (service.<tc>.<n> or
+// module.<m>.service.<tc>.<n>) to the state.services key, the display name.
+func serviceNameOfRef(id string) (string, bool) {
+	module, _, name, _, ok := alphasfile.ParseServiceRef(id)
+	if !ok {
+		return "", false
+	}
+	return alphasfile.DisplayName(module, name), true
 }
 
 func implicitRuntimeAfter(svc *alphasfile.Service, state *alphaState) []string {
@@ -3609,7 +3635,9 @@ func prepareBuild(ctx context.Context, svc *alphasfile.Service, name, dest strin
 		binDir = svc.Runtime.BinDir
 	}
 	if binDir != "" {
-		if err := zfs.EnsureDir(binDir); err != nil {
+		// A module service's binary lands at <bin>/<module>/<name>, so the
+		// module subdir must exist before the toolchain default writes there.
+		if err := zfs.EnsureDir(filepath.Dir(filepath.Join(binDir, name))); err != nil {
 			return fmt.Errorf("mkdir bin dir: %w", err)
 		}
 	}

@@ -62,9 +62,10 @@ Lowest to highest, last wins:
 
 1. `alpha`'s process environment, **filtered by `sysenv`** (closed-world
    whitelist — anything not listed is stripped; defaults to empty)
-2. **toolchain env** — `mise env --json` output for the pinned
-   `toolchain.<lang>.version`, with per-language pin reinforcement
-   (e.g. `GOTOOLCHAIN=local` for Go), then the user's
+2. **toolchain env** — `mise env --json` output for the pin the service
+   runs under (its module's own `toolchain { }` when declared, else the
+   top-level `toolchain.<lang>.version`), with per-language pin
+   reinforcement (e.g. `GOTOOLCHAIN=local` for Go), then the user's
    `toolchain.<lang>.env` overlay
 3. federation-parent **file-level** `dotenv` (root-first)
 4. this Alphasfile's file-level `dotenv`

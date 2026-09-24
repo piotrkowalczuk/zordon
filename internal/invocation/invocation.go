@@ -305,7 +305,8 @@ func scanOwnedServices(stateDir, ws string) map[string]bool {
 	if ws == "" || ws == MainWorkspace {
 		return nil
 	}
-	entries, err := zfs.ReadDir(filepath.Join(stateDir, "src"))
+	srcDir := filepath.Join(stateDir, "src")
+	entries, err := zfs.ReadDir(srcDir)
 	if err != nil {
 		return nil
 	}
@@ -314,8 +315,22 @@ func scanOwnedServices(stateDir, ws string) map[string]bool {
 		if !e.IsDir() {
 			continue
 		}
-		if _, err := zfs.Stat(filepath.Join(stateDir, "src", e.Name(), ".git")); err == nil {
+		if _, err := zfs.Stat(filepath.Join(srcDir, e.Name(), ".git")); err == nil {
 			owned[e.Name()] = true
+			continue
+		}
+		// A module's services check out one level deeper: src/<module>/<svc>.
+		nested, err := zfs.ReadDir(filepath.Join(srcDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		for _, n := range nested {
+			if !n.IsDir() {
+				continue
+			}
+			if _, err := zfs.Stat(filepath.Join(srcDir, e.Name(), n.Name(), ".git")); err == nil {
+				owned[e.Name()+"/"+n.Name()] = true
+			}
 		}
 	}
 	if len(owned) == 0 {

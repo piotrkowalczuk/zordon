@@ -77,6 +77,7 @@ nav:
       - Install the Claude Code plugin: how-to/install-the-claude-code-plugin.md
       - Install the MCP bundle: how-to/install-the-mcp-bundle.md
       - Run parallel agents with workspaces: how-to/run-parallel-agents-with-workspaces.md
+      - Pin different toolchain versions per module: how-to/pin-different-toolchain-versions.md
   - Reference:
       - Binaries and layout: reference/binaries.md
       - zordon mcp: reference/mcp.md

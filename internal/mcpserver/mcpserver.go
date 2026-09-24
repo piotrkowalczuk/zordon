@@ -22,9 +22,10 @@ const maxCmdPreview = 200
 // canonical identity alpha keys provisions by and the value zordon sends in an
 // OpInvoke request.
 type Provision struct {
-	ID        string // service.<tc>.<svc>.runtime.provision.<name>
+	ID        string // [module.<m>.]service.<tc>.<svc>.runtime.provision.<name>
 	Toolchain string
-	Service   string
+	Module    string // declaring module, "" for a top-level service
+	Service   string // display name (`<module>/<svc>` inside a module)
 	Step      string
 	Latent    bool
 	Detached  bool
@@ -47,8 +48,9 @@ func Provisions(services []*alphasfile.Service) []Provision {
 				continue
 			}
 			out = append(out, Provision{
-				ID:        ProvisionID(s.Toolchain, s.Name(), p.Name),
+				ID:        alphasfile.ProvisionRef(s.Module, s.Toolchain, s.Runtime.Name, p.Name),
 				Toolchain: s.Toolchain,
+				Module:    s.Module,
 				Service:   s.Name(),
 				Step:      p.Name,
 				Latent:    p.Latent,
@@ -63,11 +65,11 @@ func Provisions(services []*alphasfile.Service) []Provision {
 	return out
 }
 
-// ProvisionID builds the canonical provision identity. It MUST match alpha's
-// newProvisionCtx id ("service."+toolchain+"."+name + ".runtime.provision."+
-// step) or OpInvoke will not resolve the target.
+// ProvisionID builds the canonical provision identity of a top-level
+// service. It MUST match alpha's newProvisionCtx id or OpInvoke will not
+// resolve the target; module services go through alphasfile.ProvisionRef.
 func ProvisionID(toolchain, service, step string) string {
-	return "service." + toolchain + "." + service + ".runtime.provision." + step
+	return alphasfile.ProvisionRef(alphasfile.DefaultModule, toolchain, service, step)
 }
 
 // ToolName is the (unsanitized) base MCP tool name for this provision. Pass it

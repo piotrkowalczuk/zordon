@@ -97,26 +97,20 @@ func pickServices(all []*alphasfile.Service, picks []string) ([]*alphasfile.Serv
 	return out, nil
 }
 
-// serviceNameFromBarrierRef pulls the service name out of a canonical
-// barrier ref. Grammar (see alpha resolveBarrier):
+// serviceNameFromBarrierRef pulls the display name of the service out of a
+// canonical barrier ref. Grammar (see alpha resolveBarrier):
 //
-//	service.<tc>.<name>.build@<state>
-//	service.<tc>.<name>.runtime@<state>
-//	service.<tc>.<name>.runtime.provision.<p>@<state>
+//	[module.<m>.]service.<tc>.<name>.build@<state>
+//	[module.<m>.]service.<tc>.<name>.runtime@<state>
+//	[module.<m>.]service.<tc>.<name>.runtime.provision.<p>@<state>
 //
 // Toolchain / non-service refs return ("", false).
 func serviceNameFromBarrierRef(ref string) (string, bool) {
-	if !strings.HasPrefix(ref, "service.") {
+	module, _, name, _, ok := alphasfile.ParseServiceRef(ref)
+	if !ok {
 		return "", false
 	}
-	if at := strings.LastIndexByte(ref, '@'); at >= 0 {
-		ref = ref[:at]
-	}
-	parts := strings.SplitN(strings.TrimPrefix(ref, "service."), ".", 3)
-	if len(parts) < 2 || parts[1] == "" {
-		return "", false
-	}
-	return parts[1], true
+	return alphasfile.DisplayName(module, name), true
 }
 
 func sortedNames(all []*alphasfile.Service) []string {
