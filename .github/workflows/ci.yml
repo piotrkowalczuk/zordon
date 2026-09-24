@@ -111,6 +111,22 @@ jobs:
           # file, then extract — a retried stream pipe could corrupt tar).
           retry() { for i in 1 2 3 4 5; do "$@" && return 0; s=$((i * 5)); echo "  retry $i/5 in ${s}s: $*" >&2; sleep "$s"; done; return 1; }
           if [ -x "$(command -v apt-get)" ]; then
+            # bullseye (debian:11) left the live mirrors in 2026-08: main and
+            # updates moved to archive.debian.org, and deb.debian.org's
+            # bullseye-security index still lists packages whose pool files
+            # are gone (404 on every fetch). The image ships packages from
+            # that security suite (perl-base +deb11u5), so the archive alone
+            # leaves apt with unmet dependencies — snapshot.debian.org still
+            # serves the security pool at a fixed date. Release files there
+            # are past their Valid-Until, hence the apt.conf knob.
+            if grep -q '^VERSION_ID="11"' /etc/os-release; then
+              printf '%s\n' \
+                'deb http://archive.debian.org/debian bullseye main' \
+                'deb http://archive.debian.org/debian bullseye-updates main' \
+                'deb http://snapshot.debian.org/archive/debian-security/20260824T000000Z bullseye-security main' \
+                > /etc/apt/sources.list
+              echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99archive
+            fi
             retry apt-get update
             retry apt-get install -y git gcc sudo make curl ca-certificates procps
           fi
@@ -203,6 +219,22 @@ jobs:
           # file, then extract — a retried stream pipe could corrupt tar).
           retry() { for i in 1 2 3 4 5; do "$@" && return 0; s=$((i * 5)); echo "  retry $i/5 in ${s}s: $*" >&2; sleep "$s"; done; return 1; }
           if [ -x "$(command -v apt-get)" ]; then
+            # bullseye (debian:11) left the live mirrors in 2026-08: main and
+            # updates moved to archive.debian.org, and deb.debian.org's
+            # bullseye-security index still lists packages whose pool files
+            # are gone (404 on every fetch). The image ships packages from
+            # that security suite (perl-base +deb11u5), so the archive alone
+            # leaves apt with unmet dependencies — snapshot.debian.org still
+            # serves the security pool at a fixed date. Release files there
+            # are past their Valid-Until, hence the apt.conf knob.
+            if grep -q '^VERSION_ID="11"' /etc/os-release; then
+              printf '%s\n' \
+                'deb http://archive.debian.org/debian bullseye main' \
+                'deb http://archive.debian.org/debian bullseye-updates main' \
+                'deb http://snapshot.debian.org/archive/debian-security/20260824T000000Z bullseye-security main' \
+                > /etc/apt/sources.list
+              echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99archive
+            fi
             retry apt-get update
             retry apt-get install -y git gcc sudo make curl ca-certificates procps
           fi
