@@ -77,7 +77,7 @@ The header lists every imported file with the modules taken from it, plus module
 ```
 
 !!! note "Running one service on its own"
-    Put a small entrypoint next to the fragment that imports it, for example `services/kafka/dev/Alphasfile`.
-    Keep it outside the directories the main entrypoint walks up from, or it becomes a [federation](../federation.md) level and kafka runs twice.
+    Pick it from the main entrypoint: `zordon start kafka/kafka` starts kafka and the services it waits on, from any directory under the entrypoint.
+    Do not add a second `Alphasfile` under the main entrypoint's directory to run kafka alone: walk-up turns it into a [federation](../federation.md) level, and kafka runs in both levels.
 
 See [Imports](../alphasfile.md#imports) for every rule.
