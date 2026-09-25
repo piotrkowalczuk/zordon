@@ -58,7 +58,7 @@ test.race: build.race
 
 test.coverage: build
 	$(ZORDON_TEST_ENV) \
-	go test -timeout $(GOTEST_TIMEOUT) -cover -coverpkg=./... -coverprofile=cover.out -tags '$(CONFORMANCE_TAGS)' ./...
+	go test -timeout $(GOTEST_TIMEOUT) -count=1 -cover -coverpkg=./... -coverprofile=cover.out -tags '$(CONFORMANCE_TAGS)' ./...
 
 # test.unit / test.coverage.unit run the whole module WITHOUT the conformance
 # build tags, so the tagged conformance bringups are skipped — they run in the
@@ -71,30 +71,30 @@ test.unit: build.race
 
 test.coverage.unit: build
 	$(ZORDON_TEST_ENV) \
-	go test -timeout $(GOTEST_TIMEOUT) -cover -coverpkg=./... -coverprofile=cover.out ./...
+	go test -timeout $(GOTEST_TIMEOUT) -count=1 -cover -coverpkg=./... -coverprofile=cover.out ./...
 
 # Per-toolchain conformance legs — CI runs one per matrix cell so each installs
 # only its own toolchain. Race-instrumented binaries are built first so the
 # supervisor's goroutines are checked when a test spawns them.
 test.conformance.go: build.race
 	$(ZORDON_TEST_ENV) \
-	go test -timeout $(GOTEST_TIMEOUT) -race -tags conformance_go ./tests/conformance/
+	go test -timeout $(GOTEST_TIMEOUT) -count=1 -race -tags conformance_go ./tests/conformance/
 
 test.conformance.rust: build.race
 	$(ZORDON_TEST_ENV) \
-	go test -timeout $(GOTEST_TIMEOUT) -race -tags conformance_rust ./tests/conformance/
+	go test -timeout $(GOTEST_TIMEOUT) -count=1 -race -tags conformance_rust ./tests/conformance/
 
 test.conformance.node: build.race
 	$(ZORDON_TEST_ENV) \
-	go test -timeout $(GOTEST_TIMEOUT) -race -tags conformance_node ./tests/conformance/
+	go test -timeout $(GOTEST_TIMEOUT) -count=1 -race -tags conformance_node ./tests/conformance/
 
 test.conformance.pkg: build.race
 	$(ZORDON_TEST_ENV) \
-	go test -timeout $(GOTEST_TIMEOUT) -race -tags conformance_pkg ./tests/conformance/
+	go test -timeout $(GOTEST_TIMEOUT) -count=1 -race -tags conformance_pkg ./tests/conformance/
 
 test.conformance.java: build.race
 	$(ZORDON_TEST_ENV) \
-	go test -timeout $(GOTEST_TIMEOUT) -race -tags conformance_java ./tests/conformance/
+	go test -timeout $(GOTEST_TIMEOUT) -count=1 -race -tags conformance_java ./tests/conformance/
 
 # The conformance suites compile only under their per-toolchain build tags, so
 # the linters must see the full set — otherwise they flag the shared helpers as
