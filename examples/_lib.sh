@@ -23,7 +23,13 @@ c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_rst=$'\033[0m'
 info() { echo "${c_yel}··${c_rst} $*" >&2; }
 pass() { echo "${c_grn}OK${c_rst} $*" >&2; }
 fail() { echo "${c_red}FAIL${c_rst} $*" >&2; exit 1; }
-skip() { echo "${c_yel}SKIP${c_rst} $*" >&2; exit 0; }
+# With ZORDON_NO_SKIP=1 (CI) a skip is a failure: an example that did not
+# run proves nothing, and a SKIP exits 0 and would otherwise read as green.
+skip() {
+	[ "${ZORDON_NO_SKIP:-}" = 1 ] && fail "skip forbidden (ZORDON_NO_SKIP=1): $*"
+	echo "${c_yel}SKIP${c_rst} $*" >&2
+	exit 0
+}
 
 need() { command -v "$1" >/dev/null 2>&1 || skip "missing tool: $1"; }
 

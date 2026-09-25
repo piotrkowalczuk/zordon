@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 func TestResolve(t *testing.T) {
@@ -59,7 +61,7 @@ func TestResolve_isLexicalOnly(t *testing.T) {
 
 	link := filepath.Join(base, "escape")
 	if err := os.Symlink(outside, link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
+		ztest.Skip(t, "symlinks unavailable: %v", err)
 	}
 
 	got, ok := Resolve(base, "escape/x")

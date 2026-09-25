@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 func run(ctx context.Context, c *exec.Cmd) error { return c.Run() }
@@ -28,7 +30,7 @@ func git(t *testing.T, dir string, args ...string) {
 // `git worktree add` fails with "branch already checked out".
 func TestMonorepoPerServiceBranches(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
+		ztest.Skip(t, "git not available")
 	}
 	repo := t.TempDir()
 	git(t, repo, "init", "-q", "-b", "main")
@@ -70,7 +72,7 @@ func TestMonorepoPerServiceBranches(t *testing.T) {
 // developer's work to a start is the outcome this guards against.
 func TestPrimary_AddWorktree_respectsUserBranchSwitch(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
+		ztest.Skip(t, "git not available")
 	}
 	repo := commitFileRepo(t, "app/main.go", "package app\n")
 	git(t, repo, "branch", "mine")
@@ -112,7 +114,7 @@ func TestPrimary_AddWorktree_respectsUserBranchSwitch(t *testing.T) {
 // populated) is likewise reused with a warning, never wiped.
 func TestPrimary_AddWorktree_respectsPlainDirectory(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
+		ztest.Skip(t, "git not available")
 	}
 	p, err := NewPrimary("", "", commitFileRepo(t, "app/main.go", "package app\n"), "", nil)
 	if err != nil {
@@ -154,7 +156,7 @@ func currentBranch(t *testing.T, dir string) string {
 // tree on the bare existence of .git (issue #38).
 func TestPrimary_AddWorktree_rebuildsInterruptedSparseCheckout(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
+		ztest.Skip(t, "git not available")
 	}
 	repo := commitFileRepo(t, "pkg/app/main.go", "package app\n")
 
@@ -201,7 +203,7 @@ func TestPrimary_AddWorktree_rebuildsInterruptedSparseCheckout(t *testing.T) {
 // but would vanish on a rebuild.
 func TestPrimary_AddWorktree_reusesCompletedWorktree(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
+		ztest.Skip(t, "git not available")
 	}
 	repo := commitFileRepo(t, "pkg/app/main.go", "package app\n")
 	p, err := NewPrimary("", "", repo, "", &Workspace{Sparse: []string{"pkg/app"}})
@@ -236,7 +238,7 @@ func TestPrimary_AddWorktree_reusesCompletedWorktree(t *testing.T) {
 // be rebuilt — a sentinel dropped into it does not survive the rebuild.
 func TestPrimary_AddWorktree_rebuildsLockedWorktree(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
+		ztest.Skip(t, "git not available")
 	}
 	repo := commitFileRepo(t, "pkg/app/main.go", "package app\n")
 	p, err := NewPrimary("", "", repo, "", &Workspace{Sparse: []string{"pkg/app"}})
@@ -274,7 +276,7 @@ func TestPrimary_AddWorktree_rebuildsLockedWorktree(t *testing.T) {
 // instead reclaim the orphan (unlock + prune) and rebuild.
 func TestPrimary_AddWorktree_reclaimsOrphanedLockedRegistration(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
+		ztest.Skip(t, "git not available")
 	}
 	repo := commitFileRepo(t, "pkg/app/main.go", "package app\n")
 	p, err := NewPrimary("", "", repo, "", &Workspace{Sparse: []string{"pkg/app"}})

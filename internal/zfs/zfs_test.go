@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 func TestZordonHome_overrideWins(t *testing.T) {
@@ -45,7 +47,7 @@ func TestChdir(t *testing.T) {
 func TestZordonHome_defaultsToUserHomeZordon(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		t.Skip("UserHomeDir unavailable on this platform")
+		ztest.Skip(t, "UserHomeDir unavailable on this platform")
 	}
 	want := filepath.Join(home, ".zordon")
 	if got := ZordonHome(""); got != want {

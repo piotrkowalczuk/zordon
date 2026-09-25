@@ -1,5 +1,20 @@
 sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
+# Pinned so the example never depends on whatever cargo/ruby the host has:
+# mise materializes both, and the example runs the same on a laptop and in
+# a bare CI container.
+toolchain {
+  rust {
+    version = "1.91.0"
+  }
+  ruby {
+    version = "3.3.6"
+    tools = {
+      bundler = "2.5.6"
+    }
+  }
+}
+
 service "go" "nats-server" {
   git {
     url = "github.com/nats-io/nats-server"
@@ -25,9 +40,10 @@ service "go" "nats-server" {
 
 service "rust" "tansu" {
   crate {
-    name     = "tansu"
-    features = ["dynostore"]
+    name    = "tansu"
+    version = "0.6.0"
   }
+  features = ["dynostore"]   # service level: applies to every source mode, not only crate {}
 
   vars = {
     kafka = net::pickport()

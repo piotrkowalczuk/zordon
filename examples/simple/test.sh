@@ -4,7 +4,6 @@
 cd "$(dirname "$0")"
 source ../_lib.sh
 need curl
-need cargo
 need_net
 
 start

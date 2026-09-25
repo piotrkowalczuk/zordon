@@ -12,6 +12,7 @@
 ## Testing
 
 - Keep private helpers under the actual tests.
+- **No silent skips:** skip a Go test only through `ztest.Skip(t, reason)` (`internal/ztest`); `make lint` rejects a direct `t.Skip*`. CI sets `ZORDON_NO_SKIP=1`, which turns every skip into a failure, in Go tests and in examples (`skip`/`need` in `examples/_lib.sh`, the gates in `make e2e`). A test that can never run is not a test: implement it or delete it, never leave it skipping.
 - **Deliberate use of `t.Parallel()`:**
   - Do not blindly apply `t.Parallel()` to every test function.
   - **When to use:** Use it for I/O-bound tests, long-polling, simulated network delays, or moderate blocking operations that would otherwise bottleneck the test suite without consuming excessive hardware resources.

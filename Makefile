@@ -1,4 +1,4 @@
-.PHONY: fmt build build.race build.release test test.fast test.race test.coverage test.unit test.coverage.unit test.conformance.go test.conformance.rust test.conformance.node test.conformance.pkg test.conformance.java e2e lint gen release.check release.snapshot clean
+.PHONY: fmt build build.race build.release test test.fast test.race test.coverage test.unit test.coverage.unit test.conformance.go test.conformance.rust test.conformance.node test.conformance.pkg test.conformance.java e2e e2e.selftest lint gen release.check release.snapshot clean
 
 EXAMPLES ?= $(shell ls -d examples/*/)
 GOTEST_TIMEOUT ?= 30m
@@ -104,6 +104,7 @@ test.conformance.java: build.race
 # `go build`/`go test` (where it would trigger conformance bringups).
 lint: export GOFLAGS = -tags=$(CONFORMANCE_TAGS_CSV)
 lint:
+	scripts/check-skips.sh
 	go vet ./...
 	go tool staticcheck ./...
 	go tool go-critic check ./...
@@ -134,15 +135,21 @@ clean:
 	rm -f *.out alpha.log examples/*/alpha.log
 	-rm -rf "$${TMPDIR:-/tmp}"/zordon-* 2>/dev/null || true
 
-e2e: build
-	@for dir in $(EXAMPLES); do \
+# e2e skips an example whose OS gate or test.sh is missing; with
+# ZORDON_NO_SKIP=1 (CI) every such skip fails the run instead.
+e2e: build e2e.selftest
+	@skip() { if [ "$$ZORDON_NO_SKIP" = 1 ]; then echo "==> $$1 (FAIL: skip forbidden, ZORDON_NO_SKIP=1: $$2)"; exit 1; fi; echo "==> $$1 (SKIP: $$2)"; }; \
+	for dir in $(EXAMPLES); do \
 		base=$$(basename $$dir); \
 		case $$base in \
-			*_macos) [ "$$(uname -s)" = Darwin ] || { echo "==> $$dir (SKIP: macOS-only)"; continue; } ;; \
-			*_linux) [ "$$(uname -s)" = Linux ]  || { echo "==> $$dir (SKIP: Linux-only)"; continue; } ;; \
+			*_macos) [ "$$(uname -s)" = Darwin ] || { skip "$$dir" "macOS-only"; continue; } ;; \
+			*_linux) [ "$$(uname -s)" = Linux ]  || { skip "$$dir" "Linux-only"; continue; } ;; \
 		esac; \
 		t="$$dir/test.sh"; \
-		[ -f "$$t" ] || { echo "no test.sh in $$dir, skipping"; continue; }; \
+		[ -f "$$t" ] || { skip "$$dir" "no test.sh"; continue; }; \
 		echo "==> $$dir"; \
 		bash "$$t" || exit 1; \
 	done
+
+e2e.selftest:
+	@examples/_lib_test.sh

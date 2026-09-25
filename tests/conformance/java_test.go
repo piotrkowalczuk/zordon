@@ -221,15 +221,43 @@ func TestJavaService_buildToolDetect_table(t *testing.T) {
 	}
 }
 
-// git source requires a network clone from a supported host; the
-// spring-petclinic e2e example covers it. No offline path here.
+// TestJavaService_gitSource is the `git` arm of the source oneof: a
+// remote clone at a pinned rev (golden_repo_test.go), built from a subdir.
 func TestJavaService_gitSource(t *testing.T) {
-	t.Skip("git source requires a network clone from a supported host; covered by examples/java (spring-petclinic)")
+	p := zordontest.NewProject(t)
+	p.WriteFile("Alphasfile", javaAlphasfile("echo", fmt.Sprintf(`
+  git {
+    url = "%s"
+    rev = "%s"
+  }
+  src { exe = "golden/java/echo-maven" }
+
+  vars = { port = net::pickport() }
+  env  = { PORT = "${self.vars.port}" }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "500ms"
+    failure_threshold = 120
+  }`, goldenRepo, goldenRev)))
+
+	mustStart(t, p)
+	mustGetJavaEcho(t, p.Get(t, "service.java.echo.vars.port").Int())
 }
 
-// java has no use-only mode (like ruby/nodejs) — see docs/services/java.md.
-func TestJavaService_useOnly(t *testing.T) {
-	t.Skip("java has no use-only mode; workspace-only (src/git)")
+// TestJavaService_useOnlyRejected pins that java has no use-only mode
+// (docs/services/java.md): declaring one fails before anything runs.
+func TestJavaService_useOnlyRejected(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.WriteFile("Alphasfile", javaAlphasfile("echo", `
+  package = "com.example:echo:1.0.0"`))
+	res := p.Zordon("plan").Run(t)
+	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "java has no use-only mode") {
+		t.Fatalf("want a 'java has no use-only mode' error, got exit %d\n%s", res.ExitCode, res.Stderr)
+	}
 }
 
 // javaAlphasfile wraps a service body in the shared toolchain + sysenv

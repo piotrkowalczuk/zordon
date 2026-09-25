@@ -12,6 +12,8 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/zdoc"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
+
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 func TestWorkspaceFilePath_accepts(t *testing.T) {
@@ -326,7 +328,7 @@ func TestApplyWorkspaceFiles_writesThroughASymlink(t *testing.T) {
 	link := filepath.Join(inv.Dir, ".claude", "settings.json")
 	mustDir(t, filepath.Dir(link))
 	if err := os.Symlink(realFile, link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
+		ztest.Skip(t, "symlinks unavailable: %v", err)
 	}
 
 	apply(t, specWith(&alphasfile.WorkspaceFile{
@@ -368,7 +370,7 @@ func TestApplyWorkspaceFiles_symlinkOutOfTheWorkspaceIsRefused(t *testing.T) {
 	link := filepath.Join(inv.Dir, ".claude", "settings.json")
 	mustDir(t, filepath.Dir(link))
 	if err := os.Symlink(realFile, link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
+		ztest.Skip(t, "symlinks unavailable: %v", err)
 	}
 
 	// Control: a plain file in the same workspace must still go through, so a
@@ -415,7 +417,7 @@ func TestWorkspaceFilePath_symlinkEscapingTheWorkspace(t *testing.T) {
 	}
 
 	if err := os.Symlink(outside, filepath.Join(inv.Dir, "escape")); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
+		ztest.Skip(t, "symlinks unavailable: %v", err)
 	}
 	if _, err := workspaceFilePath(inv, nil, "escape/x"); err == nil {
 		t.Fatal("a path through a symlink leaving the workspace was accepted")
@@ -425,7 +427,7 @@ func TestWorkspaceFilePath_symlinkEscapingTheWorkspace(t *testing.T) {
 	// keeps generated files out of somebody's git tree.
 	mustDir(t, filepath.Join(inv.Dir, "src", "app"))
 	if err := os.Symlink(filepath.Join(inv.Dir, "src", "app"), filepath.Join(inv.Dir, "into-src")); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
+		ztest.Skip(t, "symlinks unavailable: %v", err)
 	}
 	if _, err := workspaceFilePath(inv, nil, "into-src/LEAKED.md"); err == nil {
 		t.Fatal("a path through a symlink into the service checkout was accepted")
