@@ -315,6 +315,9 @@ func checkFragment(root *rootBlock) error {
 	if root.Toolchain != nil {
 		return fmt.Errorf("%s: top-level toolchain %s; pin it inside a module block", root.Toolchain.DefRange, hint)
 	}
+	if root.Workspace != nil {
+		return fmt.Errorf("%s: top-level workspace %s", root.Workspace.DefRange, hint)
+	}
 	if root.EnvRange != (hcl.Range{}) {
 		return fmt.Errorf("%s: top-level env %s", root.EnvRange, hint)
 	}

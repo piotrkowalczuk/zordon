@@ -133,6 +133,7 @@ func TestLoadTree_rejectsTopLevelInFragment(t *testing.T) {
 		"toolchain": {"toolchain {\n  go { version = \"1.27.0\" }\n}\n", "top-level toolchain"},
 		"env":       {`env = { A = "1" }`, "top-level env"},
 		"dotenv":    {`dotenv = ".env"`, "top-level dotenv"},
+		"workspace": {"workspace {\n  branch = \"x/${service.name}\"\n}\n", "top-level workspace"},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {

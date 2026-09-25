@@ -1027,6 +1027,8 @@ type fileBlock struct {
 // its config already in place. That timing is why the evaluation context is
 // static — see RenderWorkspace.
 type workspaceRootBlock struct {
+	DefRange hcl.Range `hcl:",def_range"`
+
 	Branch hcl.Expression        `hcl:"branch,optional"`
 	Files  []*workspaceFileBlock `hcl:"file,block"`
 }
