@@ -25,9 +25,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# A skipped test proves nothing, and neither `go test` (without -v) nor a
-# SKIPped example (exit 0) shows up as anything but green. With this set,
-# ztest.Skip, examples/_lib.sh and `make e2e` turn every skip into a failure.
+# A skipped example exits 0 and shows up as green. Go tests never skip
+# (`make lint` enforces it); examples may skip on a laptop for what depends
+# on the machine, and with this set examples/_lib.sh and `make e2e` fail
+# instead.
 env:
   ZORDON_NO_SKIP: "1"
 

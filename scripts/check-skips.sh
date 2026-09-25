@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Every Go test skip must go through ztest.Skip, which fails instead of
-# skipping when ZORDON_NO_SKIP=1 (CI). A direct t.Skip*/b.Skip* would bypass
-# that and let a missing tool turn a suite green without running it.
+# Go tests never skip. A missing prerequisite is a broken environment and the
+# test must fail saying what is missing; a skip exits green and `go test`
+# without -v does not even print it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 hits="$(grep -rnE '\.(Skip|Skipf|SkipNow)\(' --include='*.go' \
 	--exclude-dir=.zordon --exclude-dir=_site --exclude-dir=workspaces --exclude-dir=.claude \
-	. | grep -v '^\./internal/ztest/' | grep -vE 'ztest\.Skip\(' || true)"
+	. || true)"
 
 if [ -n "$hits" ]; then
-	echo "direct test skips found; use ztest.Skip(t, reason) instead:" >&2
+	echo "Go tests must not skip; fail with t.Fatal and name the missing prerequisite:" >&2
 	echo "$hits" >&2
 	exit 1
 fi

@@ -35,13 +35,11 @@ import (
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
-
-	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 func TestGrandchildEscape_buildReapsAlphaWithinGrace(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
-		ztest.Skip(t, "python3 not on PATH; needed to spawn a grandchild that setsid's out of the pgid")
+		t.Fatal("python3 not on PATH; needed to spawn a grandchild that setsid's out of the pgid")
 	}
 
 	p := zordontest.NewProject(t, zordontest.WithExpectedLeftovers())
