@@ -9,6 +9,8 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 // TestApplyTarget is the guard on which directory `zordon workspace apply`
@@ -142,9 +144,6 @@ workspace {
 // overwriting files again. It does real git work, which is why it is the one
 // heavier test here — the alternative was leaving this to `make e2e`.
 func TestRunWorkspaceServiceAdd_leavesGeneratedFilesAlone(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, invocation.AlphasfileName), `
 workspace {
@@ -188,6 +187,7 @@ service "go" "app" {
 
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
+	ztest.AssertSystem(t)
 	c := exec.Command("git", args...)
 	c.Dir = dir
 	if out, err := c.CombinedOutput(); err != nil {

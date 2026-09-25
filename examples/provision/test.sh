@@ -31,10 +31,7 @@ for _ in $(seq 1 50); do
 done
 assert_present "$notify"
 
-# Bonus: zordon get should surface the resolved provision details, so
-# tooling can introspect the chain without parsing the Alphasfile.
-prov_cmd="$(zordon get service.go.app.provision.0.cmd 2>/dev/null || true)"
-case "$prov_cmd" in
-	*"markers/init"*) pass "zordon get exposes resolved provision cmd: $prov_cmd";;
-	*) info "provision cmd not visible via zordon get (got: '$prov_cmd') — non-fatal";;
-esac
+# zordon get surfaces the resolved provision details, keyed by provision
+# name, so tooling can introspect the chain without parsing the Alphasfile.
+prov_cmd="$(zordon get service.go.app.provision.init-state.cmd)" || fail "zordon get service.go.app.provision.init-state.cmd failed"
+assert_contains "$prov_cmd" "markers/init" "zordon get exposes the resolved provision cmd"

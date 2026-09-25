@@ -19,15 +19,13 @@ import (
 // in `service "rust" { ... }`. The source selector is a three-way
 // oneof and the build/readiness selectors are two-way:
 //
-//	source:     src | git | cargo        (src covered; git/cargo deferred)
+//	source:     src | git | cargo
 //	build:      default (cargo install --path) | explicit cmd
 //	readiness:  http probe | none (stabilization-only)
 //
-// `git` (a github/gitlab/bitbucket clone) and `cargo` (a crates.io
-// use-only install) both require network and a real remote — same
-// reason the Go suite leaves its `git`/`package` variants as TODO.
-// They are pinned as explicit Skips below so the oneof matrix is
-// discoverable in code rather than implied by its absence.
+// `git` and `cargo` clone this repository from GitHub at goldenRev
+// (see golden_repo_test.go) and build golden/rust/echo from there, so
+// they need network like the toolchain install already does.
 //
 // All Rust tests share golden/rust/echo (std-only, so `cargo install`
 // is fast and offline) and reuse the Go suite's mustStart /
@@ -435,24 +433,86 @@ service "rust" "echo" {
 	}
 }
 
-// TestRustService_gitSource documents the `git` arm of the source
-// oneof. NewPrimary's normalizeGit only accepts github.com /
-// gitlab.com / bitbucket.org and rewrites to https://<repo>.git, so
-// there is no offline/local-repo path — exercising it needs network
-// and a published repo. Skipped (not deleted) so the oneof matrix
-// stays explicit in code, matching go_test.go's "git ... TODO".
+// TestRustService_gitSource is the `git` arm of the source oneof: a
+// remote clone at a pinned rev, built from a subdir via `src { exe }`.
 func TestRustService_gitSource(t *testing.T) {
-	t.Skip("git source oneof requires a network clone from a supported host (github/gitlab/bitbucket); no offline path — see package doc")
+	p := zordontest.NewProject(t)
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  rust {
+    version = "%s"
+  }
 }
 
-// TestRustService_cargoUseOnly documents the `cargo` arm of the
-// source oneof: a crates.io use-only install (cargo install <crate>,
-// no checkout). Requires crates.io reachability and a crate that runs
-// as a long-lived addressable server, so it's deferred for the same
-// reason go_test.go defers `package`. Skipped to keep the matrix
-// discoverable.
+service "rust" "echo" {
+  git {
+    url = "%s"
+    rev = "%s"
+  }
+  src { exe = "golden/rust/echo" }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, rustVersion, goldenRepo, goldenRev))
+
+	mustStart(t, p)
+	mustGetRustEcho(t, p.Get(t, "service.rust.echo.vars.port").Int())
+}
+
+// TestRustService_cargoUseOnly is the `cargo` arm: a use-only
+// `cargo install` with no checkout. The crate comes from a git URL rather
+// than crates.io so the fixture stays the repo's own echo server; the
+// install path is the same, only the source flag differs.
 func TestRustService_cargoUseOnly(t *testing.T) {
-	t.Skip("cargo (crates.io use-only) source oneof requires network + a long-lived server crate; deferred like go_test.go's package variant")
+	p := zordontest.NewProject(t)
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  rust {
+    version = "%s"
+  }
+}
+
+service "rust" "echo" {
+  crate {
+    name = "echo"
+    git  = "https://%s"
+    rev  = "%s"
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/echo", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, rustVersion, goldenRepo, goldenRev))
+
+	mustStart(t, p)
+	mustGetRustEcho(t, p.Get(t, "service.rust.echo.vars.port").Int())
 }
 
 // --- rust-specific helpers (package-local) ---------------------

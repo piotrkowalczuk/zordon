@@ -15,9 +15,6 @@ import (
 // source repo, so two workspaces cloning the same service never contend for an
 // admin dir.
 func TestPrimary_Clone_materializesDetachedAtRef(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
 	repo := taggedRepo(t)
 	p := mustDirPrimary(t, repo, "v1")
 
@@ -38,9 +35,6 @@ func TestPrimary_Clone_materializesDetachedAtRef(t *testing.T) {
 // A finished clone at the same ref is reused as-is: a sentinel file dropped
 // into the working tree survives (a rebuild would wipe it).
 func TestPrimary_Clone_reusesUnchangedRef(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
 	p := mustDirPrimary(t, taggedRepo(t), "v1")
 	dest := filepath.Join(t.TempDir(), "src", "app")
 	if err := p.Clone(t.Context(), dest, "v1", run); err != nil {
@@ -60,9 +54,6 @@ func TestPrimary_Clone_reusesUnchangedRef(t *testing.T) {
 
 // A changed ref rebuilds the tree so the working copy follows the new ref.
 func TestPrimary_Clone_rebuildsOnChangedRef(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
 	repo := taggedRepo(t)
 	dest := filepath.Join(t.TempDir(), "src", "app")
 
@@ -82,9 +73,6 @@ func TestPrimary_Clone_rebuildsOnChangedRef(t *testing.T) {
 // there — otherwise a later `workspace create` of the same service would hit
 // "branch already checked out".
 func TestPrimary_Clone_migratesFromRegisteredWorktree(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
 	repo := taggedRepo(t)
 	p := mustDirPrimary(t, repo, "v1")
 	dest := filepath.Join(t.TempDir(), "src", "app")
@@ -114,9 +102,6 @@ func TestPrimary_Clone_migratesFromRegisteredWorktree(t *testing.T) {
 // prune/re-add churn produces (issue #73 comment) — a cross-linked back-pointer
 // or a checkout silently sitting on another workspace's branch.
 func TestWorktreeHealthy(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
 	branch := "zordon/wsA/app"
 
 	t.Run("complete worktree is healthy", func(t *testing.T) {

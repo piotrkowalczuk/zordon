@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,63 +8,32 @@ import (
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
-type corepackCell struct {
-	node, pm, version, note string
-	ok                      bool
-}
-
-// TestCorepackMatrix probes what Corepack provisions per Node version
-// AFTER we refresh Corepack itself to the latest published release.
-// Refresh is the planned production behavior: bundled corepack inside
-// older Node distributions ships a stale signing-key set, so verifying
-// recent pnpm/yarn downloads fails with `Cannot find matching keyid`.
-// `npm i -g --prefix <dir> corepack@latest` (run under the pinned
-// node) gives that node a fresh corepack with a current keyring.
-//
-// The test mirrors what production will do at toolchain materialization,
-// then asks each PM for its --version with NO `package.json#packageManager`
-// pin, so the value we record is exactly Corepack's built-in default
-// for that Node version. npm is excluded because it ships bundled
-// with node and never goes through corepack.
+// TestCorepackMatrix runs the production EnsureNodeCorepack on every Node
+// line zordon supports and requires pnpm and yarn to start with no
+// `package.json#packageManager` pin, which is what a project with only a
+// lockfile gets. npm is excluded because it ships with node and never goes
+// through corepack.
 //
 // Uses the same ZORDON_HOME as conformance (zordontest.DefaultHome →
-// `<repo>/.zordon`). That dir is what CI pre-places mise into and what
-// the conformance suite already shares for its warm cache, so this
-// test reuses both without needing to bootstrap mise via cargo.
+// `<repo>/.zordon`): CI pre-places mise there and the conformance suite
+// shares it as its warm cache.
 func TestCorepackMatrix(t *testing.T) {
-	nodeVersions := []string{"18.20.5", "20.18.1", "22.11.0"}
+	nodeVersions := []string{"18.20.5", "20.18.1", "22.11.0", "24.15.0"}
 	pms := []string{"pnpm", "yarn"}
 
+	ztest.AssertSystem(t)
 	zordonHome := zordontest.DefaultHome(t)
 	dataDir := filepath.Join(zordonHome, "toolchain")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-
 	bin, err := EnsureMise(zordonHome, os.Stderr)
 	if err != nil {
 		t.Fatalf("EnsureMise: %v", err)
 	}
-
-	// isolatedEnv prepends the mise binary's dir to PATH — the
-	// mise-installed node's npm wrapper calls `mise reshim`
-	// post-install and exits 127 otherwise.
-	env := isolatedEnv(dataDir, bin)
-
-	mustRun := func(label, name string, args ...string) {
-		t.Helper()
-		cmd := exec.Command(name, args...)
-		cmd.Env = env
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("%s: %v", label, err)
-		}
-	}
-
-	var results []corepackCell
 
 	for _, nv := range nodeVersions {
 		t.Run("node-"+nv, func(t *testing.T) {
@@ -75,77 +43,74 @@ func TestCorepackMatrix(t *testing.T) {
 			}
 			defer release()
 
-			if _, err := MiseEnv(bin, dataDir, "node", nv, os.Stderr); err != nil {
+			env, err := MiseEnv(bin, dataDir, "node", nv, os.Stderr)
+			if err != nil {
 				t.Fatalf("MiseEnv node@%s: %v", nv, err)
 			}
-
-			// Per-version playground: where the refreshed corepack
-			// lives and where it writes its shims.
-			workDir := t.TempDir()
-			refreshDir := filepath.Join(workDir, "corepack-latest")
-			shimDir := filepath.Join(workDir, "shims")
-			emptyCwd := filepath.Join(workDir, "cwd")
-			for _, d := range []string{refreshDir, shimDir, emptyCwd} {
-				if err := os.MkdirAll(d, 0o755); err != nil {
-					t.Fatal(err)
-				}
+			if err := EnsureNodeCorepack(bin, dataDir, nv, env, os.Stderr); err != nil {
+				t.Fatalf("EnsureNodeCorepack node@%s: %v", nv, err)
 			}
-
-			spec := "node@" + nv
-			mustRun("refresh corepack",
-				bin, "exec", spec, "--",
-				"npm", "install", "-g",
-				"--prefix", refreshDir,
-				"corepack@latest")
-
-			refreshedCorepack := filepath.Join(refreshDir, "bin", "corepack")
-			mustRun("corepack enable",
-				bin, "exec", spec, "--",
-				refreshedCorepack, "enable",
-				"--install-directory", shimDir)
-
-			t.Logf("refreshed corepack at %s; shims:", refreshedCorepack)
-			if entries, _ := os.ReadDir(shimDir); len(entries) > 0 {
-				names := make([]string, 0, len(entries))
-				for _, e := range entries {
-					names = append(names, e.Name())
-				}
-				t.Logf("  %v", names)
+			if home := env["COREPACK_HOME"]; !strings.HasPrefix(home, filepath.Join(dataDir, "node-corepack", nv)+string(filepath.Separator)) {
+				t.Errorf("COREPACK_HOME = %q, want a dir private to node %s under %s", home, nv, dataDir)
 			}
-
+			cwd := t.TempDir()
 			for _, pm := range pms {
-				t.Run(pm, func(t *testing.T) {
-					c := corepackCell{node: nv, pm: pm}
-					shim := filepath.Join(shimDir, pm)
-					if _, statErr := os.Stat(shim); statErr != nil {
-						c.note = "no shim at " + shim
-						results = append(results, c)
-						t.Logf("FAIL node=%s pm=%s: %s", nv, pm, c.note)
-						return
-					}
-					ver := exec.Command(bin, "exec", spec, "--", shim, "--version")
-					ver.Env = env
-					ver.Dir = emptyCwd
-					out, err := ver.CombinedOutput()
-					if err != nil {
-						c.note = truncate(string(out), 200) + " | " + err.Error()
-						results = append(results, c)
-						t.Logf("FAIL node=%s pm=%s: %s", nv, pm, c.note)
-						return
-					}
-					c.ok = true
-					c.version = lastLine(strings.TrimSpace(string(out)))
-					results = append(results, c)
-					t.Logf("OK   node=%s pm=%s version=%s", nv, pm, c.version)
-				})
+				cmd := exec.Command(bin, "exec", "node@"+nv, "--", pm, "--version")
+				cmd.Env = overlayEnv(isolatedEnv(dataDir, bin), env)
+				cmd.Dir = cwd
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Errorf("node=%s pm=%s: %v\n%s", nv, pm, err, strings.TrimSpace(string(out)))
+					continue
+				}
+				t.Logf("node=%s pm=%s version=%s", nv, pm, lastLine(strings.TrimSpace(string(out))))
 			}
 		})
 	}
+}
 
-	t.Cleanup(func() {
-		t.Logf("\n=== Corepack default-version matrix (post-refresh) ===\n%s",
-			renderTable(results))
-	})
+func TestCorepackSpecFor(t *testing.T) {
+	cases := map[string]struct {
+		node string
+		spec string
+		ok   bool
+	}{
+		"node 18 lts":            {"18.20.5", "corepack@~0.33.0", true},
+		"node 18 below floor":    {"18.17.0", "", false},
+		"node 20":                {"v20.18.1", "corepack@~0.34.0", true},
+		"node 20 below 20.10":    {"20.9.0", "", false},
+		"node 21 odd release":    {"21.7.3", "", false},
+		"node 22 before 22.22.2": {"22.11.0", "corepack@~0.34.0", true},
+		"node 22 from 22.22.2":   {"22.22.2", "corepack@~0.36.0", true},
+		"node 24 before 24.15":   {"24.1.0", "corepack@~0.34.0", true},
+		"node 24 from 24.15":     {"24.15.0", "corepack@~0.36.0", true},
+		"node 26":                {"26.0.0", "corepack@~0.36.0", true},
+		"not a version":          {"lts", "", false},
+		"two components":         {"22.11", "", false},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			spec, ok := CorepackSpecFor(c.node)
+			if spec != c.spec || ok != c.ok {
+				t.Errorf("CorepackSpecFor(%q) = (%q, %v), want (%q, %v)", c.node, spec, ok, c.spec, c.ok)
+			}
+		})
+	}
+}
+
+// overlayEnv returns base with every key of over set; over wins.
+func overlayEnv(base []string, over map[string]string) []string {
+	out := make([]string, 0, len(base)+len(over))
+	for _, kv := range base {
+		k, _, _ := strings.Cut(kv, "=")
+		if _, replaced := over[k]; !replaced {
+			out = append(out, kv)
+		}
+	}
+	for k, v := range over {
+		out = append(out, k+"="+v)
+	}
+	return out
 }
 
 func lastLine(s string) string {
@@ -153,25 +118,4 @@ func lastLine(s string) string {
 		return s[i+1:]
 	}
 	return s
-}
-
-func truncate(s string, n int) string {
-	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " // ")
-	if len(s) > n {
-		return s[:n] + "…"
-	}
-	return s
-}
-
-func renderTable(rows []corepackCell) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%-10s %-6s %-12s %-6s %s\n", "node", "pm", "version", "status", "note")
-	for _, r := range rows {
-		status := "ok"
-		if !r.ok {
-			status = "FAIL"
-		}
-		fmt.Fprintf(&b, "%-10s %-6s %-12s %-6s %s\n", r.node, r.pm, r.version, status, r.note)
-	}
-	return b.String()
 }

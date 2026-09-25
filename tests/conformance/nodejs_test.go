@@ -364,15 +364,58 @@ service "nodejs" "echo" {
 	}
 }
 
-// git source oneof — same as rust_test: requires a published
-// github/gitlab/bitbucket repo, no offline path.
+// TestNodeService_gitSource is the `git` arm of the source oneof: a
+// remote clone at a pinned rev (golden_repo_test.go), run from a subdir.
 func TestNodeService_gitSource(t *testing.T) {
-	t.Skip("git source oneof requires a network clone from a supported host; no offline path")
+	p := zordontest.NewProject(t)
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  nodejs {
+    version = "%s"
+  }
 }
 
-// nodejs has no use-only mode in v1 — see docs/services/nodejs.md.
-func TestNodeService_useOnly(t *testing.T) {
-	t.Skip("nodejs has no use-only mode in v1; deferred")
+service "nodejs" "echo" {
+  git {
+    url = "%s"
+    rev = "%s"
+  }
+  src { exe = "golden/nodejs/echo" }
+
+  vars = { port = net::pickport() }
+  env  = { PORT = "${self.vars.port}" }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`, nodeVersion, goldenRepo, goldenRev))
+
+	mustStart(t, p)
+	mustGetNodeEcho(t, p.Get(t, "service.nodejs.echo.vars.port").Int())
+}
+
+// TestNodeService_useOnlyRejected pins that nodejs has no use-only mode
+// (docs/services/nodejs.md): declaring one fails before anything runs.
+func TestNodeService_useOnlyRejected(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+
+service "nodejs" "echo" {
+  package = "echo@1.0.0"
+}
+`)
+	res := p.Zordon("plan").Run(t)
+	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "nodejs has no use-only mode") {
+		t.Fatalf("want a 'nodejs has no use-only mode' error, got exit %d\n%s", res.ExitCode, res.Stderr)
+	}
 }
 
 // mustGetNodeEcho confirms reachability AND that process.version

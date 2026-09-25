@@ -45,7 +45,7 @@ func TestChdir(t *testing.T) {
 func TestZordonHome_defaultsToUserHomeZordon(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		t.Skip("UserHomeDir unavailable on this platform")
+		t.Fatal("UserHomeDir unavailable on this platform")
 	}
 	want := filepath.Join(home, ".zordon")
 	if got := ZordonHome(""); got != want {
