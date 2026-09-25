@@ -67,6 +67,7 @@ nav:
   - Workspaces: workspaces.md
   - Federation: federation.md
   - How-to:
+      - Prepare a workspace for an agent: how-to/prepare-a-workspace-for-an-agent.md
       - Run a provision via MCP: how-to/run-a-provision-via-mcp.md
       - Drive a host stack from a container: how-to/drive-a-host-stack-from-a-container.md
       - Use a binary from another service: how-to/use-a-binary-from-another-service.md

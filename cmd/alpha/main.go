@@ -3571,7 +3571,13 @@ func prepareWorkspace(ctx context.Context, svc *alphasfile.Service, name, wsName
 		// services share one primary repo would otherwise all want
 		// `zordon/<ws>` and the 2nd `git worktree add` would fail with
 		// "branch already checked out". Slashes are valid in ref names.
-		branch := "zordon/" + wsName + "/" + name
+		//
+		// Resolved at eval from the top-level `workspace { branch }` template,
+		// so alpha reads it rather than re-deriving the naming scheme.
+		branch := svc.Package.WorkspaceBranch
+		if branch == "" {
+			branch = alphasfile.DefaultBranchFor(wsName, name)
+		}
 		log.Info("alpha", "prepare %s: worktree -> %s (branch %s)", name, checkout, branch)
 		warn, err := p.AddWorktree(ctx, checkout, branch, runner)
 		if err != nil {

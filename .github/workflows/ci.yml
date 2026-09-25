@@ -172,6 +172,10 @@ jobs:
           # only run on macOS (via `make e2e`'s *_macos gate locally).
           - simple
           - workspace
+          # workspace_files covers the generated-file side of a workspace
+          # (create/merge/region + the branch template), which is pure git
+          # and filesystem work — no network, no toolchain download.
+          - workspace_files
           # java clones spring-petclinic and runs its Maven wrapper: a
           # real (heavy, network-bound) JVM build per distro. The wrapper
           # downloads Maven + deps into HOME's ~/.m2 on a cold cache.

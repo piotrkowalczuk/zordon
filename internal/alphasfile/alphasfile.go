@@ -154,6 +154,11 @@ type Package struct {
 	// same service never collide, issue #73). Always false in "main" (nothing
 	// is picked there) and for InPlace services.
 	Editable bool `json:"editable,omitempty"`
+	// WorkspaceBranch is the branch an Editable checkout lives on, rendered
+	// from the top-level `workspace { branch }` template. Resolved once at
+	// eval so alpha and `zordon status` read a concrete value rather than
+	// each re-deriving the naming scheme.
+	WorkspaceBranch string `json:"workspace_branch,omitempty"`
 }
 
 type Workspace struct {
@@ -642,6 +647,10 @@ type rootBlock struct {
 	SysEnv    hcl.Expression  `hcl:"sysenv,optional"` // closed-world whitelist of inherited OS env vars
 	Services  []*serviceBlock `hcl:"service,block"`
 	Toolchain *toolchainBlock `hcl:"toolchain,block"`
+	// Workspace is how to prepare a workspace DIRECTORY (generated files,
+	// branch naming) — not to be confused with serviceBlock.Workspace, which
+	// is how to cut one service's checkout.
+	Workspace *workspaceRootBlock `hcl:"workspace,block"`
 }
 
 // toolchainBlock is the optional top-level pin map. Each language gets
@@ -957,6 +966,52 @@ type fileBlock struct {
 	Name string         `hcl:"name,label"`
 	Path hcl.Expression `hcl:"path"`
 	Body hcl.Expression `hcl:"body"`
+}
+
+// workspaceRootBlock is the top-level `workspace {}`: how to PREPARE a
+// workspace directory. Distinct from the service-level `workspace { sparse }`
+// (workspaceBlock), which says how to cut one service's checkout.
+//
+// Its files are rendered by `zordon workspace create` / `workspace apply`,
+// before anything is built or started, so an agent or a dev container finds
+// its config already in place. That timing is why the evaluation context is
+// static — see RenderWorkspace.
+type workspaceRootBlock struct {
+	Branch hcl.Expression        `hcl:"branch,optional"`
+	Files  []*workspaceFileBlock `hcl:"file,block"`
+}
+
+// workspaceFileBlock carries the target path plus exactly one operation. The
+// operation is a typed sub-block rather than an `op` attribute because the
+// three payloads are disjoint (a string, a structured patch, a marked span) —
+// the same reason build/runtime/agent are separate blocks above.
+type workspaceFileBlock struct {
+	Name   string         `hcl:"name,label"`
+	Path   hcl.Expression `hcl:"path"`
+	Create *createOpBlock `hcl:"create,block"`
+	Merge  *mergeOpBlock  `hcl:"merge,block"`
+	Region *regionOpBlock `hcl:"region,block"`
+}
+
+// createOpBlock writes a whole file zordon owns. Exactly one of body/source.
+type createOpBlock struct {
+	Body   hcl.Expression `hcl:"body,optional"`
+	Source hcl.Expression `hcl:"source,optional"`
+}
+
+// mergeOpBlock owns a fragment of a structured file somebody else owns,
+// applied as an RFC 7386 merge patch. Format defaults to the path's extension.
+type mergeOpBlock struct {
+	Data   hcl.Expression `hcl:"data"`
+	Format string         `hcl:"format,optional"`
+}
+
+// regionOpBlock owns a comment-delimited span of a text file — the text
+// counterpart of merge. Comment defaults to "#".
+type regionOpBlock struct {
+	Body    hcl.Expression `hcl:"body,optional"`
+	Source  hcl.Expression `hcl:"source,optional"`
+	Comment string         `hcl:"comment,optional"`
 }
 
 // --- public entry point ---------------------------------------------------
