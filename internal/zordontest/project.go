@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 // Project is one temp-dir-rooted project under harness control.
@@ -54,6 +56,7 @@ type Project struct {
 // the ultimate safety net. We do NOT pkill here.
 func NewProject(t *testing.T, opts ...Option) *Project {
 	t.Helper()
+	ztest.AssertSystem(t)
 	cfg := resolveConfig(opts)
 
 	root := cfg.root
@@ -333,7 +336,7 @@ func isExecutable(path string) bool {
 // re-derive the path.
 func DefaultHome(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(repoRoot(t), ".zordon")
+	return ztest.Home(t)
 }
 
 // resolveHome picks ZORDON_HOME for the project: the cfg override

@@ -40,7 +40,7 @@ func TestCorepackMatrix(t *testing.T) {
 	pms := []string{"pnpm", "yarn"}
 
 	zordonHome := zordontest.DefaultHome(t)
-	ztest.AssertSystem(t, ztest.Toolchain(zordonHome))
+	ztest.AssertSystem(t)
 	dataDir := filepath.Join(zordonHome, "toolchain")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)

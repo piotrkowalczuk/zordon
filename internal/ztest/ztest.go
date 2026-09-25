@@ -1,31 +1,26 @@
-// Package ztest checks that the host can run a test at all. A missing
-// prerequisite fails the test with what is missing and why; tests never
-// skip.
+// Package ztest checks that the host can run zordon's tests at all. A
+// missing prerequisite fails the test with what is missing and why; tests
+// never skip.
 package ztest
 
 import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
-// Need is one thing a test requires from the host.
+// Need is one extra thing a test requires from the host, on top of the
+// system every test gets checked for.
 type Need struct {
 	name  string
 	why   string
 	ready func() bool
-}
-
-// Git is required by every test AssertSystem guards: each source and each
-// toolchain goes through git, so AssertSystem always checks it.
-var Git = Need{
-	name:  "git",
-	why:   "every git/src source and every toolchain is materialized through git; install git",
-	ready: onPath("git"),
 }
 
 // Python3 is required by tests that spawn a helper process with it.
@@ -35,14 +30,44 @@ var Python3 = Need{
 	ready: onPath("python3"),
 }
 
-// Toolchain is required by every test that brings up a pinned toolchain.
-// alpha materializes toolchains through mise and bootstraps mise itself
-// from <zordonHome>/bin/mise, falling back to `cargo install mise`.
-func Toolchain(zordonHome string) Need {
-	placed := filepath.Join(zordonHome, "bin", "mise")
+// AssertSystem fails the test unless the host has what zordon itself stands
+// on, git and mise, plus every extra need given. Every missing piece is
+// listed at once with its reason.
+func AssertSystem(t testing.TB, needs ...Need) {
+	t.Helper()
+	all := append([]Need{gitNeed, miseNeed(Home(t))}, needs...)
+	var missing []string
+	for _, n := range all {
+		if !n.ready() {
+			missing = append(missing, fmt.Sprintf("  - %s: %s", n.name, n.why))
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("system not ready for zordon's tests:\n%s", strings.Join(missing, "\n"))
+	}
+}
+
+// Home is the ZORDON_HOME tests share: <repo>/.zordon. CI pre-places mise
+// there, and every toolchain install caches under it.
+func Home(t testing.TB) string {
+	t.Helper()
+	return filepath.Join(repoRoot(t), ".zordon")
+}
+
+var gitNeed = Need{
+	name:  "git",
+	why:   "every git/src source and every toolchain is materialized through git; install git",
+	ready: onPath("git"),
+}
+
+// miseNeed is mise, the base every toolchain and package installs through.
+// zordon runs <home>/bin/mise and builds it with `cargo install mise` when
+// it is missing, so either makes the host ready.
+func miseNeed(home string) Need {
+	placed := filepath.Join(home, "bin", "mise")
 	return Need{
 		name: "mise",
-		why:  fmt.Sprintf("toolchains install through mise, which must be pre-placed at %s or buildable with cargo; place mise there (CI does) or install cargo", placed),
+		why:  fmt.Sprintf("zordon installs every toolchain and package through mise; place it at %s (CI does) or install cargo so zordon can build it", placed),
 		ready: func() bool {
 			if st, err := zfs.Stat(placed); err == nil && !st.IsDir() {
 				return true
@@ -52,24 +77,38 @@ func Toolchain(zordonHome string) Need {
 	}
 }
 
-// AssertSystem fails the test unless the host provides Git and every need
-// given, listing all that are missing at once.
-func AssertSystem(t testing.TB, needs ...Need) {
-	t.Helper()
-	var missing []string
-	for _, n := range append([]Need{Git}, needs...) {
-		if !n.ready() {
-			missing = append(missing, fmt.Sprintf("  - %s: %s", n.name, n.why))
-		}
-	}
-	if len(missing) > 0 {
-		t.Fatalf("system not ready for this test:\n%s", strings.Join(missing, "\n"))
-	}
-}
-
 func onPath(bin string) func() bool {
 	return func() bool {
 		_, err := exec.LookPath(bin)
 		return err == nil
 	}
+}
+
+var (
+	rootOnce sync.Once
+	rootDir  string
+)
+
+// repoRoot walks up from this source file to the directory holding go.mod.
+func repoRoot(t testing.TB) string {
+	t.Helper()
+	rootOnce.Do(func() {
+		_, here, _, ok := runtime.Caller(0)
+		if !ok {
+			return
+		}
+		for dir := filepath.Dir(here); ; dir = filepath.Dir(dir) {
+			if zfs.Exists(filepath.Join(dir, "go.mod")) {
+				rootDir = dir
+				return
+			}
+			if filepath.Dir(dir) == dir {
+				return
+			}
+		}
+	})
+	if rootDir == "" {
+		t.Fatal("ztest: no go.mod above the ztest package")
+	}
+	return rootDir
 }
