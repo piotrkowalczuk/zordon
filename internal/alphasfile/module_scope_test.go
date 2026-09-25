@@ -9,6 +9,36 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
+func TestCompile_moduleBinDir(t *testing.T) {
+	af := compile(t, `
+service "go" "gateway" {
+  git { url = "github.com/x/gw" }
+  runtime { cmd = ["${fs::bin()}/${self.name}"] }
+}
+module "payments" {
+  service "go" "db" {
+    git { url = "github.com/x/db" }
+    runtime { cmd = ["${fs::bin()}/${self.name}"] }
+  }
+}
+`, nil)
+	cases := map[string]struct{ binDir, cmd string }{
+		"gateway":     {"/proj/workspaces/main/bin", "/proj/workspaces/main/bin/gateway"},
+		"payments/db": {"/proj/workspaces/main/bin/payments", "/proj/workspaces/main/bin/payments/db"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := svcByName(af, name)
+			if s.Runtime.BinDir != c.binDir {
+				t.Errorf("BinDir = %q, want %q", s.Runtime.BinDir, c.binDir)
+			}
+			if got := s.Runtime.Command[0]; got != c.cmd {
+				t.Errorf("fs::bin()/self.name = %q, want %q", got, c.cmd)
+			}
+		})
+	}
+}
+
 func TestCompile_debuggerToolsGoToModulePin(t *testing.T) {
 	af := compile(t, `
 toolchain {

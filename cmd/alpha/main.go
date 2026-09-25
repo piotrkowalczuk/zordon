@@ -2453,6 +2453,16 @@ func toolchainKey(svc *alphasfile.Service) string {
 	return svc.Toolchain
 }
 
+// artifactName is the file name of a service's build output inside its
+// bin dir. It is the bare label, never the `<module>/<name>` display name:
+// the module is already the bin dir's last segment.
+func artifactName(svc *alphasfile.Service) string {
+	if svc.Runtime == nil {
+		return ""
+	}
+	return svc.Runtime.Name
+}
+
 // serviceNameOfRef maps a canonical service id (service.<tc>.<n> or
 // module.<m>.service.<tc>.<n>) to the state.services key, the display name.
 func serviceNameOfRef(id string) (string, bool) {
@@ -3150,10 +3160,10 @@ func buildCmd(svc *alphasfile.Service, checkout string, globalDotenv []string, g
 		// cargo-install) into the out-of-tree bin dir; run it from there.
 		// cwd = source checkout (when there is one) so relative config
 		// paths resolve.
-		argv := debuggerWrap(svc, append([]string{filepath.Join(binDir, name)}, svc.Flags()...))
+		argv := debuggerWrap(svc, append([]string{filepath.Join(binDir, artifactName(svc))}, svc.Flags()...))
 		cmd = exec.Command(argv[0], argv[1:]...)
 	default:
-		argv := debuggerWrap(svc, append([]string{name}, svc.Flags()...))
+		argv := debuggerWrap(svc, append([]string{artifactName(svc)}, svc.Flags()...))
 		cmd = exec.Command(argv[0], argv[1:]...)
 	}
 	if checkout != "" {
@@ -3192,8 +3202,18 @@ func buildCmd(svc *alphasfile.Service, checkout string, globalDotenv []string, g
 // toolchains ignore it.
 func defaultBuild(svc *alphasfile.Service, name, binDir, dest string) string {
 	out := filepath.Join(binDir, name)
-	root := filepath.Dir(binDir) // binDir = <stateDir>/bin
-	projectRoot := filepath.Dir(filepath.Dir(filepath.Dir(root)))
+	// binDir = <stateDir>/bin, or <stateDir>/bin/<module> for a module
+	// service. cargo install writes to <root>/bin, so a module gets its own
+	// cargo root and the installed binaries are copied into binDir.
+	stateDir := filepath.Dir(binDir)
+	root := stateDir
+	syncCargoBins := ""
+	if svc.Module != alphasfile.DefaultModule {
+		stateDir = filepath.Dir(stateDir)
+		root = filepath.Join(stateDir, "cargo", svc.Module)
+		syncCargoBins = fmt.Sprintf(" && cp -f %q/bin/* %q/", root, binDir)
+	}
+	projectRoot := filepath.Dir(filepath.Dir(stateDir))
 	rustCache := filepath.Join(projectRoot, ".zordon", "cache", "rust", "target")
 
 	// Use-only: install the dependency's binary into fs::bin, no checkout.
@@ -3232,8 +3252,8 @@ func defaultBuild(svc *alphasfile.Service, name, binDir, dest string) string {
 				opts += fmt.Sprintf(" --bin %q", b)
 			}
 			// crates are immutable ⇒ no --force (reuse if already installed).
-			return fmt.Sprintf("CARGO_TARGET_DIR=%q cargo install %q --root %q%s --locked",
-				rustCache, svc.Package.Install, root, opts)
+			return fmt.Sprintf("CARGO_TARGET_DIR=%q cargo install %q --root %q%s --locked%s",
+				rustCache, svc.Package.Install, root, opts, syncCargoBins)
 		}
 		return ""
 	}
@@ -3264,8 +3284,8 @@ func defaultBuild(svc *alphasfile.Service, name, binDir, dest string) string {
 		if svc.Package != nil && strings.TrimSpace(svc.Package.Bin) != "" {
 			opts += fmt.Sprintf(" --bin %q", svc.Package.Bin)
 		}
-		return fmt.Sprintf("CARGO_TARGET_DIR=%q cargo install --path . --root %q%s --locked --force",
-			rustCache, root, opts)
+		return fmt.Sprintf("CARGO_TARGET_DIR=%q cargo install --path . --root %q%s --locked --force%s",
+			rustCache, root, opts, syncCargoBins)
 	case alphasfile.ToolchainRuby:
 		// `--path` was removed in Bundler 2.x — write the path into the
 		// per-checkout .bundle/config first (so `bundle exec` at runtime
@@ -3635,9 +3655,7 @@ func prepareBuild(ctx context.Context, svc *alphasfile.Service, name, dest strin
 		binDir = svc.Runtime.BinDir
 	}
 	if binDir != "" {
-		// A module service's binary lands at <bin>/<module>/<name>, so the
-		// module subdir must exist before the toolchain default writes there.
-		if err := zfs.EnsureDir(filepath.Dir(filepath.Join(binDir, name))); err != nil {
+		if err := zfs.EnsureDir(binDir); err != nil {
 			return fmt.Errorf("mkdir bin dir: %w", err)
 		}
 	}
@@ -3649,7 +3667,7 @@ func prepareBuild(ctx context.Context, svc *alphasfile.Service, name, dest strin
 	if bc := svc.BuildCmd(); len(bc) > 0 {
 		log.Info("alpha", "prepare %s: build (%v)", name, bc)
 		c = exec.Command(bc[0], bc[1:]...)
-	} else if def := strings.TrimSpace(defaultBuild(svc, name, binDir, dest)); def != "" {
+	} else if def := strings.TrimSpace(defaultBuild(svc, artifactName(svc), binDir, dest)); def != "" {
 		log.Info("alpha", "prepare %s: build (%s)", name, def)
 		c = exec.Command("/bin/sh", "-c", def)
 	}

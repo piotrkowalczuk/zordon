@@ -5,7 +5,7 @@ sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 # `service.go.db` means that module's db; from outside it is
 # `module.payments.service.go.db`. Display names are `payments/db`,
 # `auth/api`, … (picks, `zordon status`, checkout dirs), and a module
-# service's binary builds to `${fs::bin()}/<module>/<name>`.
+# service builds into its module bin dir: `${fs::bin()}` there is `<bin>/<module>`.
 
 service "go" "gateway" {
   src {
@@ -50,7 +50,7 @@ module "payments" {
     vars = { port = net::pickport() }
 
     runtime {
-      cmd = ["${fs::bin()}/${self.module}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}", "-name", "${self.module}/${self.name}"]
+      cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}", "-name", "${self.module}/${self.name}"]
     }
 
     readiness {
@@ -73,7 +73,7 @@ module "payments" {
 
     runtime {
       cmd = [
-        "${fs::bin()}/${self.module}/${self.name}",
+        "${fs::bin()}/${self.name}",
         "-addr", "127.0.0.1:${self.vars.port}",
         "-name", "${self.module}/${self.name}",
         "-upstream", "db=127.0.0.1:${service.go.db.vars.port}",
@@ -102,7 +102,7 @@ module "auth" {
     vars = { port = net::pickport() }
 
     runtime {
-      cmd = ["${fs::bin()}/${self.module}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}", "-name", "${self.module}/${self.name}"]
+      cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}", "-name", "${self.module}/${self.name}"]
     }
 
     readiness {
@@ -125,7 +125,7 @@ module "auth" {
 
     runtime {
       cmd = [
-        "${fs::bin()}/${self.module}/${self.name}",
+        "${fs::bin()}/${self.name}",
         "-addr", "127.0.0.1:${self.vars.port}",
         "-name", "${self.module}/${self.name}",
         "-upstream", "db=127.0.0.1:${service.go.db.vars.port}",

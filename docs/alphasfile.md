@@ -112,7 +112,7 @@ module "payments" {
 | bare `service.<tc>.<name>` in expressions | default module | module `m` only, no fallback |
 | cross-module reference | `module.<other>.service.<tc>.<name>…` | `module.<other>.service.<tc>.<name>…` |
 | `toolchain.<lang>.ready` | `toolchain.<lang>@ready` | the module's own pin when declared, else the default pin |
-| build output | `${fs::bin()}/<name>` | `${fs::bin()}/m/<name>` |
+| `fs::bin()` and build output | `<state>/bin`, artifact `<name>` | `<state>/bin/m`, artifact `<name>` (a block moved into a module keeps `${fs::bin()}/${self.name}` unchanged) |
 | state dirs (`fs::etc()`, `fs::var()`) | `<state>/etc/<name>` | `<state>/etc/m/<name>` |
 | `zordon get` path | `service.<tc>.<name>.…` | `module.m.service.<tc>.<name>.…` |
 | MCP provision tool | `provision__<tc>_<name>__<step>` | `provision__<tc>_m_<name>__<step>` |

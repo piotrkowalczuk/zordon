@@ -454,6 +454,20 @@ func projectToolchains(toolchain map[string]*ToolchainConfig, modules []*moduleB
 	return out
 }
 
+// binDir is fs::bin() for a scope: the invocation's bin dir, one level
+// deeper for a module. Artifacts keep their bare names inside it because
+// `go install` and `cargo install` name binaries themselves, so the module
+// has to live in the directory, not in the file name.
+func (r *resolver) binDir(module string) string {
+	if r.inv == nil {
+		return ""
+	}
+	if module == DefaultModule {
+		return r.inv.BinDir()
+	}
+	return filepath.Join(r.inv.BinDir(), module)
+}
+
 // toolchainKeyFor picks the pin a service runs under: its module's own,
 // else the entrypoint's, else none.
 func (r *resolver) toolchainKeyFor(module, lang string) string {
@@ -971,7 +985,7 @@ func (r *resolver) finishService(st *svcState) error {
 		Files:     st.files,
 		Dir:       st.dir,
 		Checkout:  st.dirs.root,
-		BinDir:    r.inv.BinDir(),
+		BinDir:    r.binDir(sb.module),
 		EtcDir:    st.dirs.etc,
 		VarDir:    st.dirs.vardir,
 		Print:     printLine,
@@ -1905,14 +1919,14 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 	}
 	fns := map[string]function.Function{
 		// fs:: namespace — per-invocation filesystem coordinates and identity.
-		"fs::tmp":   str(func() string { return r.inv.TmpDir }),   // generated files
-		"fs::src":   str(func() string { return dirs.root }),      // src.path: checkout root (service scope only)
-		"fs::exe":   str(func() string { return dirs.exe }),       // src.path + src.exe: exe-anchored work dir (= self.dir)
-		"fs::bin":   str(func() string { return r.inv.BinDir() }), // build outputs (outside src)
-		"fs::state": str(func() string { return r.inv.StateDir }), // per-workspace state root (workspaces/<wt>)
-		"fs::etc":   str(func() string { return dirs.etc }),       // <StateDir>/etc/<svc>: generated config that must persist (service scope only)
-		"fs::var":   str(func() string { return dirs.vardir }),    // <StateDir>/var/<svc>: variable runtime state — db/logs (service scope only)
-		"fs::hash":  r.fsHashFunc(),                               // instance identity (location)
+		"fs::tmp":   str(func() string { return r.inv.TmpDir }),          // generated files
+		"fs::src":   str(func() string { return dirs.root }),             // src.path: checkout root (service scope only)
+		"fs::exe":   str(func() string { return dirs.exe }),              // src.path + src.exe: exe-anchored work dir (= self.dir)
+		"fs::bin":   str(func() string { return r.binDir(dirs.module) }), // build outputs (outside src); <bin>/<module> inside a module
+		"fs::state": str(func() string { return r.inv.StateDir }),        // per-workspace state root (workspaces/<wt>)
+		"fs::etc":   str(func() string { return dirs.etc }),              // <StateDir>/etc/<svc>: generated config that must persist (service scope only)
+		"fs::var":   str(func() string { return dirs.vardir }),           // <StateDir>/var/<svc>: variable runtime state — db/logs (service scope only)
+		"fs::hash":  r.fsHashFunc(),                                      // instance identity (location)
 		// cfg:: namespace — manifest identity (Alphasfile bytes + parent ctx).
 		"cfg::hash": r.cfgHashFunc(),
 		// src:: namespace — current service's source code identity.

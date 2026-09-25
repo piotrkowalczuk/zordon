@@ -2,6 +2,7 @@ package main
 
 import (
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
@@ -114,6 +115,76 @@ func TestAlphaState_ResolveBarrier_module(t *testing.T) {
 	}
 }
 
+// Toolchains that name the binary themselves (cargo install, go install)
+// must still produce <bin>/<module>/<name> for a module service, because
+// the default run path is BinDir joined with the bare service name.
+func TestDefaultBuild_moduleService(t *testing.T) {
+	const binDir = "/p/workspaces/main/bin/payments"
+	cases := map[string]struct {
+		svc      *alphasfile.Service
+		contains []string
+	}{
+		"go workspace build": {
+			svc:      moduleBuildSvc(alphasfile.ToolchainGo, &alphasfile.Package{Src: "/src"}),
+			contains: []string{`-o "/p/workspaces/main/bin/payments/db"`},
+		},
+		"go use-only install": {
+			svc:      moduleBuildSvc(alphasfile.ToolchainGo, &alphasfile.Package{Install: "example.com/cmd/db@v1"}),
+			contains: []string{`GOBIN="/p/workspaces/main/bin/payments"`},
+		},
+		"rust workspace build": {
+			svc: moduleBuildSvc(alphasfile.ToolchainRust, &alphasfile.Package{Src: "/src"}),
+			contains: []string{
+				`--root "/p/workspaces/main/cargo/payments"`,
+				`CARGO_TARGET_DIR="/p/.zordon/cache/rust/target"`,
+				`&& cp -f "/p/workspaces/main/cargo/payments"/bin/* "/p/workspaces/main/bin/payments"/`,
+			},
+		},
+		"rust crate install": {
+			svc: moduleBuildSvc(alphasfile.ToolchainRust, &alphasfile.Package{Install: "db", Version: "1.0.0"}),
+			contains: []string{
+				`--root "/p/workspaces/main/cargo/payments"`,
+				`&& cp -f "/p/workspaces/main/cargo/payments"/bin/* "/p/workspaces/main/bin/payments"/`,
+			},
+		},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			got := defaultBuild(c.svc, artifactName(c.svc), binDir, "/src")
+			for _, want := range c.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("missing %q in\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestDefaultBuild_defaultModuleRustUnchanged(t *testing.T) {
+	svc := &alphasfile.Service{
+		Toolchain: alphasfile.ToolchainRust,
+		Runtime:   &alphasfile.RuntimeConfig{Name: "db"},
+		Package:   &alphasfile.Package{Toolchain: alphasfile.ToolchainRust, Src: "/src"},
+	}
+	got := defaultBuild(svc, artifactName(svc), "/p/workspaces/main/bin", "/src")
+	want := `CARGO_TARGET_DIR="/p/.zordon/cache/rust/target" cargo install --path . --root "/p/workspaces/main" --locked --force`
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}
+
+func TestBuildCmd_moduleRunsBareArtifact(t *testing.T) {
+	svc := moduleBuildSvc(alphasfile.ToolchainGo, &alphasfile.Package{Src: "/src"})
+	svc.Runtime.BinDir = "/p/workspaces/main/bin/payments"
+	cmd, err := buildCmd(svc, "/src", nil, nil, false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Path != "/p/workspaces/main/bin/payments/db" {
+		t.Errorf("Path = %q", cmd.Path)
+	}
+}
+
 func TestNewServiceCtx_idFromDisplayName(t *testing.T) {
 	cases := map[string]struct{ name, want string }{
 		"flat":   {"db", "service.go.db"},
@@ -125,6 +196,16 @@ func TestNewServiceCtx_idFromDisplayName(t *testing.T) {
 				t.Errorf("id = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+func moduleBuildSvc(tc string, pkg *alphasfile.Package) *alphasfile.Service {
+	pkg.Toolchain = tc
+	return &alphasfile.Service{
+		Toolchain: tc,
+		Module:    "payments",
+		Runtime:   &alphasfile.RuntimeConfig{Name: "db"},
+		Package:   pkg,
 	}
 }
 
