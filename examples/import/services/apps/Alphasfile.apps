@@ -1,0 +1,65 @@
+# Two modules in one fragment. Both depend on kafka, so this file imports
+# kafka's module; without that import `module.kafka` is not visible here.
+import "../kafka/Alphasfile.kafka" {
+  modules = ["kafka"]
+}
+
+module "app" {
+  service "go" "app" {
+    src {
+      path = "../../../.."
+      exe  = "./examples/import/src/app"
+    }
+
+    vars = { port = net::pickport() }
+
+    runtime {
+      cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}"]
+
+      provision "topic" {
+        after = [self.runtime.ready, module.kafka.service.go.kafka.runtime.ready]
+        cmd   = module.kafka.service.go.kafka.runtime.provision.create-topic
+        env   = { TOPIC = "app-events" }
+      }
+    }
+
+    readiness {
+      http {
+        path = "/"
+        port = self.vars.port
+      }
+      period            = "200ms"
+      failure_threshold = 50
+    }
+  }
+}
+
+module "billing" {
+  service "go" "billing" {
+    src {
+      path = "../../../.."
+      exe  = "./examples/import/src/billing"
+    }
+
+    vars = { port = net::pickport() }
+
+    runtime {
+      cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}"]
+
+      provision "topic" {
+        after = [self.runtime.ready, module.kafka.service.go.kafka.runtime.ready]
+        cmd   = module.kafka.service.go.kafka.runtime.provision.create-topic
+        env   = { TOPIC = "billing-events" }
+      }
+    }
+
+    readiness {
+      http {
+        path = "/"
+        port = self.vars.port
+      }
+      period            = "200ms"
+      failure_threshold = 50
+    }
+  }
+}

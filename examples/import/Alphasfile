@@ -1,0 +1,8 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+# The entrypoint names only what it composes. kafka arrives because the apps
+# fragment imports it; it runs once, but this file cannot reference
+# module.kafka without importing it too.
+import "services/apps/Alphasfile.apps" {
+  modules = ["app", "billing"]
+}

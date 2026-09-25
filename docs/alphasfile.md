@@ -129,6 +129,56 @@ Rules:
 
 See [Pin different toolchain versions per module](how-to/pin-different-toolchain-versions.md) for the recipe and [examples/modules](https://github.com/piotrkowalczuk/zordon/tree/main/examples/modules) for a runnable stack.
 
+### Imports
+
+An `import` block pulls named modules out of another file.
+A module is the only unit of import; a file is just a container that may hold several modules.
+
+```hcl
+# Alphasfile (entrypoint)
+import "services/apps/Alphasfile.apps" {
+  modules = ["app", "billing"]
+}
+
+# services/apps/Alphasfile.apps (fragment)
+import "../kafka/Alphasfile.kafka" {
+  modules = ["kafka"]
+}
+module "app" {
+  service "go" "app" {
+    runtime {
+      provision "topic" {
+        cmd = module.kafka.service.go.kafka.runtime.provision.create-topic
+      }
+    }
+  }
+}
+module "billing" { … }
+
+# services/kafka/Alphasfile.kafka (fragment)
+module "kafka" { service "go" "kafka" { … } }
+```
+
+| rule | behavior |
+|---|---|
+| syntax | `import "<path>" { modules = ["<m>", …] }`, repeatable; `modules` is required and non-empty |
+| path | relative to the importing file's directory; `~/` and absolute paths allowed |
+| entrypoint vs fragment | a file named exactly `Alphasfile` is an entrypoint and cannot be imported; import a fragment, by convention `Alphasfile.<name>` |
+| fragment content | `import`, `module` and `sysenv` only; top-level `service`, `toolchain`, `env` and `dotenv` are errors |
+| loading | every file loads once; diamonds and cycles between files are fine |
+| instantiation | the entrypoint's own modules plus every module named in some loaded file's import; a declared but never imported module is left out |
+| visibility | a file may reference `module.<m>` only for modules it declares or imports; the error names the missing import |
+| duplicates | a module name is declared once across all loaded files |
+| relative `src { path }` | resolves against the directory of the file that declares the service |
+| `sysenv` | union of the entrypoint's and every fragment's list |
+| `cfg::hash()` and drift | covers the bytes of every loaded file, so editing a fragment restarts a level like editing its Alphasfile |
+| `zordon plan` | prints `# import <file> [modules]` per imported file and `# unused module <m> in <file>` under the level header |
+
+Imports are file-level: loading a file loads its imports, even when the importer only takes one of its modules.
+Remote sources inside `import` are reserved and currently rejected.
+
+See [Split an Alphasfile across files](how-to/split-an-alphasfile-across-files.md) for the recipe and [examples/import](https://github.com/piotrkowalczuk/zordon/tree/main/examples/import) for a runnable stack.
+
 ### Source: `git { }`, `src { }`, `crate { }`
 
 A service picks exactly one primary. The rest comes from toolchain

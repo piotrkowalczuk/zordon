@@ -78,6 +78,7 @@ nav:
       - Install the MCP bundle: how-to/install-the-mcp-bundle.md
       - Run parallel agents with workspaces: how-to/run-parallel-agents-with-workspaces.md
       - Pin different toolchain versions per module: how-to/pin-different-toolchain-versions.md
+      - Split an Alphasfile across files: how-to/split-an-alphasfile-across-files.md
   - Reference:
       - Binaries and layout: reference/binaries.md
       - zordon mcp: reference/mcp.md

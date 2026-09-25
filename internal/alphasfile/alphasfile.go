@@ -17,14 +17,11 @@ import (
 	"time"
 
 	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/gohcl"
-	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
-	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 const (
@@ -254,26 +251,14 @@ func (m *ServiceMeta) Workspaceable() bool {
 // (vars / arguments / files / readiness / sudo are ignored). Pure, needs no
 // Invocation — the entry point for `zordon workspace`.
 func ParseServices(path string) ([]*ServiceMeta, error) {
-	b, err := zfs.Read(path)
+	tree, err := LoadTree(path)
 	if err != nil {
-		return nil, fmt.Errorf("alphasfile read: %w", err)
-	}
-	parser := hclparse.NewParser()
-	file, diags := parser.ParseHCL(b, path)
-	if diags.HasErrors() {
-		return nil, fmt.Errorf("alphasfile parse: %s", diags.Error())
-	}
-	var root rootBlock
-	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
-		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
-	}
-	if err := annotateModules(&root); err != nil {
 		return nil, err
 	}
-	base := filepath.Dir(path) // relative src/sparse anchor = Alphasfile dir
-	blocks := root.allServices()
+	blocks := tree.merged().allServices()
 	out := make([]*ServiceMeta, 0, len(blocks))
 	for _, sb := range blocks {
+		base := sb.file.dir // relative src anchor = the declaring file's dir
 		pkg := &Package{Toolchain: sb.Toolchain}
 		srcPath := ""
 		if sb.Src != nil {
@@ -683,6 +668,22 @@ type rootBlock struct {
 	// is how to cut one service's checkout.
 	Workspace *workspaceRootBlock `hcl:"workspace,block"`
 	Modules   []*moduleBlock      `hcl:"module,block"`
+	Imports   []*importBlock      `hcl:"import,block"`
+
+	// gohcl synthesizes a null expression for an absent optional
+	// attribute, so presence is read off the attribute's range.
+	DotenvRange hcl.Range `hcl:"dotenv,attr_range"`
+	EnvRange    hcl.Range `hcl:"env,attr_range"`
+	SysEnvRange hcl.Range `hcl:"sysenv,attr_range"`
+}
+
+// importBlock pulls named modules out of another file:
+// `import "<path>" { modules = ["a", "b"] }`.
+type importBlock struct {
+	Path     string    `hcl:"path,label"`
+	Modules  []string  `hcl:"modules"`
+	Git      *gitBlock `hcl:"git,block"`
+	DefRange hcl.Range `hcl:",def_range"`
 }
 
 // moduleBlock is a named namespace of services with an optional toolchain
@@ -701,6 +702,8 @@ type moduleBlock struct {
 // labeled block) means `toolchain { go { ... } nodejs { ... } }`
 // catches typos at decode time, not at runtime in alpha.
 type toolchainBlock struct {
+	DefRange hcl.Range `hcl:",def_range"`
+
 	Go     *langToolchainBlock `hcl:"go,block"`
 	Rust   *langToolchainBlock `hcl:"rust,block"`
 	Ruby   *langToolchainBlock `hcl:"ruby,block"`
@@ -751,7 +754,9 @@ type serviceBlock struct {
 	Toolchain string    `hcl:"toolchain,label"`
 	Name      string    `hcl:"name,label"`
 	DefRange  hcl.Range `hcl:",def_range"`
+	Body      hcl.Body  `hcl:",body"`
 	module    string
+	file      *treeFile // declaring file: anchors relative src.path, scopes module visibility
 
 	// static fields
 	Color string    `hcl:"color,optional"`
@@ -1066,11 +1071,21 @@ type regionOpBlock struct {
 // pre-seeds the flat service namespace with values resolved by Alphasfiles
 // higher in a federation chain (nil for a standalone file).
 func Open(path string, inv *invocation.InvocationState, parent *ParentContext, cfgHash string, testCfg TestConfig) (*Alphasfile, error) {
-	b, err := zfs.Read(path)
+	tree, err := LoadTree(path)
 	if err != nil {
-		return nil, fmt.Errorf("alphasfile read: %w", err)
+		return nil, err
 	}
-	return Compile(path, b, inv, parent, cfgHash, testCfg)
+	return Resolve(tree, inv, parent, cfgHash, testCfg)
+}
+
+// Resolve is Open for an already loaded Tree, so a caller that hashed the
+// tree's bytes evaluates exactly those bytes.
+func Resolve(tree *Tree, inv *invocation.InvocationState, parent *ParentContext, cfgHash string, testCfg TestConfig) (*Alphasfile, error) {
+	p, err := NewManifestStateFromTree(tree, inv).Plan(parent, cfgHash, testCfg)
+	if err != nil {
+		return nil, err
+	}
+	return p.Compute()
 }
 
 // Compile is Open without filesystem I/O: it resolves the given Alphasfile
@@ -1097,27 +1112,28 @@ func Compile(name string, src []byte, inv *invocation.InvocationState, parent *P
 // — federation parent context enters at Plan, not here.
 type ManifestState struct {
 	name string
+	tree *Tree
 	root *rootBlock
 	inv  *invocation.InvocationState
 }
 
-// NewManifestState parses Alphasfile source into its block tree. This is the
-// only step that fails on HCL syntax; ordering (Plan) and evaluation (Compute)
-// come after.
+// NewManifestState parses a single inline Alphasfile into its block tree.
+// This is the only step that fails on HCL syntax; ordering (Plan) and
+// evaluation (Compute) come after. Imports need a file on disk, see
+// NewManifestStateFromTree.
 func NewManifestState(name string, src []byte, inv *invocation.InvocationState) (*ManifestState, error) {
-	parser := hclparse.NewParser()
-	file, diags := parser.ParseHCL(src, name)
-	if diags.HasErrors() {
-		return nil, fmt.Errorf("alphasfile parse: %s", diags.Error())
-	}
-	var root rootBlock
-	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
-		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
-	}
-	if err := annotateModules(&root); err != nil {
+	tree, err := ParseTree(name, src)
+	if err != nil {
 		return nil, err
 	}
-	return &ManifestState{name: name, root: &root, inv: inv}, nil
+	m := NewManifestStateFromTree(tree, inv)
+	m.name = name
+	return m, nil
+}
+
+// NewManifestStateFromTree places a loaded Tree in its invocation.
+func NewManifestStateFromTree(tree *Tree, inv *invocation.InvocationState) *ManifestState {
+	return &ManifestState{name: tree.Root(), tree: tree, root: tree.merged(), inv: inv}
 }
 
 // ParentContext carries what a federation child needs from its parents:
