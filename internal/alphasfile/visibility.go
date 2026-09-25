@@ -9,10 +9,10 @@ import (
 )
 
 // checkVisibility reports a `module.<m>` reference to a module of this
-// manifest that the referencing file neither declares nor imports. The
+// manifest that the referencing scope neither declares nor imports. The
 // evaluation context already hides such modules; this pass exists to point
-// at the expression and name the missing import.
-func checkVisibility(services []*serviceBlock, owners map[string]string) error {
+// at the expression and name the missing import and where it goes.
+func checkVisibility(services []*serviceBlock, tree *Tree) error {
 	for _, sb := range services {
 		if sb.file == nil || sb.Body == nil {
 			continue
@@ -34,15 +34,19 @@ func checkVisibility(services []*serviceBlock, owners map[string]string) error {
 			if !ok {
 				return nil
 			}
-			owner, isLocal := owners[name]
-			if !isLocal || sb.file.visible[name] {
+			owner := tree.owners[name]
+			if owner == nil || tree.visible(sb.module, name) {
 				return nil
 			}
-			rel, err := filepath.Rel(sb.file.dir, owner)
+			rel, err := filepath.Rel(sb.file.dir, owner.path)
 			if err != nil {
-				rel = owner
+				rel = owner.path
 			}
-			found = fmt.Errorf("%s: module.%s is not visible in %s; add import %q { modules = [%q] }", st.SrcRange, name, sb.file.path, rel, name)
+			scope, where := "the top level of "+sb.file.path, "at the top level"
+			if sb.module != DefaultModule {
+				scope, where = fmt.Sprintf("module %q (%s)", sb.module, sb.file.path), fmt.Sprintf("inside module %q", sb.module)
+			}
+			found = fmt.Errorf("%s: module.%s is not visible in %s; add import %q { modules = [%q] } %s", st.SrcRange, name, scope, rel, name, where)
 			return nil
 		})
 		if found != nil {

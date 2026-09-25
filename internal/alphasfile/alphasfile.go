@@ -305,6 +305,16 @@ func (rb *rootBlock) allServices() []*serviceBlock {
 	return out
 }
 
+// allImports is every import block of the file: the top level's, then each
+// module's.
+func (rb *rootBlock) allImports() []*importBlock {
+	out := append([]*importBlock(nil), rb.Imports...)
+	for _, mb := range rb.Modules {
+		out = append(out, mb.Imports...)
+	}
+	return out
+}
+
 // resolveSrcDir turns a `src` value into an absolute path: ~ expands to
 // $HOME; absolute stays; relative resolves against base (the Alphasfile's
 // directory). Empty stays empty.
@@ -693,6 +703,7 @@ type importBlock struct {
 type moduleBlock struct {
 	Name      string          `hcl:"name,label"`
 	DefRange  hcl.Range       `hcl:",def_range"`
+	Imports   []*importBlock  `hcl:"import,block"`
 	Toolchain *toolchainBlock `hcl:"toolchain,block"`
 	Services  []*serviceBlock `hcl:"service,block"`
 }

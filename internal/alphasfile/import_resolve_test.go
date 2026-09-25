@@ -14,8 +14,9 @@ func TestOpen_transitiveModuleChain(t *testing.T) {
 	root := writeTree(t, dir, map[string]string{
 		"Alphasfile": "import \"a/Alphasfile.a\" { modules = [\"a\"] }\nimport \"c/Alphasfile.c\" { modules = [\"c\"] }\n",
 		"a/Alphasfile.a": `
-import "../b/Alphasfile.b" { modules = ["b"] }
 module "a" {
+  import "../b/Alphasfile.b" { modules = ["b"] }
+
   service "go" "a" {
     git { url = "github.com/x/a" }
     vars = { upstream = module.b.service.go.b.vars.port }
@@ -69,8 +70,9 @@ service "go" "z" {
 }
 `, body),
 				"a/Alphasfile.a": `
-import "../b/Alphasfile.b" { modules = ["b"] }
-module "a" {}
+module "a" {
+  import "../b/Alphasfile.b" { modules = ["b"] }
+}
 `,
 				"b/Alphasfile.b": `
 module "b" {
@@ -107,8 +109,9 @@ func TestOpen_visibilityOK_cycle(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `import "Alphasfile.a" { modules = ["a"] }`,
 		"Alphasfile.a": `
-import "Alphasfile.b" { modules = ["b"] }
 module "a" {
+  import "Alphasfile.b" { modules = ["b"] }
+
   service "go" "a" {
     git { url = "github.com/x/a" }
     vars = { port = 1 }
@@ -117,8 +120,9 @@ module "a" {
 }
 `,
 		"Alphasfile.b": `
-import "Alphasfile.a" { modules = ["a"] }
 module "b" {
+  import "Alphasfile.a" { modules = ["a"] }
+
   service "go" "b" {
     git { url = "github.com/x/b" }
     vars = { port = 2 }

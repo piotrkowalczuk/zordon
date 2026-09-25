@@ -125,10 +125,8 @@ type resolver struct {
 	// ToolchainKey; finishService reads a service's key off it.
 	toolchain map[string]*ToolchainConfig
 
-	// tree is the loaded manifest; owners maps each instantiated module to
-	// the file declaring it, which is what file-level visibility checks.
-	tree   *Tree
-	owners map[string]string
+	// tree is the loaded manifest; it decides which modules a scope sees.
+	tree *Tree
 
 	// service ids already taken (parent or local); collision is an error.
 	taken map[string]string // ServiceRef → origin ("parent" | "local")
@@ -179,7 +177,6 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 		cfgHash:         cfgHash,
 		serviceByModule: seed,
 		tree:            m.tree,
-		owners:          m.tree.moduleOwners(),
 		taken:           map[string]string{},
 		testCfg:         testCfg,
 	}
@@ -221,7 +218,7 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	// resolvable, regardless of evaluation order — they're constants
 	// derived from labels, not expressions.
 	services := root.allServices()
-	if err := checkVisibility(services, r.owners); err != nil {
+	if err := checkVisibility(services, r.tree); err != nil {
 		return nil, err
 	}
 	states, err := r.prepareServices(services)
@@ -520,12 +517,11 @@ type svcState struct {
 // working dir (fs::exe ≈ src.path + src.exe = self.dir). Zero value = file scope
 // (no service): both "", so fs::src/fs::exe error cleanly.
 type srcDirs struct {
-	root   string    // checkout root        → fs::src()
-	exe    string    // <checkout>/<exe>      → fs::exe()
-	etc    string    // <StateDir>/etc/<svc>  → fs::etc()
-	vardir string    // <StateDir>/var/<svc>  → fs::var()
-	module string    // scope of bare `service.*` / `toolchain.*` traversals
-	file   *treeFile // declaring file; nil at file scope (all modules visible)
+	root   string // checkout root        → fs::src()
+	exe    string // <checkout>/<exe>      → fs::exe()
+	etc    string // <StateDir>/etc/<svc>  → fs::etc()
+	vardir string // <StateDir>/var/<svc>  → fs::var()
+	module string // scope of bare `service.*` / `toolchain.*` traversals and of module visibility
 }
 
 // prepareServices initializes one svcState per service: validates
@@ -646,7 +642,7 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 			dir:      dir,
 			self:     self,
 			fileVals: map[string]cty.Value{},
-			dirs:     srcDirs{root: checkout, exe: dir, etc: etcDir, vardir: varDir, module: sb.module, file: sb.file},
+			dirs:     srcDirs{root: checkout, exe: dir, etc: etcDir, vardir: varDir, module: sb.module},
 			srcPath:  srcPath,
 		}
 		out[sid] = st
@@ -1667,18 +1663,12 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 	if len(tcs) > 0 {
 		vars["toolchain"] = cty.ObjectVal(copyCtyMap(tcs))
 	}
-	// Every module is addressable as module.<m>.{service,toolchain} from
-	// anywhere; the default module has no such handle (it composes, it is
-	// not composed).
+	// A module is addressable as module.<m>.{service,toolchain} where the
+	// scope sees it (Tree.visible); the default module has no such handle (it
+	// composes, it is not composed).
 	modules := map[string]cty.Value{}
 	visible := func(name string) bool {
-		if name == DefaultModule {
-			return false
-		}
-		if _, local := r.owners[name]; local && dirs.file != nil {
-			return dirs.file.visible[name]
-		}
-		return true
+		return name != DefaultModule && r.tree.visible(dirs.module, name)
 	}
 	for name := range r.serviceByModule {
 		if visible(name) {

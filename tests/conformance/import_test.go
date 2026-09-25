@@ -23,11 +23,11 @@ import "services/apps/Alphasfile.apps" {
 `
 
 const importApps = `
-import "../db/Alphasfile.db" {
-  modules = ["db"]
-}
-
 module "app" {
+  import "../db/Alphasfile.db" {
+    modules = ["db"]
+  }
+
   service "go" "app" {
     package = "example.com/app@v0.0.0"
     vars = {

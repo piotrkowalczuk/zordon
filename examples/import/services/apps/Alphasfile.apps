@@ -1,10 +1,11 @@
-# Two modules in one fragment. Both depend on kafka, so this file imports
-# kafka's module; without that import `module.kafka` is not visible here.
-import "../kafka/Alphasfile.kafka" {
-  modules = ["kafka"]
-}
-
+# Two modules in one fragment. Each depends on kafka, so each imports it:
+# an import belongs to the module that needs it and joins the stack only
+# with that module. Without it `module.kafka` is not visible in the module.
 module "app" {
+  import "../kafka/Alphasfile.kafka" {
+    modules = ["kafka"]
+  }
+
   service "go" "app" {
     src {
       path = "../../../.."
@@ -35,6 +36,10 @@ module "app" {
 }
 
 module "billing" {
+  import "../kafka/Alphasfile.kafka" {
+    modules = ["kafka"]
+  }
+
   service "go" "billing" {
     src {
       path = "../../../.."

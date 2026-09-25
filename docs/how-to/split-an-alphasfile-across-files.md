@@ -42,16 +42,16 @@ import "services/kafka/Alphasfile.kafka" {
 
 Reference the moved service as `module.kafka.service.go.kafka`, start it with `zordon start kafka/kafka`, and read it with `zordon get module.kafka.service.go.kafka.vars.port`.
 
-## 3. Let dependent fragments import their dependencies
+## 3. Import dependencies inside the module that needs them
 
-If `services/apps/Alphasfile.apps` holds modules that call kafka, import kafka from that file:
+If a module in `services/apps/Alphasfile.apps` calls kafka, import kafka inside that module:
 
 ```hcl
-import "../kafka/Alphasfile.kafka" {
-  modules = ["kafka"]
-}
-
 module "app" {
+  import "../kafka/Alphasfile.kafka" {
+    modules = ["kafka"]
+  }
+
   service "go" "app" {
     runtime {
       after = [module.kafka.service.go.kafka.runtime.ready]
@@ -61,7 +61,9 @@ module "app" {
 ```
 
 The entrypoint then only imports `app`; kafka comes along and still loads once.
-The entrypoint cannot reference `module.kafka` until it imports kafka itself, and `zordon plan` names the missing import if it tries.
+Every other module in the same file that calls kafka imports it too, because an import belongs to one module and joins the stack only with it.
+To call a module declared in the same fragment, import it by the fragment's own file name.
+The entrypoint cannot reference `module.kafka` until it imports kafka itself, and `zordon plan` names the missing import and where it goes.
 
 ## 4. Verify without starting anything
 

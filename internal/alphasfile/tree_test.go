@@ -14,7 +14,7 @@ func TestLoadTree_resolvesImportRelativeToImporter(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
 		"Alphasfile":           `import "a/Alphasfile.a" { modules = ["a"] }`,
-		"a/Alphasfile.a":       "import \"../b/Alphasfile.b\" { modules = [\"b\"] }\nmodule \"a\" {}\n",
+		"a/Alphasfile.a":       "module \"a\" {\n  import \"../b/Alphasfile.b\" { modules = [\"b\"] }\n}\n",
 		"b/Alphasfile.b":       `module "b" {}`,
 		"b/Alphasfile.ignored": `module "x" {}`,
 	})
@@ -32,8 +32,8 @@ func TestLoadTree_loadsOnce_diamond(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
 		"Alphasfile":   "import \"Alphasfile.a\" { modules = [\"a\"] }\nimport \"Alphasfile.b\" { modules = [\"b\"] }\n",
-		"Alphasfile.a": "import \"Alphasfile.c\" { modules = [\"c\"] }\nmodule \"a\" {}\n",
-		"Alphasfile.b": "import \"Alphasfile.c\" { modules = [\"c\"] }\nmodule \"b\" {}\n",
+		"Alphasfile.a": "module \"a\" {\n  import \"Alphasfile.c\" { modules = [\"c\"] }\n}\n",
+		"Alphasfile.b": "module \"b\" {\n  import \"Alphasfile.c\" { modules = [\"c\"] }\n}\n",
 		"Alphasfile.c": `module "c" {}`,
 	})
 	tree, err := LoadTree(root)
@@ -58,8 +58,8 @@ func TestLoadTree_loadsOnce_cycle(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
 		"Alphasfile":   `import "Alphasfile.a" { modules = ["a"] }`,
-		"Alphasfile.a": "import \"Alphasfile.b\" { modules = [\"b\"] }\nmodule \"a\" {}\n",
-		"Alphasfile.b": "import \"Alphasfile.a\" { modules = [\"a\"] }\nmodule \"b\" {}\n",
+		"Alphasfile.a": "module \"a\" {\n  import \"Alphasfile.b\" { modules = [\"b\"] }\n}\n",
+		"Alphasfile.b": "module \"b\" {\n  import \"Alphasfile.a\" { modules = [\"a\"] }\n}\n",
 	})
 	tree, err := LoadTree(root)
 	if err != nil {
