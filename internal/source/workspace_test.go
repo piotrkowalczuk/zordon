@@ -10,12 +10,15 @@ import (
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 func run(ctx context.Context, c *exec.Cmd) error { return c.Run() }
 
 func git(t *testing.T, dir string, args ...string) {
 	t.Helper()
+	ztest.AssertSystem(t)
 	c := exec.Command("git", args...)
 	c.Dir = dir
 	if out, err := c.CombinedOutput(); err != nil {

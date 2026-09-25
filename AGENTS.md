@@ -12,7 +12,7 @@
 ## Testing
 
 - Keep private helpers under the actual tests.
-- **Go tests never skip:** a missing prerequisite (git, python3, …) is a broken environment, so fail with `t.Fatal` and name it; `make lint` rejects any `t.Skip*`. A test that can never run is not a test: implement it or delete it.
+- **Go tests never skip:** a missing prerequisite is a broken environment, so the test fails naming it; `make lint` rejects any `t.Skip*`. State prerequisites once, in the shared helper, with `ztest.AssertSystem(t, needs...)` (`internal/ztest`): git is always required, `ztest.Toolchain(home)` adds the mise bootstrap every toolchain needs, `ztest.Python3` a python helper. A test that can never run is not a test: implement it or delete it.
 - **Examples skip only locally:** `skip`/`need` in `examples/_lib.sh` and the gates in `make e2e` cover what depends on the machine (network, sudo, OS). CI sets `ZORDON_NO_SKIP=1`, which turns every such skip into a failure.
 - **Deliberate use of `t.Parallel()`:**
   - Do not blindly apply `t.Parallel()` to every test function.

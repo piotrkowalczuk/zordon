@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 // StartOption configures a Start invocation.
@@ -56,6 +58,7 @@ func StartEnv(key, value string) StartOption {
 // testing.TB explicitly so the helper can be driven from a subtest's t.
 func (p *Project) Start(t testing.TB, opts ...StartOption) *StartOutcome {
 	t.Helper()
+	ztest.AssertSystem(t, ztest.Toolchain(p.home))
 	o := startOpts{bringup: 15 * time.Minute}
 	for _, fn := range opts {
 		fn(&o)
