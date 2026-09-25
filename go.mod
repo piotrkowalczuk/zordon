@@ -1,6 +1,6 @@
 module github.com/piotrkowalczuk/zordon
 
-go 1.26.5
+go 1.27.0
 
 require (
 	github.com/BurntSushi/toml v1.6.0
@@ -84,7 +84,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/grpc v1.79.3 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
-	honnef.co/go/tools v0.7.0 // indirect
+	honnef.co/go/tools v0.8.1 // indirect
 )
 
 tool (

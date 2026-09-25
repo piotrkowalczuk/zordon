@@ -13,7 +13,7 @@ toolchain {
   go {
     # mcp-dap-server HEAD currently requires Go ≥ 1.26.1; pin an older
     # mcp-dap-server tag under `tools` below if you need an older Go.
-    version = "1.26.5"
+    version = "1.27.0"
   }
 }
 
