@@ -63,6 +63,32 @@ func TestDisplayName_roundTrip(t *testing.T) {
 	}
 }
 
+func TestParseToolchainRef(t *testing.T) {
+	cases := map[string]struct {
+		entity, key string
+		ok          bool
+	}{
+		"flat":                {"toolchain.go", "go", true},
+		"module":              {"module.legacy.toolchain.go", "legacy/go", true},
+		"pkg tool key":        {"toolchain.aqua:etcd-io/etcd", "aqua:etcd-io/etcd", true},
+		"service ref":         {"module.legacy.service.go.api", "", false},
+		"empty flat":          {"toolchain.", "", false},
+		"module without lang": {"module.legacy.toolchain.", "", false},
+		"unrelated root":      {"service.go.api", "", false},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			key, ok := ParseToolchainRef(c.entity)
+			if key != c.key || ok != c.ok {
+				t.Errorf("got (%q,%v), want (%q,%v)", key, ok, c.key, c.ok)
+			}
+		})
+	}
+	if got := ToolchainRef("legacy", "go"); got != "module.legacy.toolchain.go" {
+		t.Errorf("ToolchainRef = %q", got)
+	}
+}
+
 func TestToolchainKey_roundTrip(t *testing.T) {
 	cases := map[string]struct{ module, lang, key string }{
 		"flat":   {"", "go", "go"},

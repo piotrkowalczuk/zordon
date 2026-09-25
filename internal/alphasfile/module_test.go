@@ -197,6 +197,22 @@ service "go" "payments/db" {
 	}
 }
 
+func TestCompile_moduleNameCollidesWithTopLevelService(t *testing.T) {
+	err := compileErr(t, `
+service "go" "payments" {
+  git { url = "github.com/x/p" }
+}
+module "payments" {
+  service "go" "db" {
+    git { url = "github.com/x/db" }
+  }
+}
+`)
+	if err == nil || !strings.Contains(err.Error(), `module "payments" has the same name as the top-level service`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestCompile_duplicateModuleName(t *testing.T) {
 	err := compileErr(t, `
 module "payments" {}
@@ -289,9 +305,9 @@ module "modern" {
 }
 `, nil)
 	cases := map[string]string{
-		"legacy/billing": "toolchain.legacy/go@ready",
+		"legacy/billing": "module.legacy.toolchain.go@ready",
 		"modern/api":     "toolchain.go@ready",
-		"gateway":        "toolchain.legacy/go@ready",
+		"gateway":        "module.legacy.toolchain.go@ready",
 	}
 	for name, want := range cases {
 		if got := svcByName(af, name).Runtime.After; len(got) != 1 || got[0] != want {

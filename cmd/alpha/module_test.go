@@ -97,9 +97,10 @@ func TestAlphaState_ResolveBarrier_module(t *testing.T) {
 		"module runtime":             {"module.payments.service.go.db.runtime@ready", true},
 		"module build":               {"module.payments.service.go.db.build@success", true},
 		"flat runtime":               {"service.go.db.runtime@ready", true},
-		"module toolchain key":       {"toolchain.legacy/go@ready", true},
+		"module toolchain ref":       {"module.legacy.toolchain.go@ready", true},
+		"module toolchain by key":    {"toolchain.legacy/go@ready", true},
 		"unknown module":             {"module.auth.service.go.db.runtime@ready", false},
-		"unpinned toolchain key":     {"toolchain.auth/go@ready", false},
+		"unpinned module toolchain":  {"module.auth.toolchain.go@ready", false},
 		"module ref without service": {"module.payments.runtime@ready", false},
 	}
 	for hint, c := range cases {
@@ -182,6 +183,34 @@ func TestBuildCmd_moduleRunsBareArtifact(t *testing.T) {
 	}
 	if cmd.Path != "/p/workspaces/main/bin/payments/db" {
 		t.Errorf("Path = %q", cmd.Path)
+	}
+}
+
+func TestImplicitRuntimeAfter_moduleToolchainRef(t *testing.T) {
+	s := &alphaState{}
+	legacy := newToolchainCtx("go", "1.22.0", nil, nil)
+	legacy.key = "legacy/go"
+	s.addToolchain(legacy)
+	s.addToolchain(newToolchainCtx("go", "1.27.0", nil, nil))
+
+	cases := map[string]struct {
+		svc  *alphasfile.Service
+		want string
+	}{
+		"module pin":            {&alphasfile.Service{Toolchain: "go", Module: "legacy", ToolchainKey: "legacy/go"}, "module.legacy.toolchain.go@ready"},
+		"module on default pin": {&alphasfile.Service{Toolchain: "go", Module: "modern", ToolchainKey: "go"}, "toolchain.go@ready"},
+		"top level":             {&alphasfile.Service{Toolchain: "go", ToolchainKey: "go"}, "toolchain.go@ready"},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			got := implicitRuntimeAfter(c.svc, s)
+			if len(got) != 1 || got[0] != c.want {
+				t.Fatalf("got %v, want [%s]", got, c.want)
+			}
+			if _, err := s.resolveBarrier(got[0]); err != nil {
+				t.Errorf("implicit dep must resolve: %v", err)
+			}
+		})
 	}
 }
 

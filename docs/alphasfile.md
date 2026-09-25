@@ -111,7 +111,7 @@ module "payments" {
 | display name (picks, `zordon status`, checkout dir, worktree branch) | `<name>` | `m/<name>` |
 | bare `service.<tc>.<name>` in expressions | default module | module `m` only, no fallback |
 | cross-module reference | `module.<other>.service.<tc>.<name>…` | `module.<other>.service.<tc>.<name>…` |
-| `toolchain.<lang>.ready` | `toolchain.<lang>@ready` | the module's own pin when declared, else the default pin |
+| `toolchain.<lang>.ready` | `toolchain.<lang>@ready` | `module.m.toolchain.<lang>@ready` for the module's own pin, else `toolchain.<lang>@ready` |
 | `fs::bin()` and build output | `<state>/bin`, artifact `<name>` | `<state>/bin/m`, artifact `<name>` (a block moved into a module keeps `${fs::bin()}/${self.name}` unchanged) |
 | state dirs (`fs::etc()`, `fs::var()`) | `<state>/etc/<name>` | `<state>/etc/m/<name>` |
 | `zordon get` path | `service.<tc>.<name>.…` | `module.m.service.<tc>.<name>.…` |

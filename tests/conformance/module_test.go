@@ -85,7 +85,7 @@ module "auth" {
 		`module "auth" {`,
 		`version = "1.27.0"`,
 		`version = "1.22.0"`,
-		`"toolchain.payments/go@ready"`,
+		`"module.payments.toolchain.go@ready"`,
 		`"toolchain.go@ready"`,
 		`"module.payments.service.go.db.runtime@ready"`,
 		`"module.payments.service.go.api.runtime@ready"`,

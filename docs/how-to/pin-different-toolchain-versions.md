@@ -52,7 +52,7 @@ Inside the module, keep using bare `service.go.<name>` for sibling services.
 zordon plan
 ```
 
-The rendered manifest shows a `toolchain { go { version = "1.22.0" } }` block nested inside `module "legacy" { … }` and `after = ["toolchain.legacy/go@ready"]` on billing.
+The rendered manifest shows a `toolchain { go { version = "1.22.0" } }` block nested inside `module "legacy" { … }` and `after = ["module.legacy.toolchain.go@ready"]` on billing.
 Run `zordon start` once the plan looks right; alpha materializes both Go versions through mise and each service runs under its own.
 
 !!! note "One pin per language per module"

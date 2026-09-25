@@ -466,12 +466,11 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 		return nil, fmt.Errorf("barrier ref %q has no @state suffix", ref)
 	}
 	entityID, state := ref[:at], lifecycle.State(ref[at+1:])
-	// Toolchain ref: `toolchain.<lang>`. Cheapest to check first by
-	// prefix because nothing else starts with it.
-	if after, ok := strings.CutPrefix(entityID, "toolchain."); ok {
-		lang := after
+	// Toolchain ref: `toolchain.<key>` or `module.<m>.toolchain.<lang>`.
+	// Checked first: neither form can be a service ref.
+	if key, ok := alphasfile.ParseToolchainRef(entityID); ok {
 		s.mu.RLock()
-		tc := s.toolchains[lang]
+		tc := s.toolchains[key]
 		s.mu.RUnlock()
 		if tc == nil {
 			return nil, fmt.Errorf("unknown toolchain %q (not pinned in Alphasfile.toolchain{})", entityID)
@@ -2480,7 +2479,11 @@ func implicitRuntimeAfter(svc *alphasfile.Service, state *alphaState) []string {
 	_, pinned := state.toolchains[key]
 	state.mu.RUnlock()
 	if pinned {
-		deps = append(deps, "toolchain."+key+"@ready")
+		ref := "toolchain." + key
+		if prefix := svc.Module + "/"; svc.Module != alphasfile.DefaultModule && key == svc.ToolchainKey && strings.HasPrefix(key, prefix) {
+			ref = alphasfile.ToolchainRef(svc.Module, strings.TrimPrefix(key, prefix))
+		}
+		deps = append(deps, ref+"@ready")
 	}
 	if svc.Runtime != nil {
 		deps = append(deps, svc.Runtime.After...)

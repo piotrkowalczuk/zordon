@@ -83,6 +83,34 @@ func ToolchainKey(module, lang string) string {
 	return module + "/" + lang
 }
 
+// ToolchainRef is the barrier entity of a toolchain pin, shaped like the
+// HCL path that reaches it: `toolchain.<lang>` for the entrypoint's pin,
+// `module.<m>.toolchain.<lang>` for a module's own pin.
+func ToolchainRef(module, lang string) string {
+	if module == DefaultModule {
+		return "toolchain." + lang
+	}
+	return "module." + module + ".toolchain." + lang
+}
+
+// ParseToolchainRef maps a toolchain barrier entity back to its toolchain
+// key. The flat form passes its key through verbatim, since a pkg tool key
+// such as `aqua:etcd-io/etcd` may itself contain '/'.
+func ParseToolchainRef(entity string) (key string, ok bool) {
+	if after, found := strings.CutPrefix(entity, "module."); found {
+		m, lang, found := strings.Cut(after, ".toolchain.")
+		if !found || m == "" || lang == "" {
+			return "", false
+		}
+		return ToolchainKey(m, lang), true
+	}
+	key, found := strings.CutPrefix(entity, "toolchain.")
+	if !found || key == "" {
+		return "", false
+	}
+	return key, true
+}
+
 // ToolchainLang recovers the language label from a toolchain key.
 func ToolchainLang(key string) string {
 	if i := strings.LastIndexByte(key, '/'); i >= 0 {
@@ -108,6 +136,11 @@ func annotateModules(root *rootBlock) error {
 		seen[mb.Name] = mb
 		for _, sb := range mb.Services {
 			sb.module = mb.Name
+		}
+	}
+	for _, sb := range root.Services {
+		if mb, clash := seen[sb.Name]; clash {
+			return fmt.Errorf("%s: module %q has the same name as the top-level service declared at %s; both would own <state>/{bin,src,etc,var}/%s and the git branch zordon/<ws>/%s, so rename one of them", mb.DefRange, mb.Name, sb.DefRange, sb.Name, sb.Name)
 		}
 	}
 	for _, sb := range root.allServices() {

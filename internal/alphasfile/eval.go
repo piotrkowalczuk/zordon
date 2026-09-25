@@ -427,18 +427,19 @@ func (r *resolver) evalToolchainBlock(tb *toolchainBlock, module string, out map
 }
 
 // projectToolchains builds the per-module `toolchain.<lang>` cty view.
-// Every key resolves to the barrier entity `toolchain.<key>`, so
-// `toolchain.ruby.ready` is `toolchain.ruby@ready` at top level and
-// `toolchain.payments/ruby@ready` inside module payments. A module without
-// its own pin for a language inherits the entrypoint's entry.
+// Each pin resolves to its ToolchainRef entity, so `toolchain.ruby.ready`
+// is `toolchain.ruby@ready` at top level and
+// `module.payments.toolchain.ruby@ready` inside module payments, mirroring
+// the path that reaches it from outside. A module without its own pin for
+// a language inherits the entrypoint's entry.
 func projectToolchains(toolchain map[string]*ToolchainConfig, modules []*moduleBlock) map[string]map[string]cty.Value {
-	attrs := func(key string) cty.Value {
-		return cty.ObjectVal(buildBarrierAttrs("toolchain."+key, ToolchainBarrierStates))
+	attrs := func(module, lang string) cty.Value {
+		return cty.ObjectVal(buildBarrierAttrs(ToolchainRef(module, lang), ToolchainBarrierStates))
 	}
 	base := map[string]cty.Value{}
 	for key := range toolchain {
 		if !strings.Contains(key, "/") {
-			base[key] = attrs(key)
+			base[key] = attrs(DefaultModule, key)
 		}
 	}
 	out := map[string]map[string]cty.Value{DefaultModule: base}
@@ -446,7 +447,7 @@ func projectToolchains(toolchain map[string]*ToolchainConfig, modules []*moduleB
 		own := maps.Clone(base)
 		for key := range toolchain {
 			if m, lang, ok := strings.Cut(key, "/"); ok && m == mb.Name {
-				own[lang] = attrs(key)
+				own[lang] = attrs(m, lang)
 			}
 		}
 		out[mb.Name] = own
@@ -2065,9 +2066,9 @@ func tcBinFunc() function.Function {
 			if ready.Type() != cty.String {
 				return cty.NilVal, errors.New("fs::toolchain::bin: malformed toolchain reference")
 			}
-			id, _, _ := strings.Cut(ready.AsString(), "@") // "toolchain.<key>"
-			key, ok := strings.CutPrefix(id, "toolchain.")
-			if !ok || key == "" {
+			id, _, _ := strings.Cut(ready.AsString(), "@")
+			key, ok := ParseToolchainRef(id)
+			if !ok {
 				return cty.NilVal, fmt.Errorf("fs::toolchain::bin: not a toolchain reference: %q", ready.AsString())
 			}
 			return cty.StringVal(BinSentinel("tc", key)), nil

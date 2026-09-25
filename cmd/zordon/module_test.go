@@ -17,7 +17,7 @@ func TestServiceNameFromBarrierRef_module(t *testing.T) {
 		"module runtime":   {"module.payments.service.go.api.runtime@ready", "payments/api", true},
 		"module build":     {"module.payments.service.go.api.build@success", "payments/api", true},
 		"module provision": {"module.payments.service.go.db.runtime.provision.migrate@ready", "payments/db", true},
-		"module toolchain": {"toolchain.payments/go@ready", "", false},
+		"module toolchain": {"module.payments.toolchain.go@ready", "", false},
 		"flat unchanged":   {"service.go.api.runtime@ready", "api", true},
 	}
 	for hint, c := range cases {
