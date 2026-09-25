@@ -166,9 +166,17 @@ type Workspace struct {
 }
 
 type Service struct {
-	Toolchain string         `json:"toolchain"`
-	Runtime   *RuntimeConfig `json:"runtime"`
-	Package   *Package       `json:"package,omitempty"`
+	Toolchain string `json:"toolchain"`
+	// Module is the declaring module block's name; empty for a top-level
+	// service (DefaultModule). Runtime.Name stays the bare label; Name()
+	// and ID() derive the qualified forms.
+	Module string `json:"module,omitempty"`
+	// ToolchainKey is the materialized pin this service runs under: its
+	// module's own `toolchain {}` when declared, else the entrypoint's.
+	// Empty when the language is not pinned at all.
+	ToolchainKey string         `json:"toolchain_key,omitempty"`
+	Runtime      *RuntimeConfig `json:"runtime"`
+	Package      *Package       `json:"package,omitempty"`
 	// Pkg is set instead of Package for `pkg` services: a mise coordinate
 	// with no source build. Mutually exclusive with Package.
 	Pkg      *PkgSpec        `json:"pkg,omitempty"`
@@ -214,7 +222,8 @@ type AgentMCPFeature struct {
 // without resolving the dynamic graph (no Invocation / parent context /
 // pickport needed just to `git worktree add`).
 type ServiceMeta struct {
-	Name      string
+	Name      string // DisplayName: `<module>/<name>` inside a module
+	Module    string
 	Toolchain string
 	Package   *Package
 }
@@ -258,9 +267,13 @@ func ParseServices(path string) ([]*ServiceMeta, error) {
 	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
 		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
 	}
+	if err := annotateModules(&root); err != nil {
+		return nil, err
+	}
 	base := filepath.Dir(path) // relative src/sparse anchor = Alphasfile dir
-	out := make([]*ServiceMeta, 0, len(root.Services))
-	for _, sb := range root.Services {
+	blocks := root.allServices()
+	out := make([]*ServiceMeta, 0, len(blocks))
+	for _, sb := range blocks {
 		pkg := &Package{Toolchain: sb.Toolchain}
 		srcPath := ""
 		if sb.Src != nil {
@@ -292,9 +305,19 @@ func ParseServices(path string) ([]*ServiceMeta, error) {
 		if sb.Workspace != nil && len(sb.Workspace.Sparse) > 0 {
 			pkg.Workspace = &Workspace{Sparse: cleanSparse(sb.Workspace.Sparse)}
 		}
-		out = append(out, &ServiceMeta{Name: sb.Name, Toolchain: sb.Toolchain, Package: pkg})
+		out = append(out, &ServiceMeta{Name: DisplayName(sb.module, sb.Name), Module: sb.module, Toolchain: sb.Toolchain, Package: pkg})
 	}
 	return out, nil
+}
+
+// allServices lists every service block, top-level first then module by
+// module in declaration order. This is the one evaluation order.
+func (rb *rootBlock) allServices() []*serviceBlock {
+	out := append([]*serviceBlock(nil), rb.Services...)
+	for _, mb := range rb.Modules {
+		out = append(out, mb.Services...)
+	}
+	return out
 }
 
 // resolveSrcDir turns a `src` value into an absolute path: ~ expands to
@@ -331,9 +354,17 @@ func cleanSparse(in []string) []string {
 
 func (s *Service) Name() string {
 	if s.Runtime != nil {
-		return s.Runtime.Name
+		return DisplayName(s.Module, s.Runtime.Name)
 	}
 	return ""
+}
+
+// ID is the canonical service id (see ServiceRef).
+func (s *Service) ID() string {
+	if s.Runtime == nil {
+		return ""
+	}
+	return ServiceRef(s.Module, s.Toolchain, s.Runtime.Name)
 }
 
 // Ref returns the default revision for git worktree add: Branch wins, then
@@ -651,6 +682,18 @@ type rootBlock struct {
 	// branch naming) — not to be confused with serviceBlock.Workspace, which
 	// is how to cut one service's checkout.
 	Workspace *workspaceRootBlock `hcl:"workspace,block"`
+	Modules   []*moduleBlock      `hcl:"module,block"`
+}
+
+// moduleBlock is a named namespace of services with an optional toolchain
+// pin of its own. Its services are addressed as
+// `module.<name>.service.<tc>.<svc>` from outside and as `service.<tc>.<svc>`
+// from inside the block.
+type moduleBlock struct {
+	Name      string          `hcl:"name,label"`
+	DefRange  hcl.Range       `hcl:",def_range"`
+	Toolchain *toolchainBlock `hcl:"toolchain,block"`
+	Services  []*serviceBlock `hcl:"service,block"`
 }
 
 // toolchainBlock is the optional top-level pin map. Each language gets
@@ -705,8 +748,10 @@ func (t *toolchainBlock) byLabel() map[string]*langToolchainBlock {
 }
 
 type serviceBlock struct {
-	Toolchain string `hcl:"toolchain,label"`
-	Name      string `hcl:"name,label"`
+	Toolchain string    `hcl:"toolchain,label"`
+	Name      string    `hcl:"name,label"`
+	DefRange  hcl.Range `hcl:",def_range"`
+	module    string
 
 	// static fields
 	Color string    `hcl:"color,optional"`
@@ -1069,6 +1114,9 @@ func NewManifestState(name string, src []byte, inv *invocation.InvocationState) 
 	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
 		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
 	}
+	if err := annotateModules(&root); err != nil {
+		return nil, err
+	}
 	return &ManifestState{name: name, root: &root, inv: inv}, nil
 }
 
@@ -1077,7 +1125,7 @@ func NewManifestState(name string, src []byte, inv *invocation.InvocationState) 
 // the cumulative toolchain pins (so the child inherits go/rust/ruby
 // versions from above without having to re-declare).
 type ParentContext struct {
-	byTC      map[string]map[string]cty.Value
+	byModule  map[string]map[string]map[string]cty.Value // module → toolchain → name
 	toolchain map[string]*ToolchainConfig
 	sysenv    []string
 }
@@ -1088,16 +1136,17 @@ type ParentContext struct {
 // { name, toolchain, dir, vars, arguments, file }.
 func NewParentContext(services []*Service) *ParentContext {
 	pc := &ParentContext{
-		byTC:      map[string]map[string]cty.Value{},
+		byModule:  map[string]map[string]map[string]cty.Value{},
 		toolchain: map[string]*ToolchainConfig{},
 	}
 	for _, s := range services {
 		if s == nil || s.Runtime == nil {
 			continue
 		}
-		tc, name := s.Toolchain, s.Name()
+		tc, name := s.Toolchain, s.Runtime.Name
 		obj := map[string]cty.Value{
 			"name":      cty.StringVal(name),
+			"module":    cty.StringVal(s.Module),
 			"toolchain": cty.StringVal(tc),
 			"dir":       cty.StringVal(serviceDirOf(s)),
 			"vars":      mapValToCty(s.Runtime.Vars),
@@ -1116,10 +1165,15 @@ func NewParentContext(services []*Service) *ParentContext {
 		} else {
 			obj["file"] = cty.EmptyObjectVal
 		}
-		if pc.byTC[tc] == nil {
-			pc.byTC[tc] = map[string]cty.Value{}
+		byTC := pc.byModule[s.Module]
+		if byTC == nil {
+			byTC = map[string]map[string]cty.Value{}
+			pc.byModule[s.Module] = byTC
 		}
-		pc.byTC[tc][name] = cty.ObjectVal(obj)
+		if byTC[tc] == nil {
+			byTC[tc] = map[string]cty.Value{}
+		}
+		byTC[tc][name] = cty.ObjectVal(obj)
 	}
 	return pc
 }
@@ -1128,11 +1182,16 @@ func NewParentContext(services []*Service) *ParentContext {
 // chain can accumulate top-down. Later levels see everything above them.
 func (pc *ParentContext) Merge(services []*Service) *ParentContext {
 	next := NewParentContext(services)
-	for tc, byName := range next.byTC {
-		if pc.byTC[tc] == nil {
-			pc.byTC[tc] = map[string]cty.Value{}
+	for module, byTC := range next.byModule {
+		if pc.byModule[module] == nil {
+			pc.byModule[module] = map[string]map[string]cty.Value{}
 		}
-		maps.Copy(pc.byTC[tc], byName)
+		for tc, byName := range byTC {
+			if pc.byModule[module][tc] == nil {
+				pc.byModule[module][tc] = map[string]cty.Value{}
+			}
+			maps.Copy(pc.byModule[module][tc], byName)
+		}
 	}
 	return pc
 }

@@ -75,6 +75,7 @@ func byName(node map[string]any, srcKey string) map[string]any {
 // bin_dir, print, command, …) plus live status (pid/ready) when running.
 func buildTree(levels []*level) map[string]any {
 	svcRoot := map[string]any{}
+	modRoot := map[string]any{}
 	for _, lv := range levels {
 		if lv.state == nil {
 			continue
@@ -117,7 +118,7 @@ func buildTree(levels []*level) map[string]any {
 					}
 				}
 			}
-			if st, ok := running[s.Runtime.Name]; ok {
+			if st, ok := running[s.Name()]; ok {
 				node["pid"] = st.PID
 				node["readiness"] = st.Readiness
 				node["ready"] = st.Readiness == "ready"
@@ -125,15 +126,35 @@ func buildTree(levels []*level) map[string]any {
 			} else {
 				node["running"] = false
 			}
-			tc, _ := svcRoot[s.Toolchain].(map[string]any)
+			byTC := svcRoot
+			if s.Module != alphasfile.DefaultModule {
+				byTC = moduleServices(modRoot, s.Module)
+			}
+			tc, _ := byTC[s.Toolchain].(map[string]any)
 			if tc == nil {
 				tc = map[string]any{}
-				svcRoot[s.Toolchain] = tc
+				byTC[s.Toolchain] = tc
 			}
 			tc[s.Runtime.Name] = node
 		}
 	}
-	return map[string]any{"service": svcRoot}
+	return map[string]any{"service": svcRoot, "module": modRoot}
+}
+
+// moduleServices returns the `module.<name>.service` map, creating the
+// module node on first use so paths mirror the HCL nesting.
+func moduleServices(modRoot map[string]any, module string) map[string]any {
+	mod, _ := modRoot[module].(map[string]any)
+	if mod == nil {
+		mod = map[string]any{}
+		modRoot[module] = mod
+	}
+	svc, _ := mod["service"].(map[string]any)
+	if svc == nil {
+		svc = map[string]any{}
+		mod["service"] = svc
+	}
+	return svc
 }
 
 // resolveExpr evaluates expr against root and returns the rendered value.

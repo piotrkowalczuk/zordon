@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
@@ -140,13 +142,65 @@ func renderState(st *protocol.StateInfo) []byte {
 	if len(st.SysEnv) > 0 {
 		body.SetAttributeValue("sysenv", stringListVal(st.SysEnv))
 	}
-	if len(st.Toolchain) > 0 {
-		renderToolchainBlock(body, st.Toolchain)
+	if tc := toolchainOf(st.Toolchain, alphasfile.DefaultModule); len(tc) > 0 {
+		renderToolchainBlock(body, tc)
 	}
 	for _, s := range st.Services {
-		renderService(body, s)
+		if s != nil && s.Module == alphasfile.DefaultModule {
+			renderService(body, s)
+		}
+	}
+	for _, m := range moduleOrder(st) {
+		mb := body.AppendNewBlock("module", []string{m}).Body()
+		if tc := toolchainOf(st.Toolchain, m); len(tc) > 0 {
+			renderToolchainBlock(mb, tc)
+		}
+		for _, s := range st.Services {
+			if s != nil && s.Module == m {
+				renderService(mb, s)
+			}
+		}
 	}
 	return f.Bytes()
+}
+
+// toolchainOf narrows the key-addressed pin map to one module's pins,
+// re-keyed by language so the block renderer can place them.
+func toolchainOf(tc map[string]*alphasfile.ToolchainConfig, module string) map[string]*alphasfile.ToolchainConfig {
+	out := map[string]*alphasfile.ToolchainConfig{}
+	for key, cfg := range tc {
+		m, lang := alphasfile.DefaultModule, key
+		if i := strings.LastIndexByte(key, '/'); i >= 0 {
+			m, lang = key[:i], key[i+1:]
+		}
+		if m == module {
+			out[lang] = cfg
+		}
+	}
+	return out
+}
+
+// moduleOrder lists modules by first appearance among services, then any
+// module that only pins a toolchain, sorted.
+func moduleOrder(st *protocol.StateInfo) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range st.Services {
+		if s == nil || s.Module == alphasfile.DefaultModule || seen[s.Module] {
+			continue
+		}
+		seen[s.Module] = true
+		out = append(out, s.Module)
+	}
+	var rest []string
+	for key := range st.Toolchain {
+		if i := strings.LastIndexByte(key, '/'); i >= 0 && !seen[key[:i]] {
+			seen[key[:i]] = true
+			rest = append(rest, key[:i])
+		}
+	}
+	sort.Strings(rest)
+	return append(out, rest...)
 }
 
 func renderToolchainBlock(body *hclwrite.Body, tc map[string]*alphasfile.ToolchainConfig) {

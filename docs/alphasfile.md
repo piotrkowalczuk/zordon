@@ -77,6 +77,58 @@ service "go" "my-app" {
 }
 ```
 
+### Modules
+
+A `module "<name>" { }` block is a namespace for services with an optional toolchain pin of its own.
+Two modules may each declare a `service "go" "db"`; the module keeps them apart.
+
+```hcl
+toolchain {
+  go { version = "1.27.0" }            # the default module's pin, and the fallback for every module
+}
+
+service "go" "gateway" {               # top-level = the default module; identity unchanged
+  vars = { upstream = module.payments.service.go.api.vars.port }
+  runtime { after = [module.payments.service.go.api.runtime.ready] }
+}
+
+module "payments" {
+  toolchain {
+    go { version = "1.22.0" }          # only payments' services run under this pin
+  }
+
+  service "go" "db" { … }
+  service "go" "api" {
+    vars = { db = service.go.db.vars.port }        # bare `service.*` = this module
+    runtime { after = [service.go.db.runtime.ready, toolchain.go.ready] }
+  }
+}
+```
+
+| aspect | default module (top level) | inside `module "m"` |
+|---|---|---|
+| canonical id | `service.<tc>.<name>` | `module.m.service.<tc>.<name>` |
+| display name (picks, `zordon status`, checkout dir, worktree branch) | `<name>` | `m/<name>` |
+| bare `service.<tc>.<name>` in expressions | default module | module `m` only, no fallback |
+| cross-module reference | `module.<other>.service.<tc>.<name>…` | `module.<other>.service.<tc>.<name>…` |
+| `toolchain.<lang>.ready` | `toolchain.<lang>@ready` | `module.m.toolchain.<lang>@ready` for the module's own pin, else `toolchain.<lang>@ready` |
+| `fs::bin()` and build output | `<state>/bin`, artifact `<name>` | `<state>/bin/m`, artifact `<name>` (a block moved into a module keeps `${fs::bin()}/${self.name}` unchanged) |
+| state dirs (`fs::etc()`, `fs::var()`) | `<state>/etc/<name>` | `<state>/etc/m/<name>` |
+| `zordon get` path | `service.<tc>.<name>.…` | `module.m.service.<tc>.<name>.…` |
+| MCP provision tool | `provision__<tc>_<name>__<step>` | `provision__<tc>_m_<name>__<step>` |
+
+Rules:
+
+- A module name is a plain identifier (`[A-Za-z][A-Za-z0-9_-]*`) and is declared once per file.
+- Services are unique per `(module, toolchain, name)`, so the same name in two modules is not a duplicate.
+- Inside a module the default module and federation parents are not addressable; the entrypoint composes modules, modules do not reach up.
+- `self.module` holds the declaring module's name (empty at top level), handy for `-name "${self.module}/${self.name}"` style flags.
+- `fs::service::bin`, `fs::service::etc` and `fs::service::var` accept `module.<m>.service.<tc>.<name>` references.
+- A module's `toolchain { }` pins are keyed `<m>/<lang>` in the resolved manifest and the plan renders them inside the module block.
+- `env`, `dotenv` and `sysenv` stay top-level only; module-scoped env is not supported.
+
+See [Pin different toolchain versions per module](how-to/pin-different-toolchain-versions.md) for the recipe and [examples/modules](https://github.com/piotrkowalczuk/zordon/tree/main/examples/modules) for a runnable stack.
+
 ### Source: `git { }`, `src { }`, `crate { }`
 
 A service picks exactly one primary. The rest comes from toolchain
