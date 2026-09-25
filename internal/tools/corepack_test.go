@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 type corepackCell struct {
@@ -39,6 +40,7 @@ func TestCorepackMatrix(t *testing.T) {
 	pms := []string{"pnpm", "yarn"}
 
 	zordonHome := zordontest.DefaultHome(t)
+	ztest.AssertSystem(t, ztest.Toolchain(zordonHome))
 	dataDir := filepath.Join(zordonHome, "toolchain")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
