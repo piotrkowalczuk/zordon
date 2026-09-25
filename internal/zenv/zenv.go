@@ -57,6 +57,22 @@ func (e EnvironmentVariables) Join(others ...EnvironmentVariables) EnvironmentVa
 	return out
 }
 
+// Fill returns a copy of the receiver with every key that is absent or
+// empty in it taken from defaults. It is Join's mirror image: Join lets
+// the overlay win, Fill lets the receiver win. Alpha uses it for the
+// toolchain layer-3 defaults (GOTOOLCHAIN=local, relocated caches, ...)
+// which must not clobber a value mise itself already pinned.
+func (e EnvironmentVariables) Fill(defaults EnvironmentVariables) EnvironmentVariables {
+	out := make(EnvironmentVariables, len(e)+len(defaults))
+	maps.Copy(out, e)
+	for k, v := range defaults {
+		if out[k] == "" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // PrependPath returns a copy of the receiver with dirs prepended (highest
 // priority first) to the PATH-style list variable named by key, joined with
 // the OS path-list separator. dirs are de-duplicated preserving first

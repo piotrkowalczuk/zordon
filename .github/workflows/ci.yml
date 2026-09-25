@@ -84,6 +84,9 @@ jobs:
           # java installs a JDK and builds the golden Maven + Gradle fixtures
           # through their committed wrappers (golden/java/echo-{maven,gradle}).
           - java
+          # ruby installs a precompiled ruby via mise plus the declared
+          # bundler, and proves the hermetic gem/bundler env (golden/ruby/echo).
+          - ruby
     container:
       image: ${{ matrix.distro }}
       # tini as pid 1 to reap zombies; GitHub's bare `tail` pid 1
@@ -93,8 +96,15 @@ jobs:
     env:
       CGO_ENABLED: "1"
       GO_VERSION: "1.27.0"
+      # mise resolves ruby/rust/aqua releases through the GitHub API; the
+      # anonymous per-IP limit is exhausted within minutes on shared
+      # runners (ruby then falls back to a source build, rust reports
+      # "ready" without cargo). zordon hands this to mise as
+      # MISE_GITHUB_TOKEN for its own calls only — services never see it.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Install dependencies
+      - &install-deps
+        name: Install dependencies
         run: |
           set -e
           # POSIX sh only — these container images default the run shell
@@ -111,6 +121,15 @@ jobs:
           # file, then extract — a retried stream pipe could corrupt tar).
           retry() { for i in 1 2 3 4 5; do "$@" && return 0; s=$((i * 5)); echo "  retry $i/5 in ${s}s: $*" >&2; sleep "$s"; done; return 1; }
           if [ -x "$(command -v apt-get)" ]; then
+            # bullseye is EOL: main/updates live on archive.debian.org, security only on snapshot.debian.org.
+            if grep -q '^VERSION_ID="11"' /etc/os-release; then
+              printf '%s\n' \
+                'deb http://archive.debian.org/debian bullseye main' \
+                'deb http://archive.debian.org/debian bullseye-updates main' \
+                'deb http://snapshot.debian.org/archive/debian-security/20260824T000000Z bullseye-security main' \
+                > /etc/apt/sources.list
+              echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99archive
+            fi
             retry apt-get update
             retry apt-get install -y git gcc sudo make curl ca-certificates procps
           fi
@@ -123,19 +142,20 @@ jobs:
       - name: Cache Go + toolchain
         # Per-(distro, toolchain): each cache holds a single mise-installed
         # toolchain, so it stays small (well under GitHub's 10GB cap) even
-        # across 24 legs. .zordon/toolchain/installs is MISE_DATA_DIR — the
-        # dir a cold run reinstalls go/rust/node/etc. into from scratch today.
-        # The key busts on go.sum / golden / conformance changes (that's where
-        # the pinned tool versions live); restore-keys warm-starts otherwise.
+        # across the matrix. .zordon/toolchain is MISE_DATA_DIR plus the
+        # zordon-owned homes next to it (cargo-home, rustup-home, node-home,
+        # java-home, ruby-home): every toolchain's install AND its relocated
+        # caches live there now, so nothing under /root/.cargo, /root/.npm or
+        # /root/.m2 is written by the suite any more. The key busts on
+        # go.sum / golden / conformance changes (that's where the pinned tool
+        # versions live); restore-keys warm-starts otherwise.
         uses: actions/cache@v4
         with:
           path: |
             /root/go/pkg/mod
             /root/.cache/go-build
-            .zordon/toolchain/installs
+            .zordon/toolchain
             .zordon/mise-cache
-            /root/.cargo
-            /root/.npm
           key: ${{ matrix.distro }}-${{ matrix.toolchain }}-${{ hashFiles('go.sum', 'golden/**', 'tests/conformance/**') }}
           restore-keys: |
             ${{ matrix.distro }}-${{ matrix.toolchain }}-
@@ -178,7 +198,8 @@ jobs:
           - workspace_files
           # java clones spring-petclinic and runs its Maven wrapper: a
           # real (heavy, network-bound) JVM build per distro. The wrapper
-          # downloads Maven + deps into HOME's ~/.m2 on a cold cache.
+          # downloads Maven + deps into the zordon-owned java-home under
+          # .zordon/toolchain on a cold cache.
           - java
     container:
       image: ${{ matrix.distro }}
@@ -189,32 +210,14 @@ jobs:
     env:
       CGO_ENABLED: "1"
       GO_VERSION: "1.27.0"
+      # mise resolves ruby/rust/aqua releases through the GitHub API; the
+      # anonymous per-IP limit is exhausted within minutes on shared
+      # runners (ruby then falls back to a source build, rust reports
+      # "ready" without cargo). zordon hands this to mise as
+      # MISE_GITHUB_TOKEN for its own calls only — services never see it.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Install dependencies
-        run: |
-          set -e
-          # POSIX sh only — these container images default the run shell
-          # to /bin/sh (dash), so no `pipefail` or other bashisms here.
-          #
-          # Distro Go packages are far older than the go.mod toolchain
-          # (go 1.25.6 + `tool` directive), so install the official Go
-          # tarball. gcc -> `go test -race` (cgo); procps -> the e2e
-          # port_of helper greps `ps`.
-          #
-          # Every fetch here is network-bound; a transient distro-mirror
-          # or go.dev blip otherwise sinks the whole matrix at setup.
-          # Retry the package installs; let curl retry the download (to a
-          # file, then extract — a retried stream pipe could corrupt tar).
-          retry() { for i in 1 2 3 4 5; do "$@" && return 0; s=$((i * 5)); echo "  retry $i/5 in ${s}s: $*" >&2; sleep "$s"; done; return 1; }
-          if [ -x "$(command -v apt-get)" ]; then
-            retry apt-get update
-            retry apt-get install -y git gcc sudo make curl ca-certificates procps
-          fi
-          if [ -x "$(command -v dnf)" ]; then retry dnf install -y git gcc sudo make curl procps-ng; fi
-          if [ -x "$(command -v pacman)" ]; then retry pacman -Syu --noconfirm git gcc sudo make curl procps-ng; fi
-          curl --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
-          tar -C /usr/local -xzf /tmp/go.tgz
-          echo /usr/local/go/bin >> "$GITHUB_PATH"
+      - *install-deps
       - uses: actions/checkout@v4
       - name: Cache Go + toolchains
         # Containers run as root, so Go's defaults are /root/go/pkg/mod

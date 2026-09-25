@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
 )
 
@@ -52,7 +53,8 @@ func TestCorepackMatrix(t *testing.T) {
 	// isolatedEnv prepends the mise binary's dir to PATH — the
 	// mise-installed node's npm wrapper calls `mise reshim`
 	// post-install and exits 127 otherwise.
-	env := isolatedEnv(dataDir, bin)
+	host := zenv.FromHost([]string{"HOME", "USER", "PATH", "LANG", "TMPDIR"})
+	env := isolatedEnv(host, dataDir, bin)
 
 	mustRun := func(label, name string, args ...string) {
 		t.Helper()
@@ -75,7 +77,7 @@ func TestCorepackMatrix(t *testing.T) {
 			}
 			defer release()
 
-			if _, err := MiseEnv(bin, dataDir, "node", nv, os.Stderr); err != nil {
+			if _, err := MiseEnv(bin, dataDir, "node", nv, host, os.Stderr); err != nil {
 				t.Fatalf("MiseEnv node@%s: %v", nv, err)
 			}
 

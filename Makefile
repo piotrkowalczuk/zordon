@@ -1,4 +1,4 @@
-.PHONY: fmt build build.race build.release test test.fast test.race test.coverage test.unit test.coverage.unit test.conformance.go test.conformance.rust test.conformance.node test.conformance.pkg test.conformance.java e2e lint gen release.check release.snapshot clean
+.PHONY: fmt build build.race build.release test test.fast test.race test.coverage test.unit test.coverage.unit test.conformance.go test.conformance.rust test.conformance.node test.conformance.pkg test.conformance.java test.conformance.ruby e2e lint gen release.check release.snapshot clean
 
 EXAMPLES ?= $(shell ls -d examples/*/)
 GOTEST_TIMEOUT ?= 30m
@@ -95,6 +95,10 @@ test.conformance.pkg: build.race
 test.conformance.java: build.race
 	$(ZORDON_TEST_ENV) \
 	go test -timeout $(GOTEST_TIMEOUT) -race -tags conformance_java ./tests/conformance/
+
+test.conformance.ruby: build.race
+	$(ZORDON_TEST_ENV) \
+	go test -timeout $(GOTEST_TIMEOUT) -race -tags conformance_ruby ./tests/conformance/
 
 # The conformance suites compile only under their per-toolchain build tags, so
 # the linters must see the full set — otherwise they flag the shared helpers as
