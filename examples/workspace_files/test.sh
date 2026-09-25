@@ -103,7 +103,7 @@ zordon workspace apply --workspace=feature
 # apply on an unchanged manifest is a no-op, byte for byte.
 #
 # Compared with `git diff --no-index` rather than a hash or cmp: shasum is a
-# perl script absent from debian:11, and cmp (diffutils) is absent from the
+# perl script absent from the slim Debian images, and cmp (diffutils) is absent from the
 # fedora image — both were tried and both broke a distro. git is already a hard
 # prerequisite of this example, and its comparison is byte-exact.
 generated="CLAUDE.md .claude/settings.json .gitignore"

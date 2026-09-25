@@ -289,7 +289,7 @@ func TestPrimary_AddWorktree_reclaimsOrphanedLockedRegistration(t *testing.T) {
 	// leaving the orphaned, locked registration behind.
 	// `--lock` (no `--reason`) mirrors AddWorktree's own invocation: the lock
 	// is the sentinel, and `git worktree add --reason` only exists in git 2.34+
-	// which the debian:11 CI leg (git 2.30) rejects.
+	// and older git (Debian 11 ships 2.30) rejects it.
 	git(t, repo, "worktree", "add", "--lock",
 		"--no-checkout", "--force", "-B", "zordon/main/app", dest, "HEAD")
 	if err := zfs.RemoveTree(dest); err != nil {
