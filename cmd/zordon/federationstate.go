@@ -22,13 +22,14 @@ import (
 // computed by the walk, not here.
 type ChainLevel struct {
 	afPath string
-	bytes  []byte
+	tree   *alphasfile.Tree
 	inv    *invocation.InvocationState
 	isLeaf bool
 }
 
 func (l ChainLevel) Path() string                            { return l.afPath }
-func (l ChainLevel) Bytes() []byte                           { return l.bytes }
+func (l ChainLevel) Bytes() []byte                           { return l.tree.Bytes() }
+func (l ChainLevel) Tree() *alphasfile.Tree                  { return l.tree }
 func (l ChainLevel) Invocation() *invocation.InvocationState { return l.inv }
 
 // IsLeaf reports whether this is the invocation (leaf) level — the one the
@@ -60,9 +61,9 @@ func NewFederationState(zordonHome string) (*FederationState, error) {
 	}
 	levels := make([]ChainLevel, 0, len(chain))
 	for _, afPath := range chain {
-		raw, err := zfs.Read(afPath)
+		tree, err := alphasfile.LoadTree(afPath)
 		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", afPath, err)
+			return nil, err
 		}
 		isLeaf := afPath == invFile
 		var inv *invocation.InvocationState
@@ -74,7 +75,7 @@ func NewFederationState(zordonHome string) (*FederationState, error) {
 		if err != nil {
 			return nil, err
 		}
-		levels = append(levels, ChainLevel{afPath: afPath, bytes: raw, inv: inv, isLeaf: isLeaf})
+		levels = append(levels, ChainLevel{afPath: afPath, tree: tree, inv: inv, isLeaf: isLeaf})
 	}
 	return &FederationState{levels: levels}, nil
 }
@@ -125,13 +126,9 @@ func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx
 	if canReuse(lvl.IsLeaf(), old, cfgHash) {
 		return nil, old, true, nil
 	}
-	// świeży: parse → Plan (kolejność; cykl pada TU) → Compute (eval + efekty).
-	// Używa już-wczytanych bajtów (lvl.bytes), więc nie czyta pliku ponownie.
-	man, err := alphasfile.NewManifestState(lvl.afPath, lvl.bytes, lvl.inv)
-	if err != nil {
-		return nil, old, false, err
-	}
-	plan, err := man.Plan(parentCtx, cfgHash, testCfg)
+	// Fresh: Plan (ordering; a cycle fails here) then Compute (eval + effects),
+	// over the tree loaded once at discovery, the same bytes cfgHash covers.
+	plan, err := alphasfile.NewManifestStateFromTree(lvl.tree, lvl.inv).Plan(parentCtx, cfgHash, testCfg)
 	if err != nil {
 		return nil, old, false, err
 	}

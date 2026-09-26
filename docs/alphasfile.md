@@ -129,6 +129,61 @@ Rules:
 
 See [Pin different toolchain versions per module](how-to/pin-different-toolchain-versions.md) for the recipe and [examples/modules](https://github.com/piotrkowalczuk/zordon/tree/main/examples/modules) for a runnable stack.
 
+### Imports
+
+An `import` block in the entrypoint pulls named modules out of another file into the stack.
+A `require` block inside a module declares that the module depends on modules from another file.
+A module is the only unit of import; a file is just a container that may hold several modules.
+
+```hcl
+# Alphasfile (entrypoint)
+import "./services/apps/Alphasfile.apps" {
+  modules = ["app", "billing"]
+}
+
+# services/apps/Alphasfile.apps (fragment)
+module "app" {
+  require "../kafka/Alphasfile.kafka" {
+    modules = ["kafka"]
+  }
+
+  service "go" "app" {
+    runtime {
+      provision "topic" {
+        cmd = module.kafka.service.go.kafka.runtime.provision.create-topic
+      }
+    }
+  }
+}
+module "billing" { … }
+
+# services/kafka/Alphasfile.kafka (fragment)
+module "kafka" { service "go" "kafka" { … } }
+```
+
+| rule | behavior |
+|---|---|
+| syntax | `import "./<path>" { modules = ["<m>", …] }` and `require "./<path>" { modules = [...] }`, repeatable; `modules` is required and non-empty |
+| placement | `import` at the entrypoint's top level only; `require` inside a `module` block in any file |
+| path | starts with `./`, `../`, `/` or `~/`; relative paths resolve against the declaring file's directory; any other spelling is reserved for remote identities and currently rejected |
+| entrypoint vs fragment | a file named exactly `Alphasfile` is an entrypoint and cannot be imported; import a fragment, by convention `Alphasfile.<name>` |
+| fragment content | `module` blocks only; top-level `import`, `service`, `toolchain`, `env`, `dotenv`, `sysenv` and `workspace` are errors |
+| loading | every file loads once; diamonds and cycles between files are fine; imports inside modules outside the stack are loaded and checked too |
+| stack | the entrypoint's modules, the modules its imports name, and, repeated until nothing changes, the modules required by any module already in the stack; every other module is left out |
+| visibility at the entrypoint's top level | the entrypoint's modules and the modules its imports name |
+| visibility inside a module | the module itself and what it requires; in the entrypoint also every other module of the entrypoint, because all of them are in the stack |
+| sibling in a fragment | required like any other module, by the fragment's own file name: `require "./Alphasfile.apps" { modules = ["billing"] }` |
+| visibility error | names the expression and the missing `import` at the top level or `require` inside the module |
+| duplicates | a module name is declared once across all loaded files |
+| relative `src { path }` | resolves against the directory of the file that declares the service |
+| `cfg::hash()` and drift | covers the bytes of every loaded file, so editing a fragment restarts a level like editing its Alphasfile |
+| `zordon plan` | prints `# import <file> [modules]` per file the stack takes modules from and `# unused module <m> in <file>` under the level header |
+
+A `require` joins the stack only with the module that declares it, so taking one module from a shared file never starts what its neighbours need.
+Remote sources are reserved and currently rejected.
+
+See [Split an Alphasfile across files](how-to/split-an-alphasfile-across-files.md) for the recipe and [examples/import](https://github.com/piotrkowalczuk/zordon/tree/main/examples/import) for a runnable stack.
+
 ### Source: `git { }`, `src { }`, `crate { }`
 
 A service picks exactly one primary. The rest comes from toolchain

@@ -125,6 +125,9 @@ type resolver struct {
 	// ToolchainKey; finishService reads a service's key off it.
 	toolchain map[string]*ToolchainConfig
 
+	// tree is the loaded manifest; it decides which modules a scope sees.
+	tree *Tree
+
 	// service ids already taken (parent or local); collision is an error.
 	taken map[string]string // ServiceRef → origin ("parent" | "local")
 
@@ -173,6 +176,7 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 		inv:             m.inv,
 		cfgHash:         cfgHash,
 		serviceByModule: seed,
+		tree:            m.tree,
 		taken:           map[string]string{},
 		testCfg:         testCfg,
 	}
@@ -214,6 +218,9 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	// resolvable, regardless of evaluation order — they're constants
 	// derived from labels, not expressions.
 	services := root.allServices()
+	if err := checkVisibility(services, r.tree); err != nil {
+		return nil, err
+	}
 	states, err := r.prepareServices(services)
 	if err != nil {
 		return nil, err
@@ -280,6 +287,13 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	localSysEnv, err := r.evalStrList(root.SysEnv, nil, "sysenv", srcDirs{})
 	if err != nil {
 		return nil, err
+	}
+	for _, expr := range r.tree.sysenvExprs() {
+		more, err := r.evalStrList(expr, nil, "sysenv", srcDirs{})
+		if err != nil {
+			return nil, err
+		}
+		localSysEnv = mergeSysEnv(localSysEnv, more)
 	}
 	var parentSysEnv []string
 	if p.parent != nil {
@@ -507,7 +521,7 @@ type srcDirs struct {
 	exe    string // <checkout>/<exe>      → fs::exe()
 	etc    string // <StateDir>/etc/<svc>  → fs::etc()
 	vardir string // <StateDir>/var/<svc>  → fs::var()
-	module string // scope of bare `service.*` / `toolchain.*` traversals
+	module string // scope of bare `service.*` / `toolchain.*` traversals and of module visibility
 }
 
 // prepareServices initializes one svcState per service: validates
@@ -568,7 +582,7 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 		}
 		switch {
 		case srcPath != "" && gitURL == "" && !r.inv.OwnsService(display):
-			checkout = r.resolveDir(srcPath)
+			checkout = r.resolveDir(sb, srcPath)
 		case gitURL != "" || srcPath != "":
 			checkout = r.inv.CheckoutPath(display)
 		}
@@ -1183,7 +1197,7 @@ func (r *resolver) finishService(st *svcState) error {
 		Package: &Package{
 			Toolchain: sb.Toolchain,
 			Git:       pkgGit,
-			Src:       r.resolveDir(srcLocalPath),
+			Src:       r.resolveDir(sb, srcLocalPath),
 			Branch:    pkgBranch,
 			Tag:       pkgTag,
 			Rev:       pkgRev,
@@ -1649,18 +1663,20 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 	if len(tcs) > 0 {
 		vars["toolchain"] = cty.ObjectVal(copyCtyMap(tcs))
 	}
-	// Every module is addressable as module.<m>.{service,toolchain} from
-	// anywhere; the default module has no such handle (it composes, it is
-	// not composed).
+	// A module is addressable as module.<m>.{service,toolchain} where the
+	// scope sees it (Tree.visible); the default module has no such handle (it
+	// composes, it is not composed).
 	modules := map[string]cty.Value{}
+	visible := func(name string) bool {
+		return name != DefaultModule && r.tree.visible(dirs.module, name)
+	}
 	for name := range r.serviceByModule {
-		if name == DefaultModule {
-			continue
+		if visible(name) {
+			modules[name] = r.moduleCty(name)
 		}
-		modules[name] = r.moduleCty(name)
 	}
 	for name := range r.toolchainCty {
-		if _, done := modules[name]; !done && name != DefaultModule {
+		if _, done := modules[name]; !done && visible(name) {
 			modules[name] = r.moduleCty(name)
 		}
 	}
@@ -2122,17 +2138,21 @@ func osEnvFunc() function.Function {
 }
 
 // resolveDir turns a `dir` primary into an absolute path. ~ expands to
-// $HOME; a relative path resolves against the Alphasfile's OWN
-// directory (so the same Alphasfile means the same thing regardless of
-// where the user ran zordon from — `cd into subdir; zordon start` walks
-// up to the same file and gets the same resolved paths). Empty stays
-// empty (no dir primary). Workspace invocations adopt the project-root
-// Alphasfile, so r.afDir is project root there too.
-func (r *resolver) resolveDir(dir string) string {
+// $HOME; a relative path resolves against the directory of the file that
+// declares the service (the entrypoint, or the imported fragment), so a
+// file means the same thing regardless of where the user ran zordon from
+// and regardless of who imports it. Empty stays empty (no dir primary).
+// Workspace invocations adopt the project-root Alphasfile, so the anchor
+// is project root there too.
+func (r *resolver) resolveDir(sb *serviceBlock, dir string) string {
 	if dir == "" {
 		return ""
 	}
-	return resolveSrcDir(r.afDir, dir)
+	base := r.afDir
+	if sb.file != nil {
+		base = sb.file.dir
+	}
+	return resolveSrcDir(base, dir)
 }
 
 // fsHashFunc returns the short (16 hex chars) hash that identifies this

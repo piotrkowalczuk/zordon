@@ -1,0 +1,70 @@
+# Two modules in one fragment. Each depends on kafka, so each requires it:
+# a require belongs to the module that needs it and joins the stack only
+# with that module. Without it `module.kafka` is not visible in the module.
+module "app" {
+  require "../kafka/Alphasfile.kafka" {
+    modules = ["kafka"]
+  }
+
+  service "go" "app" {
+    src {
+      path = "../../../.."
+      exe  = "./examples/import/src/app"
+    }
+
+    vars = { port = net::pickport() }
+
+    runtime {
+      cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}"]
+
+      provision "topic" {
+        after = [self.runtime.ready, module.kafka.service.go.kafka.runtime.ready]
+        cmd   = module.kafka.service.go.kafka.runtime.provision.create-topic
+        env   = { TOPIC = "app-events" }
+      }
+    }
+
+    readiness {
+      http {
+        path = "/"
+        port = self.vars.port
+      }
+      period            = "200ms"
+      failure_threshold = 50
+    }
+  }
+}
+
+module "billing" {
+  require "../kafka/Alphasfile.kafka" {
+    modules = ["kafka"]
+  }
+
+  service "go" "billing" {
+    src {
+      path = "../../../.."
+      exe  = "./examples/import/src/billing"
+    }
+
+    vars = { port = net::pickport() }
+
+    runtime {
+      cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}"]
+
+      provision "topic" {
+        after = [self.runtime.ready, module.kafka.service.go.kafka.runtime.ready]
+        cmd   = module.kafka.service.go.kafka.runtime.provision.create-topic
+        env   = { TOPIC = "billing-events" }
+      }
+    }
+
+    readiness {
+      http {
+        path = "/"
+        port = self.vars.port
+      }
+      period            = "200ms"
+      failure_threshold = 50
+    }
+  }
+}

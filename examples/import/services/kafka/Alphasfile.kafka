@@ -1,0 +1,44 @@
+# A fragment: importable, never an entrypoint. It holds modules only.
+# Relative paths resolve against THIS file's directory, so the repo root is
+# four levels up.
+module "kafka" {
+  service "go" "kafka" {
+    src {
+      path = "../../../.."
+      exe  = "./examples/import/src/kafka"
+    }
+
+    vars = {
+      port   = net::pickport()
+      topics = "${fs::var()}/topics.txt"   # per-service state dir, wiped with the workspace
+    }
+
+    runtime {
+      cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}"]
+
+      provision "create-topic" {
+        after = never
+        cmd   = "echo \"$TOPIC\" >> ${self.vars.topics}"
+      }
+    }
+
+    readiness {
+      http {
+        path = "/"
+        port = self.vars.port
+      }
+      period            = "200ms"
+      failure_threshold = 50
+    }
+  }
+}
+
+# Declared but never imported: loaded with the file, not instantiated.
+module "kafka-ui" {
+  service "go" "ui" {
+    src {
+      path = "../../../.."
+      exe  = "./examples/import/src/kafka"
+    }
+  }
+}

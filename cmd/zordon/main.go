@@ -827,6 +827,7 @@ func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome 
 			marker = fmt.Sprintf(" (invocation, workspace=%s)", lv.inv.Workspace)
 		}
 		fmt.Fprintf(out, "# [%s] %s%s\n", lv.inv.FsHash, lv.afPath, marker)
+		fmt.Fprint(out, importLines("#   ", lv.tree))
 
 		if lv.state == nil {
 			fmt.Fprintln(out, "  alpha: not running")

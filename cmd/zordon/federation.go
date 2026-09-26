@@ -96,6 +96,7 @@ func discoverChain(zordonHome string) (chain []string, invocationFile string, er
 // and (if running) the live alpha state.
 type level struct {
 	afPath       string
+	tree         *alphasfile.Tree
 	isInvocation bool
 	inv          *invocation.InvocationState
 	parentCtx    *alphasfile.ParentContext
@@ -118,7 +119,7 @@ func resolveChain(ctx context.Context, zordonHome string, testCfg alphasfile.Tes
 		if resp, e := control.Roundtrip(ctx, lv.inv.SocketPath(), &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
 			return resp.State, nil
 		}
-		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
+		af, err := alphasfile.Resolve(lv.tree, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
 		if err != nil {
 			return nil, nil //nolint:nilerr // intentional: see comment above
 		}
@@ -190,6 +191,7 @@ func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, err
 		}
 		lv := &level{
 			afPath:       cl.Path(),
+			tree:         cl.Tree(),
 			isInvocation: cl.IsLeaf(),
 			inv:          cl.Invocation(),
 			parentCtx:    parents.ParentContext(),

@@ -31,7 +31,7 @@ import (
 // (they are shared context, not what you're starting).
 func runPlan(_ context.Context, w io.Writer, zordonHome string, picks []string, testCfg alphasfile.TestConfig) error {
 	levels, err := walkChain(zordonHome, func(lv *level) (*protocol.StateInfo, error) {
-		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
+		af, err := alphasfile.Resolve(lv.tree, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
 		if err != nil {
 			return nil, err
 		}
@@ -60,6 +60,7 @@ func runPlan(_ context.Context, w io.Writer, zordonHome string, picks []string, 
 			marker = " (invocation)"
 		}
 		fmt.Fprintf(w, "# === [%s] %s%s ===\n", lv.inv.FsHash, lv.afPath, marker)
+		fmt.Fprint(w, importLines("# ", lv.tree))
 		if _, err := w.Write(renderState(lv.state)); err != nil {
 			return err
 		}
@@ -120,6 +121,23 @@ func renderWorkspaceBlock(spec *alphasfile.WorkspaceSpec) []byte {
 		}
 	}
 	return f.Bytes()
+}
+
+// importLines lists the fragments a level loaded and the modules taken from
+// each, then modules that were loaded but never imported. Empty for a
+// manifest without imports.
+func importLines(prefix string, tree *alphasfile.Tree) string {
+	if tree == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, e := range tree.Imports() {
+		fmt.Fprintf(&b, "%simport %s [%s]\n", prefix, e.Path, strings.Join(e.Modules, ", "))
+	}
+	for _, u := range tree.Unused() {
+		fmt.Fprintf(&b, "%sunused module %s in %s\n", prefix, u.Module, u.Path)
+	}
+	return b.String()
 }
 
 // renderState writes a resolved StateInfo back as HCL bytes, every
