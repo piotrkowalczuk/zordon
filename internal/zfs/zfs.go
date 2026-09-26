@@ -253,6 +253,11 @@ func RemoveTree(path string) error {
 	return nil
 }
 
+// Symlink creates link pointing at target.
+func Symlink(target, link string) error {
+	return os.Symlink(target, link)
+}
+
 // Exists reports whether path exists (file or dir). Errors other
 // than ErrNotExist are treated as "exists from the caller's point
 // of view" — surfacing them via bool would lose information; if a

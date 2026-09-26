@@ -47,6 +47,7 @@ type Tree struct {
 	offs     *offIndex
 	chain    map[string]bool
 	src      importSource
+	changes  []LockChange
 }
 
 // ImportEdge is one imported file and the modules the stack takes from it,
@@ -57,6 +58,9 @@ type ImportEdge struct {
 	Modules  []string
 	Package  string
 	Features []string
+	// Origin is where a remote file came from: "search <dir>" or
+	// "<repo>@<commit>"; empty for a local file.
+	Origin string
 }
 
 // UnusedModule is a module or package of a loaded file that is not part of
@@ -64,14 +68,6 @@ type ImportEdge struct {
 type UnusedModule struct {
 	Path   string
 	Module string
-}
-
-// LoadOptions tunes how LoadTreeWith follows imports.
-type LoadOptions struct {
-	// Chain lists the Alphasfile of every federation level of the current
-	// invocation. Importing one of them as a package is an error: it would
-	// run in two levels at once.
-	Chain []string
 }
 
 // LoadTree reads the entrypoint at path and follows its imports from disk.
@@ -85,18 +81,28 @@ func LoadTreeWith(path string, opts LoadOptions) (*Tree, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := newTree(localSource{})
+	src, err := newIdentitySource(opts)
+	if err != nil {
+		return nil, err
+	}
+	t := newTree(src)
 	for _, c := range opts.Chain {
 		if a, err := filepath.Abs(c); err == nil {
 			t.chain[filepath.Clean(a)] = true
 		}
 	}
-	if _, err := t.load(filepath.Clean(abs), nil, nil, nil); err != nil {
+	if _, err := t.load(filepath.Clean(abs), nil, nil, nil, resolved{}); err != nil {
 		return nil, err
 	}
 	if err := t.finish(); err != nil {
 		return nil, err
 	}
+	if src.lock.dirty && opts.LockPath != "" {
+		if err := src.lock.write(); err != nil {
+			return nil, fmt.Errorf("write %s: %w", LockFileName, err)
+		}
+	}
+	t.changes = src.changes
 	return t, nil
 }
 
@@ -111,7 +117,7 @@ func ParseTree(name string, src []byte) (*Tree, error) {
 	if imps := root.allImports(); len(imps) > 0 {
 		return nil, fmt.Errorf("%s: %q: imports need a file on disk; load this manifest with alphasfile.Open", imps[0].DefRange, imps[0].Path)
 	}
-	t := newTree(localSource{})
+	t := newTree(nil)
 	t.register(newTreeFile(abs, abs, src, root))
 	if err := t.finish(); err != nil {
 		return nil, err
@@ -139,6 +145,9 @@ func (t *Tree) Imports() []ImportEdge { return t.edges }
 // the stack.
 func (t *Tree) Unused() []UnusedModule { return t.unused }
 
+// LockChanges lists the lock entries this load added or moved.
+func (t *Tree) LockChanges() []LockChange { return t.changes }
+
 // Bytes is the manifest identity input for invocation.ConfigHash: the
 // entrypoint's bytes, then each loaded file's identity and bytes. A tree
 // without imports hashes exactly like the lone entrypoint did before.
@@ -161,6 +170,11 @@ type treeFile struct {
 	root     *rootBlock
 	declared map[string]*moduleBlock
 	pkg      *pkgInstance
+	// confine, repoAt and origin are set for files of a remote checkout:
+	// its root, "<repo>@<commit>", and a short form for display.
+	confine string
+	repoAt  string
+	origin  string
 }
 
 // pkgInstance is a package in the stack: a directory's Alphasfile loaded
@@ -193,25 +207,6 @@ type importLink struct {
 	file    *treeFile
 	modules []string
 	block   *importBlock
-}
-
-// importSource resolves an import block to a file or a package directory.
-// Local paths are the only source today; remote sources plug in here.
-type importSource interface {
-	resolve(importer *treeFile, imp *importBlock) (path, identity string, err error)
-}
-
-type localSource struct{}
-
-func (localSource) resolve(importer *treeFile, imp *importBlock) (string, string, error) {
-	if imp.Git != nil {
-		return "", "", fmt.Errorf("%s: %s %q: remote imports (git {}) are not supported yet", imp.DefRange, imp.keyword, imp.Path)
-	}
-	if !isLocalPath(imp.Path) {
-		return "", "", fmt.Errorf("%s: %s %q: remote imports are not supported yet; a local path starts with ./, ../, / or ~/", imp.DefRange, imp.keyword, imp.Path)
-	}
-	p := filepath.Clean(resolveSrcDir(importer.dir, imp.Path))
-	return p, p, nil
 }
 
 // isLocalPath reports whether an import path names a file on disk. Every
@@ -262,7 +257,7 @@ func (t *Tree) register(f *treeFile) {
 // load reads one file and every file it imports. Imports of scopes that
 // never join the stack are loaded and checked too, so a broken file fails
 // `zordon plan` before anyone reaches for it.
-func (t *Tree) load(path string, importer *treeFile, imp *importBlock, pkg *pkgInstance) (*treeFile, error) {
+func (t *Tree) load(path string, importer *treeFile, imp *importBlock, pkg *pkgInstance, res resolved) (*treeFile, error) {
 	if importer != nil && pkg == nil && filepath.Base(path) == invocation.AlphasfileName {
 		return nil, fmt.Errorf("%s: cannot %s %q: files named %s are entrypoints and form federation levels; %s its directory to use it as a package, or a fragment such as %s.<name>", imp.DefRange, imp.keyword, imp.Path, invocation.AlphasfileName, imp.keyword, invocation.AlphasfileName)
 	}
@@ -294,6 +289,7 @@ func (t *Tree) load(path string, importer *treeFile, imp *importBlock, pkg *pkgI
 	}
 	f := newTreeFile(path, path, b, root)
 	f.pkg = pkg
+	f.confine, f.repoAt, f.origin = res.confine, res.repoAt, res.origin
 	if pkg != nil {
 		pkg.file = f
 	}
@@ -322,24 +318,25 @@ func (t *Tree) follow(f *treeFile, scope, keyword string, blocks []*importBlock)
 		if err := checkImportAttrs(f, ib); err != nil {
 			return err
 		}
-		target, targetID, err := t.src.resolve(f, ib)
+		res, err := t.src.resolve(f, ib)
 		if err != nil {
 			return err
 		}
-		if info, statErr := zfs.Stat(target); statErr == nil && info.IsDir() {
-			if err := t.followPackage(f, scope, ib, target, targetID); err != nil {
+		if info, statErr := zfs.Stat(res.path); statErr == nil && info.IsDir() {
+			if err := t.followPackage(f, scope, ib, res); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := t.followFragment(f, scope, ib, target, targetID); err != nil {
+		if err := t.followFragment(f, scope, ib, res); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, target, targetID string) error {
+func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, res resolved) error {
+	target := res.path
 	switch {
 	case ib.InputsRange != (hcl.Range{}) || ib.Features != nil:
 		return fmt.Errorf("%s: %s %q: inputs and features are passed to a package directory, not to a fragment file", ib.DefRange, ib.keyword, ib.Path)
@@ -355,10 +352,10 @@ func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, target
 	tf := t.byPath[target]
 	if tf == nil {
 		var err error
-		if tf, err = t.load(target, f, ib, nil); err != nil {
+		if tf, err = t.load(target, f, ib, nil, res); err != nil {
 			return err
 		}
-		tf.identity = targetID
+		tf.identity = res.identity
 	}
 	if tf.pkg != nil {
 		return fmt.Errorf("%s: %s %q: %s is a package's %s; %s its directory instead", ib.DefRange, ib.keyword, ib.Path, tf.path, invocation.AlphasfileName, ib.keyword)
@@ -372,7 +369,8 @@ func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, target
 	return nil
 }
 
-func (t *Tree) followPackage(f *treeFile, scope string, ib *importBlock, dir, dirID string) error {
+func (t *Tree) followPackage(f *treeFile, scope string, ib *importBlock, res resolved) error {
+	dir := res.path
 	if ib.Modules != nil {
 		return fmt.Errorf("%s: %s %q: a package is imported whole; drop modules", ib.DefRange, ib.keyword, ib.Path)
 	}
@@ -393,10 +391,10 @@ func (t *Tree) followPackage(f *treeFile, scope string, ib *importBlock, dir, di
 		pkg = &pkgInstance{name: name, at: ib.DefRange}
 		t.packages[name] = pkg
 		var err error
-		if tf, err = t.load(afPath, f, ib, pkg); err != nil {
+		if tf, err = t.load(afPath, f, ib, pkg, res); err != nil {
 			return err
 		}
-		tf.identity = filepath.Join(dirID, invocation.AlphasfileName)
+		tf.identity = res.identity + "/" + invocation.AlphasfileName
 	} else {
 		pkg = tf.pkg
 		if pkg == nil {
@@ -579,11 +577,12 @@ func (t *Tree) addEdges(scope string) {
 				features = l.file.pkg.set.features
 			}
 		}
-		t.addEdge(l.file.path, l.modules, pkgName, features)
+		t.addEdge(l.file, l.modules, pkgName, features)
 	}
 }
 
-func (t *Tree) addEdge(path string, modules []string, pkg string, features []string) {
+func (t *Tree) addEdge(f *treeFile, modules []string, pkg string, features []string) {
+	path := f.path
 	for i := range t.edges {
 		if t.edges[i].Path != path {
 			continue
@@ -595,7 +594,7 @@ func (t *Tree) addEdge(path string, modules []string, pkg string, features []str
 		}
 		return
 	}
-	t.edges = append(t.edges, ImportEdge{Path: path, Modules: append([]string(nil), modules...), Package: pkg, Features: features})
+	t.edges = append(t.edges, ImportEdge{Path: path, Modules: append([]string(nil), modules...), Package: pkg, Features: features, Origin: f.origin})
 }
 
 // settingsFor returns the inputs and features scope sees: a package's own,

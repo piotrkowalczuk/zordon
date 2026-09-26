@@ -282,7 +282,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "write the declared workspace files into an existing workspace",
 		Flags:     wsApplyFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runWorkspaceApply(zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsApplyWorkspace)
+			return runWorkspaceApply(zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsApplyWorkspace, zfs.ZordonHome(home.Path()))
 		},
 	}
 	wsServiceCmd.Subcommands = []*ff.Command{wsServiceAddCmd, wsServiceRmCmd}
@@ -367,7 +367,19 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		},
 	}
 
-	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wsCmd, getCmd, planCmd, cleanCmd, mcpCmd)
+	// update
+	updateFlags := ff.NewFlagSet("update").SetParent(rootFlags)
+	updateCmd := &ff.Command{
+		Name:      "update",
+		Usage:     "zordon update [repo ...]",
+		ShortHelp: "re-resolve the remote repositories the Alphasfile imports (all, or the named ones) to their newest commits and rewrite zordon.lock",
+		Flags:     updateFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runUpdate(stdio.Stdout, zfs.ZordonHome(home.Path()), args)
+		},
+	}
+
+	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wsCmd, getCmd, planCmd, cleanCmd, updateCmd, mcpCmd)
 	return rootCmd, agent
 }
 

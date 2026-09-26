@@ -61,7 +61,7 @@ func NewFederationState(zordonHome string) (*FederationState, error) {
 	}
 	levels := make([]ChainLevel, 0, len(chain))
 	for _, afPath := range chain {
-		tree, err := alphasfile.LoadTree(afPath)
+		tree, err := loadTree(zordonHome, afPath, chain)
 		if err != nil {
 			return nil, err
 		}

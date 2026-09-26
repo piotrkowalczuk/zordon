@@ -251,7 +251,13 @@ func (m *ServiceMeta) Workspaceable() bool {
 // (vars / arguments / files / readiness / sudo are ignored). Pure, needs no
 // Invocation — the entry point for `zordon workspace`.
 func ParseServices(path string) ([]*ServiceMeta, error) {
-	tree, err := LoadTree(path)
+	return ParseServicesWith(path, LoadOptions{})
+}
+
+// ParseServicesWith is ParseServices with load options, so imports resolve
+// the same way they do for the rest of a command.
+func ParseServicesWith(path string, opts LoadOptions) ([]*ServiceMeta, error) {
+	tree, err := LoadTreeWith(path, opts)
 	if err != nil {
 		return nil, err
 	}
