@@ -1683,6 +1683,18 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 	if len(modules) > 0 {
 		vars["module"] = cty.ObjectVal(modules)
 	}
+	if s := r.tree.settingsFor(dirs.module); s != nil {
+		if len(s.inputs) > 0 {
+			vars["input"] = cty.ObjectVal(copyCtyMap(s.inputs))
+		}
+		if len(s.features) > 0 {
+			feats := make(map[string]cty.Value, len(s.features))
+			for name, on := range s.features {
+				feats[name] = cty.BoolVal(on)
+			}
+			vars["feature"] = cty.ObjectVal(feats)
+		}
+	}
 	// fs::src / src::hash exist only in a SERVICE scope — they read `checkout`,
 	// which the caller passes as the current service's checkout, or "" at file
 	// scope (top-level dotenv/sysenv, toolchain), where they then error clearly

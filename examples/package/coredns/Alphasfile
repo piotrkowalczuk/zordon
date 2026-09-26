@@ -1,0 +1,48 @@
+# A DNS server that answers every name in one zone with 127.0.0.1.
+# go build needs these from the host; the importer may pass more.
+sysenv = ["HOME", "PATH", "TMPDIR"]
+
+input "zone" { default = "test" }
+
+service "go" "coredns" {
+  git {
+    url = "github.com/coredns/coredns"
+    tag = "v1.14.7"
+  }
+
+  build {
+    cmd = ["go", "build", "-o", "${fs::bin()}/coredns", "."]
+  }
+
+  vars = {
+    zone   = input.zone
+    dns    = net::pickport()
+    health = net::pickport()
+  }
+
+  file "corefile" {
+    path = "${fs::etc()}/Corefile"
+    body = <<-EOT
+      ${self.vars.zone}:${self.vars.dns} {
+        template IN A {
+          answer "{{ .Name }} 60 IN A 127.0.0.1"
+        }
+        health 127.0.0.1:${self.vars.health}
+        log
+      }
+    EOT
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/coredns", "-conf", self.file.corefile.path]
+  }
+
+  readiness {
+    http {
+      path = "/health"
+      port = self.vars.health
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

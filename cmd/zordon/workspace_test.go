@@ -81,7 +81,7 @@ service "go" "app" {
 `)
 	mustDir(t, filepath.Join(root, "src", "app"))
 
-	_, err := applyWorkspaceTo(discardLogger(), io.Discard, root, invocation.MainWorkspace)
+	_, err := applyWorkspaceTo(discardLogger(), io.Discard, root, invocation.MainWorkspace, t.TempDir())
 	if err == nil {
 		t.Fatal("applyWorkspaceTo succeeded, want the write into a service source refused")
 	}
@@ -211,7 +211,7 @@ service "go" "tool" {
 }
 `)
 
-	got, err := serviceSourceDirs(af)
+	got, err := serviceSourceDirs(af, t.TempDir())
 	if err != nil {
 		t.Fatalf("serviceSourceDirs: %v", err)
 	}
@@ -248,7 +248,7 @@ workspace {
 	if err != nil {
 		t.Fatalf("applyTarget: %v", err)
 	}
-	if _, err := applyWorkspaceTo(discardLogger(), io.Discard, root, ws); err != nil {
+	if _, err := applyWorkspaceTo(discardLogger(), io.Discard, root, ws, t.TempDir()); err != nil {
 		t.Fatalf("applyWorkspaceTo: %v", err)
 	}
 

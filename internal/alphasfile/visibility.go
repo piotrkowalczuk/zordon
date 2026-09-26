@@ -24,7 +24,7 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 		}
 		var found error
 		hclsyntax.VisitAll(body, func(n hclsyntax.Node) hcl.Diagnostics {
-			if found != nil {
+			if found != nil || tree.isDisabled(n.Range()) {
 				return nil
 			}
 			st, ok := n.(*hclsyntax.ScopeTraversalExpr)
@@ -39,12 +39,19 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 			if owner == nil || tree.visible(sb.module, name) {
 				return nil
 			}
-			rel := localRel(sb.file.dir, owner.path)
 			scope, keyword, where := "the top level of "+sb.file.path, "import", "at the top level"
 			if sb.module != DefaultModule {
-				scope, keyword, where = fmt.Sprintf("module %q (%s)", sb.module, sb.file.path), "require", fmt.Sprintf("inside module %q", sb.module)
+				kind := "module"
+				if tree.packages[sb.module] != nil {
+					kind = "package"
+				}
+				scope, keyword, where = fmt.Sprintf("%s %q (%s)", kind, sb.module, sb.file.path), "require", fmt.Sprintf("inside %s %q", kind, sb.module)
 			}
-			found = fmt.Errorf("%s: module.%s is not visible in %s; add %s %q { modules = [%q] } %s", st.SrcRange, name, scope, keyword, rel, name, where)
+			if owner.pkg != nil {
+				found = fmt.Errorf("%s: module.%s is not visible in %s; add %s %q {} %s", st.SrcRange, name, scope, keyword, localRel(sb.file.dir, owner.dir), where)
+				return nil
+			}
+			found = fmt.Errorf("%s: module.%s is not visible in %s; add %s %q { modules = [%q] } %s", st.SrcRange, name, scope, keyword, localRel(sb.file.dir, owner.path), name, where)
 			return nil
 		})
 		if found != nil {

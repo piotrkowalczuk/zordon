@@ -1,0 +1,9 @@
+# A company stack: Caddy with both of its features. It is a package too, so
+# a working place runs the whole stack from a one-line Alphasfile:
+#
+#   import "github.com/piotrkowalczuk/zordon/examples/package@main" {}
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+import "./caddy" {
+  features = ["hugo", "coredns"]
+}

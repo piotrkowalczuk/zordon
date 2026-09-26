@@ -165,8 +165,8 @@ module "kafka" { service "go" "kafka" { … } }
 |---|---|
 | syntax | `import "./<path>" { modules = ["<m>", …] }` and `require "./<path>" { modules = [...] }`, repeatable; `modules` is required and non-empty |
 | placement | `import` at the entrypoint's top level only; `require` inside a `module` block in any file |
-| path | starts with `./`, `../`, `/` or `~/`; relative paths resolve against the declaring file's directory; any other spelling is reserved for remote identities and currently rejected |
-| entrypoint vs fragment | a file named exactly `Alphasfile` is an entrypoint and cannot be imported; import a fragment, by convention `Alphasfile.<name>` |
+| path | starts with `./`, `../`, `/` or `~/`; relative paths resolve against the declaring file's directory; any other spelling is a [remote identity](#remote-imports) |
+| entrypoint vs fragment | a file named exactly `Alphasfile` is an entrypoint and cannot be imported as a file; import its directory to use it as a [package](#packages), or a fragment, by convention `Alphasfile.<name>` |
 | fragment content | `module` blocks only; top-level `import`, `service`, `toolchain`, `env`, `dotenv`, `sysenv` and `workspace` are errors |
 | loading | every file loads once; diamonds and cycles between files are fine; imports inside modules outside the stack are loaded and checked too |
 | stack | the entrypoint's modules, the modules its imports name, and, repeated until nothing changes, the modules required by any module already in the stack; every other module is left out |
@@ -180,9 +180,95 @@ module "kafka" { service "go" "kafka" { … } }
 | `zordon plan` | prints `# import <file> [modules]` per file the stack takes modules from and `# unused module <m> in <file>` under the level header |
 
 A `require` joins the stack only with the module that declares it, so taking one module from a shared file never starts what its neighbours need.
-Remote sources are reserved and currently rejected.
 
 See [Split an Alphasfile across files](how-to/split-an-alphasfile-across-files.md) for the recipe and [examples/import](https://github.com/piotrkowalczuk/zordon/tree/main/examples/import) for a runnable stack.
+
+### Packages
+
+A package is a directory with an `Alphasfile`, imported whole.
+It becomes one module, named after the directory or an alias, so its services are `module.<name>.service.<tc>.<svc>` and `<name>/<svc>`.
+
+```hcl
+# Alphasfile
+import "./caddy" "edge" {
+  features = ["hugo"]
+  inputs   = { zone = "test" }
+}
+
+# caddy/Alphasfile
+feature "hugo" {}
+
+require "../hugo" {
+  enabled = feature.hugo
+}
+
+service "go" "caddy" { … }
+```
+
+| rule | behavior |
+|---|---|
+| target | an import or require whose path resolves to a directory; that directory's `Alphasfile` is the package |
+| name | the second label when given, else the directory's last path segment; unique among all modules and packages, the error suggests an alias |
+| `import` | composes the package and may pass `inputs` and `features`; allowed in the entrypoint and in packages |
+| `require` | declares a dependency and passes nothing; a package only required uses input defaults and no features |
+| several imports | every `import` of the same package must pass the same inputs and features, because it runs once |
+| content | `service`, `toolchain`, `sysenv`, `import`, `require`, `input` and `feature`; `env`, `dotenv`, `workspace` and `module` blocks are errors |
+| toolchain | the package's `toolchain {}` pins its own services, keyed `<name>/<lang>`, like a module's |
+| `sysenv` | unioned with the entrypoint's, for packages in the stack |
+| visibility | a package sees itself and what it imports or requires |
+| federation | importing a package that is a federation level of the invocation is an error, because it would run twice |
+| on its own | `zordon start` inside the package runs it: inputs take their defaults, features are off, a required input without a default is an error |
+| `zordon plan` | prints `# import <dir> as <name> [features: …]` |
+
+### Inputs and features
+
+```hcl
+input "zone" { default = "test" }
+feature "coredns" {}
+
+service "go" "caddy" {
+  file "site-coredns" {
+    enabled = feature.coredns
+    path    = "${fs::etc()}/sites/coredns.caddy"
+    body    = "… ${input.zone} …"
+  }
+}
+```
+
+| rule | behavior |
+|---|---|
+| `input "<n>" { default = … }` | read as `input.<n>`; without a default the importer must pass it |
+| input values | defaults and imported values are evaluated before planning: literals, `os::env` and `enc::*`, never another service's values |
+| unknown input | passing an input the package does not declare is an error listing the declared ones |
+| `feature "<n>" {}` | read as `feature.<n>`, a bool; the importer lists the ones to turn on |
+| unknown feature | an error listing the declared ones |
+| `enabled` | on `service`, `file`, `provision` and `require` blocks; a false value removes the block before planning |
+| `enabled` expressions | `feature.<n>`, `!`, `&&`, `||` only; no functions and no other variables |
+| reference to a removed block | an error on the referencing block that says which `enabled` removed the target and asks to gate the reference the same way |
+| `enabled` elsewhere | an error unless the file declares a feature |
+
+### Remote imports
+
+An import path that does not start with `./`, `../`, `/` or `~/` is an identity: a repository followed by a path inside it and a version.
+
+```hcl
+import "github.com/piotrkowalczuk/zordon/examples/package/caddy@v1.4.0" {}
+require "github.com/acme/infra/stacks/Alphasfile.kafka@main" { modules = ["kafka"] }
+```
+
+| rule | behavior |
+|---|---|
+| identity | `<host>/<owner>/<repo>[/<path>]@<ref>`; hosts github.com, gitlab.com and bitbucket.org |
+| version | a branch, a tag or a commit; required unless a `zordon.work` search entry provides the repository |
+| resolution order | a `search` entry of the applying `zordon.work`, then the `zordon.lock` pin, then a fetch |
+| one version per repository | two imports of the same repository with different refs are an error naming both |
+| checkout | `$ZORDON_HOME/mod/<host>/<owner>/<repo>@<commit>`, reused without the network once present |
+| confinement | a file of a remote checkout may import relative paths only, and never outside its checkout |
+| `cfg::hash()` | records `<repo>@<commit>//<path>` for remote files, so moving a pin restarts the level |
+| `zordon plan` | appends `(<repo>@<commit>)` or `(search <dir>)` to every remote import |
+| `zordon update` | moves the pins in `zordon.lock` to the newest commits |
+
+See [zordon.work, zordon.mod and zordon.lock](reference/files.md) for the three files, [Use a package from another repository](how-to/use-a-package-from-another-repository.md), [Develop a dependency locally](how-to/develop-a-dependency-locally.md), and [examples/package](https://github.com/piotrkowalczuk/zordon/tree/main/examples/package) for a runnable stack.
 
 ### Source: `git { }`, `src { }`, `crate { }`
 

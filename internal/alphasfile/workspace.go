@@ -10,8 +10,6 @@ import (
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/gohcl"
-	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
@@ -108,14 +106,9 @@ func RenderWorkspace(path string, inv *invocation.InvocationState) (*WorkspaceSp
 	if err != nil {
 		return nil, fmt.Errorf("alphasfile read: %w", err)
 	}
-	parser := hclparse.NewParser()
-	file, diags := parser.ParseHCL(b, path)
-	if diags.HasErrors() {
-		return nil, fmt.Errorf("alphasfile parse: %s", diags.Error())
-	}
-	var root rootBlock
-	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
-		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
+	root, err := decodeFile(path, b)
+	if err != nil {
+		return nil, err
 	}
 
 	spec := &WorkspaceSpec{inv: inv, branchTemplate: DefaultBranchTemplate}

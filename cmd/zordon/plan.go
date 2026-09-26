@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -132,7 +133,19 @@ func importLines(prefix string, tree *alphasfile.Tree) string {
 	}
 	var b strings.Builder
 	for _, e := range tree.Imports() {
-		fmt.Fprintf(&b, "%simport %s [%s]\n", prefix, e.Path, strings.Join(e.Modules, ", "))
+		origin := ""
+		if e.Origin != "" {
+			origin = " (" + e.Origin + ")"
+		}
+		if e.Package != "" {
+			features := ""
+			if len(e.Features) > 0 {
+				features = " [features: " + strings.Join(e.Features, ", ") + "]"
+			}
+			fmt.Fprintf(&b, "%simport %s as %s%s%s\n", prefix, filepath.Dir(e.Path), e.Package, features, origin)
+			continue
+		}
+		fmt.Fprintf(&b, "%simport %s [%s]%s\n", prefix, e.Path, strings.Join(e.Modules, ", "), origin)
 	}
 	for _, u := range tree.Unused() {
 		fmt.Fprintf(&b, "%sunused module %s in %s\n", prefix, u.Module, u.Path)

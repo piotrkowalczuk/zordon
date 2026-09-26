@@ -251,7 +251,13 @@ func (m *ServiceMeta) Workspaceable() bool {
 // (vars / arguments / files / readiness / sudo are ignored). Pure, needs no
 // Invocation — the entry point for `zordon workspace`.
 func ParseServices(path string) ([]*ServiceMeta, error) {
-	tree, err := LoadTree(path)
+	return ParseServicesWith(path, LoadOptions{})
+}
+
+// ParseServicesWith is ParseServices with load options, so imports resolve
+// the same way they do for the rest of a command.
+func ParseServicesWith(path string, opts LoadOptions) ([]*ServiceMeta, error) {
+	tree, err := LoadTreeWith(path, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +315,7 @@ func (rb *rootBlock) allServices() []*serviceBlock {
 // module's.
 func (rb *rootBlock) allImports() []*importBlock {
 	out := append([]*importBlock(nil), rb.Imports...)
+	out = append(out, rb.Requires...)
 	for _, mb := range rb.Modules {
 		out = append(out, mb.Requires...)
 	}
@@ -679,6 +686,11 @@ type rootBlock struct {
 	Workspace *workspaceRootBlock `hcl:"workspace,block"`
 	Modules   []*moduleBlock      `hcl:"module,block"`
 	Imports   []*importBlock      `hcl:"import,block"`
+	// Requires, Inputs and Features belong to a package; an entrypoint may
+	// declare them so the package also runs on its own.
+	Requires []*importBlock  `hcl:"require,block"`
+	Inputs   []*inputBlock   `hcl:"input,block"`
+	Features []*featureBlock `hcl:"feature,block"`
 
 	// gohcl synthesizes a null expression for an absent optional
 	// attribute, so presence is read off the attribute's range.
@@ -687,16 +699,41 @@ type rootBlock struct {
 	SysEnvRange hcl.Range `hcl:"sysenv,attr_range"`
 }
 
-// importBlock pulls named modules out of another file:
-// `import "<path>" { modules = ["a", "b"] }` at the entrypoint's top level,
-// `require "<path>" { modules = [...] }` inside a module.
+// importBlock pulls a package, or named modules of a fragment, into the
+// stack: `import "<path>" "<alias>"? { ... }` composes and may pass inputs and
+// features to a package, `require` declares a dependency and passes nothing.
 type importBlock struct {
-	Path     string    `hcl:"path,label"`
-	Modules  []string  `hcl:"modules"`
-	Git      *gitBlock `hcl:"git,block"`
-	DefRange hcl.Range `hcl:",def_range"`
+	Path         string         `hcl:"path,label"`
+	Modules      []string       `hcl:"modules,optional"`
+	Inputs       hcl.Expression `hcl:"inputs,optional"`
+	InputsRange  hcl.Range      `hcl:"inputs,attr_range"`
+	Features     []string       `hcl:"features,optional"`
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
+	Git          *gitBlock      `hcl:"git,block"`
+	DefRange     hcl.Range      `hcl:",def_range"`
 
 	keyword string
+	// alias is the optional second label; HCL block schemas have a fixed
+	// label count, so decodeFile lifts it off before decoding.
+	alias string
+}
+
+// inputBlock declares a value a package takes from whoever imports it:
+// `input "<name>" { default = <expr> }`. Without a default it is required.
+type inputBlock struct {
+	Name         string         `hcl:"name,label"`
+	Default      hcl.Expression `hcl:"default,optional"`
+	DefaultRange hcl.Range      `hcl:"default,attr_range"`
+	DefRange     hcl.Range      `hcl:",def_range"`
+}
+
+// featureBlock declares a switch a package's importer may turn on:
+// `feature "<name>" {}`. It is read as feature.<name> and gates blocks
+// through `enabled`.
+type featureBlock struct {
+	Name     string    `hcl:"name,label"`
+	DefRange hcl.Range `hcl:",def_range"`
 }
 
 // moduleBlock is a named namespace of services with an optional toolchain
@@ -771,6 +808,9 @@ type serviceBlock struct {
 	Body      hcl.Body  `hcl:",body"`
 	module    string
 	file      *treeFile // declaring file: anchors relative src.path, scopes module visibility
+
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
 
 	// static fields
 	Color string    `hcl:"color,optional"`
@@ -871,6 +911,9 @@ type provisionBlock struct {
 	Env         hcl.Expression   `hcl:"env,optional"`
 	After       hcl.Expression   `hcl:"after,optional"`
 	Detached    bool             `hcl:"detached,optional"`
+
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
 }
 
 // argumentBlock declares one typed input of a provision (`argument "<name>" {
@@ -1030,6 +1073,9 @@ type fileBlock struct {
 	Name string         `hcl:"name,label"`
 	Path hcl.Expression `hcl:"path"`
 	Body hcl.Expression `hcl:"body"`
+
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
 }
 
 // workspaceRootBlock is the top-level `workspace {}`: how to PREPARE a
