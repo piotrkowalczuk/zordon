@@ -1,0 +1,95 @@
+# Caddy in front of whatever its features switch on. Each feature requires
+# the package it proxies to and drops one site snippet into the Caddyfile.
+# go build needs these from the host; the importer may pass more.
+sysenv = ["HOME", "PATH", "TMPDIR"]
+
+feature "hugo" {}
+feature "coredns" {}
+
+require "../hugo" {
+  enabled = feature.hugo
+}
+
+require "../coredns" {
+  enabled = feature.coredns
+}
+
+service "go" "caddy" {
+  git {
+    url = "github.com/caddyserver/caddy"
+    tag = "v2.11.4"
+  }
+
+  build {
+    cmd = ["go", "build", "-o", "${fs::bin()}/caddy", "./cmd/caddy"]
+  }
+
+  vars = {
+    http  = net::pickport()
+    admin = net::pickport()
+  }
+
+  # Caddy autosaves its config under the user's config dir; keep it in the
+  # service's own state instead.
+  env = {
+    XDG_CONFIG_HOME = "${fs::var()}/config"
+    XDG_DATA_HOME   = "${fs::var()}/data"
+  }
+
+  file "caddyfile" {
+    path = "${fs::etc()}/Caddyfile"
+    body = <<-EOT
+      {
+        admin 127.0.0.1:${self.vars.admin}
+        auto_https off
+      }
+
+      :${self.vars.http} {
+        respond /healthz "ok" 200
+        import ${fs::etc()}/sites/*.caddy
+      }
+    EOT
+  }
+
+  file "site-base" {
+    path = "${fs::etc()}/sites/00-base.caddy"
+    body = "# site snippets switched on by features\n"
+  }
+
+  file "site-hugo" {
+    enabled = feature.hugo
+    path    = "${fs::etc()}/sites/10-hugo.caddy"
+    body    = "reverse_proxy /* 127.0.0.1:${module.hugo.service.go.hugo.vars.port}\n"
+  }
+
+  # Resolves health.<zone> through CoreDNS, which answers 127.0.0.1, and so
+  # proxies back to Caddy's own /healthz.
+  file "site-coredns" {
+    enabled = feature.coredns
+    path    = "${fs::etc()}/sites/20-coredns.caddy"
+    body    = <<-EOT
+      handle_path /dns/* {
+        reverse_proxy {
+          dynamic a {
+            name health.${module.coredns.service.go.coredns.vars.zone}
+            port ${self.vars.http}
+            resolvers 127.0.0.1:${module.coredns.service.go.coredns.vars.dns}
+          }
+        }
+      }
+    EOT
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/caddy", "run", "--config", self.file.caddyfile.path, "--adapter", "caddyfile"]
+  }
+
+  readiness {
+    http {
+      path = "/healthz"
+      port = self.vars.http
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

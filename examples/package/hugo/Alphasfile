@@ -1,0 +1,52 @@
+# A static site served by `hugo server`, generated from file blocks.
+# go build needs these from the host; the importer may pass more.
+sysenv = ["HOME", "PATH", "TMPDIR"]
+
+input "title" { default = "zordon package example" }
+
+service "go" "hugo" {
+  git {
+    url = "github.com/gohugoio/hugo"
+    tag = "v0.166.0"
+  }
+
+  build {
+    cmd = ["go", "build", "-o", "${fs::bin()}/hugo", "."]
+  }
+
+  vars = {
+    port = net::pickport()
+  }
+
+  file "config" {
+    path = "${fs::etc()}/site/hugo.toml"
+    body = <<-EOT
+      baseURL = "http://127.0.0.1:${self.vars.port}/"
+      title = "${input.title}"
+      disableKinds = ["taxonomy", "term", "RSS", "sitemap"]
+    EOT
+  }
+
+  file "index" {
+    path = "${fs::etc()}/site/content/_index.md"
+    body = "---\ntitle: home\n---\n"
+  }
+
+  file "layout" {
+    path = "${fs::etc()}/site/layouts/index.html"
+    body = "<h1>{{ .Site.Title }}</h1><p>zordon-hugo-ok</p>\n"
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/hugo", "server", "--source", "${fs::etc()}/site", "--bind", "127.0.0.1", "--port", "${self.vars.port}", "--disableLiveReload", "--renderToMemory"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 100
+  }
+}
