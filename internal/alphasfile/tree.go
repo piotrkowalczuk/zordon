@@ -74,7 +74,7 @@ func ParseTree(name string, src []byte) (*Tree, error) {
 		return nil, err
 	}
 	if imps := root.allImports(); len(imps) > 0 {
-		return nil, fmt.Errorf("%s: import %q: imports need a file on disk; load this manifest with alphasfile.Open", imps[0].DefRange, imps[0].Path)
+		return nil, fmt.Errorf("%s: %q: imports need a file on disk; load this manifest with alphasfile.Open", imps[0].DefRange, imps[0].Path)
 	}
 	t := newTree()
 	t.register(newTreeFile(abs, abs, src, root))
@@ -141,10 +141,25 @@ type localSource struct{}
 
 func (localSource) resolve(importer *treeFile, imp *importBlock) (string, string, error) {
 	if imp.Git != nil {
-		return "", "", fmt.Errorf("%s: import %q: remote imports (git {}) are not supported yet", imp.DefRange, imp.Path)
+		return "", "", fmt.Errorf("%s: %s %q: remote imports (git {}) are not supported yet", imp.DefRange, imp.keyword, imp.Path)
+	}
+	if !isLocalPath(imp.Path) {
+		return "", "", fmt.Errorf("%s: %s %q: remote imports are not supported yet; a local path starts with ./, ../, / or ~/", imp.DefRange, imp.keyword, imp.Path)
 	}
 	p := filepath.Clean(resolveSrcDir(importer.dir, imp.Path))
 	return p, p, nil
+}
+
+// isLocalPath reports whether an import path names a file on disk. Every
+// other spelling is reserved for remote identities such as
+// github.com/owner/repo/path.
+func isLocalPath(p string) bool {
+	for _, prefix := range []string{"./", "../", "/", "~/"} {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func newTree() *Tree {
@@ -179,14 +194,14 @@ func (t *Tree) register(f *treeFile) {
 // fails `zordon plan` before anyone reaches for the module.
 func (t *Tree) load(path string, importer *treeFile, imp *importBlock, src importSource) (*treeFile, error) {
 	if importer != nil && filepath.Base(path) == invocation.AlphasfileName {
-		return nil, fmt.Errorf("%s: cannot import %q: files named %s are entrypoints and form federation levels; import a fragment such as %s.<name> instead", imp.DefRange, imp.Path, invocation.AlphasfileName, invocation.AlphasfileName)
+		return nil, fmt.Errorf("%s: cannot %s %q: files named %s are entrypoints and form federation levels; import a fragment such as %s.<name> instead", imp.DefRange, imp.keyword, imp.Path, invocation.AlphasfileName, invocation.AlphasfileName)
 	}
 	b, err := zfs.Read(path)
 	if err != nil {
 		if importer == nil {
 			return nil, fmt.Errorf("alphasfile read: %w", err)
 		}
-		return nil, fmt.Errorf("%s: import %q: %w", imp.DefRange, imp.Path, err)
+		return nil, fmt.Errorf("%s: %s %q: %w", imp.DefRange, imp.keyword, imp.Path, err)
 	}
 	root, err := decodeFile(path, b)
 	if err != nil {
@@ -199,25 +214,26 @@ func (t *Tree) load(path string, importer *treeFile, imp *importBlock, src impor
 	}
 	f := newTreeFile(path, path, b, root)
 	t.register(f)
-	if err := t.follow(f, DefaultModule, root.Imports, src); err != nil {
+	if err := t.follow(f, DefaultModule, "import", root.Imports, src); err != nil {
 		return nil, err
 	}
 	for _, mb := range root.Modules {
-		if err := t.follow(f, mb.Name, mb.Imports, src); err != nil {
+		if err := t.follow(f, mb.Name, "require", mb.Requires, src); err != nil {
 			return nil, err
 		}
 	}
 	return f, nil
 }
 
-func (t *Tree) follow(f *treeFile, scope string, imports []*importBlock, src importSource) error {
+func (t *Tree) follow(f *treeFile, scope, keyword string, imports []*importBlock, src importSource) error {
 	for _, ib := range imports {
+		ib.keyword = keyword
 		target, targetID, err := src.resolve(f, ib)
 		if err != nil {
 			return err
 		}
 		if len(ib.Modules) == 0 {
-			return fmt.Errorf("%s: import %q: modules must name at least one module declared in %s", ib.DefRange, ib.Path, target)
+			return fmt.Errorf("%s: %s %q: modules must name at least one module declared in %s", ib.DefRange, keyword, ib.Path, target)
 		}
 		tf := t.byPath[target]
 		if tf == nil {
@@ -228,7 +244,7 @@ func (t *Tree) follow(f *treeFile, scope string, imports []*importBlock, src imp
 		}
 		for _, m := range ib.Modules {
 			if tf.declared[m] == nil {
-				return fmt.Errorf("%s: import %q: module %q is not declared in %s (declared: %s)", ib.DefRange, ib.Path, m, tf.path, strings.Join(sortedKeys(tf.declared), ", "))
+				return fmt.Errorf("%s: %s %q: module %q is not declared in %s (declared: %s)", ib.DefRange, keyword, ib.Path, m, tf.path, strings.Join(sortedKeys(tf.declared), ", "))
 			}
 		}
 		t.links[scope] = append(t.links[scope], importLink{file: tf, modules: ib.Modules})
@@ -375,14 +391,17 @@ func decodeFile(name string, src []byte) (*rootBlock, error) {
 	return &root, nil
 }
 
-// checkFragment enforces what an imported file may hold: modules and
-// sysenv. Everything else belongs to the entrypoint, and imports belong to
-// the module that needs them.
+// checkFragment enforces what an imported file may hold: module blocks only.
+// Everything else belongs to the entrypoint, and dependencies belong to the
+// module that needs them.
 func checkFragment(root *rootBlock) error {
-	hint := fmt.Sprintf("is only allowed in the entrypoint %s; a fragment holds module blocks and sysenv", invocation.AlphasfileName)
+	hint := fmt.Sprintf("is only allowed in the entrypoint %s; a fragment holds module blocks only", invocation.AlphasfileName)
 	if len(root.Imports) > 0 {
 		imp := root.Imports[0]
-		return fmt.Errorf("%s: top-level import %q in a fragment; move it into the module block that uses it, so it joins the stack only with that module", imp.DefRange, imp.Path)
+		return fmt.Errorf("%s: import %q in a fragment; declare the dependency inside the module block that uses it as require %q { modules = [...] }, so it joins the stack only with that module", imp.DefRange, imp.Path, imp.Path)
+	}
+	if root.SysEnvRange != (hcl.Range{}) {
+		return fmt.Errorf("%s: top-level sysenv %s", root.SysEnvRange, hint)
 	}
 	if len(root.Services) > 0 {
 		return fmt.Errorf("%s: top-level service %s; wrap it in a module block", root.Services[0].DefRange, hint)

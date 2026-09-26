@@ -310,7 +310,7 @@ func (rb *rootBlock) allServices() []*serviceBlock {
 func (rb *rootBlock) allImports() []*importBlock {
 	out := append([]*importBlock(nil), rb.Imports...)
 	for _, mb := range rb.Modules {
-		out = append(out, mb.Imports...)
+		out = append(out, mb.Requires...)
 	}
 	return out
 }
@@ -688,12 +688,15 @@ type rootBlock struct {
 }
 
 // importBlock pulls named modules out of another file:
-// `import "<path>" { modules = ["a", "b"] }`.
+// `import "<path>" { modules = ["a", "b"] }` at the entrypoint's top level,
+// `require "<path>" { modules = [...] }` inside a module.
 type importBlock struct {
 	Path     string    `hcl:"path,label"`
 	Modules  []string  `hcl:"modules"`
 	Git      *gitBlock `hcl:"git,block"`
 	DefRange hcl.Range `hcl:",def_range"`
+
+	keyword string
 }
 
 // moduleBlock is a named namespace of services with an optional toolchain
@@ -703,7 +706,7 @@ type importBlock struct {
 type moduleBlock struct {
 	Name      string          `hcl:"name,label"`
 	DefRange  hcl.Range       `hcl:",def_range"`
-	Imports   []*importBlock  `hcl:"import,block"`
+	Requires  []*importBlock  `hcl:"require,block"`
 	Toolchain *toolchainBlock `hcl:"toolchain,block"`
 	Services  []*serviceBlock `hcl:"service,block"`
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Claim: an entrypoint composes modules imported from fragment files, and
-# modules import each other. The app and billing modules each import kafka;
+# modules require each other. The app and billing modules each require kafka;
 # the entrypoint imports only app and billing. kafka is loaded once and runs
 # once, both consumers invoke its provision across files, relative src paths
 # anchor to the declaring fragment, and a module declared but never imported

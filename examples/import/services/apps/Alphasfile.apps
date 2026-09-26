@@ -1,8 +1,8 @@
-# Two modules in one fragment. Each depends on kafka, so each imports it:
-# an import belongs to the module that needs it and joins the stack only
+# Two modules in one fragment. Each depends on kafka, so each requires it:
+# a require belongs to the module that needs it and joins the stack only
 # with that module. Without it `module.kafka` is not visible in the module.
 module "app" {
-  import "../kafka/Alphasfile.kafka" {
+  require "../kafka/Alphasfile.kafka" {
     modules = ["kafka"]
   }
 
@@ -36,7 +36,7 @@ module "app" {
 }
 
 module "billing" {
-  import "../kafka/Alphasfile.kafka" {
+  require "../kafka/Alphasfile.kafka" {
     modules = ["kafka"]
   }
 

@@ -3,6 +3,7 @@ package alphasfile
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
@@ -38,15 +39,12 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 			if owner == nil || tree.visible(sb.module, name) {
 				return nil
 			}
-			rel, err := filepath.Rel(sb.file.dir, owner.path)
-			if err != nil {
-				rel = owner.path
-			}
-			scope, where := "the top level of "+sb.file.path, "at the top level"
+			rel := localRel(sb.file.dir, owner.path)
+			scope, keyword, where := "the top level of "+sb.file.path, "import", "at the top level"
 			if sb.module != DefaultModule {
-				scope, where = fmt.Sprintf("module %q (%s)", sb.module, sb.file.path), fmt.Sprintf("inside module %q", sb.module)
+				scope, keyword, where = fmt.Sprintf("module %q (%s)", sb.module, sb.file.path), "require", fmt.Sprintf("inside module %q", sb.module)
 			}
-			found = fmt.Errorf("%s: module.%s is not visible in %s; add import %q { modules = [%q] } %s", st.SrcRange, name, scope, rel, name, where)
+			found = fmt.Errorf("%s: module.%s is not visible in %s; add %s %q { modules = [%q] } %s", st.SrcRange, name, scope, keyword, rel, name, where)
 			return nil
 		})
 		if found != nil {
@@ -54,4 +52,17 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 		}
 	}
 	return nil
+}
+
+// localRel spells target relative to dir the way an import path must: with a
+// leading ./ or ../, or absolute when no relative path exists.
+func localRel(dir, target string) string {
+	rel, err := filepath.Rel(dir, target)
+	if err != nil {
+		return target
+	}
+	if rel == ".." || strings.HasPrefix(rel, "../") {
+		return rel
+	}
+	return "./" + rel
 }

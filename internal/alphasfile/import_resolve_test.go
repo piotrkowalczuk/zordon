@@ -12,10 +12,10 @@ import (
 func TestOpen_transitiveModuleChain(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile": "import \"a/Alphasfile.a\" { modules = [\"a\"] }\nimport \"c/Alphasfile.c\" { modules = [\"c\"] }\n",
+		"Alphasfile": "import \"./a/Alphasfile.a\" { modules = [\"a\"] }\nimport \"./c/Alphasfile.c\" { modules = [\"c\"] }\n",
 		"a/Alphasfile.a": `
 module "a" {
-  import "../b/Alphasfile.b" { modules = ["b"] }
+  require "../b/Alphasfile.b" { modules = ["b"] }
 
   service "go" "a" {
     git { url = "github.com/x/a" }
@@ -63,7 +63,7 @@ func TestOpen_visibilityViolation(t *testing.T) {
 			dir := t.TempDir()
 			root := writeTree(t, dir, map[string]string{
 				"Alphasfile": fmt.Sprintf(`
-import "a/Alphasfile.a" { modules = ["a"] }
+import "./a/Alphasfile.a" { modules = ["a"] }
 service "go" "z" {
   git { url = "github.com/x/z" }
   %s
@@ -71,7 +71,7 @@ service "go" "z" {
 `, body),
 				"a/Alphasfile.a": `
 module "a" {
-  import "../b/Alphasfile.b" { modules = ["b"] }
+  require "../b/Alphasfile.b" { modules = ["b"] }
 }
 `,
 				"b/Alphasfile.b": `
@@ -96,7 +96,7 @@ module "b" {
 			if err == nil {
 				t.Fatal("the entrypoint does not import module b, so module.b must not resolve")
 			}
-			for _, want := range []string{root + ":", "module.b is not visible", `add import "b/Alphasfile.b" { modules = ["b"] }`} {
+			for _, want := range []string{root + ":", "module.b is not visible", `add import "./b/Alphasfile.b" { modules = ["b"] }`} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("missing %q in %v", want, err)
 				}
@@ -107,10 +107,10 @@ module "b" {
 
 func TestOpen_visibilityOK_cycle(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": `import "Alphasfile.a" { modules = ["a"] }`,
+		"Alphasfile": `import "./Alphasfile.a" { modules = ["a"] }`,
 		"Alphasfile.a": `
 module "a" {
-  import "Alphasfile.b" { modules = ["b"] }
+  require "./Alphasfile.b" { modules = ["b"] }
 
   service "go" "a" {
     git { url = "github.com/x/a" }
@@ -121,7 +121,7 @@ module "a" {
 `,
 		"Alphasfile.b": `
 module "b" {
-  import "Alphasfile.a" { modules = ["a"] }
+  require "./Alphasfile.a" { modules = ["a"] }
 
   service "go" "b" {
     git { url = "github.com/x/b" }
@@ -143,7 +143,7 @@ module "b" {
 func TestOpen_srcPathAnchoredToDeclaringFile(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile": `import "services/kafka/Alphasfile.kafka" { modules = ["kafka"] }`,
+		"Alphasfile": `import "./services/kafka/Alphasfile.kafka" { modules = ["kafka"] }`,
 		"services/kafka/Alphasfile.kafka": `
 module "kafka" {
   service "go" "kafka" {
@@ -165,20 +165,9 @@ module "kafka" {
 	}
 }
 
-func TestOpen_sysenvUnionAcrossFiles(t *testing.T) {
-	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":   "sysenv = [\"HOME\", \"PATH\"]\nimport \"Alphasfile.f\" { modules = [\"m\"] }\n",
-		"Alphasfile.f": "sysenv = [\"PATH\", \"TZ\"]\nmodule \"m\" {}\n",
-	})
-	af := openTree(t, root)
-	if got := af.SysEnv; !equalStrs(got, []string{"HOME", "PATH", "TZ"}) {
-		t.Errorf("SysEnv = %v", got)
-	}
-}
-
 func TestOpen_moduleToolchainFromFragment(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": "toolchain {\n  go { version = \"1.27.0\" }\n}\nimport \"Alphasfile.legacy\" { modules = [\"legacy\"] }\n",
+		"Alphasfile": "toolchain {\n  go { version = \"1.27.0\" }\n}\nimport \"./Alphasfile.legacy\" { modules = [\"legacy\"] }\n",
 		"Alphasfile.legacy": `
 module "legacy" {
   toolchain {
@@ -201,7 +190,7 @@ module "legacy" {
 
 func TestOpen_unusedModuleNotInstantiated(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": `import "Alphasfile.f" { modules = ["used"] }`,
+		"Alphasfile": `import "./Alphasfile.f" { modules = ["used"] }`,
 		"Alphasfile.f": `
 module "used" {
   service "go" "a" {
@@ -224,7 +213,7 @@ module "spare" {
 func TestParseServices_followsImports(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile": "service \"go\" \"gw\" {\n  src { path = \".\" }\n}\nimport \"svc/Alphasfile.svc\" { modules = [\"svc\"] }\n",
+		"Alphasfile": "service \"go\" \"gw\" {\n  src { path = \".\" }\n}\nimport \"./svc/Alphasfile.svc\" { modules = [\"svc\"] }\n",
 		"svc/Alphasfile.svc": `
 module "svc" {
   service "go" "api" {

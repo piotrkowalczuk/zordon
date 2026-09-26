@@ -17,14 +17,14 @@ import (
 const importEntry = `
 sysenv = ["HOME", "USER", "PATH", "TMPDIR"]
 
-import "services/apps/Alphasfile.apps" {
+import "./services/apps/Alphasfile.apps" {
   modules = ["app"]
 }
 `
 
 const importApps = `
 module "app" {
-  import "../db/Alphasfile.db" {
+  require "../db/Alphasfile.db" {
     modules = ["db"]
   }
 
@@ -77,7 +77,7 @@ func TestPlan_importedModulesRenderUnderLevel(t *testing.T) {
 func TestPlan_fragmentEditChangesHash(t *testing.T) {
 	p := newImportProject(t)
 	before := planCfgHash(t, p)
-	p.WriteFile("services/db/Alphasfile.db", "sysenv = [\"TZ\"]\n"+importDB)
+	p.WriteFile("services/db/Alphasfile.db", "# edited\n"+importDB)
 	after := planCfgHash(t, p)
 	if before == after {
 		t.Fatalf("editing an imported fragment must change cfg::hash() (both %s)", before)
@@ -105,7 +105,7 @@ service "go" "gw" {
 	if res.ExitCode == 0 {
 		t.Fatalf("the entrypoint does not import module db; plan must fail\n%s", res.Stdout)
 	}
-	for _, want := range []string{"module.db is not visible", `add import "services/db/Alphasfile.db" { modules = ["db"] }`} {
+	for _, want := range []string{"module.db is not visible", `add import "./services/db/Alphasfile.db" { modules = ["db"] }`} {
 		if !strings.Contains(res.Stderr, want) {
 			t.Errorf("missing %q in stderr:\n%s", want, res.Stderr)
 		}
@@ -114,7 +114,7 @@ service "go" "gw" {
 
 func TestPlan_importOfEntrypointFails(t *testing.T) {
 	p := zordontest.NewProject(t)
-	p.WriteFile("Alphasfile", `import "svc/Alphasfile" { modules = ["svc"] }`)
+	p.WriteFile("Alphasfile", `import "./svc/Alphasfile" { modules = ["svc"] }`)
 	p.WriteFile("svc/Alphasfile", `module "svc" {}`)
 	res := p.Zordon("plan").Run(t)
 	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "entrypoints and form federation levels") {

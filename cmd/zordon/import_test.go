@@ -11,7 +11,7 @@ import (
 func TestImportLines(t *testing.T) {
 	dir := t.TempDir()
 	for rel, body := range map[string]string{
-		"Alphasfile":   `import "Alphasfile.f" { modules = ["a"] }`,
+		"Alphasfile":   `import "./Alphasfile.f" { modules = ["a"] }`,
 		"Alphasfile.f": "module \"a\" {}\nmodule \"b\" {}\n",
 	} {
 		if err := zfs.AtomicWrite(filepath.Join(dir, rel), []byte(body)); err != nil {
