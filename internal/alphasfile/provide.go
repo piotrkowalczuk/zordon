@@ -59,6 +59,29 @@ func (t *Tree) gatherProvisions() error {
 	return nil
 }
 
+// output is one output of a package in the stack, evaluated in the
+// package's scope.
+type output struct {
+	pkg  string
+	name string
+	expr hcl.Expression
+}
+
+func (o *output) id() string { return "output." + o.pkg + "." + o.name }
+
+// gatherOutputs lists the outputs of every package in the stack.
+func (t *Tree) gatherOutputs() {
+	for _, name := range sortedKeys(t.packages) {
+		p := t.packages[name]
+		if !t.active[pkgScope(name)] {
+			continue
+		}
+		for _, o := range sortedKeys(p.file.block.outputs) {
+			t.outputs = append(t.outputs, &output{pkg: name, name: o, expr: p.file.block.outputs[o]})
+		}
+	}
+}
+
 func newProvision(target *pkgInstance, scope string, pb *provideBlock) (*provision, error) {
 	slots := target.file.block.slots
 	decl, ok := slots[pb.Slot]

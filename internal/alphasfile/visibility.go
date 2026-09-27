@@ -40,6 +40,9 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 				found = moduleRefError(tree, sb, st.SrcRange, name)
 			case "package":
 				found = packageRefError(tree, sb, st.SrcRange, name)
+				if found == nil {
+					found = outputRefError(tree, st.Traversal, st.SrcRange, name)
+				}
 			case "slots":
 				found = slotRefError(tree, sb, st.SrcRange, name)
 			}
@@ -65,6 +68,25 @@ func moduleRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) err
 	}
 	scope, keyword, where := refScope(sb)
 	return fmt.Errorf("%s: module.%s is not visible in %s; add %s %q { modules = [%q] } %s", at, name, scope, keyword, localRel(sb.file.dir, owner.path), name, where)
+}
+
+func outputRefError(tree *Tree, trav hcl.Traversal, at hcl.Range, p string) error {
+	pkg := tree.packages[p]
+	if pkg == nil || len(trav) < 3 {
+		return nil
+	}
+	if kw, ok := traverseAttrName(trav[2]); !ok || kw != "outputs" {
+		return nil
+	}
+	outputs := pkg.file.block.outputs
+	if len(trav) < 4 {
+		return fmt.Errorf("%s: package.%s.outputs: name an output, such as package.%s.outputs.<name> (outputs: %s)", at, p, p, listOrNone(sortedKeys(outputs)))
+	}
+	name, ok := traverseAttrName(trav[3])
+	if _, declared := outputs[name]; ok && !declared {
+		return fmt.Errorf("%s: package %s has no output %q (outputs: %s)", at, p, name, listOrNone(sortedKeys(outputs)))
+	}
+	return nil
 }
 
 func slotRefError(tree *Tree, sb *serviceBlock, at hcl.Range, slot string) error {

@@ -1,0 +1,37 @@
+# Orders registers /orders/ with the gateway.
+package "orders" {
+  inputs = {
+    greeting = "hello"
+  }
+
+  import "../gateway" {
+    provide "routes" {
+      prefix   = "/orders/"
+      upstream = "127.0.0.1:${module.orders.service.go.orders.vars.port}"
+    }
+  }
+
+  module "orders" {
+    service "go" "orders" {
+      src {
+        path = "../../.."
+        exe  = "./examples/gateway/src/orders"
+      }
+
+      vars = { port = net::pickport() }
+
+      runtime {
+        cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}", "-greeting", inputs.greeting]
+      }
+
+      readiness {
+        http {
+          path = "/orders/"
+          port = self.vars.port
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}

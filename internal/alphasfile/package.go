@@ -30,8 +30,36 @@ func (pb *packageBlock) decodeDescribed() error {
 	if err != nil {
 		return err
 	}
-	pb.slots, err = decodeSlots(pb)
+	if pb.slots, err = decodeSlots(pb); err != nil {
+		return err
+	}
+	pb.outputs, err = decodeOutputs(pb)
 	return err
+}
+
+// decodeOutputs reads `outputs = { <name> = <expr> }` from the syntax, so
+// each expression is evaluated later, with the producers.
+func decodeOutputs(pb *packageBlock) (map[string]hcl.Expression, error) {
+	out := map[string]hcl.Expression{}
+	if pb.OutputsRange == (hcl.Range{}) {
+		return out, nil
+	}
+	obj, ok := pb.Outputs.(*hclsyntax.ObjectConsExpr)
+	if !ok {
+		return nil, fmt.Errorf("%s: outputs of package %q map each name to a value, such as { port = module.db.service.pkg.postgres.vars.port }", pb.OutputsRange, pb.Name)
+	}
+	for _, item := range obj.Items {
+		kv, diags := item.KeyExpr.Value(nil)
+		if diags.HasErrors() || kv.IsNull() || !kv.Type().Equals(cty.String) || !moduleNameRe.MatchString(kv.AsString()) {
+			return nil, fmt.Errorf("%s: output of package %q: name it with letters, digits, '_' or '-', starting with a letter", item.KeyExpr.Range(), pb.Name)
+		}
+		name := kv.AsString()
+		if _, dup := out[name]; dup {
+			return nil, fmt.Errorf("%s: output %q of package %q is declared twice", item.KeyExpr.Range(), name, pb.Name)
+		}
+		out[name] = item.ValueExpr
+	}
+	return out, nil
 }
 
 // decodeSlots reads `slots = { <slot> = { description = "...", entry =

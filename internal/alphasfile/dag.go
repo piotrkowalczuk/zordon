@@ -25,6 +25,9 @@ const (
 	// kindProvide is one provide entry; the package that owns the slot reads
 	// it through slots.<slot>, so it is a producer without a service.
 	kindProvide
+	// kindOutput is one output of a package, read as
+	// package.<p>.outputs.<n>; also a producer without a service.
+	kindOutput
 )
 
 func (k nodeKind) String() string {
@@ -39,6 +42,8 @@ func (k nodeKind) String() string {
 		return "file"
 	case kindProvide:
 		return "provide"
+	case kindOutput:
+		return "output"
 	}
 	return "?"
 }
@@ -59,6 +64,7 @@ type node struct {
 	// or the scope of the import that holds a provide.
 	scope string
 	prov  *provision
+	out   *output
 }
 
 // graph holds nodes and forward edges (id → set of ids it depends on —
@@ -81,8 +87,9 @@ func nodeID(svcID string, kind nodeKind, name string) string {
 // are valid but never carry an intra-graph edge (the parent was
 // evaluated end-to-end before this graph runs). Every provision is a node
 // too, and a reference to slots.<slot> depends on every provision to
-// that slot of the referencing package.
-func newGraph(services []*serviceBlock, provisions []*provision, parentKnown map[string]struct{}) (*graph, error) {
+// that slot of the referencing package. So is every package output, which
+// package.<p>.outputs.<n> depends on.
+func newGraph(services []*serviceBlock, provisions []*provision, outputs []*output, parentKnown map[string]struct{}) (*graph, error) {
 	g := &graph{
 		byID: map[string]*node{},
 		deps: map[string]map[string]struct{}{},
@@ -140,6 +147,12 @@ func newGraph(services []*serviceBlock, provisions []*provision, parentKnown map
 		g.deps[n.id] = map[string]struct{}{}
 		slots[p.pkg+"."+p.slot] = append(slots[p.pkg+"."+p.slot], n.id)
 	}
+	for _, o := range outputs {
+		n := &node{id: o.id(), kind: kindOutput, scope: pkgScope(o.pkg), out: o, exprs: []hcl.Expression{o.expr}}
+		g.byID[n.id] = n
+		g.nodes = append(g.nodes, n)
+		g.deps[n.id] = map[string]struct{}{}
+	}
 
 	for _, n := range g.nodes {
 		for _, expr := range n.exprs {
@@ -154,6 +167,12 @@ func newGraph(services []*serviceBlock, provisions []*provision, parentKnown map
 								g.deps[n.id][id] = struct{}{}
 							}
 						}
+					}
+					continue
+				}
+				if id, ok := outputNodeFromTrav(trav); ok {
+					if _, local := g.byID[id]; local && id != n.id {
+						g.deps[n.id][id] = struct{}{}
 					}
 					continue
 				}
@@ -175,6 +194,20 @@ func newGraph(services []*serviceBlock, provisions []*provision, parentKnown map
 		}
 	}
 	return g, nil
+}
+
+// outputNodeFromTrav maps `package.<p>.outputs.<n>...` to its output node.
+func outputNodeFromTrav(t hcl.Traversal) (string, bool) {
+	if t.RootName() != "package" || len(t) < 4 {
+		return "", false
+	}
+	pkg, ok0 := traverseAttrName(t[1])
+	kw, ok1 := traverseAttrName(t[2])
+	name, ok2 := traverseAttrName(t[3])
+	if !ok0 || !ok1 || !ok2 || kw != "outputs" {
+		return "", false
+	}
+	return (&output{pkg: pkg, name: name}).id(), true
 }
 
 // producerNodeFromTrav maps a `self.<f>...`, `service.<tc>.<svc>.<f>...` or

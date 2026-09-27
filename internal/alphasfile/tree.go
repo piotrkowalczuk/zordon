@@ -42,6 +42,7 @@ type Tree struct {
 
 	packages      map[string]*pkgInstance
 	provisions    []*provision
+	outputs       []*output
 	entryServices []*serviceBlock
 	// disabled are the source ranges of blocks switched off by enabled; the
 	// static passes over service bodies skip them.
@@ -628,6 +629,7 @@ func (t *Tree) finish() error {
 	if err := t.gatherProvisions(); err != nil {
 		return err
 	}
+	t.gatherOutputs()
 	return t.checkGated()
 }
 

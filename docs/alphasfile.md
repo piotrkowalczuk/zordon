@@ -214,7 +214,7 @@ import "./caddy" "edge" {
 | rule | behavior |
 |---|---|
 | file | a package's `Alphasfile` holds exactly one `package "<name>" {}` block and nothing outside it |
-| block content | `inputs`, `features`, `slots`, `import`, `require`, `toolchain` and `module` blocks; `env`, `dotenv`, `sysenv`, `workspace` and services outside a module are errors |
+| block content | `inputs`, `features`, `slots`, `outputs`, `import`, `require`, `toolchain` and `module` blocks; `env`, `dotenv`, `sysenv`, `workspace` and services outside a module are errors |
 | target | an import whose path resolves to a directory whose `Alphasfile` holds a package block; a directory without one is an error |
 | name | the alias label when given, else the package block's label; unique among packages in the stack |
 | identity | a module of a package is `package.<p>.module.<m>`; its services are `package.<p>.module.<m>.service.<tc>.<svc>`, shown as `<p>/<m>/<svc>` |
@@ -321,6 +321,37 @@ package "shop" {
 | switched-off import | an import removed by `enabled`, or outside the stack, provides nothing |
 | fragment | `provide` on a fragment import is an error |
 | `slots` outside a package | an error |
+
+### Outputs
+
+Outputs are what a package gives back: where it listens, when it is ready, a value per slot entry.
+
+```hcl
+# gateway/Alphasfile
+package "gateway" {
+  outputs = {
+    url   = "http://127.0.0.1:${module.gateway.service.go.gateway.vars.port}"
+    ready = module.gateway.service.go.gateway.runtime.ready
+  }
+  …
+}
+
+# billing/Alphasfile
+runtime {
+  cmd   = ["billing", "-gateway", package.gateway.outputs.url]
+  after = [package.gateway.outputs.ready]
+}
+```
+
+| rule | behavior |
+|---|---|
+| `outputs = { <name> = <expr> }` | declares the package's outputs; each expression is evaluated in the package's scope, with the other producers, so it may read its services, inputs, features and slots |
+| `package.<p>.outputs.<n>` | reads an output wherever package `p` is visible: after an import of it, at the entrypoint's top level after the entrypoint imports it |
+| per-entry values | an output may be a map keyed like a slot, such as `{ for key, d in slots.databases : key => "…/${d.name}" }`, so a provider reads its own entry's value as `package.db.outputs.dsn.<key>` |
+| barriers | an output that names a barrier, such as `runtime.ready`, carries it, so `after = [package.<p>.outputs.ready]` waits for it |
+| unknown output | an error listing the declared ones |
+
+See [examples/gateway](https://github.com/piotrkowalczuk/zordon/tree/main/examples/gateway) for inputs, features, slots and outputs in one runnable stack.
 
 ### Remote imports
 

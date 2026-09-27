@@ -121,6 +121,8 @@ type resolver struct {
 	// for the unique check.
 	collected map[string]map[string]map[string]cty.Value
 	provided  map[string][]providedEntry
+	// outputs holds evaluated package outputs: package, name.
+	outputs map[string]map[string]cty.Value
 
 	// toolchainCty is the per-module projection of `toolchain { <lang> {
 	// ... } }` declarations into cty: `toolchain.<lang>.ready` etc. resolve
@@ -240,7 +242,7 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	// not a whole-service edge. A.env→B.vars and B.env→A.vars are
 	// independent and resolve cleanly; only a literal A.vars→B.vars
 	// while B.vars→A.vars is a cycle, and that's a real bug.
-	g, err := newGraph(services, r.tree.provisions, parentKnown)
+	g, err := newGraph(services, r.tree.provisions, r.tree.outputs, parentKnown)
 	if err != nil {
 		return nil, err
 	}
@@ -263,6 +265,12 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	for _, n := range p.order {
 		if n.kind == kindProvide {
 			if err := r.evalProvision(n.prov); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if n.kind == kindOutput {
+			if err := r.evalOutput(n.out); err != nil {
 				return nil, err
 			}
 			continue
@@ -787,6 +795,22 @@ func (r *resolver) evalProvision(p *provision) error {
 		r.collected[p.pkg][p.slot] = map[string]cty.Value{}
 	}
 	r.collected[p.pkg][p.slot][p.key] = cty.ObjectVal(obj)
+	return nil
+}
+
+// evalOutput evaluates one package output in the package's scope.
+func (r *resolver) evalOutput(o *output) error {
+	v, diags := o.expr.Value(r.ctxWith(nil, srcDirs{module: pkgScope(o.pkg)}))
+	if diags.HasErrors() {
+		return fmt.Errorf("output %q of package %s: %s", o.name, o.pkg, diags.Error())
+	}
+	if r.outputs == nil {
+		r.outputs = map[string]map[string]cty.Value{}
+	}
+	if r.outputs[o.pkg] == nil {
+		r.outputs[o.pkg] = map[string]cty.Value{}
+	}
+	r.outputs[o.pkg][o.name] = v
 	return nil
 }
 
@@ -1767,10 +1791,19 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 	if len(modules) > 0 {
 		vars["module"] = cty.ObjectVal(modules)
 	}
+	for p, outs := range r.outputs {
+		if len(outs) > 0 && r.tree.packageVisible(dirs.module, p) && packages[p] == nil {
+			packages[p] = map[string]cty.Value{}
+		}
+	}
 	if len(packages) > 0 {
 		pkgs := make(map[string]cty.Value, len(packages))
 		for p, mods := range packages {
-			pkgs[p] = cty.ObjectVal(map[string]cty.Value{"module": cty.ObjectVal(mods)})
+			obj := map[string]cty.Value{"module": cty.ObjectVal(mods)}
+			if outs := r.outputs[p]; len(outs) > 0 {
+				obj["outputs"] = cty.ObjectVal(copyCtyMap(outs))
+			}
+			pkgs[p] = cty.ObjectVal(obj)
 		}
 		vars["package"] = cty.ObjectVal(pkgs)
 	}

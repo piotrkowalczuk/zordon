@@ -1,0 +1,54 @@
+# An API gateway. It knows no service: each one provides a route to the
+# routes slot, and two services claiming the same prefix are an error. Its
+# outputs are its API: where it listens and when it is ready.
+package "gateway" {
+  inputs = {
+    # null picks a free port.
+    port = null
+  }
+  features = {
+    access_log = "Prints every request the gateway proxies."
+  }
+  slots = {
+    routes = {
+      description = "Path prefixes to proxy, such as { prefix = \"/orders/\", upstream = \"127.0.0.1:8081\" }."
+      entry       = object({ prefix = string, upstream = string })
+      unique      = ["prefix"]
+    }
+  }
+  outputs = {
+    url   = "http://127.0.0.1:${module.gateway.service.go.gateway.vars.port}"
+    ready = module.gateway.service.go.gateway.runtime.ready
+  }
+
+  module "gateway" {
+    service "go" "gateway" {
+      src {
+        path = "../../.."
+        exe  = "./examples/gateway/src/gateway"
+      }
+
+      vars = {
+        port = inputs.port != null ? inputs.port : net::pickport()
+      }
+
+      file "routes" {
+        path = "${fs::etc()}/routes.json"
+        body = enc::json(slots.routes)
+      }
+
+      runtime {
+        cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}", "-routes", self.file.routes.path, "-access-log=${features.access_log}"]
+      }
+
+      readiness {
+        http {
+          path = "/healthz"
+          port = self.vars.port
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}

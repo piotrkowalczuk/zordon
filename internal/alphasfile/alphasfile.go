@@ -768,8 +768,10 @@ type requireBlock struct {
 // description of what it turns on; they are off unless an import turns them
 // on, and are read as features.<n>. Slots map each slot to a description
 // and the type of its entries; importers fill it with provide blocks, and
-// the package reads it as slots.<slot>, a map of key to entry. The
-// package's toolchain pins every module that has none of its own.
+// the package reads it as slots.<slot>, a map of key to entry. Outputs are
+// what the package gives back, read from outside as
+// package.<p>.outputs.<n>. The package's toolchain pins every module that
+// has none of its own.
 type packageBlock struct {
 	Name          string          `hcl:"name,label"`
 	DefRange      hcl.Range       `hcl:",def_range"`
@@ -779,14 +781,18 @@ type packageBlock struct {
 	FeaturesRange hcl.Range       `hcl:"features,attr_range"`
 	Slots         hcl.Expression  `hcl:"slots,optional"`
 	SlotsRange    hcl.Range       `hcl:"slots,attr_range"`
+	Outputs       hcl.Expression  `hcl:"outputs,optional"`
+	OutputsRange  hcl.Range       `hcl:"outputs,attr_range"`
 	Imports       []*importBlock  `hcl:"import,block"`
 	Requires      []*requireBlock `hcl:"require,block"`
 	Toolchain     *toolchainBlock `hcl:"toolchain,block"`
 	Modules       []*moduleBlock  `hcl:"module,block"`
 
-	// features and slots are Features and Slots decoded.
+	// features, slots and outputs are Features, Slots and Outputs decoded;
+	// an output keeps its expression, evaluated with the producers.
 	features map[string]string
 	slots    map[string]*slotDecl
+	outputs  map[string]hcl.Expression
 }
 
 // slotDecl is one slot of a package: what an entry is for, its type, and

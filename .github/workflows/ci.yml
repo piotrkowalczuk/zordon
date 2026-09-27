@@ -191,6 +191,7 @@ jobs:
           - modules
           - import
           - package
+          - gateway
           # java clones spring-petclinic and runs its Maven wrapper: a
           # real (heavy, network-bound) JVM build per distro. The wrapper
           # downloads Maven + deps into HOME's ~/.m2 on a cold cache.

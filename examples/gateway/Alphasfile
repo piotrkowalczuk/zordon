@@ -1,0 +1,13 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+# The services register their routes with the gateway themselves; the
+# entrypoint only decides how the stack is configured.
+import "./orders" {
+  inputs = { greeting = "hi from the entrypoint" }
+}
+
+import "./billing" {}
+
+import "./gateway" {
+  features = ["access_log"]
+}
