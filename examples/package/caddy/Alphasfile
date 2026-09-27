@@ -29,6 +29,8 @@ service "go" "caddy" {
     admin = net::pickport()
   }
 
+  print = feature.hugo ? "http://127.0.0.1:${self.vars.http}/  (caddy, proxies to hugo)" : "http://127.0.0.1:${self.vars.http}/  (caddy)"
+
   # Caddy autosaves its config under the user's config dir; keep it in the
   # service's own state instead.
   env = {

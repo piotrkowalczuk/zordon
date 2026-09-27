@@ -18,6 +18,8 @@ service "go" "hugo" {
     port = net::pickport()
   }
 
+  print = "http://127.0.0.1:${self.vars.port}/  (hugo, direct)"
+
   file "config" {
     path = "${fs::etc()}/site/hugo.toml"
     body = <<-EOT

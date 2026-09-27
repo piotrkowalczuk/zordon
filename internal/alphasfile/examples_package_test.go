@@ -50,3 +50,27 @@ func TestExamplePackageCaddyAlone(t *testing.T) {
 		t.Errorf("files = %v", got)
 	}
 }
+
+func TestExamplePackagePrintsWhereHugoIs(t *testing.T) {
+	stack, err := filepath.Abs("../../examples/package/Alphasfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	af := openTree(t, stack)
+	caddy, hugo := svcByName(af, "caddy/caddy"), svcByName(af, "hugo/hugo")
+	if want := fmt.Sprintf("http://127.0.0.1:%v/  (caddy, proxies to hugo)", caddy.Runtime.Vars["http"]); caddy.Runtime.Print != want {
+		t.Errorf("caddy print = %q, want %q", caddy.Runtime.Print, want)
+	}
+	if want := fmt.Sprintf("http://127.0.0.1:%v/  (hugo, direct)", hugo.Runtime.Vars["port"]); hugo.Runtime.Print != want {
+		t.Errorf("hugo print = %q, want %q", hugo.Runtime.Print, want)
+	}
+
+	alone, err := filepath.Abs("../../examples/package/caddy/Alphasfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	caddy = svcByName(openTree(t, alone), "caddy")
+	if want := fmt.Sprintf("http://127.0.0.1:%v/  (caddy)", caddy.Runtime.Vars["http"]); caddy.Runtime.Print != want {
+		t.Errorf("caddy alone print = %q, want %q", caddy.Runtime.Print, want)
+	}
+}
