@@ -180,7 +180,7 @@ func (o *offIndex) empty() bool {
 	return len(o.services) == 0 && len(o.files) == 0 && len(o.provs) == 0 && len(o.links) == 0
 }
 
-// prune drops the services, files and provisions whose enabled is false and
+// prune drops the services, files, provisions and sudo steps whose enabled is false and
 // stamps module onto what stays. Blocks without enabled keep their pointer.
 func (t *Tree) prune(services []*serviceBlock, s *scopeSettings, module string) ([]*serviceBlock, error) {
 	out := make([]*serviceBlock, 0, len(services))
@@ -259,10 +259,29 @@ func (t *Tree) pruneService(sb *serviceBlock, s *scopeSettings, module string) (
 			provs = append(provs, pb)
 		}
 	}
-	if !filesChanged && !provsChanged {
+	var sudos []*sudoBlock
+	sudosChanged := false
+	for _, sd := range sb.Sudo {
+		if sd.EnabledRange != (hcl.Range{}) {
+			on, err := evalEnabled(sd.Enabled, s)
+			if err != nil {
+				return nil, err
+			}
+			if !on {
+				sudosChanged = true
+				t.disableNested(sb.Body, "", "sudo", sd.Name)
+				continue
+			}
+		}
+		sudos = append(sudos, sd)
+	}
+	if !filesChanged && !provsChanged && !sudosChanged {
 		return sb, nil
 	}
 	cp := *sb
+	if sudosChanged {
+		cp.Sudo = sudos
+	}
 	if filesChanged {
 		cp.Files = files
 	}

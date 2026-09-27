@@ -1,7 +1,14 @@
 # Caddy in front of whatever its features switch on. Each feature requires
-# the package it proxies to and drops one site snippet into the Caddyfile.
+# the package it serves and drops site snippets into the Caddyfile. With both
+# features, Hugo is served on the host hugo.<domain>, which CoreDNS resolves.
 # go build needs these from the host; the importer may pass more.
 sysenv = ["HOME", "PATH", "TMPDIR"]
+
+# null picks a free port; 80 gives http://hugo.test/ in a browser.
+input "http_port" { default = null }
+
+# The DNS zone the hosts live in; keep it equal to the coredns zone.
+input "domain" { default = "test" }
 
 feature "hugo" {}
 feature "coredns" {}
@@ -25,11 +32,13 @@ service "go" "caddy" {
   }
 
   vars = {
-    http  = net::pickport()
+    http  = input.http_port != null ? input.http_port : net::pickport()
     admin = net::pickport()
   }
 
-  print = feature.hugo ? "http://127.0.0.1:${self.vars.http}/  (caddy, proxies to hugo)" : "http://127.0.0.1:${self.vars.http}/  (caddy)"
+  print = (feature.hugo && feature.coredns ? "http://hugo.${input.domain}:${self.vars.http}/  (caddy routes the host to hugo)" :
+    feature.hugo ? "http://127.0.0.1:${self.vars.http}/  (caddy, proxies to hugo)" :
+  "http://127.0.0.1:${self.vars.http}/  (caddy)")
 
   # Caddy autosaves its config under the user's config dir; keep it in the
   # service's own state instead.
@@ -58,10 +67,22 @@ service "go" "caddy" {
     body = "# site snippets switched on by features\n"
   }
 
+  # Without DNS there is no host to route on, so Hugo takes every path.
   file "site-hugo" {
-    enabled = feature.hugo
+    enabled = feature.hugo && !feature.coredns
     path    = "${fs::etc()}/sites/10-hugo.caddy"
     body    = "reverse_proxy /* 127.0.0.1:${module.hugo.service.go.hugo.vars.port}\n"
+  }
+
+  file "site-hugo-host" {
+    enabled = feature.hugo && feature.coredns
+    path    = "${fs::etc()}/sites/10-hugo-host.caddy"
+    body    = <<-EOT
+      @hugo host hugo.${input.domain}
+      handle @hugo {
+        reverse_proxy 127.0.0.1:${module.hugo.service.go.hugo.vars.port}
+      }
+    EOT
   }
 
   # Resolves health.<zone> through CoreDNS, which answers 127.0.0.1, and so

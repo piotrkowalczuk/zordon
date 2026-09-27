@@ -256,6 +256,40 @@ func TestLoadTree_enabledOnImportIsRejected(t *testing.T) {
 	}
 }
 
+func TestOpen_featureGatesSudo(t *testing.T) {
+	pkg := `
+feature "resolver" {}
+
+service "go" "dns" {
+  git { url = "github.com/x/dns" }
+
+  sudo "resolver" {
+    enabled = feature.resolver
+    apply   = "true"
+  }
+}
+`
+	cases := map[string]struct {
+		entry string
+		want  []string
+	}{
+		"off": {`import "./dns" {}`, nil},
+		"on":  {`import "./dns" { features = ["resolver"] }`, []string{"resolver"}},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			af := openTree(t, writeTree(t, t.TempDir(), map[string]string{"Alphasfile": c.entry, "dns/Alphasfile": pkg}))
+			var got []string
+			for _, s := range svcByName(af, "dns/dns").Runtime.Sudo {
+				got = append(got, s.Name)
+			}
+			if !equalStrs(got, c.want) {
+				t.Errorf("sudo steps = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 func fileNames(s *Service) []string {
 	var out []string
 	for _, f := range s.Runtime.Files {

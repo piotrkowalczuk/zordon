@@ -1,8 +1,16 @@
-# A DNS server that answers every name in one zone with 127.0.0.1.
+# A DNS server that answers every name in one zone with 127.0.0.1. With
+# feature resolver it also tells macOS to send lookups for the zone here, so
+# a browser reaches <anything>.<zone>.
 # go build needs these from the host; the importer may pass more.
 sysenv = ["HOME", "PATH", "TMPDIR"]
 
 input "zone" { default = "test" }
+
+# Fixed rather than picked: /etc/resolver/<zone> names this port and must
+# stay valid across restarts.
+input "dns_port" { default = 49564 }
+
+feature "resolver" {}
 
 service "go" "coredns" {
   git {
@@ -16,7 +24,7 @@ service "go" "coredns" {
 
   vars = {
     zone   = input.zone
-    dns    = net::pickport()
+    dns    = input.dns_port
     health = net::pickport()
   }
 
@@ -44,5 +52,15 @@ service "go" "coredns" {
     }
     period            = "200ms"
     failure_threshold = 50
+  }
+
+  # macOS only: /etc/resolver/<zone> routes the zone's lookups to this server.
+  sudo "resolver" {
+    enabled = feature.resolver
+    check   = "grep -qxF 'port ${self.vars.dns}' /etc/resolver/${self.vars.zone} 2>/dev/null"
+    apply   = <<-EOT
+      mkdir -p /etc/resolver && printf 'nameserver 127.0.0.1\nport ${self.vars.dns}\n' > /etc/resolver/${self.vars.zone}
+    EOT
+    verify  = "grep -qxF 'port ${self.vars.dns}' /etc/resolver/${self.vars.zone}"
   }
 }

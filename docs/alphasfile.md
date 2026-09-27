@@ -242,7 +242,7 @@ service "go" "caddy" {
 | unknown input | passing an input the package does not declare is an error listing the declared ones |
 | `feature "<n>" {}` | read as `feature.<n>`, a bool; the importer lists the ones to turn on |
 | unknown feature | an error listing the declared ones |
-| `enabled` | on `service`, `file`, `provision` and `require` blocks; a false value removes the block before planning |
+| `enabled` | on `service`, `file`, `provision`, `sudo` and `require` blocks; a false value removes the block before planning |
 | `enabled` expressions | `feature.<n>`, `!`, `&&`, `||` only; no functions and no other variables |
 | reference to a removed block | an error on the referencing block that says which `enabled` removed the target and asks to gate the reference the same way |
 | `enabled` elsewhere | an error unless the file declares a feature |

@@ -997,6 +997,9 @@ type sudoBlock struct {
 	Check  hcl.Expression `hcl:"check,optional"`
 	Apply  hcl.Expression `hcl:"apply"`
 	Verify hcl.Expression `hcl:"verify,optional"`
+
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
 }
 
 type logBlock struct {
