@@ -9,8 +9,8 @@ import (
 const pkgGreeter = `
 package "greeter" {
   inputs = {
-    greeting = "hello"
-    name     = required
+    greeting = { description = "How to greet.", type = string, default = "hello" }
+    name     = { description = "Whom to greet.", type = string }
   }
 
   module "greeter" {
@@ -49,7 +49,7 @@ func TestOpen_inputNullIsAValue(t *testing.T) {
 		"Alphasfile": `import "./web" {}`,
 		"web/Alphasfile": `
 package "web" {
-  inputs = { port = null }
+  inputs = { port = { description = "Port; null picks one.", type = number, default = null } }
 
   module "web" {
     service "go" "web" {
@@ -78,12 +78,58 @@ func TestOpen_importerInputFromEnvironment(t *testing.T) {
 	}
 }
 
+func TestOpen_inputsReadServices(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":         "service \"go\" \"db\" {\n  git { url = \"github.com/x/db\" }\n  vars = { name = \"pg\" }\n}\nimport \"./greeter\" { inputs = { name = service.go.db.vars.name } }\n",
+		"greeter/Alphasfile": pkgGreeter,
+	})
+	af := openTree(t, root)
+	if got := fmt.Sprint(svcByName(af, "greeter/greeter/greeter").Runtime.Vars["text"]); got != "hello pg" {
+		t.Errorf("text = %q; an input is evaluated with the services, so it may read one", got)
+	}
+}
+
+func TestOpen_inputDefaultReadsTheOwnPackage(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `import "./web" {}`,
+		"web/Alphasfile": `
+package "web" {
+  inputs = { url = { description = "Where web listens.", type = string, default = "http://127.0.0.1:${module.web.service.go.web.vars.port}" } }
+
+  module "web" {
+    service "go" "web" {
+      git { url = "github.com/x/web" }
+      vars = { port = 8080 }
+    }
+    service "go" "probe" {
+      git { url = "github.com/x/probe" }
+      vars = { target = inputs.url }
+    }
+  }
+}
+`,
+	})
+	if got := fmt.Sprint(svcByName(openTree(t, root), "web/web/probe").Runtime.Vars["target"]); got != "http://127.0.0.1:8080" {
+		t.Errorf("target = %q", got)
+	}
+}
+
+func TestOpen_inputMustFitItsType(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":     `import "./web" { inputs = { port = "eighty" } }`,
+		"web/Alphasfile": "package \"web\" {\n  inputs = { port = { description = \"Port.\", type = number } }\n}\n",
+	})
+	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
+	if err == nil || !strings.Contains(err.Error(), `input "port" of package web is not a number`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestLoadTree_inputErrors(t *testing.T) {
 	cases := map[string]struct{ entry, want string }{
 		"missing required": {`import "./greeter" {}`, `package greeter needs input "name"`},
 		"unknown":          {`import "./greeter" { inputs = { name = "x", nope = 1 } }`, `input "nope" is not declared by package greeter (declared: greeting, name)`},
 		"not an object":    {`import "./greeter" { inputs = "x" }`, "inputs must be an object"},
-		"services refs":    {`import "./greeter" { inputs = { name = service.go.x.name } }`, "inputs:"},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -98,24 +144,40 @@ func TestLoadTree_inputErrors(t *testing.T) {
 	}
 }
 
-func TestLoadTree_inputsCannotReadServices(t *testing.T) {
-	cases := map[string]struct{ files map[string]string }{
-		"import": {map[string]string{
-			"Alphasfile":         "service \"go\" \"db\" {\n  git { url = \"github.com/x/db\" }\n}\nimport \"./greeter\" { inputs = { name = service.go.db.vars.port } }\n",
-			"greeter/Alphasfile": pkgGreeter,
-		}},
-		"default": {map[string]string{
-			"Alphasfile":     `import "./web" {}`,
-			"web/Alphasfile": "package \"web\" {\n  inputs = { port = module.web.service.go.web.vars.port }\n  module \"web\" {\n    service \"go\" \"web\" {\n      git { url = \"github.com/x/web\" }\n    }\n  }\n}\n",
-		}},
+func TestLoadTree_inputDeclarationErrors(t *testing.T) {
+	cases := map[string]struct{ inputs, want string }{
+		"not a map":           {`["a"]`, `inputs of package "web" map each name to { description = "...", ... }`},
+		"short form":          {`{ port = 8080 }`, `input "port": inputs of package "web" map each name to`},
+		"no description":      {`{ port = { type = number } }`, `input "port" of package "web" needs a description`},
+		"empty description":   {`{ port = { description = "", type = number } }`, `input "port" of package "web" needs a description`},
+		"no type":             {`{ port = { description = "Port." } }`, `input "port" of package "web" needs a type`},
+		"bad type":            {`{ port = { description = "Port.", type = any } }`, "type any is not supported"},
+		"unknown field":       {`{ port = { description = "Port.", type = number, max = 1 } }`, `input "port" takes description, type, default, many, unique only`},
+		"many with default":   {`{ r = { description = "R.", type = object({ a = string }), many = true, default = {} } }`, `input "r" has many = true, so it starts empty and takes no default`},
+		"many not an object":  {`{ r = { description = "R.", type = string, many = true } }`, `input "r": an input with many = true takes entries from provide blocks, so its type must be object`},
+		"unique without many": {`{ r = { description = "R.", type = object({ a = string }), unique = ["a"] } }`, `input "r": unique applies to an input with many = true`},
+		"bad name":            {`{ "no spaces" = { description = "x", type = string } }`, `input of package "web": name it with letters`},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
-			_, err := LoadTree(writeTree(t, t.TempDir(), c.files))
-			if err == nil || !strings.Contains(err.Error(), "inputs are known before planning, so they cannot read") || !strings.Contains(err.Error(), "provide it to a slot, or read an output") {
-				t.Fatalf("got %v", err)
+			root := writeTree(t, t.TempDir(), map[string]string{
+				"Alphasfile":     `import "./web" {}`,
+				"web/Alphasfile": "package \"web\" {\n  inputs = " + c.inputs + "\n}\n",
+			})
+			if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("want %q, got %v", c.want, err)
 			}
 		})
+	}
+}
+
+func TestLoadTree_manyInputIsNotSet(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":     `import "./web" { inputs = { routes = {} } }`,
+		"web/Alphasfile": "package \"web\" {\n  inputs = { routes = { description = \"Routes.\", type = object({ path = string }), many = true } }\n}\n",
+	})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `input "routes" of package web has many = true, so importers add entries with provide "routes" {} instead of setting it`) {
+		t.Fatalf("got %v", err)
 	}
 }
 
@@ -133,7 +195,7 @@ func TestLoadTree_packageImportMustPassRequiredInput(t *testing.T) {
 func TestOpen_packageImportConfiguresItsDependency(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":         `import "./app" { inputs = { who = "zordon" } }`,
-		"app/Alphasfile":     "package \"app\" {\n  inputs = { who = required }\n  import \"../greeter\" { inputs = { name = inputs.who } }\n}\n",
+		"app/Alphasfile":     "package \"app\" {\n  inputs = { who = { description = \"Whom to greet.\", type = string } }\n  import \"../greeter\" { inputs = { name = inputs.who } }\n}\n",
 		"greeter/Alphasfile": pkgGreeter,
 	})
 	af := openTree(t, root)
@@ -167,13 +229,13 @@ func TestOpen_entrypointSetsAnInputOthersAlsoSet(t *testing.T) {
 	}
 }
 
-func TestLoadTree_entrypointInputConflictsWithAnImport(t *testing.T) {
+func TestOpen_entrypointInputConflictsWithAnImport(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":         "import \"./greeter\" { inputs = { name = \"y\" } }\nimport \"./a\" {}\n",
 		"a/Alphasfile":       "package \"a\" {\n  import \"../greeter\" { inputs = { name = \"x\" } }\n}\n",
 		"greeter/Alphasfile": pkgGreeter,
 	})
-	_, err := LoadTree(root)
+	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), `Alphasfile:1`) || !strings.Contains(err.Error(), `package greeter runs with input "name" = "y", but package a needs "x"`) || !strings.Contains(err.Error(), `set inputs = { name = "x" } here`) {
 		t.Fatalf("got %v", err)
 	}
@@ -182,16 +244,6 @@ func TestLoadTree_entrypointInputConflictsWithAnImport(t *testing.T) {
 func TestLoadTree_requiredInputStopsARunOnItsOwn(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{"Alphasfile": pkgGreeter})
 	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `input "name" of package greeter is required, so the package cannot run on its own`) {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestLoadTree_inputsMustBeAnObject(t *testing.T) {
-	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":     `import "./web" {}`,
-		"web/Alphasfile": "package \"web\" {\n  inputs = [\"a\"]\n}\n",
-	})
-	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "inputs of package web must be an object such as { name = default }") {
 		t.Fatalf("got %v", err)
 	}
 }

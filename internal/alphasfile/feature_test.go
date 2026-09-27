@@ -8,7 +8,7 @@ import (
 
 const pkgGated = `
 package "web" {
-  features = { extra = "Adds the extra blocks" }
+  features = { extra = { description = "Adds the extra blocks" } }
 
   module "web" {
     service "go" "web" {
@@ -94,7 +94,7 @@ func TestOpen_featureGatesRequire(t *testing.T) {
 	files := map[string]string{
 		"web/Alphasfile": `
 package "web" {
-  features = { metrics = "Scrapes metrics with prom" }
+  features = { metrics = { description = "Scrapes metrics with prom" } }
 
   import "../prom" {
     enabled = features.metrics
@@ -148,7 +148,7 @@ func TestLoadTree_brokenSwitchedOffImportFails(t *testing.T) {
 		"Alphasfile": `import "./prom" {}`,
 		"prom/Alphasfile": `
 package "prom" {
-  features = { tsdb = "Stores samples in the tsdb package." }
+  features = { tsdb = { description = "Stores samples in the tsdb package." } }
 
   import "../tsdb" {
     enabled = features.tsdb
@@ -167,7 +167,7 @@ func TestLoadTree_referenceToSwitchedOffBlock(t *testing.T) {
 		"Alphasfile": `import "./web" {}`,
 		"web/Alphasfile": `
 package "web" {
-  features = { extra = "Adds the extra blocks" }
+  features = { extra = { description = "Adds the extra blocks" } }
 
   module "web" {
     service "go" "sidecar" {
@@ -195,7 +195,7 @@ func TestLoadTree_referenceToSwitchedOffRequire(t *testing.T) {
 		"Alphasfile": `import "./web" {}`,
 		"web/Alphasfile": `
 package "web" {
-  features = { metrics = "Scrapes metrics with prom" }
+  features = { metrics = { description = "Scrapes metrics with prom" } }
 
   import "../prom" {
     enabled = features.metrics
@@ -228,7 +228,7 @@ func TestLoadTree_enabledAcceptsFeatureExpressionsOnly(t *testing.T) {
 		t.Run(hint, func(t *testing.T) {
 			root := writeTree(t, t.TempDir(), map[string]string{
 				"Alphasfile": `import "./web" {}`,
-				"web/Alphasfile": "package \"web\" {\n  features = { extra = \"Adds the extra blocks\" }\n  inputs = { flag = true }\n  module \"web\" {\n" +
+				"web/Alphasfile": "package \"web\" {\n  features = { extra = { description = \"Adds the extra blocks\" } }\n  inputs = { flag = { description = \"A flag.\", type = bool, default = true } }\n  module \"web\" {\n" +
 					"    service \"go\" \"web\" {\n      enabled = " + c.expr + "\n      git { url = \"github.com/x/web\" }\n    }\n  }\n}\n",
 			})
 			if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -243,7 +243,7 @@ func TestLoadTree_enabledCombinesFeatures(t *testing.T) {
 		"Alphasfile": `import "./web" { features = ["a"] }`,
 		"web/Alphasfile": `
 package "web" {
-  features = { a = "Turns on a", b = "Turns on b" }
+  features = { a = { description = "Turns on a" }, b = { description = "Turns on b" } }
 
   module "web" {
     service "go" "both" {
@@ -308,7 +308,7 @@ func TestLoadTree_enabledOnEntrypointImportIsRejected(t *testing.T) {
 
 func TestOpen_featureGatesImportOfAPackageRunOnItsOwn(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":     "package \"stack\" {\n  features = { x = \"Turns on x\" }\n  import \"./web\" {\n    enabled = features.x\n  }\n}\n",
+		"Alphasfile":     "package \"stack\" {\n  features = { x = { description = \"Turns on x\" } }\n  import \"./web\" {\n    enabled = features.x\n  }\n}\n",
 		"web/Alphasfile": pkgWeb,
 	})
 	if got := serviceNames(openTree(t, root)); len(got) != 0 {
@@ -318,10 +318,12 @@ func TestOpen_featureGatesImportOfAPackageRunOnItsOwn(t *testing.T) {
 
 func TestLoadTree_featuresAreDescribed(t *testing.T) {
 	cases := map[string]struct{ features, want string }{
-		"list":           {`["a"]`, `features of package "web" map each name to what it turns on, such as { tls = "Serves HTTPS with a local CA" }`},
-		"invalid name":   {`{ "no spaces" = "x" }`, `feature "no spaces" of package "web": use letters`},
-		"no description": {`{ a = "" }`, `feature "a" of package "web" needs a description of what it turns on`},
-		"not a string":   {`{ a = true }`, `feature "a" of package "web" needs a description`},
+		"list":           {`["a"]`, `features of package "web" map each name to { description = "...", ... }, such as { tls = { description = "Serves HTTPS with a local CA." } }`},
+		"short form":     {`{ a = "Turns on a." }`, `feature "a": features of package "web" map each name to`},
+		"invalid name":   {`{ "no spaces" = { description = "x" } }`, `feature of package "web": name it with letters`},
+		"no description": {`{ a = { description = "" } }`, `feature "a" of package "web" needs a description`},
+		"not a string":   {`{ a = { description = true } }`, `feature "a" of package "web" needs a description`},
+		"unknown field":  {`{ a = { description = "A.", default = true } }`, `feature "a" takes description only`},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {

@@ -14,8 +14,8 @@ import (
 
 const pkgGreeter = `
 package "greeter" {
-  inputs   = { greeting = "hello" }
-  features = { extra = "Adds the extra service" }
+  inputs   = { greeting = { description = "How to greet.", type = string, default = "hello" } }
+  features = { extra = { description = "Adds the extra service" } }
 
   module "greeter" {
     service "go" "greeter" {
@@ -55,19 +55,19 @@ func TestPlan_packageFeaturesChangeTheStack(t *testing.T) {
 	}
 }
 
-func TestPlan_provideReachesTheCollectingPackage(t *testing.T) {
+func TestPlan_provideReachesTheOwningPackage(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.WriteFile("Alphasfile", "import \"./shop\" {}\nimport \"./blog\" {}\n")
 	p.WriteFile("proxy/Alphasfile", `
 package "proxy" {
-  slots = { sites = { description = "Hosts to route.", entry = object({ host = string, port = number }) } }
+  inputs = { sites = { description = "Hosts to route.", type = object({ host = string, port = number }), many = true } }
 
   module "proxy" {
     service "go" "proxy" {
       package = "example.com/proxy@v0.0.0"
       file "routes" {
         path = "/tmp/routes"
-        body = "%{for name, s in slots.sites}${s.host}=${s.port};%{endfor}"
+        body = "%{for name, s in inputs.sites}${s.host}=${s.port};%{endfor}"
       }
     }
   }
@@ -93,7 +93,7 @@ package "`+name+`" {
 `)
 	}
 	if out := planOK(t, p); !strings.Contains(out, `body = "blog.test=8082;shop.test=8081;"`) {
-		t.Errorf("provided sites missing from the collecting package:\n%s", out)
+		t.Errorf("provided sites missing from the package that takes them:\n%s", out)
 	}
 }
 

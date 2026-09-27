@@ -2,8 +2,8 @@
 # It registers itself with Caddy as blog.<domain>.
 package "blog" {
   inputs = {
-    domain = "test"
-    title  = "zordon blog"
+    domain = { description = "The zone the blog's host lives in.", type = string, default = "test" }
+    title  = { description = "The site's title.", type = string, default = "zordon blog" }
   }
 
   import "../caddy" {

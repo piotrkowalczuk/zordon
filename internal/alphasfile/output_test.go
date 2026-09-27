@@ -8,18 +8,23 @@ import (
 
 const pkgDatabase = `
 package "db" {
-  slots = {
+  inputs = {
     databases = {
       description = "Databases to create."
-      entry       = object({ name = string })
+      type        = object({ name = string })
+      many        = true
       unique      = ["name"]
     }
   }
 
   outputs = {
-    port  = module.db.service.go.pg.vars.port
-    ready = module.db.service.go.pg.runtime.ready
-    dsn   = { for key, d in slots.databases : key => "postgres://127.0.0.1:${module.db.service.go.pg.vars.port}/${d.name}" }
+    port  = { description = "Where Postgres listens.", type = number, value = module.db.service.go.pg.vars.port }
+    ready = { description = "Postgres is ready.", type = string, value = module.db.service.go.pg.runtime.ready }
+    dsn = {
+      description = "The DSN of each database, by entry key."
+      type        = map(string)
+      value       = { for key, d in inputs.databases : key => "postgres://127.0.0.1:${module.db.service.go.pg.vars.port}/${d.name}" }
+    }
   }
 
   module "db" {
@@ -109,8 +114,14 @@ func TestOpen_outputOfAPackageNotImported(t *testing.T) {
 
 func TestLoadTree_outputDeclarationErrors(t *testing.T) {
 	cases := map[string]struct{ outputs, want string }{
-		"not an object": {`["port"]`, `outputs of package "p" map each name to a value`},
-		"bad name":      {`{ "no spaces" = 1 }`, `output of package "p": name it with letters`},
+		"not an object":  {`["port"]`, `outputs of package "p" map each name to { description = "...", ... }`},
+		"short form":     {`{ port = 1 }`, `output "port": outputs of package "p" map each name to`},
+		"bad name":       {`{ "no spaces" = { description = "x", type = number, value = 1 } }`, `output of package "p": name it with letters`},
+		"no description": {`{ port = { type = number, value = 1 } }`, `output "port" of package "p" needs a description`},
+		"no type":        {`{ port = { description = "Port.", value = 1 } }`, `output "port" of package "p" needs a type`},
+		"no value":       {`{ port = { description = "Port.", type = number } }`, `output "port" of package "p" needs a value`},
+		"bad type":       {`{ port = { description = "Port.", type = set(number), value = [1] } }`, "type set is not supported"},
+		"unknown field":  {`{ port = { description = "Port.", type = number, value = 1, default = 2 } }`, `output "port" takes description, type, value only`},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -128,10 +139,21 @@ func TestLoadTree_outputDeclarationErrors(t *testing.T) {
 func TestOpen_outputEvaluationError(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":   "import \"./p\" {}\n\nservice \"go\" \"tool\" {\n  git { url = \"github.com/x/tool\" }\n  vars = { v = package.p.outputs.broken }\n}\n",
-		"p/Alphasfile": "package \"p\" {\n  outputs = { broken = module.m.service.go.s.vars.nope }\n  module \"m\" {\n    service \"go\" \"s\" {\n      git { url = \"github.com/x/s\" }\n    }\n  }\n}\n",
+		"p/Alphasfile": "package \"p\" {\n  outputs = { broken = { description = \"Broken.\", type = string, value = module.m.service.go.s.vars.nope } }\n  module \"m\" {\n    service \"go\" \"s\" {\n      git { url = \"github.com/x/s\" }\n    }\n  }\n}\n",
 	})
 	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), `output "broken" of package p`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestOpen_outputMustFitItsType(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":   "import \"./p\" {}\n\nservice \"go\" \"tool\" {\n  git { url = \"github.com/x/tool\" }\n  vars = { v = package.p.outputs.port }\n}\n",
+		"p/Alphasfile": "package \"p\" {\n  outputs = { port = { description = \"Port.\", type = number, value = \"eighty\" } }\n}\n",
+	})
+	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
+	if err == nil || !strings.Contains(err.Error(), `output "port" of package p is not a number`) {
 		t.Fatalf("got %v", err)
 	}
 }

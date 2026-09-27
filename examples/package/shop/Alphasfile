@@ -2,8 +2,8 @@
 # It registers itself with Caddy as shop.<domain>.
 package "shop" {
   inputs = {
-    domain = "test"
-    title  = "zordon shop"
+    domain = { description = "The zone the shop's host lives in.", type = string, default = "test" }
+    title  = { description = "The site's title.", type = string, default = "zordon shop" }
   }
 
   import "../caddy" {

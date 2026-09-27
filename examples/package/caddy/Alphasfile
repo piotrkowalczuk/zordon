@@ -3,19 +3,31 @@
 # claiming the same host are an error.
 package "caddy" {
   inputs = {
-    # null picks a free port; 80 gives http://shop.test/ in a browser.
-    http_port = null
-    # The DNS zone of feature dns; passed on to coredns.
-    domain = "test"
-  }
-  features = {
-    dns = "Adds /dns/healthz, answered by looking up health.<domain> in CoreDNS: proof that the zone resolves."
-  }
-  slots = {
+    http_port = {
+      description = "Port to serve on; null picks a free one, 80 gives http://shop.test/ in a browser."
+      type        = number
+      default     = null
+    }
+    domain = {
+      description = "The DNS zone of feature dns; passed on to coredns."
+      type        = string
+      default     = "test"
+    }
     sites = {
       description = "Hosts to route by name, such as { host = \"shop.test\", upstream = \"127.0.0.1:8080\" }."
-      entry       = object({ host = string, upstream = string })
+      type        = object({ host = string, upstream = string })
+      many        = true
       unique      = ["host"]
+    }
+  }
+  features = {
+    dns = { description = "Adds /dns/healthz, answered by looking up health.<domain> in CoreDNS: proof that the zone resolves." }
+  }
+  outputs = {
+    url = {
+      description = "Where Caddy serves."
+      type        = string
+      value       = "http://127.0.0.1:${module.caddy.service.go.caddy.vars.http}"
     }
   }
 
@@ -40,7 +52,7 @@ package "caddy" {
         admin = net::pickport()
       }
 
-      print = "http://127.0.0.1:${self.vars.http}/  (caddy)%{for name, s in slots.sites} http://${s.host}:${self.vars.http}/%{endfor}"
+      print = "http://127.0.0.1:${self.vars.http}/  (caddy)%{for name, s in inputs.sites} http://${s.host}:${self.vars.http}/%{endfor}"
 
       # Caddy autosaves its config under the user's config dir; keep it in the
       # service's own state instead.
@@ -67,7 +79,7 @@ package "caddy" {
       # One host matcher per provided site.
       file "site-routes" {
         path = "${fs::etc()}/sites/10-routes.caddy"
-        body = "# sites provided to caddy\n%{for name, s in slots.sites}@${name} host ${s.host}\nhandle @${name} {\n  reverse_proxy ${s.upstream}\n}\n%{endfor}"
+        body = "# sites provided to caddy\n%{for name, s in inputs.sites}@${name} host ${s.host}\nhandle @${name} {\n  reverse_proxy ${s.upstream}\n}\n%{endfor}"
       }
 
       # Resolves health.<zone> through CoreDNS, which answers 127.0.0.1, and
@@ -79,9 +91,9 @@ package "caddy" {
           handle_path /dns/* {
             reverse_proxy {
               dynamic a {
-                name health.${package.coredns.module.coredns.service.go.coredns.vars.zone}
+                name health.${package.coredns.outputs.zone}
                 port ${self.vars.http}
-                resolvers 127.0.0.1:${package.coredns.module.coredns.service.go.coredns.vars.dns}
+                resolvers ${package.coredns.outputs.dns}
               }
             }
           }

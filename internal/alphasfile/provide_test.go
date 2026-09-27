@@ -8,10 +8,11 @@ import (
 
 const pkgProxy = `
 package "proxy" {
-  slots = {
+  inputs = {
     sites = {
       description = "Hosts to route."
-      entry       = object({ host = string, port = number, tls = optional(bool, false) })
+      type        = object({ host = string, port = number, tls = optional(bool, false) })
+      many        = true
       unique      = ["host"]
     }
   }
@@ -19,7 +20,7 @@ package "proxy" {
   module "proxy" {
     service "go" "proxy" {
       git { url = "github.com/x/proxy" }
-      vars = { routes = "%{ for k, s in slots.sites }${s.key}:${s.host}=${s.port}/${s.tls};%{ endfor }" }
+      vars = { routes = "%{ for k, s in inputs.sites }${s.key}:${s.host}=${s.port}/${s.tls};%{ endfor }" }
     }
   }
 }
@@ -46,7 +47,7 @@ package %[1]q {
 `, name, port)
 }
 
-func TestOpen_provideFillsASlot(t *testing.T) {
+func TestOpen_provideFillsAManyInput(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":       "import \"./shop\" {}\nimport \"./blog\" {}\n",
 		"proxy/Alphasfile": pkgProxy,
@@ -90,14 +91,14 @@ import "./proxy" {
 	}
 }
 
-func TestOpen_emptySlot(t *testing.T) {
+func TestOpen_emptyManyInput(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":       `import "./proxy" {}`,
 		"proxy/Alphasfile": pkgProxy,
 	})
 	af := openTree(t, root)
 	if got := fmt.Sprint(svcByName(af, "proxy/proxy/proxy").Runtime.Vars["routes"]); got != "" {
-		t.Errorf("routes = %q; a slot nobody fills is empty", got)
+		t.Errorf("routes = %q; an input with many = true that nobody provides to is empty", got)
 	}
 }
 
@@ -107,7 +108,7 @@ func TestOpen_switchedOffImportProvidesNothing(t *testing.T) {
 		"proxy/Alphasfile": pkgProxy,
 		"shop/Alphasfile": `
 package "shop" {
-  features = { public = "Serves the shop through the proxy." }
+  features = { public = { description = "Serves the shop through the proxy." } }
 
   import "../proxy" {
     enabled = features.public
@@ -129,11 +130,11 @@ func TestLoadTree_provideErrors(t *testing.T) {
 	cases := map[string]struct{ entry, want string }{
 		"unknown slot": {
 			"import \"./proxy\" {\n  provide \"nope\" \"a\" {\n    host = \"a\"\n  }\n}\n",
-			`provide "nope": package proxy has no slot "nope" (slots: sites)`,
+			`provide "nope": package proxy has no input "nope" (inputs with many = true: sites)`,
 		},
 		"repeated key": {
 			"import \"./proxy\" {\n  provide \"sites\" \"a\" {\n    host = \"a\"\n    port = 1\n  }\n  provide \"sites\" \"a\" {\n    host = \"b\"\n    port = 2\n  }\n}\n",
-			`entry "a" of slot "sites" in package proxy is already provided at`,
+			`entry "a" of input "sites" in package proxy is already provided at`,
 		},
 		"no key at the entrypoint": {
 			"import \"./proxy\" {\n  provide \"sites\" {\n    host = \"a\"\n    port = 1\n  }\n}\n",
@@ -149,15 +150,15 @@ func TestLoadTree_provideErrors(t *testing.T) {
 		},
 		"unknown attribute": {
 			"import \"./proxy\" {\n  provide \"sites\" \"a\" {\n    hots = \"a\"\n    port = 1\n  }\n}\n",
-			`slot "sites" of package proxy has no attribute "hots" (entry: host, port, tls (optional))`,
+			`input "sites" of package proxy has no attribute "hots" (object({ host = string, port = number, tls = optional(bool) }))`,
 		},
 		"missing attribute": {
 			"import \"./proxy\" {\n  provide \"sites\" \"a\" {\n    host = \"a\"\n  }\n}\n",
-			`slot "sites" of package proxy needs attribute "port"`,
+			`input "sites" of package proxy needs attribute "port"`,
 		},
 		"fragment": {
 			"import \"./Alphasfile.f\" {\n  modules = [\"m\"]\n  provide \"sites\" \"a\" {\n    host = \"a\"\n  }\n}\n",
-			"provide fills a slot of a package, not a fragment file",
+			"provide adds an entry to an input of a package, not to a fragment file",
 		},
 	}
 	for hint, c := range cases {
@@ -180,7 +181,7 @@ func TestOpen_provideValueMustFitTheEntry(t *testing.T) {
 		"proxy/Alphasfile": pkgProxy,
 	})
 	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
-	if err == nil || !strings.Contains(err.Error(), `provide "sites": the entry does not fit slot "sites" of package proxy`) {
+	if err == nil || !strings.Contains(err.Error(), `provide "sites": the entry does not fit input "sites" of package proxy`) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -192,34 +193,34 @@ func TestOpen_provideDetectsAUniqueCollision(t *testing.T) {
 		"shop/Alphasfile":  pkgSite("shop", 8081),
 	})
 	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
-	if err == nil || !strings.Contains(err.Error(), `host = "shop.test" is already provided by entry`) || !strings.Contains(err.Error(), `slot "sites" of package proxy takes each host once`) {
+	if err == nil || !strings.Contains(err.Error(), `host = "shop.test" is already provided by entry`) || !strings.Contains(err.Error(), `input "sites" of package proxy takes each host once`) {
 		t.Fatalf("got %v", err)
 	}
 }
 
-func TestOpen_slotErrors(t *testing.T) {
+func TestOpen_inputRefErrors(t *testing.T) {
 	cases := map[string]struct{ files map[string]string }{
-		"unknown slot": {map[string]string{
+		"unknown input": {map[string]string{
 			"Alphasfile": `import "./p" {}`,
 			"p/Alphasfile": `
 package "p" {
-  slots = { sites = { description = "Sites", entry = object({ host = string }) } }
+  inputs = { sites = { description = "Sites.", type = object({ host = string }), many = true } }
   module "m" {
     service "go" "s" {
       git { url = "github.com/x/s" }
-      vars = { n = slots.nope }
+      vars = { n = inputs.nope }
     }
   }
 }
 `,
 		}},
 		"outside a package": {map[string]string{
-			"Alphasfile": "service \"go\" \"s\" {\n  git { url = \"github.com/x/s\" }\n  vars = { n = slots.sites }\n}\n",
+			"Alphasfile": "service \"go\" \"s\" {\n  git { url = \"github.com/x/s\" }\n  vars = { n = inputs.sites }\n}\n",
 		}},
 	}
 	want := map[string]string{
-		"unknown slot":      `slots.nope: package p has no slot "nope" (slots: sites)`,
-		"outside a package": "slots.sites: only a package reads its slots",
+		"unknown input":     `inputs.nope: package p has no input "nope" (inputs: sites)`,
+		"outside a package": "inputs.sites: only a package has inputs",
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -232,26 +233,12 @@ package "p" {
 	}
 }
 
-func TestLoadTree_slotDeclarationErrors(t *testing.T) {
-	cases := map[string]struct{ slots, want string }{
-		"not an object":       {`["sites"]`, `slots of package "p" map each slot to { description = "...", entry = object({ ... }) }`},
-		"no description":      {`{ sites = { entry = object({ host = string }) } }`, `slot "sites" of package "p" needs a description`},
-		"no entry":            {`{ sites = { description = "Sites" } }`, `slot "sites" of package "p" needs entry = object({ ... })`},
-		"not an object entry": {`{ sites = { description = "Sites", entry = string } }`, `slot "sites": entry must be object({ ... })`},
-		"reserved key":        {`{ sites = { description = "Sites", entry = object({ key = string }) } }`, `slot "sites": entry cannot declare key`},
-		"bad type":            {`{ sites = { description = "Sites", entry = object({ host = strin }) } }`, `slot "sites": entry:`},
-		"unknown field":       {`{ sites = { description = "Sites", entry = object({ host = string }), max = 3 } }`, `slot "sites" takes description, entry and unique only`},
-		"unique unknown":      {`{ sites = { description = "Sites", entry = object({ host = string }), unique = ["port"] } }`, `slot "sites": unique names "port", which entry does not declare`},
-	}
-	for hint, c := range cases {
-		t.Run(hint, func(t *testing.T) {
-			root := writeTree(t, t.TempDir(), map[string]string{
-				"Alphasfile":   `import "./p" {}`,
-				"p/Alphasfile": "package \"p\" {\n  slots = " + c.slots + "\n}\n",
-			})
-			if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), c.want) {
-				t.Fatalf("want %q, got %v", c.want, err)
-			}
-		})
+func TestLoadTree_provideToASingleInput(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":   "import \"./p\" {\n  provide \"port\" \"a\" {\n    n = 1\n  }\n}\n",
+		"p/Alphasfile": "package \"p\" {\n  inputs = { port = { description = \"Port.\", type = number, default = 1 } }\n}\n",
+	})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `input "port" of package p takes one value; set it with inputs = { port = ... }`) {
+		t.Fatalf("got %v", err)
 	}
 }

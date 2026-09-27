@@ -96,7 +96,7 @@ func TestOpen_packageAndModuleMayShareAName(t *testing.T) {
 
 const pkgDBReplica = `
 package "db" {
-  features = { replica = "Runs a read replica next to the primary" }
+  features = { replica = { description = "Runs a read replica next to the primary" } }
 
   module "db" {
     service "go" "primary" {
@@ -148,7 +148,7 @@ func TestLoadTree_importListsAFeatureTwice(t *testing.T) {
 
 const pkgStore = `
 package "store" {
-  features = { replica = "Runs a replica." }
+  features = { replica = { description = "Runs a replica." } }
   module "db" {
     service "go" "replica" {
       enabled = features.replica
@@ -253,7 +253,7 @@ func TestLoadTree_entrypointLeavesANeededFeatureOff(t *testing.T) {
 func TestLoadTree_entrypointLeavesANeededFeatureOffBehindAFeature(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":     "import \"./db\" {}\nimport \"./app\" { features = [\"ha\"] }\n",
-		"app/Alphasfile": "package \"app\" {\n  features = { ha = \"Survives a database restart\" }\n  import \"../db\" {\n    enabled  = features.ha\n    features = [\"replica\"]\n  }\n}\n",
+		"app/Alphasfile": "package \"app\" {\n  features = { ha = { description = \"Survives a database restart\" } }\n  import \"../db\" {\n    enabled  = features.ha\n    features = [\"replica\"]\n  }\n}\n",
 		"db/Alphasfile":  pkgDBReplica,
 	})
 	_, err := LoadTree(root)
@@ -301,7 +301,7 @@ package "app" {
 `,
 		"db/Alphasfile": `
 package "db" {
-  inputs = { port = 5432 }
+  inputs = { port = { description = "Port to listen on.", type = number, default = 5432 } }
 
   module "db" {
     service "go" "db" {
@@ -433,8 +433,8 @@ func TestLoadTree_packageRunsOnItsOwn(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `
 package "web" {
-  inputs   = { greeting = "hello" }
-  features = { extra = "Adds the extra blocks" }
+  inputs   = { greeting = { description = "How to greet.", type = string, default = "hello" } }
+  features = { extra = { description = "Adds the extra blocks" } }
 
   module "web" {
     service "go" "web" {

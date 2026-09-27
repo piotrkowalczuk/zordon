@@ -43,8 +43,8 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 				if found == nil {
 					found = outputRefError(tree, st.Traversal, st.SrcRange, name)
 				}
-			case "slots":
-				found = slotRefError(tree, sb, st.SrcRange, name)
+			case "inputs":
+				found = inputRefError(tree, sb, st.SrcRange, name)
 			}
 			return nil
 		})
@@ -89,14 +89,14 @@ func outputRefError(tree *Tree, trav hcl.Traversal, at hcl.Range, p string) erro
 	return nil
 }
 
-func slotRefError(tree *Tree, sb *serviceBlock, at hcl.Range, slot string) error {
+func inputRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) error {
 	p, inPkg := packageOf(sb.module)
 	if !inPkg {
-		return fmt.Errorf("%s: slots.%s: only a package reads its slots; declare slots = { %s = { ... } } in a package block", at, slot, slot)
+		return fmt.Errorf("%s: inputs.%s: only a package has inputs; declare inputs = { %s = { ... } } in a package block", at, name, name)
 	}
-	slots := tree.packages[p].file.block.slots
-	if _, ok := slots[slot]; !ok {
-		return fmt.Errorf("%s: slots.%s: package %s has no slot %q (slots: %s)", at, slot, p, slot, listOrNone(sortedKeys(slots)))
+	inputs := tree.packages[p].file.block.inputs
+	if _, ok := inputs[name]; !ok {
+		return fmt.Errorf("%s: inputs.%s: package %s has no input %q (inputs: %s)", at, name, p, name, listOrNone(sortedKeys(inputs)))
 	}
 	return nil
 }

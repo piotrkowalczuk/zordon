@@ -26,7 +26,7 @@ func TestImportLines_package(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{
 		"Alphasfile":     `import "./web" "edge" { features = ["tls"] }`,
-		"web/Alphasfile": "package \"web\" {\n  features = { tls = \"Serves HTTPS\" }\n}\n",
+		"web/Alphasfile": "package \"web\" {\n  features = { tls = { description = \"Serves HTTPS\" } }\n}\n",
 	})
 	tree, err := alphasfile.LoadTree(filepath.Join(dir, "Alphasfile"))
 	if err != nil {
@@ -45,7 +45,7 @@ func TestImportLines_importedBy(t *testing.T) {
 	writeFiles(t, dir, map[string]string{
 		"Alphasfile":     "import \"./app\" {}\n",
 		"app/Alphasfile": "package \"app\" {\n  import \"../web\" { features = [\"tls\"] }\n}\n",
-		"web/Alphasfile": "package \"web\" {\n  features = { tls = \"Serves HTTPS\" }\n}\n",
+		"web/Alphasfile": "package \"web\" {\n  features = { tls = { description = \"Serves HTTPS\" } }\n}\n",
 	})
 	tree, err := alphasfile.LoadTree(filepath.Join(dir, "Alphasfile"))
 	if err != nil {

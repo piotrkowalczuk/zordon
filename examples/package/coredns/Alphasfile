@@ -3,13 +3,31 @@
 # a browser reaches <anything>.<zone>.
 package "coredns" {
   inputs = {
-    zone = "test"
-    # Fixed rather than picked: /etc/resolver/<zone> names this port and
-    # must stay valid across restarts.
-    dns_port = 49564
+    zone = {
+      description = "The zone to answer; every name in it resolves to 127.0.0.1."
+      type        = string
+      default     = "test"
+    }
+    dns_port = {
+      description = "Port to answer on. Fixed rather than picked: /etc/resolver/<zone> names it and must stay valid across restarts."
+      type        = number
+      default     = 49564
+    }
   }
   features = {
-    resolver = "Writes /etc/resolver/<zone> with sudo (macOS), so a browser resolves *.<zone> through CoreDNS."
+    resolver = { description = "Writes /etc/resolver/<zone> with sudo (macOS), so a browser resolves *.<zone> through CoreDNS." }
+  }
+  outputs = {
+    zone = {
+      description = "The zone CoreDNS answers."
+      type        = string
+      value       = module.coredns.service.go.coredns.vars.zone
+    }
+    dns = {
+      description = "Where CoreDNS answers, as host:port."
+      type        = string
+      value       = "127.0.0.1:${module.coredns.service.go.coredns.vars.dns}"
+    }
   }
 
   module "coredns" {

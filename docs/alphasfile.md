@@ -186,16 +186,24 @@ See [Split an Alphasfile across files](how-to/split-an-alphasfile-across-files.m
 ### Packages
 
 A package is the API between a stack and the modules that implement it.
-Its file holds one `package` block: the package's inputs, features and imports, and its modules.
+Its file holds one `package` block: what goes in (`features`, `inputs`), what comes out (`outputs`), its imports, and its modules.
 
 ```hcl
 # caddy/Alphasfile
 package "caddy" {
-  inputs   = { domain = "test", http_port = null }
-  features = { coredns = "Routes hosts by name, resolved through CoreDNS." }
+  features = {
+    dns = { description = "Resolves hosts through CoreDNS." }
+  }
+  inputs = {
+    domain = { description = "The zone hosts live in.", type = string, default = "test" }
+    sites  = { description = "Hosts to route.", type = object({ host = string, upstream = string }), many = true }
+  }
+  outputs = {
+    url = { description = "Where Caddy serves.", type = string, value = "http://127.0.0.1:${module.caddy.service.go.caddy.vars.http}" }
+  }
 
   import "../coredns" {
-    enabled = features.coredns
+    enabled = features.dns
     inputs  = { zone = inputs.domain }
   }
 
@@ -206,7 +214,7 @@ package "caddy" {
 
 # Alphasfile
 import "./caddy" "edge" {
-  features = ["coredns"]
+  features = ["dns"]
   inputs   = { domain = "dev" }
 }
 ```
@@ -214,17 +222,18 @@ import "./caddy" "edge" {
 | rule | behavior |
 |---|---|
 | file | a package's `Alphasfile` holds exactly one `package "<name>" {}` block and nothing outside it |
-| block content | `inputs`, `features`, `slots`, `outputs`, `import`, `require`, `toolchain` and `module` blocks; `env`, `dotenv`, `sysenv`, `workspace` and services outside a module are errors |
+| block content | `features`, `inputs`, `outputs`, `import`, `require`, `toolchain` and `module` blocks; `env`, `dotenv`, `sysenv`, `workspace` and services outside a module are errors |
+| declarations | `features`, `inputs` and `outputs` each map a name to `{ description = "…", … }`; the description is required |
 | target | an import whose path resolves to a directory whose `Alphasfile` holds a package block; a directory without one is an error |
 | name | the alias label when given, else the package block's label; unique among packages in the stack |
 | identity | a module of a package is `package.<p>.module.<m>`; its services are `package.<p>.module.<m>.service.<tc>.<svc>`, shown as `<p>/<m>/<svc>` |
 | inside a package | `module.<m>` is one of the package's own modules; another package is `package.<q>.module.<m>` |
-| import at the entrypoint's top level | the final word on the package's inputs and features; every other import of the package must be satisfied by it |
+| import at the entrypoint's top level | the final word on the package's features and inputs; every other import of the package must be satisfied by it |
 | any other import | configures the package when the entrypoint does not import it |
 | features from several imports | unite; every importer gets what it needs |
 | an input from several imports | an error: an input has one source; set it where the entrypoint imports the package |
-| unmet need | a feature the entrypoint leaves off, or an input it sets to another value, is an error on the entrypoint's import that quotes the feature's description and names the importer |
-| entrypoint imports | several imports of the same package at the entrypoint's top level must pass the same inputs and features |
+| unmet need | a feature the entrypoint leaves off is an error on the entrypoint's import that quotes the feature's description and names the importer; an input it sets to another value is the same error once both values are evaluated |
+| entrypoint imports | several imports of the same package at the entrypoint's top level must pass the same features and inputs |
 | cycle | packages that import each other cannot be configured first; importing one of them at the entrypoint's top level breaks the cycle |
 | dependencies | a package depends on packages, never on a fragment's modules |
 | toolchain | the package's `toolchain {}` pins every module that has none of its own |
@@ -233,18 +242,21 @@ import "./caddy" "edge" {
 | on its own | `zordon start` in the package's directory runs it with default inputs and no features; a required input is an error |
 | `zordon plan` | prints `# import <dir> as <name> [features: …] (imported by …)` and renders `package "<p>" { module "<m>" { … } }` |
 
-### Inputs and features
+### Features
+
+Features are the only part of a package known before planning, because they decide which blocks exist.
 
 ```hcl
 package "coredns" {
-  inputs   = { zone = "test", token = required }
-  features = { resolver = "Writes /etc/resolver/<zone> with sudo, so a browser resolves the zone." }
+  features = {
+    resolver = { description = "Writes /etc/resolver/<zone> with sudo, so a browser resolves the zone." }
+  }
 
   module "coredns" {
     service "go" "coredns" {
       sudo "resolver" {
         enabled = features.resolver
-        apply   = "… ${inputs.zone} …"
+        apply   = "…"
       }
     }
   }
@@ -253,11 +265,8 @@ package "coredns" {
 
 | rule | behavior |
 |---|---|
-| `inputs = { <n> = <default> }` | declares the package's inputs; read as `inputs.<n>`; `null` is an ordinary default |
-| `required` | an input with no default; whoever configures the package must pass it |
-| input values | defaults and imported values are evaluated before planning: literals, `os::env`, `enc::*` and, in a package's import, the package's own `inputs`; never another service's values |
-| unknown input | passing an input the package does not declare is an error listing the declared ones |
-| `features = { <n> = "<description>" }` | declares the package's features; the description says what the feature turns on and is quoted in errors; all are off unless an import lists them; read as `features.<n>`, a bool |
+| `features = { <n> = { description = "…" } }` | declares the package's features; the description says what the feature turns on and is quoted in errors |
+| value | off unless an import lists it in `features = [...]`; read as `features.<n>`, a bool |
 | unknown feature | an error listing the declared ones |
 | `enabled` | on `service`, `file`, `provision`, `sudo` and `import` blocks inside a package; a false value removes the block before planning |
 | `enabled` expressions | `features.<n>`, `!`, `&&`, `||` only; no functions and no other variables |
@@ -267,71 +276,64 @@ package "coredns" {
 A service's process gets no host variables unless the entrypoint passes them with `sysenv`.
 Without `HOME`, zordon points Go's caches at `$ZORDON_HOME/go`, so a package builds without anything from the host.
 
-### Slots and provide
+### Inputs
 
-Features are known before planning, because they decide which blocks exist.
-Inputs set one value each.
-A slot takes entries from many importers at once, evaluated with the services, so an entry may carry another service's port.
+Inputs are what goes into a package, evaluated with the services, so a value may carry another service's port.
+A single input takes one value from one import; an input with `many = true` takes entries from every importer at once.
 Entries are data merged into one map before the package is evaluated, never calls: the package runs once with every entry.
 
 ```hcl
-# caddy/Alphasfile
-package "caddy" {
-  slots = {
-    sites = {
-      description = "Hosts to route by name."
-      entry       = object({ host = string, upstream = string, tls = optional(bool, false) })
-      unique      = ["host"]
-    }
+# gateway/Alphasfile
+package "gateway" {
+  inputs = {
+    port   = { description = "Port to listen on; null picks one.", type = number, default = null }
+    routes = { description = "Paths to proxy.", type = object({ prefix = string, upstream = string }), many = true, unique = ["prefix"] }
   }
-
-  module "caddy" {
-    service "go" "caddy" {
-      file "routes" {
-        path = "${fs::etc()}/routes.caddy"
-        body = "%{for key, s in slots.sites}@${key} host ${s.host}\nhandle @${key} {\n  reverse_proxy ${s.upstream}\n}\n%{endfor}"
-      }
-    }
-  }
+  …
 }
 
-# shop/Alphasfile
-package "shop" {
-  import "../caddy" {
-    provide "sites" {
-      host     = "shop.test"
-      upstream = "127.0.0.1:${module.shop.service.go.hugo.vars.port}"
+# orders/Alphasfile
+package "orders" {
+  import "../gateway" {
+    provide "routes" {
+      prefix   = "/orders/"
+      upstream = "127.0.0.1:${module.orders.service.go.orders.vars.port}"
     }
   }
-
-  module "shop" { … }
+  …
 }
+
+# Alphasfile
+import "./gateway" { inputs = { port = 8080 } }
 ```
 
 | rule | behavior |
 |---|---|
-| `slots = { <slot> = { description, entry, unique } }` | declares the package's slots; `description` says what an entry is for, `entry` is its type as `object({ … })` with `optional(<type>, <default>)` for optional attributes, `unique` lists attributes no two entries may share |
-| `provide "<slot>" "<key>"? { <attr> = <expr> … }` | inside any import of a package, at the entrypoint's top level, in a package block or in a module; attributes only |
+| `inputs = { <n> = { description, type, default?, many?, unique? } }` | declares the package's inputs; `type` is one of the [types](#types) |
+| `default` | a single input's value when no import sets it; without one the input is required; it is evaluated in the package, so it may read the package's own services |
+| `inputs = { <n> = <expr> }` on an import | sets a single input; evaluated in the scope of the import, so it may read what the importer sees, such as its own `inputs` or another package's `outputs` |
+| `many = true` | the input takes entries from `provide` blocks and starts empty; its type must be `object({ … })`; it takes no default |
+| `provide "<input>" "<key>"? { <attr> = <expr> … }` | inside any import of a package, at the entrypoint's top level, in a package block or in a module; attributes only; setting a `many` input with `inputs = {…}` is an error, and so is providing to a single one |
 | key | the provider's name, the package or module holding the import, followed by `.<key>` when the block has a key; at the entrypoint's top level the key is required and used alone |
 | collisions | two packages never collide, because package names are unique in the stack; the same key twice from one provider is an error naming both blocks; a `unique` attribute with the same value in two entries is an error naming both |
-| entry check | an attribute the entry does not declare, or a required one left out, is an error on the `provide` block; a value of the wrong type is an error when the entry is evaluated |
-| `slots.<slot>` | inside the package, a map of key to entry, sorted by key; each entry has its attributes, defaults applied, and `key` |
-| evaluation | entries are evaluated in the scope of the import that holds them, with the other producers; a reference to `slots.<slot>` waits for every entry of the slot |
-| unknown slot | `provide` or `slots.<slot>` naming a slot the package does not have is an error listing the declared ones |
-| switched-off import | an import removed by `enabled`, or outside the stack, provides nothing |
+| type check | a value that does not fit the type is an error naming the input and where in the value it went wrong; an attribute the type does not declare, or a required one left out, is an error on the `provide` block |
+| `inputs.<n>` | inside the package: a single input's value; for `many`, a map of key to entry, sorted by key, each entry with its attributes, defaults applied, and `key` |
+| evaluation | an input is evaluated with the other producers; a reference to `inputs.<n>` waits for its value, or for every entry of a `many` input |
+| unknown input | setting, providing or reading an input the package does not declare is an error listing the declared ones |
+| switched-off import | an import removed by `enabled`, or outside the stack, sets and provides nothing |
 | fragment | `provide` on a fragment import is an error |
-| `slots` outside a package | an error |
+| `inputs` outside a package | an error |
 
 ### Outputs
 
-Outputs are what a package gives back: where it listens, when it is ready, a value per slot entry.
+Outputs are what a package gives back: where it listens, when it is ready, a value per entry of a `many` input.
 
 ```hcl
 # gateway/Alphasfile
 package "gateway" {
   outputs = {
-    url   = "http://127.0.0.1:${module.gateway.service.go.gateway.vars.port}"
-    ready = module.gateway.service.go.gateway.runtime.ready
+    url   = { description = "Where the gateway listens.", type = string, value = "http://127.0.0.1:${module.gateway.service.go.gateway.vars.port}" }
+    ready = { description = "The gateway answers requests.", type = string, value = module.gateway.service.go.gateway.runtime.ready }
   }
   …
 }
@@ -345,13 +347,31 @@ runtime {
 
 | rule | behavior |
 |---|---|
-| `outputs = { <name> = <expr> }` | declares the package's outputs; each expression is evaluated in the package's scope, with the other producers, so it may read its services, inputs, features and slots |
+| `outputs = { <n> = { description, type, value } }` | declares the package's outputs; each value is evaluated in the package's scope, with the other producers, so it may read its services, features and inputs |
+| type check | a value that does not fit its type is an error naming the output |
 | `package.<p>.outputs.<n>` | reads an output wherever package `p` is visible: after an import of it, at the entrypoint's top level after the entrypoint imports it |
-| per-entry values | an output may be a map keyed like a slot, such as `{ for key, d in slots.databases : key => "…/${d.name}" }`, so a provider reads its own entry's value as `package.db.outputs.dsn.<key>` |
+| per-entry values | an output may be a map keyed like a `many` input, such as `{ for key, d in inputs.databases : key => "…/${d.name}" }`, so a provider reads its own entry's value as `package.db.outputs.dsn.<key>` |
 | barriers | an output that names a barrier, such as `runtime.ready`, carries it, so `after = [package.<p>.outputs.ready]` waits for it |
 | unknown output | an error listing the declared ones |
 
-See [examples/gateway](https://github.com/piotrkowalczuk/zordon/tree/main/examples/gateway) for inputs, features, slots and outputs in one runnable stack.
+See [examples/gateway](https://github.com/piotrkowalczuk/zordon/tree/main/examples/gateway) for features, inputs and outputs in one runnable stack.
+
+### Types
+
+Inputs and outputs name their type in HCL's type syntax, as in Terraform.
+
+| type | values |
+|---|---|
+| `string`, `number`, `bool` | a primitive; HCL's conversions apply, so `"8080"` fits `number` |
+| `list(T)` | an ordered list of `T` |
+| `map(T)` | string keys to `T` |
+| `object({ <attr> = T, … })` | named attributes; `optional(T)` may be left out and is then null, `optional(T, <default>)` takes the default |
+
+| rule | behavior |
+|---|---|
+| unsupported | `any`, `set(T)` and `tuple([…])` are errors that say what to use instead |
+| undeclared attribute | a value with an attribute the object type does not declare is an error, where HCL would drop it silently |
+| mismatch | an error names the path to the offending value, such as `routes[1].port: a number is required` |
 
 ### Remote imports
 

@@ -12,9 +12,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/zclconf/go-cty/cty"
-	"github.com/zclconf/go-cty/cty/convert"
 	"github.com/zclconf/go-cty/cty/function"
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
@@ -121,8 +119,10 @@ type resolver struct {
 	// for the unique check.
 	collected map[string]map[string]map[string]cty.Value
 	provided  map[string][]providedEntry
-	// outputs holds evaluated package outputs: package, name.
+	// outputs and inputs hold evaluated package outputs and single inputs:
+	// package, name.
 	outputs map[string]map[string]cty.Value
+	inputs  map[string]map[string]cty.Value
 
 	// toolchainCty is the per-module projection of `toolchain { <lang> {
 	// ... } }` declarations into cty: `toolchain.<lang>.ready` etc. resolve
@@ -242,7 +242,7 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	// not a whole-service edge. A.env→B.vars and B.env→A.vars are
 	// independent and resolve cleanly; only a literal A.vars→B.vars
 	// while B.vars→A.vars is a cycle, and that's a real bug.
-	g, err := newGraph(services, r.tree.provisions, r.tree.outputs, parentKnown)
+	g, err := newGraph(services, &graphValues{provisions: r.tree.provisions, outputs: r.tree.outputs, inputs: r.tree.inputs, checks: r.tree.checks}, parentKnown)
 	if err != nil {
 		return nil, err
 	}
@@ -271,6 +271,18 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 		}
 		if n.kind == kindOutput {
 			if err := r.evalOutput(n.out); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if n.kind == kindInput {
+			if err := r.evalInput(n.in); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if n.kind == kindCheck {
+			if err := r.evalCheck(n.check); err != nil {
 				return nil, err
 			}
 			continue
@@ -745,45 +757,42 @@ func (r *resolver) evalProducerNode(n *node, st *svcState) error {
 }
 
 // evalProvision evaluates one provide entry in the scope of its import,
-// converts it to the slot's entry type, and files it under
-// slots.<slot>["<key>"] of the package it provides to, with key set.
+// checks it against the input's type, and files it under
+// inputs.<input>["<key>"] of the package it provides to, with key set.
 func (r *resolver) evalProvision(p *provision) error {
 	ctx := r.ctxWith(nil, srcDirs{module: p.scope})
 	vals := make(map[string]cty.Value, len(p.attrs))
 	for name, attr := range p.attrs {
 		v, diags := attr.Expr.Value(ctx)
 		if diags.HasErrors() {
-			return fmt.Errorf("%s: provide %q: %s", p.block.DefRange, p.slot, diags.Error())
+			return fmt.Errorf("%s: provide %q: %s", p.block.DefRange, p.input, diags.Error())
 		}
 		vals[name] = v
 	}
-	entry := cty.ObjectVal(vals)
-	if p.decl.defaults != nil {
-		entry = p.decl.defaults.Apply(entry)
-	}
-	entry, err := convert.Convert(entry, p.decl.entry)
+	entry, err := p.decl.ty.Convert(cty.ObjectVal(vals))
 	if err != nil {
-		return fmt.Errorf("%s: provide %q: the entry does not fit slot %q of package %s (%s): %w", p.block.DefRange, p.slot, p.slot, p.pkg, typeexpr.TypeString(p.decl.entry), err)
+		return fmt.Errorf("%s: provide %q: the entry does not fit input %q of package %s (%s): %w", p.block.DefRange, p.input, p.input, p.pkg, p.decl.ty, err)
 	}
 	obj := entry.AsValueMap()
 	if obj == nil {
 		obj = map[string]cty.Value{}
 	}
+	slot := p.pkg + "." + p.input
 	for _, attr := range p.decl.unique {
 		v := obj[attr]
 		if v.IsNull() {
 			continue
 		}
-		for _, other := range r.provided[p.pkg+"."+p.slot] {
+		for _, other := range r.provided[slot] {
 			if ov := other.entry[attr]; !ov.IsNull() && ov.RawEquals(v) {
-				return fmt.Errorf("%s: provide %q: %s = %s is already provided by entry %q at %s; slot %q of package %s takes each %s once", p.block.DefRange, p.slot, attr, hclValue(v), other.p.key, other.p.block.DefRange, p.slot, p.pkg, attr)
+				return fmt.Errorf("%s: provide %q: %s = %s is already provided by entry %q at %s; input %q of package %s takes each %s once", p.block.DefRange, p.input, attr, hclValue(v), other.p.key, other.p.block.DefRange, p.input, p.pkg, attr)
 			}
 		}
 	}
 	if r.provided == nil {
 		r.provided = map[string][]providedEntry{}
 	}
-	r.provided[p.pkg+"."+p.slot] = append(r.provided[p.pkg+"."+p.slot], providedEntry{p: p, entry: obj})
+	r.provided[slot] = append(r.provided[slot], providedEntry{p: p, entry: obj})
 	obj["key"] = cty.StringVal(p.key)
 	if r.collected == nil {
 		r.collected = map[string]map[string]map[string]cty.Value{}
@@ -791,18 +800,23 @@ func (r *resolver) evalProvision(p *provision) error {
 	if r.collected[p.pkg] == nil {
 		r.collected[p.pkg] = map[string]map[string]cty.Value{}
 	}
-	if r.collected[p.pkg][p.slot] == nil {
-		r.collected[p.pkg][p.slot] = map[string]cty.Value{}
+	if r.collected[p.pkg][p.input] == nil {
+		r.collected[p.pkg][p.input] = map[string]cty.Value{}
 	}
-	r.collected[p.pkg][p.slot][p.key] = cty.ObjectVal(obj)
+	r.collected[p.pkg][p.input][p.key] = cty.ObjectVal(obj)
 	return nil
 }
 
-// evalOutput evaluates one package output in the package's scope.
+// evalOutput evaluates one package output in the package's scope and checks
+// it against its type.
 func (r *resolver) evalOutput(o *output) error {
-	v, diags := o.expr.Value(r.ctxWith(nil, srcDirs{module: pkgScope(o.pkg)}))
+	v, diags := o.decl.value.Value(r.ctxWith(nil, srcDirs{module: pkgScope(o.pkg)}))
 	if diags.HasErrors() {
 		return fmt.Errorf("output %q of package %s: %s", o.name, o.pkg, diags.Error())
+	}
+	v, err := o.decl.ty.Convert(v)
+	if err != nil {
+		return fmt.Errorf("%s: output %q of package %s is not a %s: %w", o.decl.value.Range(), o.name, o.pkg, o.decl.ty, err)
 	}
 	if r.outputs == nil {
 		r.outputs = map[string]map[string]cty.Value{}
@@ -812,6 +826,51 @@ func (r *resolver) evalOutput(o *output) error {
 	}
 	r.outputs[o.pkg][o.name] = v
 	return nil
+}
+
+// evalInput evaluates one single input: what its import passes, in the
+// import's scope, or its default, in the package's; then checks the type.
+func (r *resolver) evalInput(in *input) error {
+	v := cty.NullVal(cty.DynamicPseudoType)
+	at := in.decl.def
+	if e := in.expr(); e != nil {
+		var diags hcl.Diagnostics
+		v, diags = e.Value(r.ctxWith(nil, srcDirs{module: in.scope()}))
+		if diags.HasErrors() {
+			return fmt.Errorf("input %q of package %s: %s", in.name, in.pkg, diags.Error())
+		}
+		at = e
+	}
+	v, err := in.decl.ty.Convert(v)
+	if err != nil {
+		return fmt.Errorf("%s: input %q of package %s is not a %s: %w", at.Range(), in.name, in.pkg, in.decl.ty, err)
+	}
+	if r.inputs == nil {
+		r.inputs = map[string]map[string]cty.Value{}
+	}
+	if r.inputs[in.pkg] == nil {
+		r.inputs[in.pkg] = map[string]cty.Value{}
+	}
+	r.inputs[in.pkg][in.name] = v
+	return nil
+}
+
+// evalCheck compares what another import passes for an input with the value
+// the package runs with.
+func (r *resolver) evalCheck(c *check) error {
+	v, diags := c.c.arg.expr.Value(r.ctxWith(nil, srcDirs{module: c.c.arg.scope}))
+	if diags.HasErrors() {
+		return fmt.Errorf("input %q of package %s: %s", c.in.name, c.in.pkg, diags.Error())
+	}
+	want, err := c.in.decl.ty.Convert(v)
+	if err != nil {
+		return fmt.Errorf("%s: input %q of package %s is not a %s: %w", c.c.arg.at, c.in.name, c.in.pkg, c.in.decl.ty, err)
+	}
+	got := r.inputs[c.in.pkg][c.in.name]
+	if got.RawEquals(want) {
+		return nil
+	}
+	return fmt.Errorf("%s: package %s runs with input %q = %s, but %s needs %s (%s); set inputs = { %s = %s } here", c.c.at, c.in.pkg, c.in.name, hclValue(got), c.c.by, hclValue(want), c.c.arg.at, c.in.name, hclValue(want))
 }
 
 type providedEntry struct {
@@ -1807,20 +1866,22 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 		}
 		vars["package"] = cty.ObjectVal(pkgs)
 	}
-	if pkg := r.tree.packages[selfPkg]; inPkg && pkg != nil && len(pkg.file.block.slots) > 0 {
-		slots := make(map[string]cty.Value, len(pkg.file.block.slots))
-		for slot := range pkg.file.block.slots {
-			slots[slot] = cty.EmptyObjectVal
-			if entries := r.collected[selfPkg][slot]; len(entries) > 0 {
-				slots[slot] = cty.ObjectVal(copyCtyMap(entries))
+	if pkg := r.tree.packages[selfPkg]; inPkg && pkg != nil && len(pkg.file.block.inputs) > 0 {
+		inputs := copyCtyMap(r.inputs[selfPkg])
+		for name, decl := range pkg.file.block.inputs {
+			if !decl.many {
+				continue
+			}
+			inputs[name] = cty.EmptyObjectVal
+			if entries := r.collected[selfPkg][name]; len(entries) > 0 {
+				inputs[name] = cty.ObjectVal(copyCtyMap(entries))
 			}
 		}
-		vars["slots"] = cty.ObjectVal(slots)
+		if len(inputs) > 0 {
+			vars["inputs"] = cty.ObjectVal(inputs)
+		}
 	}
 	if s := r.tree.settingsFor(dirs.module); s != nil {
-		if len(s.inputs) > 0 {
-			vars["inputs"] = cty.ObjectVal(copyCtyMap(s.inputs))
-		}
 		if len(s.features) > 0 {
 			feats := make(map[string]cty.Value, len(s.features))
 			for name, on := range s.features {

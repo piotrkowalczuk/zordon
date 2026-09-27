@@ -11,7 +11,6 @@ import (
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
-	"github.com/zclconf/go-cty/cty"
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
@@ -43,6 +42,8 @@ type Tree struct {
 	packages      map[string]*pkgInstance
 	provisions    []*provision
 	outputs       []*output
+	inputs        []*input
+	checks        []*check
 	entryServices []*serviceBlock
 	// disabled are the source ranges of blocks switched off by enabled; the
 	// static passes over service bodies skip them.
@@ -201,18 +202,31 @@ type pkgInstance struct {
 	needs    []pkgNeed
 	active   bool
 	settings *scopeSettings
+	// inputs is the source of each single input that an import sets; the
+	// rest take their default. checks are the other imports that set an
+	// input too, compared with the value once both are evaluated.
+	inputs map[string]*inputArg
+	checks []*inputCheck
 }
 
 type pkgSettings struct {
 	at       hcl.Range
-	inputs   map[string]cty.Value
+	inputs   map[string]*inputArg
 	features []string
 }
 
-// scopeSettings is what a package's modules see as inputs.<n> and
-// features.<n>.
+// inputCheck is an import that sets an input the entrypoint's import also
+// decides; its value must match.
+type inputCheck struct {
+	name string
+	arg  *inputArg
+	by   string
+	at   hcl.Range
+}
+
+// scopeSettings is what a package's modules see as features.<n>, fixed
+// before planning.
 type scopeSettings struct {
-	inputs   map[string]cty.Value
 	features map[string]bool
 }
 
@@ -419,7 +433,7 @@ func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, res re
 	case ib.InputsRange != (hcl.Range{}) || ib.Features != nil:
 		return fmt.Errorf("%s: %s %q: inputs and features are passed to a package directory, not to a fragment file", ib.DefRange, ib.keyword, ib.Path)
 	case len(ib.Provides) > 0:
-		return fmt.Errorf("%s: %s %q: provide fills a slot of a package, not a fragment file", ib.Provides[0].DefRange, ib.keyword, ib.Path)
+		return fmt.Errorf("%s: %s %q: provide adds an entry to an input of a package, not to a fragment file", ib.Provides[0].DefRange, ib.keyword, ib.Path)
 	case f.block != nil:
 		return fmt.Errorf("%s: %s %q: a package depends on other packages, not on a fragment's modules; move the modules into this package or into a package of their own", ib.DefRange, ib.keyword, ib.Path)
 	case ib.Modules == nil:
@@ -480,7 +494,7 @@ func (t *Tree) followPackage(f *treeFile, scope string, ib *importBlock, res res
 		}
 	}
 	if scope == DefaultModule {
-		set, err := passedSettings(ib, nil)
+		set, err := passedSettings(ib, scope, f.src)
 		if err != nil {
 			return err
 		}
@@ -629,7 +643,7 @@ func (t *Tree) finish() error {
 	if err := t.gatherProvisions(); err != nil {
 		return err
 	}
-	t.gatherOutputs()
+	t.gatherValues()
 	return t.checkGated()
 }
 
@@ -811,7 +825,7 @@ func decodeFile(name string, src []byte) (*rootBlock, error) {
 		return nil, err
 	}
 	for _, pb := range root.Packages {
-		if err := pb.decodeDescribed(); err != nil {
+		if err := pb.decodeAPI(); err != nil {
 			return nil, err
 		}
 	}

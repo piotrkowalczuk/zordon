@@ -1,7 +1,7 @@
 # Orders registers /orders/ with the gateway.
 package "orders" {
   inputs = {
-    greeting = "hello"
+    greeting = { description = "What orders answers with.", type = string, default = "hello" }
   }
 
   import "../gateway" {

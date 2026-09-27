@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
@@ -762,16 +761,15 @@ type requireBlock struct {
 }
 
 // packageBlock is the API boundary between a stack and the modules that
-// implement a package: `package "<name>" { inputs = {...} features = {...}
-// ... module "<m>" { ... } }`. Inputs map each name to its default, or to
-// `required`; they are read as inputs.<n>. Features map each name to a
-// description of what it turns on; they are off unless an import turns them
-// on, and are read as features.<n>. Slots map each slot to a description
-// and the type of its entries; importers fill it with provide blocks, and
-// the package reads it as slots.<slot>, a map of key to entry. Outputs are
-// what the package gives back, read from outside as
-// package.<p>.outputs.<n>. The package's toolchain pins every module that
-// has none of its own.
+// implement a package: `package "<name>" { features = {...} inputs = {...}
+// outputs = {...} ... module "<m>" { ... } }`. Each maps a name to
+// { description = "...", ... }. Features are fixed before planning, because
+// they decide which blocks exist; they are read as features.<n>. Inputs are
+// what goes in and outputs what comes out, both evaluated with the services:
+// a single input takes one value from one import, an input with many = true
+// takes entries from provide blocks; both are read as inputs.<n>. Outputs
+// are read from outside as package.<p>.outputs.<n>. The package's toolchain
+// pins every module that has none of its own.
 type packageBlock struct {
 	Name          string          `hcl:"name,label"`
 	DefRange      hcl.Range       `hcl:",def_range"`
@@ -779,8 +777,6 @@ type packageBlock struct {
 	InputsRange   hcl.Range       `hcl:"inputs,attr_range"`
 	Features      hcl.Expression  `hcl:"features,optional"`
 	FeaturesRange hcl.Range       `hcl:"features,attr_range"`
-	Slots         hcl.Expression  `hcl:"slots,optional"`
-	SlotsRange    hcl.Range       `hcl:"slots,attr_range"`
 	Outputs       hcl.Expression  `hcl:"outputs,optional"`
 	OutputsRange  hcl.Range       `hcl:"outputs,attr_range"`
 	Imports       []*importBlock  `hcl:"import,block"`
@@ -788,20 +784,10 @@ type packageBlock struct {
 	Toolchain     *toolchainBlock `hcl:"toolchain,block"`
 	Modules       []*moduleBlock  `hcl:"module,block"`
 
-	// features, slots and outputs are Features, Slots and Outputs decoded;
-	// an output keeps its expression, evaluated with the producers.
+	// features, inputs and outputs are Features, Inputs and Outputs decoded.
 	features map[string]string
-	slots    map[string]*slotDecl
-	outputs  map[string]hcl.Expression
-}
-
-// slotDecl is one slot of a package: what an entry is for, its type, and
-// the attributes no two entries may share.
-type slotDecl struct {
-	description string
-	entry       cty.Type
-	defaults    *typeexpr.Defaults
-	unique      []string
+	inputs   map[string]*inputDecl
+	outputs  map[string]*outputDecl
 }
 
 // moduleBlock is a named namespace of services with an optional toolchain

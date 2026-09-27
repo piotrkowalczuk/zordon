@@ -28,7 +28,21 @@ const (
 	// kindOutput is one output of a package, read as
 	// package.<p>.outputs.<n>; also a producer without a service.
 	kindOutput
+	// kindInput is one single input of a package, read as inputs.<n> in it.
+	kindInput
+	// kindCheck compares another import's value for an input with the value
+	// the package runs with; it produces nothing.
+	kindCheck
 )
+
+// graphValues are the producers that belong to packages rather than to
+// services.
+type graphValues struct {
+	provisions []*provision
+	outputs    []*output
+	inputs     []*input
+	checks     []*check
+}
 
 func (k nodeKind) String() string {
 	switch k {
@@ -44,6 +58,10 @@ func (k nodeKind) String() string {
 		return "provide"
 	case kindOutput:
 		return "output"
+	case kindInput:
+		return "input"
+	case kindCheck:
+		return "check"
 	}
 	return "?"
 }
@@ -65,6 +83,8 @@ type node struct {
 	scope string
 	prov  *provision
 	out   *output
+	in    *input
+	check *check
 }
 
 // graph holds nodes and forward edges (id → set of ids it depends on —
@@ -85,11 +105,12 @@ func nodeID(svcID string, kind nodeKind, name string) string {
 // newGraph builds the cross-service per-producer DAG. parentKnown lists
 // services already resolved by a federation parent; references to those
 // are valid but never carry an intra-graph edge (the parent was
-// evaluated end-to-end before this graph runs). Every provision is a node
-// too, and a reference to slots.<slot> depends on every provision to
-// that slot of the referencing package. So is every package output, which
-// package.<p>.outputs.<n> depends on.
-func newGraph(services []*serviceBlock, provisions []*provision, outputs []*output, parentKnown map[string]struct{}) (*graph, error) {
+// evaluated end-to-end before this graph runs). Every single input of a
+// package is a node too, and so is every provision to an input with
+// many = true: inputs.<n> in a package depends on the one or on all of
+// them. So is every package output, which package.<p>.outputs.<n> depends
+// on, and every check of an input's value against another import.
+func newGraph(services []*serviceBlock, vals *graphValues, parentKnown map[string]struct{}) (*graph, error) {
 	g := &graph{
 		byID: map[string]*node{},
 		deps: map[string]map[string]struct{}{},
@@ -136,22 +157,33 @@ func newGraph(services []*serviceBlock, provisions []*provision, outputs []*outp
 		}
 	}
 
-	slots := map[string][]string{}
-	for _, p := range provisions {
+	addNode := func(n *node) {
+		g.byID[n.id] = n
+		g.nodes = append(g.nodes, n)
+		g.deps[n.id] = map[string]struct{}{}
+	}
+	many := map[string][]string{}
+	for _, p := range vals.provisions {
 		n := &node{id: p.id(), kind: kindProvide, scope: p.scope, prov: p}
 		for _, name := range sortedKeys(p.attrs) {
 			n.exprs = append(n.exprs, p.attrs[name].Expr)
 		}
-		g.byID[n.id] = n
-		g.nodes = append(g.nodes, n)
-		g.deps[n.id] = map[string]struct{}{}
-		slots[p.pkg+"."+p.slot] = append(slots[p.pkg+"."+p.slot], n.id)
+		addNode(n)
+		many[p.pkg+"."+p.input] = append(many[p.pkg+"."+p.input], n.id)
 	}
-	for _, o := range outputs {
-		n := &node{id: o.id(), kind: kindOutput, scope: pkgScope(o.pkg), out: o, exprs: []hcl.Expression{o.expr}}
-		g.byID[n.id] = n
-		g.nodes = append(g.nodes, n)
-		g.deps[n.id] = map[string]struct{}{}
+	for _, o := range vals.outputs {
+		addNode(&node{id: o.id(), kind: kindOutput, scope: pkgScope(o.pkg), out: o, exprs: []hcl.Expression{o.decl.value}})
+	}
+	for _, in := range vals.inputs {
+		n := &node{id: in.id(), kind: kindInput, scope: in.scope(), in: in}
+		if e := in.expr(); e != nil {
+			n.exprs = []hcl.Expression{e}
+		}
+		addNode(n)
+	}
+	for _, c := range vals.checks {
+		addNode(&node{id: c.id(), kind: kindCheck, scope: c.c.arg.scope, check: c, exprs: []hcl.Expression{c.c.arg.expr}})
+		g.deps[c.id()][c.in.id()] = struct{}{}
 	}
 
 	for _, n := range g.nodes {
@@ -160,10 +192,14 @@ func newGraph(services []*serviceBlock, provisions []*provision, outputs []*outp
 				continue
 			}
 			for _, trav := range expr.Variables() {
-				if trav.RootName() == "slots" && len(trav) >= 2 {
+				if trav.RootName() == "inputs" && len(trav) >= 2 {
 					if pkg, inPkg := packageOf(n.scope); inPkg {
-						if slot, ok := traverseAttrName(trav[1]); ok {
-							for _, id := range slots[pkg+"."+slot] {
+						if name, ok := traverseAttrName(trav[1]); ok {
+							id := (&input{pkg: pkg, name: name}).id()
+							if _, single := g.byID[id]; single && id != n.id {
+								g.deps[n.id][id] = struct{}{}
+							}
+							for _, id := range many[pkg+"."+name] {
 								g.deps[n.id][id] = struct{}{}
 							}
 						}

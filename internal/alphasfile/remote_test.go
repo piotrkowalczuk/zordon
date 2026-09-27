@@ -161,7 +161,7 @@ func TestLoadTreeWith_switchedOffRemoteImportIsStillLocked(t *testing.T) {
 		"prom/Alphasfile": `
 package "prom" {
   require "github.com/acme/infra" { ref = "main" }
-  features = { tsdb = "Stores samples in the tsdb package." }
+  features = { tsdb = { description = "Stores samples in the tsdb package." } }
 
   import "github.com/acme/infra/pkgs/db" {
     enabled = features.tsdb

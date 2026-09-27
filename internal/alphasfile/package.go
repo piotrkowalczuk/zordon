@@ -8,10 +8,11 @@ import (
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
+
+	"github.com/piotrkowalczuk/zordon/internal/ztypes"
 )
 
 // pkgNeed is an import of a package from anywhere but the entrypoint's top
@@ -22,169 +23,218 @@ type pkgNeed struct {
 	set   *pkgSettings
 }
 
-// decodeDescribed reads a package's features, a map of name to
-// description, and its slots.
-func (pb *packageBlock) decodeDescribed() error {
+// inputDecl is one input of a package. A single input takes one value from
+// one source; a many input takes entries from every provide block of its
+// importers, keyed by provider.
+type inputDecl struct {
+	description string
+	ty          ztypes.Type
+	// def is the default value's expression; nil marks a required single
+	// input.
+	def    hcl.Expression
+	many   bool
+	unique []string
+}
+
+// outputDecl is one output of a package.
+type outputDecl struct {
+	description string
+	ty          ztypes.Type
+	value       hcl.Expression
+}
+
+// inputArg is a value an import passes to one input, evaluated later, with
+// the producers, in the scope of the import.
+type inputArg struct {
+	expr  hcl.Expression
+	scope string
+	at    hcl.Range
+	src   string
+}
+
+// decodeAPI reads a package's features, inputs and outputs. Each is a map of
+// name to { description = "...", ... }; types and value expressions are
+// read from the syntax, so nothing is evaluated here.
+func (pb *packageBlock) decodeAPI() error {
 	var err error
-	pb.features, err = described(pb.Features, pb.FeaturesRange, "feature", fmt.Sprintf(`features of package %q map each name to what it turns on, such as { tls = "Serves HTTPS with a local CA" }`, pb.Name), "what it turns on, so whoever imports the package can decide", pb.Name)
-	if err != nil {
+	if pb.features, err = decodeFeatures(pb); err != nil {
 		return err
 	}
-	if pb.slots, err = decodeSlots(pb); err != nil {
+	if pb.inputs, err = decodeInputs(pb); err != nil {
 		return err
 	}
 	pb.outputs, err = decodeOutputs(pb)
 	return err
 }
 
-// decodeOutputs reads `outputs = { <name> = <expr> }` from the syntax, so
-// each expression is evaluated later, with the producers.
-func decodeOutputs(pb *packageBlock) (map[string]hcl.Expression, error) {
-	out := map[string]hcl.Expression{}
-	if pb.OutputsRange == (hcl.Range{}) {
-		return out, nil
+// declItems iterates `<attr> = { <name> = { <field> = <expr> ... } ... }`,
+// checking names and that each entry is an object with a description.
+func declItems(expr hcl.Expression, at hcl.Range, what, example, pkg string, each func(name string, at hcl.Range, fields map[string]hcl.Expression) error) error {
+	if at == (hcl.Range{}) {
+		return nil
 	}
-	obj, ok := pb.Outputs.(*hclsyntax.ObjectConsExpr)
+	shape := fmt.Sprintf("%ss of package %q map each name to { description = \"...\", ... }, such as %s", what, pkg, example)
+	obj, ok := expr.(*hclsyntax.ObjectConsExpr)
 	if !ok {
-		return nil, fmt.Errorf("%s: outputs of package %q map each name to a value, such as { port = module.db.service.pkg.postgres.vars.port }", pb.OutputsRange, pb.Name)
+		return fmt.Errorf("%s: %s", at, shape)
 	}
+	seen := map[string]bool{}
 	for _, item := range obj.Items {
-		kv, diags := item.KeyExpr.Value(nil)
-		if diags.HasErrors() || kv.IsNull() || !kv.Type().Equals(cty.String) || !moduleNameRe.MatchString(kv.AsString()) {
-			return nil, fmt.Errorf("%s: output of package %q: name it with letters, digits, '_' or '-', starting with a letter", item.KeyExpr.Range(), pb.Name)
+		name, ok := staticKey(item.KeyExpr)
+		itemAt := item.KeyExpr.Range()
+		if !ok || !moduleNameRe.MatchString(name) {
+			return fmt.Errorf("%s: %s of package %q: name it with letters, digits, '_' or '-', starting with a letter", itemAt, what, pkg)
 		}
-		name := kv.AsString()
-		if _, dup := out[name]; dup {
-			return nil, fmt.Errorf("%s: output %q of package %q is declared twice", item.KeyExpr.Range(), name, pb.Name)
+		if seen[name] {
+			return fmt.Errorf("%s: %s %q of package %q is declared twice", itemAt, what, name, pkg)
 		}
-		out[name] = item.ValueExpr
-	}
-	return out, nil
-}
-
-// decodeSlots reads `slots = { <slot> = { description = "...", entry =
-// object({...}) } }`. The entry is a type, so it is read from the syntax, not
-// evaluated.
-func decodeSlots(pb *packageBlock) (map[string]*slotDecl, error) {
-	out := map[string]*slotDecl{}
-	if pb.SlotsRange == (hcl.Range{}) {
-		return out, nil
-	}
-	shape := fmt.Sprintf(`slots of package %q map each slot to { description = "...", entry = object({ ... }) }, such as { sites = { description = "Hosts to route.", entry = object({ host = string, upstream = string }) } }`, pb.Name)
-	obj, ok := pb.Slots.(*hclsyntax.ObjectConsExpr)
-	if !ok {
-		return nil, fmt.Errorf("%s: %s", pb.SlotsRange, shape)
-	}
-	for _, item := range obj.Items {
-		kv, diags := item.KeyExpr.Value(nil)
-		if diags.HasErrors() || kv.IsNull() || !kv.Type().Equals(cty.String) {
-			return nil, fmt.Errorf("%s: %s", item.KeyExpr.Range(), shape)
-		}
-		name := kv.AsString()
-		at := item.KeyExpr.Range()
-		if !moduleNameRe.MatchString(name) {
-			return nil, fmt.Errorf("%s: slot %q of package %q: use letters, digits, '_' or '-' and start with a letter", at, name, pb.Name)
-		}
-		if _, dup := out[name]; dup {
-			return nil, fmt.Errorf("%s: slot %q of package %q is declared twice", at, name, pb.Name)
-		}
+		seen[name] = true
 		body, ok := item.ValueExpr.(*hclsyntax.ObjectConsExpr)
 		if !ok {
-			return nil, fmt.Errorf("%s: slot %q: %s", at, name, shape)
+			return fmt.Errorf("%s: %s %q: %s", itemAt, what, name, shape)
 		}
-		decl := &slotDecl{}
-		hasEntry := false
-		for _, field := range body.Items {
-			fv, _ := field.KeyExpr.Value(nil)
-			key := ""
-			if fv.IsKnown() && !fv.IsNull() && fv.Type().Equals(cty.String) {
-				key = fv.AsString()
+		fields := map[string]hcl.Expression{}
+		for _, f := range body.Items {
+			key, ok := staticKey(f.KeyExpr)
+			if !ok {
+				return fmt.Errorf("%s: %s %q: %s", f.KeyExpr.Range(), what, name, shape)
 			}
-			switch key {
-			case "description":
-				d, diags := field.ValueExpr.Value(nil)
-				if diags.HasErrors() || d.IsNull() || !d.Type().Equals(cty.String) {
-					return nil, fmt.Errorf("%s: slot %q: description must be a string", field.ValueExpr.Range(), name)
+			fields[key] = f.ValueExpr
+		}
+		d, ok := fields["description"]
+		if !ok {
+			return fmt.Errorf("%s: %s %q of package %q needs a description, so whoever uses the package knows what it is for", itemAt, what, name, pkg)
+		}
+		v, diags := d.Value(nil)
+		if diags.HasErrors() || v.IsNull() || !v.Type().Equals(cty.String) || strings.TrimSpace(v.AsString()) == "" {
+			return fmt.Errorf("%s: %s %q of package %q needs a description, so whoever uses the package knows what it is for", d.Range(), what, name, pkg)
+		}
+		if err := each(name, itemAt, fields); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func staticKey(expr hcl.Expression) (string, bool) {
+	v, diags := expr.Value(nil)
+	if diags.HasErrors() || v.IsNull() || !v.IsKnown() || !v.Type().Equals(cty.String) {
+		return "", false
+	}
+	return v.AsString(), true
+}
+
+func onlyFields(fields map[string]hcl.Expression, what, name string, at hcl.Range, allowed ...string) error {
+	for _, key := range sortedKeys(fields) {
+		if !slices.Contains(allowed, key) {
+			return fmt.Errorf("%s: %s %q takes %s only", at, what, name, strings.Join(allowed, ", "))
+		}
+	}
+	return nil
+}
+
+func decodeFeatures(pb *packageBlock) (map[string]string, error) {
+	out := map[string]string{}
+	err := declItems(pb.Features, pb.FeaturesRange, "feature", `{ tls = { description = "Serves HTTPS with a local CA." } }`, pb.Name, func(name string, at hcl.Range, fields map[string]hcl.Expression) error {
+		if err := onlyFields(fields, "feature", name, at, "description"); err != nil {
+			return err
+		}
+		v, _ := fields["description"].Value(nil)
+		out[name] = v.AsString()
+		return nil
+	})
+	return out, err
+}
+
+func decodeInputs(pb *packageBlock) (map[string]*inputDecl, error) {
+	out := map[string]*inputDecl{}
+	err := declItems(pb.Inputs, pb.InputsRange, "input", `{ port = { description = "Port to listen on.", type = number, default = null } }`, pb.Name, func(name string, at hcl.Range, fields map[string]hcl.Expression) error {
+		if err := onlyFields(fields, "input", name, at, "description", "type", "default", "many", "unique"); err != nil {
+			return err
+		}
+		d, _ := fields["description"].Value(nil)
+		decl := &inputDecl{description: d.AsString(), def: fields["default"]}
+		te, ok := fields["type"]
+		if !ok {
+			return fmt.Errorf("%s: input %q of package %q needs a type, such as type = string", at, name, pb.Name)
+		}
+		ty, err := ztypes.Parse(te)
+		if err != nil {
+			return fmt.Errorf("%s: input %q: type: %w", te.Range(), name, err)
+		}
+		decl.ty = ty
+		if m, ok := fields["many"]; ok {
+			v, diags := m.Value(nil)
+			if diags.HasErrors() || v.IsNull() || !v.Type().Equals(cty.Bool) {
+				return fmt.Errorf("%s: input %q: many must be true or false", m.Range(), name)
+			}
+			decl.many = v.True()
+		}
+		if u, ok := fields["unique"]; ok {
+			if !decl.many {
+				return fmt.Errorf("%s: input %q: unique applies to an input with many = true", u.Range(), name)
+			}
+			v, diags := u.Value(nil)
+			if diags.HasErrors() || v.IsNull() || !(v.Type().IsTupleType() || v.Type().IsListType()) {
+				return fmt.Errorf("%s: input %q: unique lists entry attributes, such as [\"host\"]", u.Range(), name)
+			}
+			for _, a := range v.AsValueSlice() {
+				if a.IsNull() || !a.Type().Equals(cty.String) {
+					return fmt.Errorf("%s: input %q: unique lists entry attributes, such as [\"host\"]", u.Range(), name)
 				}
-				decl.description = strings.TrimSpace(d.AsString())
-			case "entry":
-				ty, defaults, diags := typeexpr.TypeConstraintWithDefaults(field.ValueExpr)
-				if diags.HasErrors() {
-					return nil, fmt.Errorf("%s: slot %q: entry: %s", field.ValueExpr.Range(), name, diags.Error())
-				}
-				if !ty.IsObjectType() {
-					return nil, fmt.Errorf("%s: slot %q: entry must be object({ ... }), because a provide block holds attributes", field.ValueExpr.Range(), name)
-				}
-				if ty.HasAttribute("key") {
-					return nil, fmt.Errorf("%s: slot %q: entry cannot declare key; every entry has it, set to its key", field.ValueExpr.Range(), name)
-				}
-				decl.entry, decl.defaults, hasEntry = ty, defaults, true
-			case "unique":
-				u, diags := field.ValueExpr.Value(nil)
-				if diags.HasErrors() || u.IsNull() || !(u.Type().IsTupleType() || u.Type().IsListType()) {
-					return nil, fmt.Errorf("%s: slot %q: unique lists entry attributes, such as [\"host\"]", field.ValueExpr.Range(), name)
-				}
-				for _, v := range u.AsValueSlice() {
-					if v.IsNull() || !v.Type().Equals(cty.String) {
-						return nil, fmt.Errorf("%s: slot %q: unique lists entry attributes, such as [\"host\"]", field.ValueExpr.Range(), name)
-					}
-					decl.unique = append(decl.unique, v.AsString())
-				}
-			default:
-				return nil, fmt.Errorf("%s: slot %q takes description, entry and unique only", field.KeyExpr.Range(), name)
+				decl.unique = append(decl.unique, a.AsString())
 			}
 		}
-		for _, attr := range decl.unique {
-			if hasEntry && !decl.entry.HasAttribute(attr) {
-				return nil, fmt.Errorf("%s: slot %q: unique names %q, which entry does not declare", at, name, attr)
+		if decl.many {
+			switch {
+			case decl.def != nil:
+				return fmt.Errorf("%s: input %q has many = true, so it starts empty and takes no default", decl.def.Range(), name)
+			case !ty.IsObject():
+				return fmt.Errorf("%s: input %q: an input with many = true takes entries from provide blocks, so its type must be object({ ... })", te.Range(), name)
+			case ty.HasAttribute("key"):
+				return fmt.Errorf("%s: input %q: the entry type cannot declare key; every entry has it, set to its key", te.Range(), name)
 			}
-		}
-		if decl.description == "" {
-			return nil, fmt.Errorf("%s: slot %q of package %q needs a description of what an entry is for, so importers know what to provide", at, name, pb.Name)
-		}
-		if !hasEntry {
-			return nil, fmt.Errorf("%s: slot %q of package %q needs entry = object({ ... }), the type of what importers provide", at, name, pb.Name)
+			for _, a := range decl.unique {
+				if !ty.HasAttribute(a) {
+					return fmt.Errorf("%s: input %q: unique names %q, which the type does not declare", at, name, a)
+				}
+			}
 		}
 		out[name] = decl
-	}
-	return out, nil
+		return nil
+	})
+	return out, err
 }
 
-func described(expr hcl.Expression, at hcl.Range, what, shape, needs, pkg string) (map[string]string, error) {
-	out := map[string]string{}
-	if at == (hcl.Range{}) {
-		return out, nil
-	}
-	v, diags := expr.Value(nil)
-	if diags.HasErrors() {
-		return nil, fmt.Errorf("%s: %s: %s", at, shape, diags.Error())
-	}
-	if v.IsNull() {
-		return out, nil
-	}
-	if !v.Type().IsObjectType() && !v.Type().IsMapType() {
-		return nil, fmt.Errorf("%s: %s", at, shape)
-	}
-	vals := v.AsValueMap()
-	for _, name := range sortedKeys(vals) {
-		if !moduleNameRe.MatchString(name) {
-			return nil, fmt.Errorf("%s: %s %q of package %q: use letters, digits, '_' or '-' and start with a letter", at, what, name, pkg)
+func decodeOutputs(pb *packageBlock) (map[string]*outputDecl, error) {
+	out := map[string]*outputDecl{}
+	err := declItems(pb.Outputs, pb.OutputsRange, "output", `{ url = { description = "Where it listens.", value = "http://127.0.0.1:${module.web.service.go.web.vars.port}" } }`, pb.Name, func(name string, at hcl.Range, fields map[string]hcl.Expression) error {
+		if err := onlyFields(fields, "output", name, at, "description", "type", "value"); err != nil {
+			return err
 		}
-		d := vals[name]
-		if d.IsNull() || !d.Type().Equals(cty.String) || strings.TrimSpace(d.AsString()) == "" {
-			return nil, fmt.Errorf("%s: %s %q of package %q needs a description of %s", at, what, name, pkg, needs)
+		value, ok := fields["value"]
+		if !ok {
+			return fmt.Errorf("%s: output %q of package %q needs a value", at, name, pb.Name)
 		}
-		out[name] = d.AsString()
-	}
-	return out, nil
+		te, ok := fields["type"]
+		if !ok {
+			return fmt.Errorf("%s: output %q of package %q needs a type, such as type = string", at, name, pb.Name)
+		}
+		ty, err := ztypes.Parse(te)
+		if err != nil {
+			return fmt.Errorf("%s: output %q: type: %w", te.Range(), name, err)
+		}
+		d, _ := fields["description"].Value(nil)
+		out[name] = &outputDecl{description: d.AsString(), ty: ty, value: value}
+		return nil
+	})
+	return out, err
 }
 
-// passedSettings evaluates what an import passes to a package. Inputs are
-// evaluated statically: literals, os::env, enc::* and, inside a package,
-// its own inputs; never another service's values, so a package's
-// configuration is known before planning.
-func passedSettings(ib *importBlock, own *scopeSettings) (*pkgSettings, error) {
-	set := &pkgSettings{at: ib.DefRange, inputs: map[string]cty.Value{}, features: slices.Clone(ib.Features)}
+// passedSettings reads what an import passes to a package: its features and,
+// per input, the expression that gives the value, evaluated later in scope.
+func passedSettings(ib *importBlock, scope string, src []byte) (*pkgSettings, error) {
+	set := &pkgSettings{at: ib.DefRange, inputs: map[string]*inputArg{}, features: slices.Clone(ib.Features)}
 	sort.Strings(set.features)
 	for i := 1; i < len(set.features); i++ {
 		if set.features[i] == set.features[i-1] {
@@ -194,28 +244,21 @@ func passedSettings(ib *importBlock, own *scopeSettings) (*pkgSettings, error) {
 	if ib.InputsRange == (hcl.Range{}) {
 		return set, nil
 	}
-	allowed := []string{}
-	if own != nil {
-		allowed = append(allowed, "inputs")
+	obj, ok := ib.Inputs.(*hclsyntax.ObjectConsExpr)
+	if !ok {
+		return nil, fmt.Errorf("%s: import %q: inputs must be an object such as { name = value }", ib.InputsRange, ib.Path)
 	}
-	if err := staticRefs(ib.Inputs, allowed...); err != nil {
-		return nil, fmt.Errorf("%s: import %q inputs: %w", ib.InputsRange, ib.Path, err)
+	for _, item := range obj.Items {
+		name, ok := staticKey(item.KeyExpr)
+		if !ok {
+			return nil, fmt.Errorf("%s: import %q: inputs must be an object such as { name = value }", item.KeyExpr.Range(), ib.Path)
+		}
+		arg := &inputArg{expr: item.ValueExpr, scope: scope, at: item.ValueExpr.Range()}
+		if r := item.ValueExpr.Range(); src != nil && r.End.Byte <= len(src) {
+			arg.src = string(r.SliceBytes(src))
+		}
+		set.inputs[name] = arg
 	}
-	ctx := staticEvalCtx()
-	if own != nil {
-		ctx.Variables = map[string]cty.Value{"inputs": cty.ObjectVal(own.inputs)}
-	}
-	v, diags := ib.Inputs.Value(ctx)
-	if diags.HasErrors() {
-		return nil, fmt.Errorf("%s: import %q inputs: %s", ib.InputsRange, ib.Path, diags.Error())
-	}
-	if v.IsNull() {
-		return set, nil
-	}
-	if !v.Type().IsObjectType() && !v.Type().IsMapType() {
-		return nil, fmt.Errorf("%s: import %q: inputs must be an object such as { name = value }, got %s", ib.InputsRange, ib.Path, v.Type().FriendlyName())
-	}
-	maps.Copy(set.inputs, v.AsValueMap())
 	return set, nil
 }
 
@@ -225,22 +268,20 @@ func sameSettings(a, b *pkgSettings) bool {
 	}
 	for k, av := range a.inputs {
 		bv, ok := b.inputs[k]
-		if !ok || !av.RawEquals(bv) {
+		if !ok || av.src != bv.src {
 			return false
 		}
 	}
 	return true
 }
 
-// requiredSentinel is what `required` evaluates to in a package's inputs:
-// a string no real default can collide with, as for `never`.
-const requiredSentinel = "\x00zordon:required\x00"
-
-// resolvePackages fixes the inputs and features of every package. A package
-// the entrypoint imports at its top level gets what that import passes, and
-// every other import of it in the stack must be satisfied by that. Any
-// other package gets the union of what its importers in the stack pass, so
-// importers are resolved first.
+// resolvePackages fixes the features of every package and the source of each
+// of its inputs. A package the entrypoint imports at its top level gets what
+// that import passes, and every other import of it in the stack must be
+// satisfied by that. Any other package gets the union of the features its
+// importers in the stack pass, and each input from the one importer that
+// sets it; importers are resolved first, because their features decide which
+// of their imports count.
 func (t *Tree) resolvePackages() error {
 	plain := t.plainActive()
 	pending := maps.Clone(t.packages)
@@ -285,7 +326,7 @@ func (t *Tree) resolvePackage(p *pkgInstance, plain map[string]bool) error {
 	if p.entry {
 		var err error
 		p.active = true
-		p.settings, err = resolveSettings(pb, p.set, who)
+		p.settings, err = resolveSettings(p, pb, p.set, who)
 		return err
 	}
 	needs, err := t.needsOf(p, plain)
@@ -293,9 +334,6 @@ func (t *Tree) resolvePackage(p *pkgInstance, plain map[string]bool) error {
 		return err
 	}
 	if len(needs) == 0 {
-		if _, err := declaredInputs(pb, who); err != nil {
-			return err
-		}
 		p.settings = idleSettings(pb)
 		return nil
 	}
@@ -304,7 +342,7 @@ func (t *Tree) resolvePackage(p *pkgInstance, plain map[string]bool) error {
 	if err != nil {
 		return err
 	}
-	p.settings, err = resolveSettings(pb, set, who)
+	p.settings, err = resolveSettings(p, pb, set, who)
 	return err
 }
 
@@ -313,10 +351,6 @@ func (t *Tree) resolvePackage(p *pkgInstance, plain map[string]bool) error {
 // reaches, and from packages in the stack whose enabled keeps the import.
 func (t *Tree) needsOf(p *pkgInstance, plain map[string]bool) ([]pkgNeed, error) {
 	who := "package " + p.name
-	declared, err := declaredInputs(p.file.block, who)
-	if err != nil {
-		return nil, err
-	}
 	var needs []pkgNeed
 	for _, scope := range sortedKeys(t.links) {
 		if scope == DefaultModule {
@@ -327,7 +361,6 @@ func (t *Tree) needsOf(p *pkgInstance, plain map[string]bool) ([]pkgNeed, error)
 			if l.pkg != p || l.block == nil {
 				continue
 			}
-			var own *scopeSettings
 			by := "module " + scope
 			if inPkg {
 				q := t.packages[owner]
@@ -343,15 +376,15 @@ func (t *Tree) needsOf(p *pkgInstance, plain map[string]bool) ([]pkgNeed, error)
 						continue
 					}
 				}
-				own, by = q.settings, "package "+owner
+				by = "package " + owner
 			} else if !plain[scope] {
 				continue
 			}
-			set, err := passedSettings(l.block, own)
+			set, err := passedSettings(l.block, scope, nil)
 			if err != nil {
 				return nil, err
 			}
-			if err := checkDeclared(p.file.block, declared, set, who); err != nil {
+			if err := checkDeclared(p.file.block, set, who); err != nil {
 				return nil, err
 			}
 			needs = append(needs, pkgNeed{by: by, block: l.block, set: set})
@@ -397,7 +430,7 @@ func (t *Tree) plainActive() map[string]bool {
 }
 
 func mergeNeeds(p *pkgInstance, needs []pkgNeed) (*pkgSettings, error) {
-	set := &pkgSettings{at: needs[0].block.DefRange, inputs: map[string]cty.Value{}}
+	set := &pkgSettings{at: needs[0].block.DefRange, inputs: map[string]*inputArg{}}
 	from := map[string]pkgNeed{}
 	on := map[string]bool{}
 	for _, n := range needs {
@@ -405,20 +438,20 @@ func mergeNeeds(p *pkgInstance, needs []pkgNeed) (*pkgSettings, error) {
 			on[f] = true
 		}
 		for _, k := range sortedKeys(n.set.inputs) {
-			v := n.set.inputs[k]
 			if prev, ok := from[k]; ok {
 				return nil, fmt.Errorf("%s: %s sets input %q of package %s, but %s already sets it at %s; an input has one source, so set it where the entrypoint imports package %s", n.block.DefRange, n.by, k, p.name, prev.by, prev.block.DefRange, p.name)
 			}
 			from[k] = n
-			set.inputs[k] = v
+			set.inputs[k] = n.set.inputs[k]
 		}
 	}
 	set.features = sortedKeys(on)
 	return set, nil
 }
 
-// checkSatisfied reports what the entrypoint's import of p leaves unmet for
-// another importer: a feature off, or an input with another value.
+// checkSatisfied reports a feature another importer needs and the
+// entrypoint's import of p leaves off. An input it sets is compared with the
+// value p runs with once both are evaluated.
 func checkSatisfied(p *pkgInstance, n pkgNeed) error {
 	at := p.at
 	if p.set != nil {
@@ -431,12 +464,7 @@ func checkSatisfied(p *pkgInstance, n pkgNeed) error {
 		return fmt.Errorf("%s: package %s runs with feature %q off, but %s needs it (%s):\n  %s: %s\nturn it on here with features = [%q], or %s", at, p.name, f, n.by, n.block.DefRange, f, p.file.block.features[f], f, dropHint(n))
 	}
 	for _, k := range sortedKeys(n.set.inputs) {
-		want := n.set.inputs[k]
-		got := p.settings.inputs[k]
-		if got.RawEquals(want) {
-			continue
-		}
-		return fmt.Errorf("%s: package %s runs with input %q = %s, but %s needs %s (%s); set inputs = { %s = %s } here", at, p.name, k, hclValue(got), n.by, hclValue(want), n.block.DefRange, k, hclValue(want))
+		p.checks = append(p.checks, &inputCheck{name: k, arg: n.set.inputs[k], by: n.by, at: at})
 	}
 	return nil
 }
@@ -464,73 +492,42 @@ func hclValue(v cty.Value) string {
 	return strings.TrimSpace(string(hclwrite.TokensForValue(v).Bytes()))
 }
 
-// declaredInputs evaluates a package's inputs: each name to its default or
-// to requiredSentinel.
-func declaredInputs(pb *packageBlock, who string) (map[string]cty.Value, error) {
-	declared := map[string]cty.Value{}
-	if pb.InputsRange == (hcl.Range{}) {
-		return declared, nil
-	}
-	if err := staticRefs(pb.Inputs, "required"); err != nil {
-		return nil, fmt.Errorf("%s: inputs of %s: %w", pb.InputsRange, who, err)
-	}
-	ctx := staticEvalCtx()
-	ctx.Variables = map[string]cty.Value{"required": cty.StringVal(requiredSentinel)}
-	v, diags := pb.Inputs.Value(ctx)
-	if diags.HasErrors() {
-		return nil, fmt.Errorf("%s: inputs of %s: %s", pb.InputsRange, who, diags.Error())
-	}
-	if v.IsNull() {
-		return declared, nil
-	}
-	if !v.Type().IsObjectType() && !v.Type().IsMapType() {
-		return nil, fmt.Errorf("%s: inputs of %s must be an object such as { name = default }, got %s", pb.InputsRange, who, v.Type().FriendlyName())
-	}
-	maps.Copy(declared, v.AsValueMap())
-	return declared, nil
-}
-
-func checkDeclared(pb *packageBlock, declared map[string]cty.Value, set *pkgSettings, who string) error {
+func checkDeclared(pb *packageBlock, set *pkgSettings, who string) error {
 	for _, n := range set.features {
 		if _, ok := pb.features[n]; !ok {
 			return fmt.Errorf("%s: feature %q is not declared by %s (declared: %s)", set.at, n, who, listOrNone(sortedKeys(pb.features)))
 		}
 	}
 	for _, n := range sortedKeys(set.inputs) {
-		if _, ok := declared[n]; !ok {
-			return fmt.Errorf("%s: input %q is not declared by %s (declared: %s)", set.at, n, who, listOrNone(sortedKeys(declared)))
+		decl, ok := pb.inputs[n]
+		if !ok {
+			return fmt.Errorf("%s: input %q is not declared by %s (declared: %s)", set.at, n, who, listOrNone(sortedKeys(pb.inputs)))
+		}
+		if decl.many {
+			return fmt.Errorf("%s: input %q of %s has many = true, so importers add entries with provide %q {} instead of setting it", set.inputs[n].at, n, who, n)
 		}
 	}
 	return nil
 }
 
-// resolveSettings computes the inputs and features a package's modules
-// see. set is what configures it; nil means a package run on its own:
-// defaults and no features.
-func resolveSettings(pb *packageBlock, set *pkgSettings, who string) (*scopeSettings, error) {
-	declared, err := declaredInputs(pb, who)
-	if err != nil {
-		return nil, err
-	}
+// resolveSettings fixes the features a package runs with and the source of
+// each of its single inputs: what configures it, else the default. set nil
+// means a package run on its own: defaults and no features.
+func resolveSettings(p *pkgInstance, pb *packageBlock, set *pkgSettings, who string) (*scopeSettings, error) {
 	s := idleSettings(pb)
+	p.inputs = map[string]*inputArg{}
 	if set != nil {
-		if err := checkDeclared(pb, declared, set, who); err != nil {
+		if err := checkDeclared(pb, set, who); err != nil {
 			return nil, err
 		}
 		for _, n := range set.features {
 			s.features[n] = true
 		}
+		maps.Copy(p.inputs, set.inputs)
 	}
-	for _, name := range sortedKeys(declared) {
-		if set != nil {
-			if v, ok := set.inputs[name]; ok {
-				s.inputs[name] = v
-				continue
-			}
-		}
-		def := declared[name]
-		if !def.RawEquals(cty.StringVal(requiredSentinel)) {
-			s.inputs[name] = def
+	for _, name := range sortedKeys(pb.inputs) {
+		decl := pb.inputs[name]
+		if decl.many || p.inputs[name] != nil || decl.def != nil {
 			continue
 		}
 		if set != nil {
@@ -541,10 +538,10 @@ func resolveSettings(pb *packageBlock, set *pkgSettings, who string) (*scopeSett
 	return s, nil
 }
 
-// idleSettings are every feature off and no inputs: what a package outside
-// the stack sees, and where resolveSettings starts.
+// idleSettings are every feature off: what a package outside the stack sees,
+// and where resolveSettings starts.
 func idleSettings(pb *packageBlock) *scopeSettings {
-	s := &scopeSettings{inputs: map[string]cty.Value{}, features: map[string]bool{}}
+	s := &scopeSettings{features: map[string]bool{}}
 	for n := range pb.features {
 		s.features[n] = false
 	}
@@ -592,38 +589,6 @@ func evalEnabled(expr hcl.Expression, s *scopeSettings) (bool, error) {
 		return false, fmt.Errorf("%s: enabled must be true or false", r)
 	}
 	return v.True(), nil
-}
-
-// staticRefs reports a reference in an inputs expression to anything but the
-// allowed roots. Inputs are fixed before any service is evaluated, which a
-// bare "Variables not allowed" does not tell the user.
-func staticRefs(expr hcl.Expression, allowed ...string) error {
-	for _, trav := range expr.Variables() {
-		if slices.Contains(allowed, trav.RootName()) {
-			continue
-		}
-		return fmt.Errorf("%s: inputs are known before planning, so they cannot read %s; to pass a value that comes from a service, provide it to a slot, or read an output of the package that owns it", trav.SourceRange(), travString(trav))
-	}
-	return nil
-}
-
-func travString(trav hcl.Traversal) string {
-	var b strings.Builder
-	b.WriteString(trav.RootName())
-	for _, step := range trav[1:] {
-		if name, ok := traverseAttrName(step); ok {
-			b.WriteString("." + name)
-			continue
-		}
-		b.WriteString("[…]")
-	}
-	return b.String()
-}
-
-func staticEvalCtx() *hcl.EvalContext {
-	fns := encodeFuncs()
-	fns["os::env"] = osEnvFunc()
-	return &hcl.EvalContext{Functions: fns}
 }
 
 // offRecord remembers where a block was switched off, for the error that

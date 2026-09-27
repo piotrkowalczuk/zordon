@@ -1,24 +1,35 @@
-# An API gateway. It knows no service: each one provides a route to the
-# routes slot, and two services claiming the same prefix are an error. Its
-# outputs are its API: where it listens and when it is ready.
+# An API gateway. It knows no service: each one provides an entry to the
+# routes input, and two services claiming the same prefix are an error. Its
+# inputs and outputs are its API: what it takes, where it listens and when it
+# is ready.
 package "gateway" {
-  inputs = {
-    # null picks a free port.
-    port = null
-  }
   features = {
-    access_log = "Prints every request the gateway proxies."
+    access_log = { description = "Prints every request the gateway proxies." }
   }
-  slots = {
+  inputs = {
+    port = {
+      description = "Port to listen on; null picks a free one."
+      type        = number
+      default     = null
+    }
     routes = {
       description = "Path prefixes to proxy, such as { prefix = \"/orders/\", upstream = \"127.0.0.1:8081\" }."
-      entry       = object({ prefix = string, upstream = string })
+      type        = object({ prefix = string, upstream = string })
+      many        = true
       unique      = ["prefix"]
     }
   }
   outputs = {
-    url   = "http://127.0.0.1:${module.gateway.service.go.gateway.vars.port}"
-    ready = module.gateway.service.go.gateway.runtime.ready
+    url = {
+      description = "Where the gateway listens."
+      type        = string
+      value       = "http://127.0.0.1:${module.gateway.service.go.gateway.vars.port}"
+    }
+    ready = {
+      description = "The gateway answers requests."
+      type        = string
+      value       = module.gateway.service.go.gateway.runtime.ready
+    }
   }
 
   module "gateway" {
@@ -34,7 +45,7 @@ package "gateway" {
 
       file "routes" {
         path = "${fs::etc()}/routes.json"
-        body = enc::json(slots.routes)
+        body = enc::json(inputs.routes)
       }
 
       runtime {
