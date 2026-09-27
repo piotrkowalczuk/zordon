@@ -124,6 +124,39 @@ func TestPlan_identityImportThroughZordonWork(t *testing.T) {
 	}
 }
 
+func TestPkgGetAndUpdate(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.WriteFile("checkouts/infra/zordon.mod", `module = "github.com/acme/infra"`)
+	p.WriteFile("checkouts/infra/pkgs/greeter/Alphasfile", pkgGreeter)
+	p.WriteFile("zordon.work", `search "./checkouts/infra" {}`)
+	p.WriteFile("Alphasfile", "import \"github.com/acme/infra/pkgs/greeter\" {}\n")
+
+	if res := p.Zordon("plan").Run(t); res.ExitCode == 0 || !strings.Contains(res.Stderr, "run zordon pkg get github.com/acme/infra@<ref>") {
+		t.Fatalf("plan without a require: exit %d\n%s", res.ExitCode, res.Stderr)
+	}
+	res := p.Zordon("pkg", "get", "github.com/acme/infra@main").Run(t)
+	if res.ExitCode != 0 || !strings.Contains(res.Stdout, `require "github.com/acme/infra" { ref = "main" }`) {
+		t.Fatalf("pkg get: exit %d\n%s\n%s", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	planOK(t, p)
+	if res := p.Zordon("pkg", "update").Run(t); res.ExitCode != 0 || !strings.Contains(res.Stdout, "zordon.lock is up to date") {
+		t.Errorf("pkg update: exit %d\n%s\n%s", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	if res := p.Zordon("pkg", "get").Run(t); res.ExitCode == 0 || !strings.Contains(res.Stderr, "usage: zordon pkg get <repo>@<ref>") {
+		t.Errorf("pkg get without an argument: exit %d\n%s", res.ExitCode, res.Stderr)
+	}
+}
+
+func TestGet_packageService(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.WriteFile("Alphasfile", `import "./greeter" { inputs = { greeting = "hi" } }`)
+	p.WriteFile("greeter/Alphasfile", pkgGreeter)
+	res := p.Zordon("get", "package.greeter.module.greeter.service.go.greeter.vars.greeting").Run(t)
+	if res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "hi" {
+		t.Fatalf("zordon get: exit %d\n%s\n%s", res.ExitCode, res.Stdout, res.Stderr)
+	}
+}
+
 func TestPlan_twoZordonWorkFilesFail(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.WriteFile("zordon.work", "")

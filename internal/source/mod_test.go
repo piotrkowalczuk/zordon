@@ -2,8 +2,11 @@ package source
 
 import (
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 func TestSplitIdentity(t *testing.T) {
@@ -82,6 +85,43 @@ func TestIsCommit(t *testing.T) {
 		if IsCommit(s) != ok {
 			t.Errorf("IsCommit(%q) = %v, want %v", s, !ok, ok)
 		}
+	}
+}
+
+func TestModFetcher(t *testing.T) {
+	upstream := taggedRepo(t)
+	gitHome := t.TempDir()
+	cfg := "[url \"file://" + upstream + "\"]\n\tinsteadOf = https://github.com/acme/infra.git\n"
+	if err := zfs.AtomicWrite(filepath.Join(gitHome, ".gitconfig"), []byte(cfg)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", gitHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(gitHome, ".config"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	f := ModFetcher{Home: t.TempDir()}
+	commit, err := f.Resolve("github.com/acme/infra", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := revParse(t, upstream, "v1"); commit != want {
+		t.Fatalf("Resolve = %q, want %q", commit, want)
+	}
+	dest := filepath.Join(t.TempDir(), "checkout")
+	if err := f.Materialize("github.com/acme/infra", commit, dest); err != nil {
+		t.Fatal(err)
+	}
+	if got := revParse(t, dest, "HEAD"); got != commit {
+		t.Errorf("checkout HEAD = %q, want %q", got, commit)
+	}
+	if body, err := zfs.Read(filepath.Join(dest, "README.md")); err != nil || strings.TrimSpace(string(body)) != "one" {
+		t.Errorf("README.md = %q, %v; want the v1 content", body, err)
+	}
+	if err := f.Materialize("github.com/acme/infra", "v1", filepath.Join(t.TempDir(), "x")); err == nil || !strings.Contains(err.Error(), "is not a commit hash") {
+		t.Errorf("Materialize with a ref: %v", err)
+	}
+	if _, err := f.Resolve("github.com/acme/infra", "nope"); err == nil || !strings.Contains(err.Error(), `no branch, tag or commit "nope"`) {
+		t.Errorf("Resolve of an unknown ref: %v", err)
 	}
 }
 

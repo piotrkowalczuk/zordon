@@ -110,6 +110,81 @@ package "db" {
 }
 `
 
+func TestLoadTree_packageAndModuleNames(t *testing.T) {
+	cases := map[string]struct{ body, want string }{
+		"invalid package name": {"package \"no spaces\" {}\n", `invalid package name "no spaces"`},
+		"invalid module name":  {"package \"p\" {\n  module \"no spaces\" {}\n}\n", `invalid module name "no spaces"`},
+		"duplicate module":     {"package \"p\" {\n  module \"m\" {}\n  module \"m\" {}\n}\n", `duplicate module "m" in package "p"`},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			root := writeTree(t, t.TempDir(), map[string]string{"Alphasfile": `import "./p" {}`, "p/Alphasfile": c.body})
+			if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("want %q, got %v", c.want, err)
+			}
+		})
+	}
+}
+
+func TestLoadTree_entrypointImportsMustAgreeOnInputs(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":         "import \"./greeter\" { inputs = { name = \"a\" } }\nimport \"./greeter\" { inputs = { name = \"b\" } }\n",
+		"greeter/Alphasfile": pkgGreeter,
+	})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "passes other inputs or features than the import at") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadTree_importListsAFeatureTwice(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":    `import "./db" { features = ["replica", "replica"] }`,
+		"db/Alphasfile": pkgDBReplica,
+	})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `import "./db" lists feature "replica" twice`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+const pkgStore = `
+package "store" {
+  features = { replica = "Runs a replica." }
+  module "db" {
+    service "go" "replica" {
+      enabled = features.replica
+      git { url = "github.com/x/db" }
+    }
+  }
+}
+`
+
+func TestLoadTree_referenceToSwitchedOffServiceOfASiblingModule(t *testing.T) {
+	store := strings.Replace(pkgStore, "\n}\n", `
+  module "api" {
+    service "go" "api" {
+      git { url = "github.com/x/api" }
+      vars = { db = module.db.service.go.replica.name }
+    }
+  }
+}
+`, 1)
+	root := writeTree(t, t.TempDir(), map[string]string{"Alphasfile": `import "./store" {}`, "store/Alphasfile": store})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `references service "go" "replica", which is switched off by enabled at`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadTree_referenceToSwitchedOffServiceOfAnotherPackage(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":       "import \"./app\" {}\n",
+		"store/Alphasfile": pkgStore,
+		"app/Alphasfile":   "package \"app\" {\n  import \"../store\" {}\n  module \"a\" {\n    service \"go\" \"a\" {\n      git { url = \"github.com/x/a\" }\n      vars = { db = package.store.module.db.service.go.replica.name }\n    }\n  }\n}\n",
+	})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "app/Alphasfile") || !strings.Contains(err.Error(), `references service "go" "replica", which is switched off by enabled at`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestLoadTree_entrypointImportsMustAgree(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":    "import \"./db\" { features = [\"replica\"] }\nimport \"./db\" {}\n",
