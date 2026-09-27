@@ -98,6 +98,27 @@ func TestLoadTree_inputErrors(t *testing.T) {
 	}
 }
 
+func TestLoadTree_inputsCannotReadServices(t *testing.T) {
+	cases := map[string]struct{ files map[string]string }{
+		"import": {map[string]string{
+			"Alphasfile":         "service \"go\" \"db\" {\n  git { url = \"github.com/x/db\" }\n}\nimport \"./greeter\" { inputs = { name = service.go.db.vars.port } }\n",
+			"greeter/Alphasfile": pkgGreeter,
+		}},
+		"default": {map[string]string{
+			"Alphasfile":     `import "./web" {}`,
+			"web/Alphasfile": "package \"web\" {\n  inputs = { port = module.web.service.go.web.vars.port }\n  module \"web\" {\n    service \"go\" \"web\" {\n      git { url = \"github.com/x/web\" }\n    }\n  }\n}\n",
+		}},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			_, err := LoadTree(writeTree(t, t.TempDir(), c.files))
+			if err == nil || !strings.Contains(err.Error(), "inputs are known before planning, so they cannot read") || !strings.Contains(err.Error(), "provide it to a slot, or read an output") {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadTree_packageImportMustPassRequiredInput(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":         `import "./app" {}`,

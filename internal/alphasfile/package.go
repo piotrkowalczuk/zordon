@@ -194,6 +194,13 @@ func passedSettings(ib *importBlock, own *scopeSettings) (*pkgSettings, error) {
 	if ib.InputsRange == (hcl.Range{}) {
 		return set, nil
 	}
+	allowed := []string{}
+	if own != nil {
+		allowed = append(allowed, "inputs")
+	}
+	if err := staticRefs(ib.Inputs, allowed...); err != nil {
+		return nil, fmt.Errorf("%s: import %q inputs: %w", ib.InputsRange, ib.Path, err)
+	}
 	ctx := staticEvalCtx()
 	if own != nil {
 		ctx.Variables = map[string]cty.Value{"inputs": cty.ObjectVal(own.inputs)}
@@ -464,6 +471,9 @@ func declaredInputs(pb *packageBlock, who string) (map[string]cty.Value, error) 
 	if pb.InputsRange == (hcl.Range{}) {
 		return declared, nil
 	}
+	if err := staticRefs(pb.Inputs, "required"); err != nil {
+		return nil, fmt.Errorf("%s: inputs of %s: %w", pb.InputsRange, who, err)
+	}
 	ctx := staticEvalCtx()
 	ctx.Variables = map[string]cty.Value{"required": cty.StringVal(requiredSentinel)}
 	v, diags := pb.Inputs.Value(ctx)
@@ -582,6 +592,32 @@ func evalEnabled(expr hcl.Expression, s *scopeSettings) (bool, error) {
 		return false, fmt.Errorf("%s: enabled must be true or false", r)
 	}
 	return v.True(), nil
+}
+
+// staticRefs reports a reference in an inputs expression to anything but the
+// allowed roots. Inputs are fixed before any service is evaluated, which a
+// bare "Variables not allowed" does not tell the user.
+func staticRefs(expr hcl.Expression, allowed ...string) error {
+	for _, trav := range expr.Variables() {
+		if slices.Contains(allowed, trav.RootName()) {
+			continue
+		}
+		return fmt.Errorf("%s: inputs are known before planning, so they cannot read %s; to pass a value that comes from a service, provide it to a slot, or read an output of the package that owns it", trav.SourceRange(), travString(trav))
+	}
+	return nil
+}
+
+func travString(trav hcl.Traversal) string {
+	var b strings.Builder
+	b.WriteString(trav.RootName())
+	for _, step := range trav[1:] {
+		if name, ok := traverseAttrName(step); ok {
+			b.WriteString("." + name)
+			continue
+		}
+		b.WriteString("[…]")
+	}
+	return b.String()
 }
 
 func staticEvalCtx() *hcl.EvalContext {
