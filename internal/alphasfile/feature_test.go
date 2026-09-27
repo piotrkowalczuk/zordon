@@ -143,6 +143,25 @@ package "prom" {
 	}
 }
 
+func TestLoadTree_brokenSwitchedOffImportFails(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `import "./prom" {}`,
+		"prom/Alphasfile": `
+package "prom" {
+  features = { tsdb = "Stores samples in the tsdb package." }
+
+  import "../tsdb" {
+    enabled = features.tsdb
+  }
+}
+`,
+		"tsdb/Alphasfile": "package \"tsdb\" {\n  module \"tsdb\" {\n    nope = 1\n  }\n}\n",
+	})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "tsdb/Alphasfile") {
+		t.Fatalf("a package behind a switched-off feature is loaded and checked too, got %v", err)
+	}
+}
+
 func TestLoadTree_referenceToSwitchedOffBlock(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `import "./web" {}`,

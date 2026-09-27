@@ -153,6 +153,34 @@ func TestLoadTreeWith_entrypointRequireWins(t *testing.T) {
 	}
 }
 
+func TestLoadTreeWith_switchedOffRemoteImportIsStillLocked(t *testing.T) {
+	infra, main := infraRepo(t)
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{
+		"Alphasfile": `import "./prom" {}`,
+		"prom/Alphasfile": `
+package "prom" {
+  require "github.com/acme/infra" { ref = "main" }
+  features = { tsdb = "Stores samples in the tsdb package." }
+
+  import "github.com/acme/infra/pkgs/db" {
+    enabled = features.tsdb
+  }
+}
+`,
+	})
+	tree, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := serviceNames(resolveTree(t, tree)); len(got) != 0 {
+		t.Errorf("services = %v; the feature is off", got)
+	}
+	if lock := readFile(t, filepath.Join(dir, LockFileName)); !strings.Contains(lock, main) {
+		t.Errorf("an import switched off by a feature is still resolved and locked, so turning the feature on needs no new version; lock:\n%s", lock)
+	}
+}
+
 func TestLoadTreeWith_remoteImportNeedsRequire(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web" {}`})
