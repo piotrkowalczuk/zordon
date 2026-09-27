@@ -23,7 +23,7 @@ search "~/code/infra" {}
 ```
 
 Put it in your working directory or any directory above it, and do not commit it.
-Every import of `github.com/acme/infra/...` now reads your checkout's current files, whatever version the import names.
+Every import of `github.com/acme/infra/...` now reads your checkout's current files, whatever ref the require names.
 
 ## 3. Check where each import comes from
 

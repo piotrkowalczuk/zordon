@@ -53,12 +53,14 @@ type Tree struct {
 
 // ImportEdge is one imported file and the modules the stack takes from it,
 // unioned across every importer that is part of the stack. A package edge
-// names the package and the features it was imported with.
+// names the package, the features it runs with, and the packages and
+// modules other than the entrypoint's top level that import it.
 type ImportEdge struct {
-	Path     string
-	Modules  []string
-	Package  string
-	Features []string
+	Path       string
+	Modules    []string
+	Package    string
+	Features   []string
+	ImportedBy []string
 	// Origin is where a remote file came from: "search <dir>" or
 	// "<repo>@<commit>"; empty for a local file.
 	Origin string
@@ -189,9 +191,13 @@ type pkgInstance struct {
 	name string
 	file *treeFile
 	at   hcl.Range
-	// set is what the first import passed; every later import must pass the
-	// same. A package only required keeps set nil: defaults, no features.
+	// entry is set when the entrypoint imports the package at its top level,
+	// or runs it on its own; set is what that import passed, nil for a run
+	// on its own. needs are the other imports of it in the stack.
+	entry    bool
 	set      *pkgSettings
+	needs    []pkgNeed
+	active   bool
 	settings *scopeSettings
 }
 
@@ -288,7 +294,7 @@ func newTreeFile(path, identity string, src []byte, root *rootBlock) *treeFile {
 // then the package runs on its own, with default inputs and no features.
 func (t *Tree) adopt(f *treeFile, pkg *pkgInstance) error {
 	if f.block != nil && pkg == nil {
-		pkg = &pkgInstance{name: f.block.Name, at: f.block.DefRange}
+		pkg = &pkgInstance{name: f.block.Name, at: f.block.DefRange, entry: true}
 		t.links[DefaultModule] = append(t.links[DefaultModule], importLink{file: f, pkg: pkg})
 	}
 	if pkg != nil {
@@ -356,35 +362,35 @@ func (t *Tree) load(path string, importer *treeFile, imp *importBlock, pkg *pkgI
 	if err := t.adopt(f, pkg); err != nil {
 		return nil, err
 	}
+	if err := t.src.visit(f); err != nil {
+		return nil, err
+	}
 	if f.block != nil {
 		name := f.pkg.name
-		if err := t.follow(f, pkgScope(name), "import", f.block.Imports); err != nil {
-			return nil, err
-		}
-		if err := t.follow(f, pkgScope(name), "require", f.block.Requires); err != nil {
+		if err := t.follow(f, pkgScope(name), f.block.Imports); err != nil {
 			return nil, err
 		}
 		for _, mb := range f.block.Modules {
-			if err := t.follow(f, name+"/"+mb.Name, "require", mb.Requires); err != nil {
+			if err := t.follow(f, name+"/"+mb.Name, mb.Imports); err != nil {
 				return nil, err
 			}
 		}
 		return f, nil
 	}
-	if err := t.follow(f, DefaultModule, "import", root.Imports); err != nil {
+	if err := t.follow(f, DefaultModule, root.Imports); err != nil {
 		return nil, err
 	}
 	for _, mb := range root.Modules {
-		if err := t.follow(f, mb.Name, "require", mb.Requires); err != nil {
+		if err := t.follow(f, mb.Name, mb.Imports); err != nil {
 			return nil, err
 		}
 	}
 	return f, nil
 }
 
-func (t *Tree) follow(f *treeFile, scope, keyword string, blocks []*importBlock) error {
+func (t *Tree) follow(f *treeFile, scope string, blocks []*importBlock) error {
 	for _, ib := range blocks {
-		ib.keyword = keyword
+		ib.keyword = "import"
 		if err := checkImportAttrs(f, ib); err != nil {
 			return err
 		}
@@ -469,13 +475,13 @@ func (t *Tree) followPackage(f *treeFile, scope string, ib *importBlock, res res
 			return fmt.Errorf("%s: %s %q: this package is already in the stack as %q (at %s); use the same name here", ib.DefRange, ib.keyword, ib.Path, pkg.name, pkg.at)
 		}
 	}
-	if ib.keyword == "import" {
-		set, err := importSettings(ib)
+	if scope == DefaultModule {
+		set, err := passedSettings(ib, nil)
 		if err != nil {
 			return err
 		}
 		if pkg.set == nil {
-			pkg.set = set
+			pkg.entry, pkg.set = true, set
 		} else if !sameSettings(pkg.set, set) {
 			return fmt.Errorf("%s: import %q passes other inputs or features than the import at %s; a package runs once, so every import of it must pass the same", ib.DefRange, ib.Path, pkg.set.at)
 		}
@@ -503,19 +509,10 @@ func (t *Tree) finish() error {
 		}
 	}
 
-	var err error
-	for _, f := range t.files {
-		if f.pkg == nil {
-			continue
-		}
-		at := hcl.Range{}
-		if f.pkg.file != t.files[0] {
-			at = f.pkg.at
-		}
-		if f.pkg.settings, err = resolveSettings(f.block, f.pkg.set, "package "+f.pkg.name, at); err != nil {
-			return err
-		}
+	if err := t.resolvePackages(); err != nil {
+		return err
 	}
+	var err error
 
 	// Every module of the entrypoint is in the stack, so the entrypoint's
 	// scopes see all of them. A fragment module sees itself and what it
@@ -688,19 +685,27 @@ func (t *Tree) addEdges(scope string) {
 		if l.pkg != nil && l.file == t.files[0] {
 			continue
 		}
-		var features []string
+		var features, by []string
 		pkgName := ""
 		if l.pkg != nil {
 			pkgName = l.pkg.name
-			if l.pkg.set != nil {
-				features = l.pkg.set.features
+			for n, on := range l.pkg.settings.features {
+				if on {
+					features = append(features, n)
+				}
+			}
+			sort.Strings(features)
+			for _, n := range l.pkg.needs {
+				if !slices.Contains(by, n.by) {
+					by = append(by, n.by)
+				}
 			}
 		}
-		t.addEdge(l.file, l.modules, pkgName, features)
+		t.addEdge(l.file, l.modules, pkgName, features, by)
 	}
 }
 
-func (t *Tree) addEdge(f *treeFile, modules []string, pkg string, features []string) {
+func (t *Tree) addEdge(f *treeFile, modules []string, pkg string, features, by []string) {
 	path := f.path
 	for i := range t.edges {
 		if t.edges[i].Path != path {
@@ -713,7 +718,7 @@ func (t *Tree) addEdge(f *treeFile, modules []string, pkg string, features []str
 		}
 		return
 	}
-	t.edges = append(t.edges, ImportEdge{Path: path, Modules: append([]string(nil), modules...), Package: pkg, Features: features, Origin: f.origin})
+	t.edges = append(t.edges, ImportEdge{Path: path, Modules: append([]string(nil), modules...), Package: pkg, Features: features, ImportedBy: by, Origin: f.origin})
 }
 
 // settingsFor returns the inputs and features a scope sees: its package's,
@@ -794,15 +799,20 @@ func decodeFile(name string, src []byte) (*rootBlock, error) {
 	if err := annotateModules(&root); err != nil {
 		return nil, err
 	}
+	for _, pb := range root.Packages {
+		if err := pb.decodeFeatures(); err != nil {
+			return nil, err
+		}
+	}
 	return &root, nil
 }
 
-// liftAliases moves the optional second label of import and require blocks
-// into aliases, keyed by the block's start offset, so gohcl sees one label.
+// liftAliases moves the optional second label of import blocks into
+// aliases, keyed by the block's start offset, so gohcl sees one label.
 func liftAliases(body *hclsyntax.Body, aliases map[int]string) {
 	for _, blk := range body.Blocks {
 		switch blk.Type {
-		case "import", "require":
+		case "import":
 			if len(blk.Labels) == 2 {
 				aliases[blk.TypeRange.Start.Byte] = blk.Labels[1]
 				blk.Labels = blk.Labels[:1]
@@ -821,7 +831,7 @@ func checkFragment(root *rootBlock) error {
 	hint := fmt.Sprintf("is only allowed in the entrypoint %s; a fragment holds module blocks only", invocation.AlphasfileName)
 	if len(root.Imports) > 0 {
 		imp := root.Imports[0]
-		return fmt.Errorf("%s: import %q in a fragment; declare the dependency inside the module block that uses it as require %q { modules = [...] }, so it joins the stack only with that module", imp.DefRange, imp.Path, imp.Path)
+		return fmt.Errorf("%s: import %q at the top of a fragment; move it inside the module block that uses it as import %q { modules = [...] }, so it joins the stack only with that module", imp.DefRange, imp.Path, imp.Path)
 	}
 	if root.SysEnvRange != (hcl.Range{}) {
 		return fmt.Errorf("%s: top-level sysenv %s", root.SysEnvRange, hint)
@@ -858,6 +868,8 @@ func checkPackageFile(root *rootBlock) error {
 		return fmt.Errorf("%s: module %q %s", root.Modules[0].DefRange, root.Modules[0].Name, outside)
 	case len(root.Imports) > 0:
 		return fmt.Errorf("%s: import %q %s", root.Imports[0].DefRange, root.Imports[0].Path, outside)
+	case len(root.Requires) > 0:
+		return fmt.Errorf("%s: require %q %s", root.Requires[0].DefRange, root.Requires[0].Repo, outside)
 	case root.Toolchain != nil:
 		return fmt.Errorf("%s: toolchain %s", root.Toolchain.DefRange, outside)
 	case root.Workspace != nil:
@@ -873,17 +885,11 @@ func checkPackageFile(root *rootBlock) error {
 }
 
 func checkImportAttrs(f *treeFile, ib *importBlock) error {
-	if ib.keyword == "require" && (ib.InputsRange != (hcl.Range{}) || ib.Features != nil) {
-		return fmt.Errorf("%s: require %q cannot pass inputs or features; import the package where the stack is composed", ib.DefRange, ib.Path)
-	}
 	if ib.EnabledRange == (hcl.Range{}) {
 		return nil
 	}
-	if ib.keyword != "require" {
-		return fmt.Errorf("%s: import %q: enabled is allowed on require only", ib.EnabledRange, ib.Path)
-	}
-	if f.block == nil || len(f.block.Features) == 0 {
-		return fmt.Errorf("%s: require %q: enabled needs a feature, and none is declared here; only a package declares features = [...]", ib.EnabledRange, ib.Path)
+	if f.block == nil || len(f.block.features) == 0 {
+		return fmt.Errorf("%s: import %q: enabled needs a feature, and none is declared here; only a package declares features = { ... }", ib.EnabledRange, ib.Path)
 	}
 	return nil
 }

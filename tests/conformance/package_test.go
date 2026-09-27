@@ -14,7 +14,7 @@ import (
 const pkgGreeter = `
 package "greeter" {
   inputs   = { greeting = "hello" }
-  features = ["extra"]
+  features = { extra = "Adds the extra service" }
 
   module "greeter" {
     service "go" "greeter" {
@@ -68,7 +68,7 @@ func TestPlan_identityImportThroughZordonWork(t *testing.T) {
 	p.WriteFile("checkouts/infra/zordon.mod", `module = "github.com/acme/infra"`)
 	p.WriteFile("checkouts/infra/pkgs/greeter/Alphasfile", pkgGreeter)
 	p.WriteFile("zordon.work", `search "./checkouts/infra" {}`)
-	p.WriteFile("Alphasfile", `import "github.com/acme/infra/pkgs/greeter@main" {}`)
+	p.WriteFile("Alphasfile", "require \"github.com/acme/infra\" { ref = \"main\" }\nimport \"github.com/acme/infra/pkgs/greeter\" {}\n")
 	out := planOK(t, p)
 	dir, err := filepath.EvalSymlinks(p.Dir())
 	if err != nil {

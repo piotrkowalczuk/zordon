@@ -19,7 +19,7 @@ module "kafka" {
 }
 
 module "kafka-ui" {
-  require "../grafana/Alphasfile.grafana" { modules = ["grafana"] }
+  import "../grafana/Alphasfile.grafana" { modules = ["grafana"] }
 
   service "go" "ui" {
     git { url = "github.com/x/ui" }
@@ -66,7 +66,7 @@ func TestLoadTree_brokenImportInUnusedModuleFails(t *testing.T) {
 module "used" {}
 
 module "spare" {
-  require "./Alphasfile.missing" { modules = ["x"] }
+  import "./Alphasfile.missing" { modules = ["x"] }
 }
 `,
 	})
@@ -82,13 +82,13 @@ func TestLoadTree_rejectsTopLevelImportInFragment(t *testing.T) {
 		"Alphasfile.b": `module "b" {}`,
 	})
 	_, err := LoadTree(root)
-	if err == nil || !strings.Contains(err.Error(), "Alphasfile.a:1") || !strings.Contains(err.Error(), `inside the module block that uses it as require "./Alphasfile.b"`) {
+	if err == nil || !strings.Contains(err.Error(), "Alphasfile.a:1") || !strings.Contains(err.Error(), `inside the module block that uses it as import "./Alphasfile.b"`) {
 		t.Fatalf("got %v", err)
 	}
 }
 
 func TestParseTree_rejectsModuleImport(t *testing.T) {
-	_, err := ParseTree("test.hcl", []byte("module \"a\" {\n  require \"./Alphasfile.f\" { modules = [\"m\"] }\n}\n"))
+	_, err := ParseTree("test.hcl", []byte("module \"a\" {\n  import \"./Alphasfile.f\" { modules = [\"m\"] }\n}\n"))
 	if err == nil || !strings.Contains(err.Error(), "imports need a file on disk") {
 		t.Fatalf("got %v", err)
 	}
@@ -99,7 +99,7 @@ func TestOpen_moduleImportNotVisibleToSibling(t *testing.T) {
 		"Alphasfile": `import "./apps/Alphasfile.apps" { modules = ["a", "c"] }`,
 		"apps/Alphasfile.apps": `
 module "a" {
-  require "../b/Alphasfile.b" { modules = ["b"] }
+  import "../b/Alphasfile.b" { modules = ["b"] }
 }
 
 module "c" {
@@ -122,7 +122,7 @@ module "b" {
 	if err == nil {
 		t.Fatal("module a's import must not make module.b visible in module c")
 	}
-	for _, want := range []string{`module.b is not visible in module "c"`, `add require "../b/Alphasfile.b" { modules = ["b"] } inside module "c"`} {
+	for _, want := range []string{`module.b is not visible in module "c"`, `add import "../b/Alphasfile.b" { modules = ["b"] } inside module "c"`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in %v", want, err)
 		}
@@ -149,7 +149,7 @@ module "s" {
 `,
 	})
 	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
-	if err == nil || !strings.Contains(err.Error(), `add require "./Alphasfile.f" { modules = ["s"] } inside module "a"`) {
+	if err == nil || !strings.Contains(err.Error(), `add import "./Alphasfile.f" { modules = ["s"] } inside module "a"`) {
 		t.Fatalf("a sibling in a fragment is imported like any module, got %v", err)
 	}
 }
@@ -159,7 +159,7 @@ func TestOpen_fragmentSiblingSelfImport(t *testing.T) {
 		"Alphasfile": `import "./Alphasfile.f" { modules = ["a"] }`,
 		"Alphasfile.f": `
 module "a" {
-  require "./Alphasfile.f" { modules = ["s"] }
+  import "./Alphasfile.f" { modules = ["s"] }
 
   service "go" "a" {
     git { url = "github.com/x/a" }
@@ -188,7 +188,7 @@ func TestOpen_entrypointModuleImport(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `
 module "gw" {
-  require "./Alphasfile.b" { modules = ["b"] }
+  import "./Alphasfile.b" { modules = ["b"] }
 
   service "go" "gw" {
     git { url = "github.com/x/gw" }
@@ -214,7 +214,7 @@ func TestOpen_entrypointModuleImportNotVisibleAtTopLevel(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `
 module "gw" {
-  require "./Alphasfile.b" { modules = ["b"] }
+  import "./Alphasfile.b" { modules = ["b"] }
 }
 
 service "go" "z" {

@@ -8,7 +8,9 @@ package "coredns" {
     # must stay valid across restarts.
     dns_port = 49564
   }
-  features = ["resolver"]
+  features = {
+    resolver = "Writes /etc/resolver/<zone> with sudo (macOS), so a browser resolves *.<zone> through CoreDNS."
+  }
 
   module "coredns" {
     service "go" "coredns" {

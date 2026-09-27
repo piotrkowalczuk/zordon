@@ -24,7 +24,7 @@ import "./services/apps/Alphasfile.apps" {
 
 const importApps = `
 module "app" {
-  require "../db/Alphasfile.db" {
+  import "../db/Alphasfile.db" {
     modules = ["db"]
   }
 

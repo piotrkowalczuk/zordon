@@ -1,21 +1,25 @@
-# Caddy in front of whatever its features switch on. Each feature requires
+# Caddy in front of whatever its features switch on. Each feature imports
 # the package it serves and drops site snippets into the Caddyfile. With both
 # features, Hugo is served on the host hugo.<domain>, which CoreDNS resolves.
 package "caddy" {
   inputs = {
     # null picks a free port; 80 gives http://hugo.test/ in a browser.
     http_port = null
-    # The DNS zone the hosts live in; keep it equal to the coredns zone.
+    # The DNS zone the hosts live in; passed on to coredns.
     domain = "test"
   }
-  features = ["hugo", "coredns"]
+  features = {
+    hugo    = "Serves the Hugo site through Caddy."
+    coredns = "Routes hugo.<domain> by host name, resolved through CoreDNS."
+  }
 
-  require "../hugo" {
+  import "../hugo" {
     enabled = features.hugo
   }
 
-  require "../coredns" {
+  import "../coredns" {
     enabled = features.coredns
+    inputs  = { zone = inputs.domain }
   }
 
   module "caddy" {

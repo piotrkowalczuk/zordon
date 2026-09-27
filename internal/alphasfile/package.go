@@ -9,13 +9,54 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
 )
 
-// importSettings evaluates what an import passes to a package. Inputs are
-// evaluated statically: literals, os::env and enc::*, never another
-// service's values, so a package's configuration is known before planning.
-func importSettings(ib *importBlock) (*pkgSettings, error) {
+// pkgNeed is an import of a package from anywhere but the entrypoint's top
+// level, with what it passes.
+type pkgNeed struct {
+	by    string // "package caddy" or "module gw"
+	block *importBlock
+	set   *pkgSettings
+}
+
+// decodeFeatures reads a package's features: a map of name to description.
+func (pb *packageBlock) decodeFeatures() error {
+	pb.features = map[string]string{}
+	if pb.FeaturesRange == (hcl.Range{}) {
+		return nil
+	}
+	shape := fmt.Sprintf(`features of package %q map each name to what it turns on, such as { tls = "Serves HTTPS with a local CA" }`, pb.Name)
+	v, diags := pb.Features.Value(nil)
+	if diags.HasErrors() {
+		return fmt.Errorf("%s: %s: %s", pb.FeaturesRange, shape, diags.Error())
+	}
+	if v.IsNull() {
+		return nil
+	}
+	if !v.Type().IsObjectType() && !v.Type().IsMapType() {
+		return fmt.Errorf("%s: %s", pb.FeaturesRange, shape)
+	}
+	vals := v.AsValueMap()
+	for _, name := range sortedKeys(vals) {
+		if !moduleNameRe.MatchString(name) {
+			return fmt.Errorf("%s: feature %q of package %q: use letters, digits, '_' or '-' and start with a letter", pb.FeaturesRange, name, pb.Name)
+		}
+		d := vals[name]
+		if d.IsNull() || !d.Type().Equals(cty.String) || strings.TrimSpace(d.AsString()) == "" {
+			return fmt.Errorf("%s: feature %q of package %q needs a description of what it turns on, so whoever imports the package can decide", pb.FeaturesRange, name, pb.Name)
+		}
+		pb.features[name] = d.AsString()
+	}
+	return nil
+}
+
+// passedSettings evaluates what an import passes to a package. Inputs are
+// evaluated statically: literals, os::env, enc::* and, inside a package,
+// its own inputs; never another service's values, so a package's
+// configuration is known before planning.
+func passedSettings(ib *importBlock, own *scopeSettings) (*pkgSettings, error) {
 	set := &pkgSettings{at: ib.DefRange, inputs: map[string]cty.Value{}, features: slices.Clone(ib.Features)}
 	sort.Strings(set.features)
 	for i := 1; i < len(set.features); i++ {
@@ -26,7 +67,11 @@ func importSettings(ib *importBlock) (*pkgSettings, error) {
 	if ib.InputsRange == (hcl.Range{}) {
 		return set, nil
 	}
-	v, diags := ib.Inputs.Value(staticEvalCtx())
+	ctx := staticEvalCtx()
+	if own != nil {
+		ctx.Variables = map[string]cty.Value{"inputs": cty.ObjectVal(own.inputs)}
+	}
+	v, diags := ib.Inputs.Value(ctx)
 	if diags.HasErrors() {
 		return nil, fmt.Errorf("%s: import %q inputs: %s", ib.InputsRange, ib.Path, diags.Error())
 	}
@@ -57,47 +102,286 @@ func sameSettings(a, b *pkgSettings) bool {
 // a string no real default can collide with, as for `never`.
 const requiredSentinel = "\x00zordon:required\x00"
 
-// resolveSettings computes the inputs and features a package's modules
-// see. set is what its import passed; nil means defaults and no features.
-// at is where an error about a missing input points when set is nil: the
-// package's first require, or the zero range for a package run on its own.
-func resolveSettings(pb *packageBlock, set *pkgSettings, who string, at hcl.Range) (*scopeSettings, error) {
-	s := &scopeSettings{inputs: map[string]cty.Value{}, features: map[string]bool{}}
-	for _, name := range pb.Features {
-		if !moduleNameRe.MatchString(name) {
-			return nil, fmt.Errorf("%s: feature %q in %s: use letters, digits, '_' or '-' and start with a letter", pb.DefRange, name, who)
+// resolvePackages fixes the inputs and features of every package. A package
+// the entrypoint imports at its top level gets what that import passes, and
+// every other import of it in the stack must be satisfied by that. Any
+// other package gets the union of what its importers in the stack pass, so
+// importers are resolved first.
+func (t *Tree) resolvePackages() error {
+	plain := t.plainActive()
+	pending := maps.Clone(t.packages)
+	for len(pending) > 0 {
+		progressed := false
+		for _, name := range sortedKeys(pending) {
+			p := pending[name]
+			if !p.entry && !t.importersDone(p, pending) {
+				continue
+			}
+			if err := t.resolvePackage(p, plain); err != nil {
+				return err
+			}
+			delete(pending, name)
+			progressed = true
 		}
-		if _, dup := s.features[name]; dup {
-			return nil, fmt.Errorf("%s: feature %q is listed twice in %s", pb.DefRange, name, who)
+		if !progressed {
+			return fmt.Errorf("packages %s import each other, so none of them can be configured first; import one of them at the top of the entrypoint to configure it there", strings.Join(sortedKeys(pending), ", "))
 		}
-		s.features[name] = false
 	}
+	for _, name := range sortedKeys(t.packages) {
+		p := t.packages[name]
+		if !p.entry {
+			continue
+		}
+		needs, err := t.needsOf(p, plain)
+		if err != nil {
+			return err
+		}
+		p.needs = needs
+		for _, n := range needs {
+			if err := checkSatisfied(p, n); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (t *Tree) resolvePackage(p *pkgInstance, plain map[string]bool) error {
+	pb, who := p.file.block, "package "+p.name
+	if p.entry {
+		var err error
+		p.active = true
+		p.settings, err = resolveSettings(pb, p.set, who)
+		return err
+	}
+	needs, err := t.needsOf(p, plain)
+	if err != nil {
+		return err
+	}
+	if len(needs) == 0 {
+		if _, err := declaredInputs(pb, who); err != nil {
+			return err
+		}
+		p.settings = idleSettings(pb)
+		return nil
+	}
+	p.active, p.needs = true, needs
+	set, err := mergeNeeds(p, needs)
+	if err != nil {
+		return err
+	}
+	p.settings, err = resolveSettings(pb, set, who)
+	return err
+}
+
+// needsOf lists the imports of p that are part of the stack, other than the
+// entrypoint's top level: from scopes outside packages the entrypoint
+// reaches, and from packages in the stack whose enabled keeps the import.
+func (t *Tree) needsOf(p *pkgInstance, plain map[string]bool) ([]pkgNeed, error) {
+	who := "package " + p.name
+	declared, err := declaredInputs(p.file.block, who)
+	if err != nil {
+		return nil, err
+	}
+	var needs []pkgNeed
+	for _, scope := range sortedKeys(t.links) {
+		if scope == DefaultModule {
+			continue
+		}
+		owner, inPkg := packageOf(scope)
+		for _, l := range t.links[scope] {
+			if l.pkg != p || l.block == nil {
+				continue
+			}
+			var own *scopeSettings
+			by := "module " + scope
+			if inPkg {
+				q := t.packages[owner]
+				if owner == p.name || !q.active {
+					continue
+				}
+				if l.block.EnabledRange != (hcl.Range{}) {
+					on, err := evalEnabled(l.block.Enabled, q.settings)
+					if err != nil {
+						return nil, err
+					}
+					if !on {
+						continue
+					}
+				}
+				own, by = q.settings, "package "+owner
+			} else if !plain[scope] {
+				continue
+			}
+			set, err := passedSettings(l.block, own)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkDeclared(p.file.block, declared, set, who); err != nil {
+				return nil, err
+			}
+			needs = append(needs, pkgNeed{by: by, block: l.block, set: set})
+		}
+	}
+	return needs, nil
+}
+
+// importersDone reports whether every package that imports p is resolved.
+func (t *Tree) importersDone(p *pkgInstance, pending map[string]*pkgInstance) bool {
+	for scope, links := range t.links {
+		owner, ok := packageOf(scope)
+		if !ok || owner == p.name || pending[owner] == nil {
+			continue
+		}
+		for _, l := range links {
+			if l.pkg == p {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// plainActive is the set of scopes outside packages in the stack: the
+// entrypoint's top level and modules, and the fragment modules they import,
+// transitively. None of them can switch an import off.
+func (t *Tree) plainActive() map[string]bool {
+	seen := map[string]bool{}
+	queue := append([]string{DefaultModule}, sortedKeys(t.files[0].declared)...)
+	for len(queue) > 0 {
+		s := queue[0]
+		queue = queue[1:]
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		for _, l := range t.links[s] {
+			queue = append(queue, l.modules...)
+		}
+	}
+	return seen
+}
+
+func mergeNeeds(p *pkgInstance, needs []pkgNeed) (*pkgSettings, error) {
+	set := &pkgSettings{at: needs[0].block.DefRange, inputs: map[string]cty.Value{}}
+	from := map[string]pkgNeed{}
+	on := map[string]bool{}
+	for _, n := range needs {
+		for _, f := range n.set.features {
+			on[f] = true
+		}
+		for _, k := range sortedKeys(n.set.inputs) {
+			v := n.set.inputs[k]
+			if prev, ok := from[k]; ok {
+				return nil, fmt.Errorf("%s: %s sets input %q of package %s, but %s already sets it at %s; an input has one source, so set it where the entrypoint imports package %s", n.block.DefRange, n.by, k, p.name, prev.by, prev.block.DefRange, p.name)
+			}
+			from[k] = n
+			set.inputs[k] = v
+		}
+	}
+	set.features = sortedKeys(on)
+	return set, nil
+}
+
+// checkSatisfied reports what the entrypoint's import of p leaves unmet for
+// another importer: a feature off, or an input with another value.
+func checkSatisfied(p *pkgInstance, n pkgNeed) error {
+	at := p.at
+	if p.set != nil {
+		at = p.set.at
+	}
+	for _, f := range n.set.features {
+		if p.settings.features[f] {
+			continue
+		}
+		return fmt.Errorf("%s: package %s runs with feature %q off, but %s needs it (%s):\n  %s: %s\nturn it on here with features = [%q], or %s", at, p.name, f, n.by, n.block.DefRange, f, p.file.block.features[f], f, dropHint(n))
+	}
+	for _, k := range sortedKeys(n.set.inputs) {
+		want := n.set.inputs[k]
+		got := p.settings.inputs[k]
+		if got.RawEquals(want) {
+			continue
+		}
+		return fmt.Errorf("%s: package %s runs with input %q = %s, but %s needs %s (%s); set inputs = { %s = %s } here", at, p.name, k, hclValue(got), n.by, hclValue(want), n.block.DefRange, k, hclValue(want))
+	}
+	return nil
+}
+
+func dropHint(n pkgNeed) string {
+	if n.block.EnabledRange == (hcl.Range{}) {
+		return "drop that import"
+	}
+	var names []string
+	for _, trav := range n.block.Enabled.Variables() {
+		if len(trav) < 2 {
+			continue
+		}
+		if name, ok := traverseAttrName(trav[1]); ok && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return fmt.Sprintf("turn off what enables that import in %s (features %s)", n.by, strings.Join(names, ", "))
+}
+
+func hclValue(v cty.Value) string {
+	if v == cty.NilVal {
+		return "unset"
+	}
+	return strings.TrimSpace(string(hclwrite.TokensForValue(v).Bytes()))
+}
+
+// declaredInputs evaluates a package's inputs: each name to its default or
+// to requiredSentinel.
+func declaredInputs(pb *packageBlock, who string) (map[string]cty.Value, error) {
 	declared := map[string]cty.Value{}
-	if pb.InputsRange != (hcl.Range{}) {
-		ctx := staticEvalCtx()
-		ctx.Variables = map[string]cty.Value{"required": cty.StringVal(requiredSentinel)}
-		v, diags := pb.Inputs.Value(ctx)
-		if diags.HasErrors() {
-			return nil, fmt.Errorf("%s: inputs of %s: %s", pb.InputsRange, who, diags.Error())
-		}
-		if !v.IsNull() {
-			if !v.Type().IsObjectType() && !v.Type().IsMapType() {
-				return nil, fmt.Errorf("%s: inputs of %s must be an object such as { name = default }, got %s", pb.InputsRange, who, v.Type().FriendlyName())
-			}
-			maps.Copy(declared, v.AsValueMap())
+	if pb.InputsRange == (hcl.Range{}) {
+		return declared, nil
+	}
+	ctx := staticEvalCtx()
+	ctx.Variables = map[string]cty.Value{"required": cty.StringVal(requiredSentinel)}
+	v, diags := pb.Inputs.Value(ctx)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("%s: inputs of %s: %s", pb.InputsRange, who, diags.Error())
+	}
+	if v.IsNull() {
+		return declared, nil
+	}
+	if !v.Type().IsObjectType() && !v.Type().IsMapType() {
+		return nil, fmt.Errorf("%s: inputs of %s must be an object such as { name = default }, got %s", pb.InputsRange, who, v.Type().FriendlyName())
+	}
+	maps.Copy(declared, v.AsValueMap())
+	return declared, nil
+}
+
+func checkDeclared(pb *packageBlock, declared map[string]cty.Value, set *pkgSettings, who string) error {
+	for _, n := range set.features {
+		if _, ok := pb.features[n]; !ok {
+			return fmt.Errorf("%s: feature %q is not declared by %s (declared: %s)", set.at, n, who, listOrNone(sortedKeys(pb.features)))
 		}
 	}
-	if set != nil {
-		for _, n := range set.features {
-			if _, ok := s.features[n]; !ok {
-				return nil, fmt.Errorf("%s: feature %q is not declared by %s (declared: %s)", set.at, n, who, listOrNone(sortedKeys(s.features)))
-			}
-			s.features[n] = true
+	for _, n := range sortedKeys(set.inputs) {
+		if _, ok := declared[n]; !ok {
+			return fmt.Errorf("%s: input %q is not declared by %s (declared: %s)", set.at, n, who, listOrNone(sortedKeys(declared)))
 		}
-		for _, n := range sortedKeys(set.inputs) {
-			if _, ok := declared[n]; !ok {
-				return nil, fmt.Errorf("%s: input %q is not declared by %s (declared: %s)", set.at, n, who, listOrNone(sortedKeys(declared)))
-			}
+	}
+	return nil
+}
+
+// resolveSettings computes the inputs and features a package's modules
+// see. set is what configures it; nil means a package run on its own:
+// defaults and no features.
+func resolveSettings(pb *packageBlock, set *pkgSettings, who string) (*scopeSettings, error) {
+	declared, err := declaredInputs(pb, who)
+	if err != nil {
+		return nil, err
+	}
+	s := idleSettings(pb)
+	if set != nil {
+		if err := checkDeclared(pb, declared, set, who); err != nil {
+			return nil, err
+		}
+		for _, n := range set.features {
+			s.features[n] = true
 		}
 	}
 	for _, name := range sortedKeys(declared) {
@@ -112,16 +396,22 @@ func resolveSettings(pb *packageBlock, set *pkgSettings, who string, at hcl.Rang
 			s.inputs[name] = def
 			continue
 		}
-		switch {
-		case set != nil:
+		if set != nil {
 			return nil, fmt.Errorf("%s: %s needs input %q; pass it with inputs = { %s = ... }", set.at, who, name, name)
-		case at != (hcl.Range{}):
-			return nil, fmt.Errorf("%s: %s needs input %q, which is required; import the package with inputs = { %s = ... } instead of only requiring it", at, who, name, name)
-		default:
-			return nil, fmt.Errorf("%s: input %q of %s is required, so the package cannot run on its own", pb.InputsRange, name, who)
 		}
+		return nil, fmt.Errorf("%s: input %q of %s is required, so the package cannot run on its own", pb.InputsRange, name, who)
 	}
 	return s, nil
+}
+
+// idleSettings are every feature off and no inputs: what a package outside
+// the stack sees, and where resolveSettings starts.
+func idleSettings(pb *packageBlock) *scopeSettings {
+	s := &scopeSettings{inputs: map[string]cty.Value{}, features: map[string]bool{}}
+	for n := range pb.features {
+		s.features[n] = false
+	}
+	return s
 }
 
 // evalEnabled evaluates an enabled attribute. It accepts feature
@@ -130,7 +420,7 @@ func resolveSettings(pb *packageBlock, set *pkgSettings, who string, at hcl.Rang
 func evalEnabled(expr hcl.Expression, s *scopeSettings) (bool, error) {
 	r := expr.Range()
 	if s == nil || len(s.features) == 0 {
-		return false, fmt.Errorf("%s: enabled needs a feature, and none is declared here; only a package declares features = [...]", r)
+		return false, fmt.Errorf("%s: enabled needs a feature, and none is declared here; only a package declares features = { ... }", r)
 	}
 	if se, ok := expr.(hclsyntax.Expression); ok {
 		var call hcl.Range

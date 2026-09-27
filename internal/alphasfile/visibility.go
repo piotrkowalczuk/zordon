@@ -78,10 +78,10 @@ func packageRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) er
 // import or require belongs.
 func refScope(sb *serviceBlock) (scope, keyword, where string) {
 	if p, inPkg := packageOf(sb.module); inPkg {
-		return fmt.Sprintf("package %q (%s)", p, sb.file.path), "require", fmt.Sprintf("inside package %q", p)
+		return fmt.Sprintf("package %q (%s)", p, sb.file.path), "import", fmt.Sprintf("inside package %q", p)
 	}
 	if sb.module != DefaultModule {
-		return fmt.Sprintf("module %q (%s)", sb.module, sb.file.path), "require", fmt.Sprintf("inside module %q", sb.module)
+		return fmt.Sprintf("module %q (%s)", sb.module, sb.file.path), "import", fmt.Sprintf("inside module %q", sb.module)
 	}
 	return "the top level of " + sb.file.path, "import", "at the top level"
 }

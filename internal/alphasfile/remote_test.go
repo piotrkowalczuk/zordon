@@ -28,10 +28,15 @@ func pkgWebRequiring(line string) string {
 	return strings.Replace(pkgWeb, "package \"web\" {\n", "package \"web\" {\n  "+line+"\n", 1)
 }
 
+// webAt is an entrypoint importing pkgs/web of the infra repository at ref.
+func webAt(ref string) string {
+	return "require \"github.com/acme/infra\" { ref = \"" + ref + "\" }\nimport \"github.com/acme/infra/pkgs/web\" {}\n"
+}
+
 func TestLoadTreeWith_remoteImportFetchesAndLocks(t *testing.T) {
 	infra, main := infraRepo(t)
 	dir := t.TempDir()
-	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
 	f := newRepoFetcher(map[string]string{remoteRepo: infra})
 	tree, err := LoadTreeWith(root, remoteOpts(t, dir, f))
 	if err != nil {
@@ -58,7 +63,7 @@ func TestLoadTreeWith_remoteImportFetchesAndLocks(t *testing.T) {
 func TestLoadTreeWith_lockedRepoLoadsOffline(t *testing.T) {
 	infra, main := infraRepo(t)
 	dir := t.TempDir()
-	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
 	opts := remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra}))
 	if _, err := LoadTreeWith(root, opts); err != nil {
 		t.Fatal(err)
@@ -77,7 +82,7 @@ func TestLoadTreeWith_lockedRepoLoadsOffline(t *testing.T) {
 func TestLoadTreeWith_updateMovesTheLock(t *testing.T) {
 	infra, main := infraRepo(t)
 	dir := t.TempDir()
-	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
 	opts := remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra}))
 	if _, err := LoadTreeWith(root, opts); err != nil {
 		t.Fatal(err)
@@ -102,11 +107,11 @@ func TestLoadTreeWith_changedRefResolvesAgain(t *testing.T) {
 	commitFile(t, infra, "pkgs/web/NOTE", "after v1")
 	dir := t.TempDir()
 	opts := remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra}))
-	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
 	if _, err := LoadTreeWith(root, opts); err != nil {
 		t.Fatal(err)
 	}
-	writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@v1" {}`})
+	writeTree(t, dir, map[string]string{"Alphasfile": webAt("v1")})
 	if _, err := LoadTreeWith(root, opts); err != nil {
 		t.Fatal(err)
 	}
@@ -120,21 +125,114 @@ func TestLoadTreeWith_oneVersionPerRepository(t *testing.T) {
 	infra, _ := infraRepo(t)
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile":     "import \"github.com/acme/infra/pkgs/web@main\" {}\nimport \"./app\" {}\n",
-		"app/Alphasfile": "package \"app\" {\n  require \"github.com/acme/infra/pkgs/db@v1\" {}\n}\n",
+		"Alphasfile":     "import \"./app\" {}\nimport \"./ops\" {}\n",
+		"app/Alphasfile": "package \"app\" {\n  require \"github.com/acme/infra\" { ref = \"main\" }\n  import \"github.com/acme/infra/pkgs/web\" {}\n}\n",
+		"ops/Alphasfile": "package \"ops\" {\n  require \"github.com/acme/infra\" { ref = \"v1\" }\n  import \"github.com/acme/infra/pkgs/db\" {}\n}\n",
 	})
 	_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
-	if err == nil || !strings.Contains(err.Error(), "one stack uses one version of a repository") {
+	if err == nil || !strings.Contains(err.Error(), "one stack uses one version of a repository, so pin it in "+root) {
 		t.Fatalf("got %v", err)
 	}
 }
 
-func TestLoadTreeWith_remoteImportNeedsVersion(t *testing.T) {
+func TestLoadTreeWith_entrypointRequireWins(t *testing.T) {
+	infra, _ := infraRepo(t)
+	v1 := gitOut(t, infra, "rev-parse", "v1^{commit}")
+	commitFile(t, infra, "pkgs/web/NOTE", "after v1")
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{
+		"Alphasfile":     "require \"github.com/acme/infra\" { ref = \"v1\" }\nimport \"./app\" {}\n",
+		"app/Alphasfile": "package \"app\" {\n  require \"github.com/acme/infra\" { ref = \"main\" }\n  import \"github.com/acme/infra/pkgs/web\" {}\n}\n",
+	})
+	tree, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tree.Bytes()), remoteRepo+"@"+v1) {
+		t.Error("the entrypoint's require picks the version for the whole stack")
+	}
+}
+
+func TestLoadTreeWith_remoteImportNeedsRequire(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web" {}`})
 	_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(nil)))
-	if err == nil || !strings.Contains(err.Error(), "a remote import needs a version: add @<branch, tag or commit>") {
+	want := `no version of github.com/acme/infra is required here; add require "github.com/acme/infra" { ref = "<branch, tag or commit>" } at the top of ` + root + ", or run zordon pkg get github.com/acme/infra@<ref>"
+	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadTreeWith_versionInPathIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
+	_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(nil)))
+	if err == nil || !strings.Contains(err.Error(), `a version is not part of an import path; drop @main and add require "github.com/acme/infra" { ref = "main" }`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadTreeWith_requireFromZordonMod(t *testing.T) {
+	infra, main := infraRepo(t)
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		ModFileName:        "module = \"github.com/acme/stack\"\nrequire \"github.com/acme/infra\" { ref = \"main\" }\n",
+		"place/Alphasfile": `import "github.com/acme/infra/pkgs/web" {}`,
+	})
+	root := filepath.Join(dir, "place", "Alphasfile")
+	tree, err := LoadTreeWith(root, remoteOpts(t, filepath.Join(dir, "place"), newRepoFetcher(map[string]string{remoteRepo: infra})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tree.Bytes()), remoteRepo+"@"+main) {
+		t.Error("a file takes its versions from the zordon.mod above it")
+	}
+}
+
+func TestLoadTreeWith_fileRequireUnderZordonMod(t *testing.T) {
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{
+		ModFileName:  `module = "github.com/acme/stack"`,
+		"Alphasfile": "require \"github.com/acme/infra\" { ref = \"main\" }\n",
+	})
+	_, err := LoadTreeWith(root, remoteOpts(t, dir, nil))
+	if err == nil || !strings.Contains(err.Error(), "belongs to the module of "+filepath.Join(dir, ModFileName)+", so its versions live there; move the require into it") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadTreeWith_requireErrors(t *testing.T) {
+	cases := map[string]struct{ body, want string }{
+		"subdirectory": {`require "github.com/acme/infra/pkgs" { ref = "main" }`, `name the repository alone, such as "github.com/acme/infra"`},
+		"version":      {`require "github.com/acme/infra@v1" { ref = "main" }`, `name the repository alone`},
+		"empty ref":    {`require "github.com/acme/infra" { ref = "" }`, "ref names a branch, tag or commit and cannot be empty"},
+		"repeated":     {"require \"github.com/acme/infra\" { ref = \"a\" }\nrequire \"github.com/acme/infra\" { ref = \"b\" }", "repeats the require at"},
+		"no ref":       {`require "github.com/acme/infra" {}`, `The argument "ref" is required`},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			dir := t.TempDir()
+			root := writeTree(t, dir, map[string]string{"Alphasfile": c.body + "\n"})
+			if _, err := LoadTreeWith(root, remoteOpts(t, dir, nil)); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("want %q, got %v", c.want, err)
+			}
+		})
+	}
+}
+
+func TestLoadTreeWith_remoteFileImportsItsOwnRepository(t *testing.T) {
+	infra := gitRepo(t, map[string]string{
+		"pkgs/web/Alphasfile": pkgWebRequiring(`import "github.com/acme/infra/pkgs/db" {}`),
+		"pkgs/db/Alphasfile":  pkgDB,
+	})
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
+	tree, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
+	if err != nil {
+		t.Fatalf("a file naming its own repository reads the same checkout, without a require: %v", err)
+	}
+	if got := serviceNames(resolveTree(t, tree)); !equalStrs(got, []string{"web/web/web", "db/db/db"}) {
+		t.Errorf("services = %v", got)
 	}
 }
 
@@ -145,7 +243,7 @@ func TestLoadTreeWith_searchByZordonMod(t *testing.T) {
 		"pkgs/web/Alphasfile": pkgWeb,
 	})
 	dir := t.TempDir()
-	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
 	opts := remoteOpts(t, dir, nil)
 	opts.Search = []string{checkout}
 	tree, err := LoadTreeWith(root, opts)
@@ -167,7 +265,7 @@ func TestLoadTreeWith_searchByLayout(t *testing.T) {
 	src := t.TempDir()
 	writeTree(t, src, map[string]string{"github.com/acme/infra/pkgs/web/Alphasfile": pkgWeb})
 	dir := t.TempDir()
-	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
 	opts := remoteOpts(t, dir, nil)
 	opts.Search = []string{src}
 	tree, err := LoadTreeWith(root, opts)
@@ -185,7 +283,7 @@ func TestLoadTreeWith_searchDuplicateProvider(t *testing.T) {
 		writeTree(t, d, map[string]string{ModFileName: `module = "github.com/acme/infra"`, "pkgs/web/Alphasfile": pkgWeb})
 	}
 	dir := t.TempDir()
-	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
 	opts := remoteOpts(t, dir, nil)
 	opts.Search = []string{a, b}
 	_, err := LoadTreeWith(root, opts)
@@ -196,15 +294,15 @@ func TestLoadTreeWith_searchDuplicateProvider(t *testing.T) {
 
 func TestLoadTreeWith_remoteFilesStayInsideTheirCheckout(t *testing.T) {
 	cases := map[string]struct{ require, want string }{
-		"escape":   {`require "../../../../outside" {}`, "leaves the checkout of github.com/acme/infra@"},
-		"absolute": {`require "/etc" {}`, "a file fetched from a remote repository may import relative paths only"},
-		"home":     {`require "~/x" {}`, "a file fetched from a remote repository may import relative paths only"},
+		"escape":   {`import "../../../../outside" {}`, "leaves the checkout of github.com/acme/infra@"},
+		"absolute": {`import "/etc" {}`, "a file fetched from a remote repository may import relative paths only"},
+		"home":     {`import "~/x" {}`, "a file fetched from a remote repository may import relative paths only"},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
 			infra := gitRepo(t, map[string]string{"pkgs/web/Alphasfile": pkgWebRequiring(c.require)})
 			dir := t.TempDir()
-			root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
+			root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
 			_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("want %q, got %v", c.want, err)
@@ -215,12 +313,12 @@ func TestLoadTreeWith_remoteFilesStayInsideTheirCheckout(t *testing.T) {
 
 func TestLoadTreeWith_remoteRelativeRequireInsideCheckout(t *testing.T) {
 	infra := gitRepo(t, map[string]string{
-		"pkgs/web/Alphasfile": pkgWebRequiring(`require "../db" {}`),
+		"pkgs/web/Alphasfile": pkgWebRequiring(`import "../db" {}`),
 		"pkgs/db/Alphasfile":  pkgDB,
 	})
 	main := gitOut(t, infra, "rev-parse", "HEAD")
 	dir := t.TempDir()
-	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
 	tree, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
 	if err != nil {
 		t.Fatal(err)

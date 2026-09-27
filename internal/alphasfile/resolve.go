@@ -19,8 +19,8 @@ const (
 	// LockFileName sits next to an entrypoint and pins every remote
 	// repository its imports name to a commit.
 	LockFileName = "zordon.lock"
-	// ModFileName declares the identity of a directory that a zordon.work
-	// search entry points at: `module = "github.com/owner/repo"`.
+	// ModFileName marks the root of a module: `module = "<identity>"` and
+	// the require blocks that pin the repositories its files import.
 	ModFileName = "zordon.mod"
 )
 
@@ -75,7 +75,10 @@ type resolved struct {
 }
 
 // importSource resolves an import block to a file or a package directory.
+// visit sees every loaded file, the entrypoint first, before any of its
+// imports is resolved.
 type importSource interface {
+	visit(f *treeFile) error
 	resolve(importer *treeFile, imp *importBlock) (resolved, error)
 }
 
@@ -83,7 +86,9 @@ type identitySource struct {
 	opts    LoadOptions
 	lock    *lockFile
 	refs    map[string]refUse
-	mods    map[string]string
+	mods    map[string]*modFile
+	scopes  map[*treeFile]*reqScope
+	entry   *reqScope
 	changes []LockChange
 }
 
@@ -92,36 +97,94 @@ type refUse struct {
 	at  hcl.Range
 }
 
+// reqScope is where a file takes the versions of its remote imports from:
+// the zordon.mod of its module, or its own require blocks when no
+// zordon.mod is above it.
+type reqScope struct {
+	// where names the place in messages, and hint where a missing require
+	// goes.
+	where string
+	hint  string
+	reqs  map[string]*requireBlock
+}
+
 func newIdentitySource(opts LoadOptions) (*identitySource, error) {
 	lock, err := readLock(opts.LockPath)
 	if err != nil {
 		return nil, err
 	}
-	return &identitySource{opts: opts, lock: lock, refs: map[string]refUse{}, mods: map[string]string{}}, nil
+	return &identitySource{
+		opts:   opts,
+		lock:   lock,
+		refs:   map[string]refUse{},
+		mods:   map[string]*modFile{},
+		scopes: map[*treeFile]*reqScope{},
+	}, nil
+}
+
+func (s *identitySource) visit(f *treeFile) error {
+	mod, err := s.modAbove(f.dir, f.confine)
+	if err != nil {
+		return err
+	}
+	own := f.root.fileRequires()
+	var sc *reqScope
+	if mod != nil {
+		if len(own) > 0 {
+			return fmt.Errorf("%s: require %q: %s belongs to the module of %s, so its versions live there; move the require into it", own[0].DefRange, own[0].Repo, f.path, mod.path)
+		}
+		sc = &reqScope{where: mod.path, hint: "to " + mod.path, reqs: mod.reqs}
+	} else {
+		reqs, err := requireMap(own)
+		if err != nil {
+			return err
+		}
+		hint := "at the top of " + f.path
+		if f.block != nil {
+			hint = fmt.Sprintf("inside package %q in %s", f.block.Name, f.path)
+		}
+		sc = &reqScope{where: f.path, hint: hint, reqs: reqs}
+	}
+	s.scopes[f] = sc
+	if s.entry == nil {
+		s.entry = sc
+	}
+	return nil
 }
 
 func (s *identitySource) resolve(importer *treeFile, imp *importBlock) (resolved, error) {
 	if imp.Git != nil {
-		return resolved{}, fmt.Errorf("%s: %s %q: remote imports (git {}) are not supported yet; name the repository in the path instead, such as github.com/owner/repo/dir@v1.0.0", imp.DefRange, imp.keyword, imp.Path)
+		return resolved{}, fmt.Errorf("%s: %s %q: remote imports (git {}) are not supported yet; name the repository in the path instead, such as github.com/owner/repo/dir, and pin it with require", imp.DefRange, imp.keyword, imp.Path)
 	}
 	if isLocalPath(imp.Path) {
 		return s.resolveLocal(importer, imp)
 	}
 	repo, sub, ref, err := source.SplitIdentity(imp.Path)
 	if err != nil {
-		return resolved{}, fmt.Errorf("%s: %s %q is neither a local path (those start with ./, ../, / or ~/) nor a remote identity such as github.com/owner/repo/dir@v1.0.0: %w", imp.DefRange, imp.keyword, imp.Path, err)
+		return resolved{}, fmt.Errorf("%s: %s %q is neither a local path (those start with ./, ../, / or ~/) nor a remote identity such as github.com/owner/repo/dir: %w", imp.DefRange, imp.keyword, imp.Path, err)
+	}
+	sc := s.scopes[importer]
+	if ref != "" {
+		return resolved{}, fmt.Errorf("%s: %s %q: a version is not part of an import path; drop @%s and add require %q { ref = %q } %s", imp.DefRange, imp.keyword, imp.Path, ref, repo, ref, sc.hint)
+	}
+	if res, ok := sameCheckout(importer, repo, sub); ok {
+		return res, nil
+	}
+	req := sc.reqs[repo]
+	if req == nil {
+		return resolved{}, fmt.Errorf("%s: %s %q: no version of %s is required here; add require %q { ref = \"<branch, tag or commit>\" } %s, or run zordon pkg get %s@<ref>", imp.DefRange, imp.keyword, imp.Path, repo, repo, sc.hint, repo)
 	}
 	id := strings.TrimSuffix(repo+"/"+sub, "/")
 	if res, ok, err := s.search(imp, id); err != nil || ok {
 		return res, err
 	}
-	if ref == "" {
-		return resolved{}, fmt.Errorf("%s: %s %q: a remote import needs a version: add @<branch, tag or commit>, or provide %s through a search entry in zordon.work", imp.DefRange, imp.keyword, imp.Path, repo)
+	ref, at := req.Ref, req.DefRange
+	if e := s.entry.reqs[repo]; e != nil {
+		ref, at = e.Ref, e.DefRange
+	} else if prev, seen := s.refs[repo]; seen && prev.ref != ref {
+		return resolved{}, fmt.Errorf("%s: require %q asks for ref %q, but %s asks for %q; one stack uses one version of a repository, so pin it in %s", req.DefRange, repo, ref, prev.at, prev.ref, s.entry.where)
 	}
-	if prev, seen := s.refs[repo]; seen && prev.ref != ref {
-		return resolved{}, fmt.Errorf("%s: %s %q asks for %s@%s, but %s asks for @%s; one stack uses one version of a repository", imp.DefRange, imp.keyword, imp.Path, repo, ref, prev.at, prev.ref)
-	}
-	s.refs[repo] = refUse{ref: ref, at: imp.DefRange}
+	s.refs[repo] = refUse{ref: ref, at: at}
 	commit, err := s.commitFor(repo, ref, imp)
 	if err != nil {
 		return resolved{}, err
@@ -208,15 +271,76 @@ func (s *identitySource) search(imp *importBlock, id string) (resolved, bool, er
 }
 
 func (s *identitySource) modOf(dir string) (string, error) {
+	mod, err := s.modIn(dir)
+	if err != nil || mod == nil {
+		return "", err
+	}
+	return mod.module, nil
+}
+
+// modIn reads dir/zordon.mod once; nil when the directory has none.
+func (s *identitySource) modIn(dir string) (*modFile, error) {
 	if mod, ok := s.mods[dir]; ok {
 		return mod, nil
 	}
 	mod, err := readMod(dir)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	s.mods[dir] = mod
 	return mod, nil
+}
+
+// modAbove finds the nearest zordon.mod at or above dir. Inside a remote
+// checkout the search stops at the checkout's root.
+func (s *identitySource) modAbove(dir, confine string) (*modFile, error) {
+	for {
+		mod, err := s.modIn(dir)
+		if err != nil || mod != nil {
+			return mod, err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir || dir == confine {
+			return nil, nil
+		}
+		dir = parent
+	}
+}
+
+// sameCheckout resolves an identity that names the repository the importer
+// was itself fetched from: the same checkout, not a second version.
+func sameCheckout(importer *treeFile, repo, sub string) (resolved, bool) {
+	own, _, ok := strings.Cut(importer.repoAt, "@")
+	if !ok || own != repo {
+		return resolved{}, false
+	}
+	return resolved{
+		path:     filepath.Join(importer.confine, filepath.FromSlash(sub)),
+		identity: importer.repoAt + "//" + sub,
+		confine:  importer.confine,
+		repoAt:   importer.repoAt,
+		origin:   importer.origin,
+	}, true
+}
+
+func requireMap(blocks []*requireBlock) (map[string]*requireBlock, error) {
+	out := map[string]*requireBlock{}
+	for _, rb := range blocks {
+		repo, sub, ref, err := source.SplitIdentity(rb.Repo)
+		switch {
+		case err != nil:
+			return nil, fmt.Errorf("%s: require %q: %w", rb.DefRange, rb.Repo, err)
+		case sub != "" || ref != "" || repo != rb.Repo:
+			return nil, fmt.Errorf("%s: require %q: name the repository alone, such as %q, and put the version in ref", rb.DefRange, rb.Repo, repo)
+		case strings.TrimSpace(rb.Ref) == "":
+			return nil, fmt.Errorf("%s: require %q: ref names a branch, tag or commit and cannot be empty", rb.DefRange, rb.Repo)
+		}
+		if prev, dup := out[repo]; dup {
+			return nil, fmt.Errorf("%s: require %q repeats the require at %s", rb.DefRange, rb.Repo, prev.DefRange)
+		}
+		out[repo] = rb
+	}
+	return out, nil
 }
 
 func (s *identitySource) commitFor(repo, ref string, imp *importBlock) (string, error) {
@@ -305,32 +429,42 @@ func (l *lockFile) write() error {
 }
 
 type modDoc struct {
-	Module string `hcl:"module"`
+	Module   string          `hcl:"module"`
+	Requires []*requireBlock `hcl:"require,block"`
 }
 
-// readMod returns the module path declared by dir/zordon.mod, or "" when
-// the directory has none.
-func readMod(dir string) (string, error) {
+type modFile struct {
+	path   string
+	module string
+	reqs   map[string]*requireBlock
+}
+
+// readMod reads dir/zordon.mod; nil when the directory has none.
+func readMod(dir string) (*modFile, error) {
 	path := filepath.Join(dir, ModFileName)
 	if !zfs.Exists(path) {
-		return "", nil
+		return nil, nil
 	}
 	b, err := zfs.Read(path)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	file, diags := hclparse.NewParser().ParseHCL(b, path)
 	if diags.HasErrors() {
-		return "", fmt.Errorf("%s: %s", path, diags.Error())
+		return nil, fmt.Errorf("%s: %s", path, diags.Error())
 	}
 	var doc modDoc
 	if diags := gohcl.DecodeBody(file.Body, nil, &doc); diags.HasErrors() {
-		return "", fmt.Errorf("%s", diags.Error())
+		return nil, fmt.Errorf("%s", diags.Error())
 	}
 	if _, _, _, err := source.SplitIdentity(doc.Module); err != nil {
-		return "", fmt.Errorf("%s: module %q: %w", path, doc.Module, err)
+		return nil, fmt.Errorf("%s: module %q: %w", path, doc.Module, err)
 	}
-	return strings.TrimSuffix(doc.Module, "/"), nil
+	reqs, err := requireMap(doc.Requires)
+	if err != nil {
+		return nil, err
+	}
+	return &modFile{path: path, module: strings.TrimSuffix(doc.Module, "/"), reqs: reqs}, nil
 }
 
 type workDoc struct {

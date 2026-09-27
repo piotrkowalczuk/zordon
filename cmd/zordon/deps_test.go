@@ -26,7 +26,7 @@ func TestImportLines_package(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{
 		"Alphasfile":     `import "./web" "edge" { features = ["tls"] }`,
-		"web/Alphasfile": "package \"web\" {\n  features = [\"tls\"]\n}\n",
+		"web/Alphasfile": "package \"web\" {\n  features = { tls = \"Serves HTTPS\" }\n}\n",
 	})
 	tree, err := alphasfile.LoadTree(filepath.Join(dir, "Alphasfile"))
 	if err != nil {
@@ -38,6 +38,54 @@ func TestImportLines_package(t *testing.T) {
 	}
 }
 
+const infraWebAtMain = "require \"github.com/acme/infra\" { ref = \"main\" }\nimport \"github.com/acme/infra/pkgs/web\" {}\n"
+
+func TestImportLines_importedBy(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"Alphasfile":     "import \"./app\" {}\n",
+		"app/Alphasfile": "package \"app\" {\n  import \"../web\" { features = [\"tls\"] }\n}\n",
+		"web/Alphasfile": "package \"web\" {\n  features = { tls = \"Serves HTTPS\" }\n}\n",
+	})
+	tree, err := alphasfile.LoadTree(filepath.Join(dir, "Alphasfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# import " + filepath.Join(dir, "web") + " as web [features: tls] (imported by package app)\n"
+	if got := importLines("# ", tree); !strings.Contains(got, want) {
+		t.Errorf("got\n%s\nwant a line\n%s", got, want)
+	}
+}
+
+func TestPkgGet(t *testing.T) {
+	ztest.AssertSystem(t)
+	infra := t.TempDir()
+	writeFiles(t, infra, map[string]string{"pkgs/web/Alphasfile": webPackage})
+	gitIn(t, infra, "init", "-q", "-b", "main")
+	commitAll(t, infra, "init")
+	head := gitHead(t, infra)
+
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{"Alphasfile": "import \"github.com/acme/infra/pkgs/web\" {}\n"})
+	af := filepath.Join(dir, "Alphasfile")
+	opts := alphasfile.LoadOptions{
+		Home:     t.TempDir(),
+		LockPath: filepath.Join(dir, alphasfile.LockFileName),
+		Fetcher:  localFetcher{"github.com/acme/infra": infra},
+	}
+	var out bytes.Buffer
+	if err := pkgGet(&out, af, opts, "github.com/acme/infra@main"); err != nil {
+		t.Fatal(err)
+	}
+	want := "require \"github.com/acme/infra\" { ref = \"main\" } in " + af + "\ngithub.com/acme/infra@main: (new) -> " + head[:12] + "\n"
+	if out.String() != want {
+		t.Errorf("printed %q, want %q", out.String(), want)
+	}
+	if _, err := alphasfile.LoadTreeWith(af, opts); err != nil {
+		t.Errorf("after pkg get the Alphasfile loads: %v", err)
+	}
+}
+
 func TestImportLines_searchOrigin(t *testing.T) {
 	checkout := t.TempDir()
 	writeFiles(t, checkout, map[string]string{
@@ -45,7 +93,7 @@ func TestImportLines_searchOrigin(t *testing.T) {
 		"pkgs/web/Alphasfile": webPackage,
 	})
 	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
+	writeFiles(t, dir, map[string]string{"Alphasfile": infraWebAtMain})
 	tree, err := alphasfile.LoadTreeWith(filepath.Join(dir, "Alphasfile"), alphasfile.LoadOptions{Search: []string{checkout}})
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +113,7 @@ func TestUpdateLock(t *testing.T) {
 	first := gitHead(t, infra)
 
 	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
+	writeFiles(t, dir, map[string]string{"Alphasfile": infraWebAtMain})
 	af := filepath.Join(dir, "Alphasfile")
 	opts := alphasfile.LoadOptions{
 		Home:     t.TempDir(),

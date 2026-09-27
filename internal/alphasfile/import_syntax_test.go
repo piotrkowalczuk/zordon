@@ -14,7 +14,7 @@ func TestLoadTree_importPathNeedsLocalPrefix(t *testing.T) {
 		"dot slash":      {path: "./Alphasfile.f", ok: true},
 		"parent":         {path: "../x/Alphasfile.f", ok: true},
 		"bare relative":  {path: "Alphasfile.f", want: "is neither a local path (those start with ./, ../, / or ~/) nor a remote identity"},
-		"remote looking": {path: "github.com/acme/infra/Alphasfile.f", want: "a remote import needs a version"},
+		"remote looking": {path: "github.com/acme/infra/Alphasfile.f", want: "no version of github.com/acme/infra is required here"},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -37,12 +37,11 @@ func TestLoadTree_importPathNeedsLocalPrefix(t *testing.T) {
 	}
 }
 
-func TestLoadTree_importInsideModuleIsRejected(t *testing.T) {
+func TestLoadTree_requireInsideModuleIsRejected(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":   "module \"a\" {\n  import \"./Alphasfile.f\" { modules = [\"m\"] }\n}\n",
-		"Alphasfile.f": `module "m" {}`,
+		"Alphasfile": "module \"a\" {\n  require \"github.com/acme/infra\" { ref = \"main\" }\n}\n",
 	})
-	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `Blocks of type "import" are not expected here`) {
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `Blocks of type "require" are not expected here`) {
 		t.Fatalf("got %v", err)
 	}
 }

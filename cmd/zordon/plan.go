@@ -142,7 +142,11 @@ func importLines(prefix string, tree *alphasfile.Tree) string {
 			if len(e.Features) > 0 {
 				features = " [features: " + strings.Join(e.Features, ", ") + "]"
 			}
-			fmt.Fprintf(&b, "%simport %s as %s%s%s\n", prefix, filepath.Dir(e.Path), e.Package, features, origin)
+			by := ""
+			if len(e.ImportedBy) > 0 {
+				by = " (imported by " + strings.Join(e.ImportedBy, ", ") + ")"
+			}
+			fmt.Fprintf(&b, "%simport %s as %s%s%s%s\n", prefix, filepath.Dir(e.Path), e.Package, features, by, origin)
 			continue
 		}
 		fmt.Fprintf(&b, "%simport %s [%s]%s\n", prefix, e.Path, strings.Join(e.Modules, ", "), origin)

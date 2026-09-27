@@ -1,7 +1,8 @@
 # A company stack: Caddy with both of its features. It is a package too, so
-# a working place runs the whole stack from a one-line Alphasfile:
+# a working place runs the whole stack from an Alphasfile of two lines:
 #
-#   import "github.com/piotrkowalczuk/zordon/examples/package@main" {}
+#   require "github.com/piotrkowalczuk/zordon" { ref = "main" }
+#   import "github.com/piotrkowalczuk/zordon/examples/package" {}
 package "stack" {
   import "./caddy" {
     features = ["hugo", "coredns"]

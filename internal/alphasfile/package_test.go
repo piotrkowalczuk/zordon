@@ -94,11 +94,26 @@ func TestOpen_packageAndModuleMayShareAName(t *testing.T) {
 	}
 }
 
-func TestLoadTree_packageImportsMustAgree(t *testing.T) {
+const pkgDBReplica = `
+package "db" {
+  features = { replica = "Runs a read replica next to the primary" }
+
+  module "db" {
+    service "go" "primary" {
+      git { url = "github.com/x/db" }
+    }
+    service "go" "replica" {
+      enabled = features.replica
+      git { url = "github.com/x/db" }
+    }
+  }
+}
+`
+
+func TestLoadTree_entrypointImportsMustAgree(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":     "import \"./db\" { features = [\"replica\"] }\nimport \"./app\" {}\n",
-		"app/Alphasfile": "package \"app\" {\n  import \"../db\" {}\n}\n",
-		"db/Alphasfile":  "package \"db\" {\n  features = [\"replica\"]\n}\n",
+		"Alphasfile":    "import \"./db\" { features = [\"replica\"] }\nimport \"./db\" {}\n",
+		"db/Alphasfile": pkgDBReplica,
 	})
 	_, err := LoadTree(root)
 	if err == nil || !strings.Contains(err.Error(), "passes other inputs or features than the import at") {
@@ -106,12 +121,100 @@ func TestLoadTree_packageImportsMustAgree(t *testing.T) {
 	}
 }
 
+func TestOpen_packageImportTurnsOnAFeature(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":     `import "./app" {}`,
+		"app/Alphasfile": "package \"app\" {\n  import \"../db\" { features = [\"replica\"] }\n}\n",
+		"db/Alphasfile":  pkgDBReplica,
+	})
+	if got := serviceNames(openTree(t, root)); !equalStrs(got, []string{"db/db/primary", "db/db/replica"}) {
+		t.Errorf("services = %v", got)
+	}
+}
+
+func TestOpen_packageImportsUniteFeatures(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":     "import \"./app\" {}\nimport \"./ops\" {}\n",
+		"app/Alphasfile": "package \"app\" {\n  import \"../db\" { features = [\"replica\"] }\n}\n",
+		"ops/Alphasfile": "package \"ops\" {\n  import \"../db\" {}\n}\n",
+		"db/Alphasfile":  pkgDBReplica,
+	})
+	if got := serviceNames(openTree(t, root)); !equalStrs(got, []string{"db/db/primary", "db/db/replica"}) {
+		t.Errorf("services = %v", got)
+	}
+}
+
+func TestOpen_entrypointImportIsASuperset(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":     "import \"./db\" { features = [\"replica\"] }\nimport \"./app\" {}\n",
+		"app/Alphasfile": "package \"app\" {\n  import \"../db\" {}\n}\n",
+		"db/Alphasfile":  pkgDBReplica,
+	})
+	if got := serviceNames(openTree(t, root)); !equalStrs(got, []string{"db/db/primary", "db/db/replica"}) {
+		t.Errorf("services = %v", got)
+	}
+}
+
+func TestLoadTree_entrypointLeavesANeededFeatureOff(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":     "import \"./db\" {}\nimport \"./app\" {}\n",
+		"app/Alphasfile": "package \"app\" {\n  import \"../db\" { features = [\"replica\"] }\n}\n",
+		"db/Alphasfile":  pkgDBReplica,
+	})
+	_, err := LoadTree(root)
+	want := []string{
+		"Alphasfile:1",
+		`package db runs with feature "replica" off, but package app needs it`,
+		"  replica: Runs a read replica next to the primary",
+		`turn it on here with features = ["replica"], or drop that import`,
+	}
+	for _, w := range want {
+		if err == nil || !strings.Contains(err.Error(), w) {
+			t.Fatalf("missing %q in %v", w, err)
+		}
+	}
+}
+
+func TestLoadTree_entrypointLeavesANeededFeatureOffBehindAFeature(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":     "import \"./db\" {}\nimport \"./app\" { features = [\"ha\"] }\n",
+		"app/Alphasfile": "package \"app\" {\n  features = { ha = \"Survives a database restart\" }\n  import \"../db\" {\n    enabled  = features.ha\n    features = [\"replica\"]\n  }\n}\n",
+		"db/Alphasfile":  pkgDBReplica,
+	})
+	_, err := LoadTree(root)
+	if err == nil || !strings.Contains(err.Error(), "or turn off what enables that import in package app (features ha)") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadTree_packagesImportingEachOther(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":   `import "./a" {}`,
+		"a/Alphasfile": "package \"a\" {\n  import \"../b\" {}\n}\n",
+		"b/Alphasfile": "package \"b\" {\n  import \"../c\" {}\n}\n",
+		"c/Alphasfile": "package \"c\" {\n  import \"../b\" {}\n}\n",
+	})
+	_, err := LoadTree(root)
+	if err == nil || !strings.Contains(err.Error(), "packages b, c import each other, so none of them can be configured first; import one of them at the top of the entrypoint") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestOpen_entrypointBreaksAnImportCycle(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":   "import \"./a\" {}\nimport \"./b\" {}\n",
+		"a/Alphasfile": "package \"a\" {\n  import \"../b\" {}\n}\n",
+		"b/Alphasfile": "package \"b\" {\n  import \"../a\" {}\n}\n",
+	})
+	openTree(t, root)
+}
+
 func TestOpen_packageRequiredUsesDefaults(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `import "./app" {}`,
 		"app/Alphasfile": `
 package "app" {
-  require "../db" {}
+  import "../db" {}
 
   module "app" {
     service "go" "app" {
@@ -218,7 +321,7 @@ func TestLoadTree_packageImportRejectsModules(t *testing.T) {
 func TestLoadTree_packageCannotRequireFragments(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":     `import "./app" {}`,
-		"app/Alphasfile": "package \"app\" {\n  require \"../Alphasfile.f\" { modules = [\"m\"] }\n}\n",
+		"app/Alphasfile": "package \"app\" {\n  import \"../Alphasfile.f\" { modules = [\"m\"] }\n}\n",
 		"Alphasfile.f":   `module "m" {}`,
 	})
 	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "a package depends on other packages, not on a fragment's modules") {
@@ -256,7 +359,7 @@ func TestLoadTree_packageRunsOnItsOwn(t *testing.T) {
 		"Alphasfile": `
 package "web" {
   inputs   = { greeting = "hello" }
-  features = ["extra"]
+  features = { extra = "Adds the extra blocks" }
 
   module "web" {
     service "go" "web" {
@@ -297,7 +400,7 @@ package "app" {
 		"db/Alphasfile": "package \"db\" {\n  module \"db\" {\n    service \"go\" \"db\" {\n      git { url = \"github.com/x/db\" }\n    }\n  }\n}\n",
 	})
 	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
-	if err == nil || !strings.Contains(err.Error(), `package.db is not visible in package "app"`) || !strings.Contains(err.Error(), `add require "../db" {} inside package "app"`) {
+	if err == nil || !strings.Contains(err.Error(), `package.db is not visible in package "app"`) || !strings.Contains(err.Error(), `add import "../db" {} inside package "app"`) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -326,7 +429,7 @@ func TestOpen_moduleRequiresAPackage(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `
 module "gw" {
-  require "./web" {}
+  import "./web" {}
 
   service "go" "gw" {
     git { url = "github.com/x/gw" }

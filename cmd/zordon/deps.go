@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
@@ -68,6 +69,35 @@ func runUpdate(out io.Writer, zordonHome string, repos []string) error {
 		return err
 	}
 	return updateLock(out, af, opts, repos)
+}
+
+// runPkgGet requires a repository at a ref for the invocation's Alphasfile
+// and locks it when the stack imports it.
+func runPkgGet(out io.Writer, zordonHome string, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: zordon pkg get <repo>@<ref>")
+	}
+	af, err := walkUp()
+	if err != nil {
+		return err
+	}
+	opts, err := loadOptions(zordonHome, af, nil)
+	if err != nil {
+		return err
+	}
+	return pkgGet(out, af, opts, args[0])
+}
+
+func pkgGet(out io.Writer, af string, opts alphasfile.LoadOptions, arg string) error {
+	repo, ref, _ := strings.Cut(arg, "@")
+	written, err := alphasfile.AddRequire(af, repo, ref)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "require %q { ref = %q } in %s\n", repo, ref, written); err != nil {
+		return err
+	}
+	return updateLock(out, af, opts, []string{repo})
 }
 
 func updateLock(out io.Writer, af string, opts alphasfile.LoadOptions, repos []string) error {

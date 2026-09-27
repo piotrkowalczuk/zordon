@@ -19,7 +19,7 @@ build_bins
 make_place() { # <Alphasfile body>
 	local dir
 	dir="$(mktemp -d)"
-	printf '%s\n' "$1" >"$dir/Alphasfile"
+	printf 'require "github.com/piotrkowalczuk/zordon" { ref = "main" }\n%s\n' "$1" >"$dir/Alphasfile"
 	printf 'search "%s" {}\n' "$ROOT" >"$dir/zordon.work"
 	echo "$dir"
 }
@@ -33,9 +33,9 @@ start_place() { # <dir>
 
 caddy_http() { (cd "$1" && zordon get package.caddy.module.caddy.service.go.caddy.vars.http); }
 
-ALL="$(make_place 'import "github.com/piotrkowalczuk/zordon/examples/package@main" {}')"
-HUGO="$(make_place 'import "github.com/piotrkowalczuk/zordon/examples/package/caddy@main" { features = ["hugo"] }')"
-CADDY="$(make_place 'import "github.com/piotrkowalczuk/zordon/examples/package/caddy@main" {}')"
+ALL="$(make_place 'import "github.com/piotrkowalczuk/zordon/examples/package" {}')"
+HUGO="$(make_place 'import "github.com/piotrkowalczuk/zordon/examples/package/caddy" { features = ["hugo"] }')"
+CADDY="$(make_place 'import "github.com/piotrkowalczuk/zordon/examples/package/caddy" {}')"
 trap 'stop_place "$ALL"; stop_place "$HUGO"; stop_place "$CADDY"' EXIT
 
 # --- whole stack, both features ---
@@ -43,8 +43,8 @@ start_place "$ALL"
 plan="$(cd "$ALL" && zordon --agent plan)" || fail "zordon plan failed in $ALL"
 assert_contains "$plan" "# import $ROOT/examples/package as stack (search $ROOT)" "the one-liner resolves through zordon.work"
 assert_contains "$plan" "# import $ROOT/examples/package/caddy as caddy [features: coredns, hugo]" "the stack imports caddy with both features"
-assert_contains "$plan" "# import $ROOT/examples/package/hugo as hugo" "feature hugo requires the hugo package"
-assert_contains "$plan" "# import $ROOT/examples/package/coredns as coredns" "feature coredns requires the coredns package"
+assert_contains "$plan" "# import $ROOT/examples/package/hugo as hugo" "feature hugo imports the hugo package"
+assert_contains "$plan" "# import $ROOT/examples/package/coredns as coredns" "feature coredns imports the coredns package"
 
 status="$(cd "$ALL" && zordon status --agent)"
 for svc in caddy/caddy/caddy hugo/hugo/hugo coredns/coredns/coredns; do
@@ -79,8 +79,8 @@ stop_place "$HUGO"
 start_place "$CADDY"
 plan="$(cd "$CADDY" && zordon --agent plan)" || fail "zordon plan failed in $CADDY"
 assert_contains "$plan" "# import $ROOT/examples/package/caddy as caddy (search $ROOT)" "caddy is importable on its own"
-case "$plan" in *"as hugo"* | *"as coredns"*) fail "a switched-off require must not import its package:\n$plan" ;; esac
-pass "switched-off requires import nothing"
+case "$plan" in *"as hugo"* | *"as coredns"*) fail "a switched-off import must not pull in its package:\n$plan" ;; esac
+pass "switched-off imports pull in nothing"
 
 status="$(cd "$CADDY" && zordon status --agent)"
 assert_contains "$status" "caddy/caddy/caddy" "caddy runs"

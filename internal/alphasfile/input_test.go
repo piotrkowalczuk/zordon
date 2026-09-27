@@ -83,7 +83,6 @@ func TestLoadTree_inputErrors(t *testing.T) {
 		"missing required": {`import "./greeter" {}`, `package greeter needs input "name"`},
 		"unknown":          {`import "./greeter" { inputs = { name = "x", nope = 1 } }`, `input "nope" is not declared by package greeter (declared: greeting, name)`},
 		"not an object":    {`import "./greeter" { inputs = "x" }`, "inputs must be an object"},
-		"require passes":   {"module \"m\" {\n  require \"./greeter\" { inputs = { name = \"x\" } }\n}\n", "cannot pass inputs or features"},
 		"services refs":    {`import "./greeter" { inputs = { name = service.go.x.name } }`, "inputs:"},
 	}
 	for hint, c := range cases {
@@ -99,13 +98,62 @@ func TestLoadTree_inputErrors(t *testing.T) {
 	}
 }
 
-func TestLoadTree_requiredPackageNeedsDefaults(t *testing.T) {
+func TestLoadTree_packageImportMustPassRequiredInput(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":         `import "./app" {}`,
-		"app/Alphasfile":     "package \"app\" {\n  require \"../greeter\" {}\n}\n",
+		"app/Alphasfile":     "package \"app\" {\n  import \"../greeter\" {}\n}\n",
 		"greeter/Alphasfile": pkgGreeter,
 	})
-	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "instead of only requiring it") {
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "app/Alphasfile:2") || !strings.Contains(err.Error(), `package greeter needs input "name"; pass it with inputs = { name = ... }`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestOpen_packageImportConfiguresItsDependency(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":         `import "./app" { inputs = { who = "zordon" } }`,
+		"app/Alphasfile":     "package \"app\" {\n  inputs = { who = required }\n  import \"../greeter\" { inputs = { name = inputs.who } }\n}\n",
+		"greeter/Alphasfile": pkgGreeter,
+	})
+	af := openTree(t, root)
+	if got := fmt.Sprint(svcByName(af, "greeter/greeter/greeter").Runtime.Vars["text"]); got != "hello zordon" {
+		t.Errorf("text = %q; a package's import passes its own inputs on", got)
+	}
+}
+
+func TestLoadTree_inputHasOneSource(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":         "import \"./a\" {}\nimport \"./b\" {}\n",
+		"a/Alphasfile":       "package \"a\" {\n  import \"../greeter\" { inputs = { name = \"x\" } }\n}\n",
+		"b/Alphasfile":       "package \"b\" {\n  import \"../greeter\" { inputs = { name = \"x\" } }\n}\n",
+		"greeter/Alphasfile": pkgGreeter,
+	})
+	_, err := LoadTree(root)
+	if err == nil || !strings.Contains(err.Error(), `package b sets input "name" of package greeter, but package a already sets it at`) || !strings.Contains(err.Error(), "an input has one source, so set it where the entrypoint imports package greeter") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestOpen_entrypointSetsAnInputOthersAlsoSet(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":         "import \"./greeter\" { inputs = { name = \"x\" } }\nimport \"./a\" {}\n",
+		"a/Alphasfile":       "package \"a\" {\n  import \"../greeter\" { inputs = { name = \"x\" } }\n}\n",
+		"greeter/Alphasfile": pkgGreeter,
+	})
+	af := openTree(t, root)
+	if got := fmt.Sprint(svcByName(af, "greeter/greeter/greeter").Runtime.Vars["text"]); got != "hello x" {
+		t.Errorf("text = %q", got)
+	}
+}
+
+func TestLoadTree_entrypointInputConflictsWithAnImport(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":         "import \"./greeter\" { inputs = { name = \"y\" } }\nimport \"./a\" {}\n",
+		"a/Alphasfile":       "package \"a\" {\n  import \"../greeter\" { inputs = { name = \"x\" } }\n}\n",
+		"greeter/Alphasfile": pkgGreeter,
+	})
+	_, err := LoadTree(root)
+	if err == nil || !strings.Contains(err.Error(), `Alphasfile:1`) || !strings.Contains(err.Error(), `package greeter runs with input "name" = "y", but package a needs "x"`) || !strings.Contains(err.Error(), `set inputs = { name = "x" } here`) {
 		t.Fatalf("got %v", err)
 	}
 }

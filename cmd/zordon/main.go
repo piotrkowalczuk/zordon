@@ -367,19 +367,37 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		},
 	}
 
-	// update
-	updateFlags := ff.NewFlagSet("update").SetParent(rootFlags)
-	updateCmd := &ff.Command{
+	// pkg (parent + nested get/update)
+	pkgFlags := ff.NewFlagSet("pkg").SetParent(rootFlags)
+	pkgCmd := &ff.Command{
+		Name:      "pkg",
+		Usage:     "zordon pkg <get|update> [args]",
+		ShortHelp: "manage the versions of the remote repositories the Alphasfile imports",
+		Flags:     pkgFlags,
+	}
+	pkgGetFlags := ff.NewFlagSet("get").SetParent(pkgFlags)
+	pkgGetCmd := &ff.Command{
+		Name:      "get",
+		Usage:     "zordon pkg get <repo>@<ref>",
+		ShortHelp: "require a repository at a branch, tag or commit (in the zordon.mod above the Alphasfile, or in the Alphasfile when there is none) and lock it",
+		Flags:     pkgGetFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runPkgGet(stdio.Stdout, zfs.ZordonHome(home.Path()), args)
+		},
+	}
+	pkgUpdateFlags := ff.NewFlagSet("update").SetParent(pkgFlags)
+	pkgUpdateCmd := &ff.Command{
 		Name:      "update",
-		Usage:     "zordon update [repo ...]",
-		ShortHelp: "re-resolve the remote repositories the Alphasfile imports (all, or the named ones) to their newest commits and rewrite zordon.lock",
-		Flags:     updateFlags,
+		Usage:     "zordon pkg update [repo ...]",
+		ShortHelp: "re-resolve the required repositories (all, or the named ones) to their newest commits and rewrite zordon.lock",
+		Flags:     pkgUpdateFlags,
 		Exec: func(ctx context.Context, args []string) error {
 			return runUpdate(stdio.Stdout, zfs.ZordonHome(home.Path()), args)
 		},
 	}
+	pkgCmd.Subcommands = []*ff.Command{pkgGetCmd, pkgUpdateCmd}
 
-	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wsCmd, getCmd, planCmd, cleanCmd, updateCmd, mcpCmd)
+	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wsCmd, getCmd, planCmd, cleanCmd, pkgCmd, mcpCmd)
 	return rootCmd, agent
 }
 
