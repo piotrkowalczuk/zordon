@@ -41,6 +41,7 @@ type Tree struct {
 	active map[string]bool
 
 	packages      map[string]*pkgInstance
+	provisions    []*provision
 	entryServices []*serviceBlock
 	// disabled are the source ranges of blocks switched off by enabled; the
 	// static passes over service bodies skip them.
@@ -416,6 +417,8 @@ func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, res re
 	switch {
 	case ib.InputsRange != (hcl.Range{}) || ib.Features != nil:
 		return fmt.Errorf("%s: %s %q: inputs and features are passed to a package directory, not to a fragment file", ib.DefRange, ib.keyword, ib.Path)
+	case len(ib.Provides) > 0:
+		return fmt.Errorf("%s: %s %q: provide fills a slot a package collects, not a fragment file", ib.Provides[0].DefRange, ib.keyword, ib.Path)
 	case f.block != nil:
 		return fmt.Errorf("%s: %s %q: a package depends on other packages, not on a fragment's modules; move the modules into this package or into a package of their own", ib.DefRange, ib.keyword, ib.Path)
 	case ib.Modules == nil:
@@ -622,6 +625,9 @@ func (t *Tree) finish() error {
 			t.addEdges(mb.Name)
 		}
 	}
+	if err := t.gatherProvisions(); err != nil {
+		return err
+	}
 	return t.checkGated()
 }
 
@@ -800,7 +806,7 @@ func decodeFile(name string, src []byte) (*rootBlock, error) {
 		return nil, err
 	}
 	for _, pb := range root.Packages {
-		if err := pb.decodeFeatures(); err != nil {
+		if err := pb.decodeDescribed(); err != nil {
 			return nil, err
 		}
 	}

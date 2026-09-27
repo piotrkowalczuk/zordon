@@ -1,10 +1,14 @@
-# A company stack: Caddy with both of its features. It is a package too, so
-# a working place runs the whole stack from an Alphasfile of two lines:
+# A company stack: a shop and a blog, each registered with Caddy, and CoreDNS
+# answering the zone. It is a package too, so a working place runs the whole
+# stack from an Alphasfile of two lines:
 #
 #   require "github.com/piotrkowalczuk/zordon" { ref = "main" }
 #   import "github.com/piotrkowalczuk/zordon/examples/package" {}
 package "stack" {
+  import "./shop" {}
+  import "./blog" {}
+
   import "./caddy" {
-    features = ["hugo", "coredns"]
+    features = ["dns"]
   }
 }

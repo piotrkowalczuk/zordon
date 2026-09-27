@@ -1,24 +1,21 @@
-# Caddy in front of whatever its features switch on. Each feature imports
-# the package it serves and drops site snippets into the Caddyfile. With both
-# features, Hugo is served on the host hugo.<domain>, which CoreDNS resolves.
+# Caddy routes every site that registers with it by host name. It knows no
+# site itself: each one provides an entry to the sites slot.
 package "caddy" {
   inputs = {
-    # null picks a free port; 80 gives http://hugo.test/ in a browser.
+    # null picks a free port; 80 gives http://shop.test/ in a browser.
     http_port = null
-    # The DNS zone the hosts live in; passed on to coredns.
+    # The DNS zone of feature dns; passed on to coredns.
     domain = "test"
   }
   features = {
-    hugo    = "Serves the Hugo site through Caddy."
-    coredns = "Routes hugo.<domain> by host name, resolved through CoreDNS."
+    dns = "Adds /dns/healthz, answered by looking up health.<domain> in CoreDNS: proof that the zone resolves."
   }
-
-  import "../hugo" {
-    enabled = features.hugo
+  collect = {
+    sites = "Hosts to route, each { host = \"shop.test\", upstream = \"127.0.0.1:8080\" }."
   }
 
   import "../coredns" {
-    enabled = features.coredns
+    enabled = features.dns
     inputs  = { zone = inputs.domain }
   }
 
@@ -38,9 +35,7 @@ package "caddy" {
         admin = net::pickport()
       }
 
-      print = (features.hugo && features.coredns ? "http://hugo.${inputs.domain}:${self.vars.http}/  (caddy routes the host to hugo)" :
-        features.hugo ? "http://127.0.0.1:${self.vars.http}/  (caddy, proxies to hugo)" :
-      "http://127.0.0.1:${self.vars.http}/  (caddy)")
+      print = "http://127.0.0.1:${self.vars.http}/  (caddy)%{for name, s in collected.sites} http://${s.host}:${self.vars.http}/%{endfor}"
 
       # Caddy autosaves its config under the user's config dir; keep it in the
       # service's own state instead.
@@ -64,34 +59,17 @@ package "caddy" {
         EOT
       }
 
-      file "site-base" {
-        path = "${fs::etc()}/sites/00-base.caddy"
-        body = "# site snippets switched on by features\n"
-      }
-
-      # Without DNS there is no host to route on, so Hugo takes every path.
-      file "site-hugo" {
-        enabled = features.hugo && !features.coredns
-        path    = "${fs::etc()}/sites/10-hugo.caddy"
-        body    = "reverse_proxy /* 127.0.0.1:${package.hugo.module.hugo.service.go.hugo.vars.port}\n"
-      }
-
-      file "site-hugo-host" {
-        enabled = features.hugo && features.coredns
-        path    = "${fs::etc()}/sites/10-hugo-host.caddy"
-        body    = <<-EOT
-          @hugo host hugo.${inputs.domain}
-          handle @hugo {
-            reverse_proxy 127.0.0.1:${package.hugo.module.hugo.service.go.hugo.vars.port}
-          }
-        EOT
+      # One host matcher per provided site.
+      file "site-routes" {
+        path = "${fs::etc()}/sites/10-routes.caddy"
+        body = "# sites provided to caddy\n%{for name, s in collected.sites}@${name} host ${s.host}\nhandle @${name} {\n  reverse_proxy ${s.upstream}\n}\n%{endfor}"
       }
 
       # Resolves health.<zone> through CoreDNS, which answers 127.0.0.1, and
       # so proxies back to Caddy's own /healthz.
-      file "site-coredns" {
-        enabled = features.coredns
-        path    = "${fs::etc()}/sites/20-coredns.caddy"
+      file "site-dns" {
+        enabled = features.dns
+        path    = "${fs::etc()}/sites/20-dns.caddy"
         body    = <<-EOT
           handle_path /dns/* {
             reverse_proxy {

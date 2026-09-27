@@ -8,115 +8,88 @@ import (
 	"testing"
 )
 
-// examples/package: the stack imports caddy with both features, which
-// requires hugo and coredns; caddy on its own keeps its gated blocks off.
-// Resolved through the real files, no process spawned.
+// examples/package: shop and blog each provide a site to caddy, which
+// routes them by host; the stack turns on caddy's dns feature, which imports
+// coredns. Resolved through the real files, no process spawned.
 func TestExamplePackageResolves(t *testing.T) {
-	root, err := filepath.Abs("../../examples/package/Alphasfile")
-	if err != nil {
-		t.Fatal(err)
-	}
-	af := openTree(t, root)
-	if got := serviceNames(af); !equalStrs(got, []string{"caddy/caddy/caddy", "hugo/hugo/hugo", "coredns/coredns/coredns"}) {
+	af := openTree(t, examplePackage(t, "Alphasfile"))
+	if got := serviceNames(af); !equalStrs(got, []string{"shop/shop/hugo", "caddy/caddy/caddy", "coredns/coredns/coredns", "blog/blog/hugo"}) {
 		t.Fatalf("services = %v", got)
 	}
 	caddy := svcByName(af, "caddy/caddy/caddy")
-	hugo := svcByName(af, "hugo/hugo/hugo")
 	coredns := svcByName(af, "coredns/coredns/coredns")
-	files := map[string]string{}
-	for _, f := range caddy.Runtime.Files {
-		files[f.Name] = f.Body
+	routes := caddyFiles(caddy)["site-routes"]
+	for _, site := range []string{"shop", "blog"} {
+		port := svcByName(af, site+"/"+site+"/hugo").Runtime.Vars["port"]
+		want := fmt.Sprintf("@%[1]s host %[1]s.test\nhandle @%[1]s {\n  reverse_proxy 127.0.0.1:%[2]v\n}\n", site, port)
+		if !strings.Contains(routes, want) {
+			t.Errorf("site-routes = %q, want the %s.test host routed to its port", routes, site)
+		}
 	}
-	if body := files["site-hugo-host"]; !strings.Contains(body, "@hugo host hugo.test") || !strings.Contains(body, fmt.Sprintf("127.0.0.1:%v", hugo.Runtime.Vars["port"])) {
-		t.Errorf("site-hugo-host = %q, want the hugo.test host routed to hugo's port", body)
-	}
-	if _, pathRoute := files["site-hugo"]; pathRoute {
-		t.Error("with DNS, hugo is routed by host, not by path")
-	}
-	if body := files["site-coredns"]; !strings.Contains(body, "name health.test") || !strings.Contains(body, fmt.Sprintf("resolvers 127.0.0.1:%v", coredns.Runtime.Vars["dns"])) {
-		t.Errorf("site-coredns = %q", body)
+	if body := caddyFiles(caddy)["site-dns"]; !strings.Contains(body, "name health.test") || !strings.Contains(body, fmt.Sprintf("resolvers 127.0.0.1:%v", coredns.Runtime.Vars["dns"])) {
+		t.Errorf("site-dns = %q", body)
 	}
 }
 
 func TestExamplePackageCaddyAlone(t *testing.T) {
-	root, err := filepath.Abs("../../examples/package/caddy/Alphasfile")
-	if err != nil {
-		t.Fatal(err)
-	}
-	af := openTree(t, root)
+	af := openTree(t, examplePackage(t, "caddy/Alphasfile"))
 	if got := serviceNames(af); !equalStrs(got, []string{"caddy/caddy/caddy"}) {
-		t.Fatalf("services = %v, want caddy alone: features are off", got)
-	}
-	got := fileNames(svcByName(af, "caddy/caddy/caddy"))
-	sort.Strings(got)
-	if !equalStrs(got, []string{"caddyfile", "site-base"}) {
-		t.Errorf("files = %v", got)
-	}
-}
-
-func TestExamplePackagePrintsWhereHugoIs(t *testing.T) {
-	stack, err := filepath.Abs("../../examples/package/Alphasfile")
-	if err != nil {
-		t.Fatal(err)
-	}
-	af := openTree(t, stack)
-	caddy, hugo := svcByName(af, "caddy/caddy/caddy"), svcByName(af, "hugo/hugo/hugo")
-	if want := fmt.Sprintf("http://hugo.test:%v/  (caddy routes the host to hugo)", caddy.Runtime.Vars["http"]); caddy.Runtime.Print != want {
-		t.Errorf("caddy print = %q, want %q", caddy.Runtime.Print, want)
-	}
-	if want := fmt.Sprintf("http://127.0.0.1:%v/  (hugo, direct)", hugo.Runtime.Vars["port"]); hugo.Runtime.Print != want {
-		t.Errorf("hugo print = %q, want %q", hugo.Runtime.Print, want)
-	}
-
-	alone, err := filepath.Abs("../../examples/package/caddy/Alphasfile")
-	if err != nil {
-		t.Fatal(err)
-	}
-	caddy = svcByName(openTree(t, alone), "caddy/caddy/caddy")
-	if want := fmt.Sprintf("http://127.0.0.1:%v/  (caddy)", caddy.Runtime.Vars["http"]); caddy.Runtime.Print != want {
-		t.Errorf("caddy alone print = %q, want %q", caddy.Runtime.Print, want)
-	}
-}
-
-func TestExamplePackageHugoWithoutDNS(t *testing.T) {
-	caddyDir, err := filepath.Abs("../../examples/package/caddy")
-	if err != nil {
-		t.Fatal(err)
-	}
-	root := writeTree(t, t.TempDir(), map[string]string{"Alphasfile": `import "` + caddyDir + `" { features = ["hugo"] }`})
-	af := openTree(t, root)
-	if got := serviceNames(af); !equalStrs(got, []string{"caddy/caddy/caddy", "hugo/hugo/hugo"}) {
-		t.Fatalf("services = %v", got)
+		t.Fatalf("services = %v, want caddy alone: features are off and nobody provides a site", got)
 	}
 	caddy := svcByName(af, "caddy/caddy/caddy")
 	got := fileNames(caddy)
 	sort.Strings(got)
-	if !equalStrs(got, []string{"caddyfile", "site-base", "site-hugo"}) {
-		t.Errorf("files = %v, want the path route and no host route without DNS", got)
+	if !equalStrs(got, []string{"caddyfile", "site-routes"}) {
+		t.Errorf("files = %v", got)
 	}
-	if want := fmt.Sprintf("http://127.0.0.1:%v/  (caddy, proxies to hugo)", caddy.Runtime.Vars["http"]); caddy.Runtime.Print != want {
-		t.Errorf("print = %q, want %q", caddy.Runtime.Print, want)
+	if routes := caddyFiles(caddy)["site-routes"]; strings.Contains(routes, "host") {
+		t.Errorf("site-routes = %q, want no host without a provided site", routes)
+	}
+}
+
+func TestExamplePackageShopAlone(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{"Alphasfile": `import "` + filepath.Dir(examplePackage(t, "shop/Alphasfile")) + `" {}`})
+	af := openTree(t, root)
+	if got := serviceNames(af); !equalStrs(got, []string{"shop/shop/hugo", "caddy/caddy/caddy"}) {
+		t.Fatalf("services = %v, want the shop and the caddy it registers with", got)
+	}
+	routes := caddyFiles(svcByName(af, "caddy/caddy/caddy"))["site-routes"]
+	if !strings.Contains(routes, "@shop host shop.test") || strings.Contains(routes, "blog") {
+		t.Errorf("site-routes = %q, want the shop only", routes)
+	}
+}
+
+func TestExamplePackagePrintsTheSites(t *testing.T) {
+	af := openTree(t, examplePackage(t, "Alphasfile"))
+	caddy := svcByName(af, "caddy/caddy/caddy")
+	http := caddy.Runtime.Vars["http"]
+	if want := fmt.Sprintf("http://127.0.0.1:%[1]v/  (caddy) http://blog.test:%[1]v/ http://shop.test:%[1]v/", http); caddy.Runtime.Print != want {
+		t.Errorf("caddy print = %q, want %q", caddy.Runtime.Print, want)
+	}
+	shop := svcByName(af, "shop/shop/hugo")
+	if want := fmt.Sprintf("http://127.0.0.1:%v/  (shop, direct)", shop.Runtime.Vars["port"]); shop.Runtime.Print != want {
+		t.Errorf("shop print = %q, want %q", shop.Runtime.Print, want)
 	}
 }
 
 func TestExamplePackageResolverAndPort(t *testing.T) {
-	caddyDir, err := filepath.Abs("../../examples/package/caddy")
-	if err != nil {
-		t.Fatal(err)
-	}
-	corednsDir := filepath.Join(filepath.Dir(caddyDir), "coredns")
 	root := writeTree(t, t.TempDir(), map[string]string{"Alphasfile": `
-import "` + caddyDir + `" {
-  features = ["hugo", "coredns"]
+import "` + filepath.Dir(examplePackage(t, "Alphasfile")) + `" {}
+import "` + filepath.Dir(examplePackage(t, "caddy/Alphasfile")) + `" {
+  features = ["dns"]
   inputs   = { http_port = 80 }
 }
-import "` + corednsDir + `" {
+import "` + filepath.Dir(examplePackage(t, "coredns/Alphasfile")) + `" {
   features = ["resolver"]
 }
 `})
 	af := openTree(t, root)
-	if got := fmt.Sprint(svcByName(af, "caddy/caddy/caddy").Runtime.Vars["http"]); got != "80" {
+	caddy := svcByName(af, "caddy/caddy/caddy")
+	if got := fmt.Sprint(caddy.Runtime.Vars["http"]); got != "80" {
 		t.Errorf("caddy http = %s, want the http_port input", got)
+	}
+	if !strings.Contains(caddy.Runtime.Print, "http://shop.test:80/") {
+		t.Errorf("caddy print = %q", caddy.Runtime.Print)
 	}
 	sudo := svcByName(af, "coredns/coredns/coredns").Runtime.Sudo
 	if len(sudo) != 1 || sudo[0].Name != "resolver" || !strings.Contains(sudo[0].Apply, "/etc/resolver/test") || !strings.Contains(sudo[0].Apply, "port 49564") {
@@ -124,12 +97,38 @@ import "` + corednsDir + `" {
 	}
 }
 
+func TestExamplePackageEntrypointMustKeepTheStacksFeature(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{"Alphasfile": `
+import "` + filepath.Dir(examplePackage(t, "Alphasfile")) + `" {}
+import "` + filepath.Dir(examplePackage(t, "caddy/Alphasfile")) + `" {
+  inputs = { http_port = 80 }
+}
+`})
+	_, err := LoadTree(root)
+	if err == nil || !strings.Contains(err.Error(), `package caddy runs with feature "dns" off, but package stack needs it`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestExamplePackageResolverIsOffByDefault(t *testing.T) {
-	stack, err := filepath.Abs("../../examples/package/Alphasfile")
+	if sudo := svcByName(openTree(t, examplePackage(t, "Alphasfile")), "coredns/coredns/coredns").Runtime.Sudo; len(sudo) != 0 {
+		t.Errorf("sudo = %+v, want none: the resolver needs root and stays off unless asked for", sudo)
+	}
+}
+
+func examplePackage(t *testing.T, rel string) string {
+	t.Helper()
+	p, err := filepath.Abs(filepath.Join("../../examples/package", rel))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sudo := svcByName(openTree(t, stack), "coredns/coredns/coredns").Runtime.Sudo; len(sudo) != 0 {
-		t.Errorf("sudo = %+v, want none: the resolver needs root and stays off unless asked for", sudo)
+	return p
+}
+
+func caddyFiles(s *Service) map[string]string {
+	out := map[string]string{}
+	for _, f := range s.Runtime.Files {
+		out[f.Name] = f.Body
 	}
+	return out
 }

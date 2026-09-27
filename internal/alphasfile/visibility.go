@@ -40,6 +40,8 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 				found = moduleRefError(tree, sb, st.SrcRange, name)
 			case "package":
 				found = packageRefError(tree, sb, st.SrcRange, name)
+			case "collected":
+				found = collectedRefError(tree, sb, st.SrcRange, name)
 			}
 			return nil
 		})
@@ -63,6 +65,18 @@ func moduleRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) err
 	}
 	scope, keyword, where := refScope(sb)
 	return fmt.Errorf("%s: module.%s is not visible in %s; add %s %q { modules = [%q] } %s", at, name, scope, keyword, localRel(sb.file.dir, owner.path), name, where)
+}
+
+func collectedRefError(tree *Tree, sb *serviceBlock, at hcl.Range, slot string) error {
+	p, inPkg := packageOf(sb.module)
+	if !inPkg {
+		return fmt.Errorf("%s: collected.%s: only a package reads what it collects; declare collect = { %s = \"...\" } in a package block", at, slot, slot)
+	}
+	collects := tree.packages[p].file.block.collects
+	if _, ok := collects[slot]; !ok {
+		return fmt.Errorf("%s: collected.%s: package %s does not collect %q (collects: %s)", at, slot, p, slot, listOrNone(sortedKeys(collects)))
+	}
+	return nil
 }
 
 func packageRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) error {

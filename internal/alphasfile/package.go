@@ -21,35 +21,45 @@ type pkgNeed struct {
 	set   *pkgSettings
 }
 
-// decodeFeatures reads a package's features: a map of name to description.
-func (pb *packageBlock) decodeFeatures() error {
-	pb.features = map[string]string{}
-	if pb.FeaturesRange == (hcl.Range{}) {
-		return nil
+// decodeDescribed reads a package's features and collect slots: each a map
+// of name to description.
+func (pb *packageBlock) decodeDescribed() error {
+	var err error
+	pb.features, err = described(pb.Features, pb.FeaturesRange, "feature", fmt.Sprintf(`features of package %q map each name to what it turns on, such as { tls = "Serves HTTPS with a local CA" }`, pb.Name), "what it turns on, so whoever imports the package can decide", pb.Name)
+	if err != nil {
+		return err
 	}
-	shape := fmt.Sprintf(`features of package %q map each name to what it turns on, such as { tls = "Serves HTTPS with a local CA" }`, pb.Name)
-	v, diags := pb.Features.Value(nil)
+	pb.collects, err = described(pb.Collect, pb.CollectRange, "slot", fmt.Sprintf(`collect of package %q maps each slot to the entries it takes, such as { sites = "Virtual hosts: { host, upstream }" }`, pb.Name), "the entries it takes and their attributes, so importers know what to provide", pb.Name)
+	return err
+}
+
+func described(expr hcl.Expression, at hcl.Range, what, shape, needs, pkg string) (map[string]string, error) {
+	out := map[string]string{}
+	if at == (hcl.Range{}) {
+		return out, nil
+	}
+	v, diags := expr.Value(nil)
 	if diags.HasErrors() {
-		return fmt.Errorf("%s: %s: %s", pb.FeaturesRange, shape, diags.Error())
+		return nil, fmt.Errorf("%s: %s: %s", at, shape, diags.Error())
 	}
 	if v.IsNull() {
-		return nil
+		return out, nil
 	}
 	if !v.Type().IsObjectType() && !v.Type().IsMapType() {
-		return fmt.Errorf("%s: %s", pb.FeaturesRange, shape)
+		return nil, fmt.Errorf("%s: %s", at, shape)
 	}
 	vals := v.AsValueMap()
 	for _, name := range sortedKeys(vals) {
 		if !moduleNameRe.MatchString(name) {
-			return fmt.Errorf("%s: feature %q of package %q: use letters, digits, '_' or '-' and start with a letter", pb.FeaturesRange, name, pb.Name)
+			return nil, fmt.Errorf("%s: %s %q of package %q: use letters, digits, '_' or '-' and start with a letter", at, what, name, pkg)
 		}
 		d := vals[name]
 		if d.IsNull() || !d.Type().Equals(cty.String) || strings.TrimSpace(d.AsString()) == "" {
-			return fmt.Errorf("%s: feature %q of package %q needs a description of what it turns on, so whoever imports the package can decide", pb.FeaturesRange, name, pb.Name)
+			return nil, fmt.Errorf("%s: %s %q of package %q needs a description of %s", at, what, name, pkg, needs)
 		}
-		pb.features[name] = d.AsString()
+		out[name] = d.AsString()
 	}
-	return nil
+	return out, nil
 }
 
 // passedSettings evaluates what an import passes to a package. Inputs are

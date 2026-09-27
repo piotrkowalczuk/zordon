@@ -214,7 +214,7 @@ import "./caddy" "edge" {
 | rule | behavior |
 |---|---|
 | file | a package's `Alphasfile` holds exactly one `package "<name>" {}` block and nothing outside it |
-| block content | `inputs`, `features`, `import`, `require`, `toolchain` and `module` blocks; `env`, `dotenv`, `sysenv`, `workspace` and services outside a module are errors |
+| block content | `inputs`, `features`, `collect`, `import`, `require`, `toolchain` and `module` blocks; `env`, `dotenv`, `sysenv`, `workspace` and services outside a module are errors |
 | target | an import whose path resolves to a directory whose `Alphasfile` holds a package block; a directory without one is an error |
 | name | the alias label when given, else the package block's label; unique among packages in the stack |
 | identity | a module of a package is `package.<p>.module.<m>`; its services are `package.<p>.module.<m>.service.<tc>.<svc>`, shown as `<p>/<m>/<svc>` |
@@ -266,6 +266,51 @@ package "coredns" {
 
 A service's process gets no host variables unless the entrypoint passes them with `sysenv`.
 Without `HOME`, zordon points Go's caches at `$ZORDON_HOME/go`, so a package builds without anything from the host.
+
+### Collect and provide
+
+Inputs and features configure a package once, before planning.
+A slot takes entries from many importers at once, evaluated with the services, so an entry may carry another service's port.
+
+```hcl
+# caddy/Alphasfile
+package "caddy" {
+  collect = { sites = "Hosts to route, each { host, upstream }." }
+
+  module "caddy" {
+    service "go" "caddy" {
+      file "routes" {
+        path = "${fs::etc()}/routes.caddy"
+        body = "%{for name, s in collected.sites}@${name} host ${s.host}\nhandle @${name} {\n  reverse_proxy ${s.upstream}\n}\n%{endfor}"
+      }
+    }
+  }
+}
+
+# shop/Alphasfile
+package "shop" {
+  import "../caddy" {
+    provide "sites" "shop" {
+      host     = "shop.test"
+      upstream = "127.0.0.1:${module.shop.service.go.hugo.vars.port}"
+    }
+  }
+
+  module "shop" { … }
+}
+```
+
+| rule | behavior |
+|---|---|
+| `collect = { <slot> = "<description>" }` | declares the package's slots; the description says what an entry holds and is required |
+| `provide "<slot>" "<key>" { <attr> = <expr> … }` | inside any import of a package, at the entrypoint's top level, in a package block or in a module; attributes only |
+| `collected.<slot>` | inside the collecting package, a map of key to entry, each an object of the provided attributes; empty when nobody provides |
+| evaluation | entries are evaluated in the scope of the import that holds them, with the other producers; a reference to `collected.<slot>` waits for every entry of the slot |
+| keys | one source per key; the same key from two imports is an error naming both |
+| unknown slot | `provide` or `collected.<slot>` naming a slot the package does not collect is an error listing the declared ones |
+| switched-off import | an import removed by `enabled`, or outside the stack, provides nothing |
+| fragment | `provide` on a fragment import is an error |
+| `collected` outside a package | an error |
 
 ### Remote imports
 

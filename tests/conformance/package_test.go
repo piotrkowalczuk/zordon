@@ -1,6 +1,7 @@
 // Package conformance, driven through `zordon plan` (static, no alpha): a
 // package's features switch its services on and off, its inputs reach the
-// rendered config, and an identity import resolves through zordon.work.
+// rendered config, provided entries reach the package that collects them,
+// and an identity import resolves through zordon.work.
 package conformance_test
 
 import (
@@ -51,6 +52,48 @@ func TestPlan_packageFeaturesChangeTheStack(t *testing.T) {
 				t.Errorf("extra rendered = %v, want %v:\n%s", got, c.extra, out)
 			}
 		})
+	}
+}
+
+func TestPlan_provideReachesTheCollectingPackage(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.WriteFile("Alphasfile", "import \"./shop\" {}\nimport \"./blog\" {}\n")
+	p.WriteFile("proxy/Alphasfile", `
+package "proxy" {
+  collect = { sites = "Hosts to route: { host, port }" }
+
+  module "proxy" {
+    service "go" "proxy" {
+      package = "example.com/proxy@v0.0.0"
+      file "routes" {
+        path = "/tmp/routes"
+        body = "%{for name, s in collected.sites}${s.host}=${s.port};%{endfor}"
+      }
+    }
+  }
+}
+`)
+	for name, port := range map[string]string{"shop": "8081", "blog": "8082"} {
+		p.WriteFile(name+"/Alphasfile", `
+package "`+name+`" {
+  import "../proxy" {
+    provide "sites" "`+name+`" {
+      host = "`+name+`.test"
+      port = module.site.service.go.site.vars.port
+    }
+  }
+
+  module "site" {
+    service "go" "site" {
+      package = "example.com/site@v0.0.0"
+      vars    = { port = `+port+` }
+    }
+  }
+}
+`)
+	}
+	if out := planOK(t, p); !strings.Contains(out, `body = "blog.test=8082;shop.test=8081;"`) {
+		t.Errorf("provided sites missing from the collecting package:\n%s", out)
 	}
 }
 

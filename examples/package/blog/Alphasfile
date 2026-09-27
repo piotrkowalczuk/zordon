@@ -1,10 +1,19 @@
-# A static site served by `hugo server`, generated from file blocks.
-package "hugo" {
+# A blog: a static site served by `hugo server`, generated from file blocks.
+# It registers itself with Caddy as blog.<domain>.
+package "blog" {
   inputs = {
-    title = "zordon package example"
+    domain = "test"
+    title  = "zordon blog"
   }
 
-  module "hugo" {
+  import "../caddy" {
+    provide "sites" "blog" {
+      host     = "blog.${inputs.domain}"
+      upstream = "127.0.0.1:${module.blog.service.go.hugo.vars.port}"
+    }
+  }
+
+  module "blog" {
     service "go" "hugo" {
       git {
         url = "github.com/gohugoio/hugo"
@@ -19,7 +28,7 @@ package "hugo" {
         port = net::pickport()
       }
 
-      print = "http://127.0.0.1:${self.vars.port}/  (hugo, direct)"
+      print = "http://127.0.0.1:${self.vars.port}/  (blog, direct)"
 
       file "config" {
         path = "${fs::etc()}/site/hugo.toml"
@@ -37,7 +46,7 @@ package "hugo" {
 
       file "layout" {
         path = "${fs::etc()}/site/layouts/index.html"
-        body = "<h1>{{ .Site.Title }}</h1><p>zordon-hugo-ok</p>\n"
+        body = "<h1>{{ .Site.Title }}</h1><p>zordon-blog-ok</p>\n"
       }
 
       runtime {

@@ -19,7 +19,7 @@ The ref is a branch, a tag or a commit.
 
 ```hcl
 import "github.com/piotrkowalczuk/zordon/examples/package/caddy" {
-  features = ["hugo"]
+  features = ["dns"]
 }
 ```
 
@@ -28,8 +28,8 @@ The path is the repository followed by the package's directory inside it, with n
 ## 3. Pass inputs if the package takes any
 
 ```hcl
-import "github.com/piotrkowalczuk/zordon/examples/package/hugo" {
-  inputs = { title = "My site" }
+import "github.com/piotrkowalczuk/zordon/examples/package/shop" {
+  inputs = { title = "My shop" }
 }
 ```
 

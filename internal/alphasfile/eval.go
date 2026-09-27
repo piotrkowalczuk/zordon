@@ -114,6 +114,9 @@ type resolver struct {
 	// federation.
 	serviceByModule map[string]map[string]map[string]cty.Value
 
+	// collected holds evaluated provide entries: package, slot, key.
+	collected map[string]map[string]map[string]cty.Value
+
 	// toolchainCty is the per-module projection of `toolchain { <lang> {
 	// ... } }` declarations into cty: `toolchain.<lang>.ready` etc. resolve
 	// to the canonical barrier-ref strings alpha then turns into real
@@ -232,7 +235,7 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	// not a whole-service edge. A.env→B.vars and B.env→A.vars are
 	// independent and resolve cleanly; only a literal A.vars→B.vars
 	// while B.vars→A.vars is a cycle, and that's a real bug.
-	g, err := newGraph(services, parentKnown)
+	g, err := newGraph(services, r.tree.provisions, parentKnown)
 	if err != nil {
 		return nil, err
 	}
@@ -253,6 +256,12 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	r := p.r
 	root := r.root
 	for _, n := range p.order {
+		if n.kind == kindProvide {
+			if err := r.evalProvision(n.prov); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		st := p.states[n.svcID]
 		if err := r.evalProducerNode(n, st); err != nil {
 			return nil, fmt.Errorf("%s.%s: %w", n.svcID, producerLabel(n), err)
@@ -719,6 +728,31 @@ func (r *resolver) evalProducerNode(n *node, st *svcState) error {
 		st.self["file"] = cty.ObjectVal(st.fileVals)
 	}
 	r.publishSelf(st)
+	return nil
+}
+
+// evalProvision evaluates one provide entry in the scope of its import and
+// files it under collected.<slot>.<key> of the package it provides to.
+func (r *resolver) evalProvision(p *provision) error {
+	ctx := r.ctxWith(nil, srcDirs{module: p.scope})
+	obj := make(map[string]cty.Value, len(p.attrs))
+	for name, attr := range p.attrs {
+		v, diags := attr.Expr.Value(ctx)
+		if diags.HasErrors() {
+			return fmt.Errorf("%s: provide %q %q: %s", p.block.DefRange, p.slot, p.key, diags.Error())
+		}
+		obj[name] = v
+	}
+	if r.collected == nil {
+		r.collected = map[string]map[string]map[string]cty.Value{}
+	}
+	if r.collected[p.pkg] == nil {
+		r.collected[p.pkg] = map[string]map[string]cty.Value{}
+	}
+	if r.collected[p.pkg][p.slot] == nil {
+		r.collected[p.pkg][p.slot] = map[string]cty.Value{}
+	}
+	r.collected[p.pkg][p.slot][p.key] = cty.ObjectVal(obj)
 	return nil
 }
 
@@ -1699,6 +1733,16 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 			pkgs[p] = cty.ObjectVal(map[string]cty.Value{"module": cty.ObjectVal(mods)})
 		}
 		vars["package"] = cty.ObjectVal(pkgs)
+	}
+	if pkg := r.tree.packages[selfPkg]; inPkg && pkg != nil && len(pkg.file.block.collects) > 0 {
+		slots := make(map[string]cty.Value, len(pkg.file.block.collects))
+		for slot := range pkg.file.block.collects {
+			slots[slot] = cty.EmptyObjectVal
+			if entries := r.collected[selfPkg][slot]; len(entries) > 0 {
+				slots[slot] = cty.ObjectVal(copyCtyMap(entries))
+			}
+		}
+		vars["collected"] = cty.ObjectVal(slots)
 	}
 	if s := r.tree.settingsFor(dirs.module); s != nil {
 		if len(s.inputs) > 0 {

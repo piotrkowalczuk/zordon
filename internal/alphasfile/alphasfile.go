@@ -722,20 +722,31 @@ type rootBlock struct {
 // features; any other import of a package configures it when the
 // entrypoint does not, and must be satisfied by the entrypoint when it does.
 type importBlock struct {
-	Path         string         `hcl:"path,label"`
-	Modules      []string       `hcl:"modules,optional"`
-	Inputs       hcl.Expression `hcl:"inputs,optional"`
-	InputsRange  hcl.Range      `hcl:"inputs,attr_range"`
-	Features     []string       `hcl:"features,optional"`
-	Enabled      hcl.Expression `hcl:"enabled,optional"`
-	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
-	Git          *gitBlock      `hcl:"git,block"`
-	DefRange     hcl.Range      `hcl:",def_range"`
+	Path         string          `hcl:"path,label"`
+	Modules      []string        `hcl:"modules,optional"`
+	Inputs       hcl.Expression  `hcl:"inputs,optional"`
+	InputsRange  hcl.Range       `hcl:"inputs,attr_range"`
+	Features     []string        `hcl:"features,optional"`
+	Enabled      hcl.Expression  `hcl:"enabled,optional"`
+	EnabledRange hcl.Range       `hcl:"enabled,attr_range"`
+	Provides     []*provideBlock `hcl:"provide,block"`
+	Git          *gitBlock       `hcl:"git,block"`
+	DefRange     hcl.Range       `hcl:",def_range"`
 
 	keyword string
 	// alias is the optional second label; HCL block schemas have a fixed
 	// label count, so decodeFile lifts it off before decoding.
 	alias string
+}
+
+// provideBlock contributes one entry to a slot the imported package
+// collects: `provide "<slot>" "<key>" { <attr> = <expr> ... }`. Its values
+// are evaluated with the other producers, so they may reference services.
+type provideBlock struct {
+	Slot     string    `hcl:"slot,label"`
+	Key      string    `hcl:"key,label"`
+	Body     hcl.Body  `hcl:",remain"`
+	DefRange hcl.Range `hcl:",def_range"`
 }
 
 // requireBlock pins a repository that remote imports name:
@@ -751,8 +762,10 @@ type requireBlock struct {
 // ... module "<m>" { ... } }`. Inputs map each name to its default, or to
 // `required`; they are read as inputs.<n>. Features map each name to a
 // description of what it turns on; they are off unless an import turns them
-// on, and are read as features.<n>. The package's toolchain pins every
-// module that has none of its own.
+// on, and are read as features.<n>. Collect maps each slot to a description
+// of the entries it takes; importers fill it with provide blocks, and the
+// package reads it as collected.<slot>, a map of key to entry. The
+// package's toolchain pins every module that has none of its own.
 type packageBlock struct {
 	Name          string          `hcl:"name,label"`
 	DefRange      hcl.Range       `hcl:",def_range"`
@@ -760,13 +773,17 @@ type packageBlock struct {
 	InputsRange   hcl.Range       `hcl:"inputs,attr_range"`
 	Features      hcl.Expression  `hcl:"features,optional"`
 	FeaturesRange hcl.Range       `hcl:"features,attr_range"`
+	Collect       hcl.Expression  `hcl:"collect,optional"`
+	CollectRange  hcl.Range       `hcl:"collect,attr_range"`
 	Imports       []*importBlock  `hcl:"import,block"`
 	Requires      []*requireBlock `hcl:"require,block"`
 	Toolchain     *toolchainBlock `hcl:"toolchain,block"`
 	Modules       []*moduleBlock  `hcl:"module,block"`
 
-	// features is Features decoded: name → description.
+	// features and collects are Features and Collect decoded: name →
+	// description.
 	features map[string]string
+	collects map[string]string
 }
 
 // moduleBlock is a named namespace of services with an optional toolchain

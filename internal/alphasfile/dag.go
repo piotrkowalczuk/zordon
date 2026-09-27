@@ -22,6 +22,9 @@ const (
 	kindArguments
 	kindEnv
 	kindFile
+	// kindProvide is one provide entry; the package that collects it reads
+	// it through collected.<slot>, so it is a producer without a service.
+	kindProvide
 )
 
 func (k nodeKind) String() string {
@@ -34,6 +37,8 @@ func (k nodeKind) String() string {
 		return "env"
 	case kindFile:
 		return "file"
+	case kindProvide:
+		return "provide"
 	}
 	return "?"
 }
@@ -50,6 +55,10 @@ type node struct {
 	kind  nodeKind
 	name  string // file name (kindFile only)
 	exprs []hcl.Expression
+	// scope is where the expressions are evaluated: the service's module,
+	// or the scope of the import that holds a provide.
+	scope string
+	prov  *provision
 }
 
 // graph holds nodes and forward edges (id → set of ids it depends on —
@@ -70,8 +79,10 @@ func nodeID(svcID string, kind nodeKind, name string) string {
 // newGraph builds the cross-service per-producer DAG. parentKnown lists
 // services already resolved by a federation parent; references to those
 // are valid but never carry an intra-graph edge (the parent was
-// evaluated end-to-end before this graph runs).
-func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph, error) {
+// evaluated end-to-end before this graph runs). Every provision is a node
+// too, and a reference to collected.<slot> depends on every provision to
+// that slot of the referencing package.
+func newGraph(services []*serviceBlock, provisions []*provision, parentKnown map[string]struct{}) (*graph, error) {
 	g := &graph{
 		byID: map[string]*node{},
 		deps: map[string]map[string]struct{}{},
@@ -101,7 +112,7 @@ func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph
 				return
 			}
 			id := nodeID(sid, kind, name)
-			n := &node{id: id, svc: s, svcID: sid, kind: kind, name: name, exprs: exprs}
+			n := &node{id: id, svc: s, svcID: sid, kind: kind, name: name, exprs: exprs, scope: s.module}
 			g.byID[id] = n
 			g.nodes = append(g.nodes, n)
 			g.deps[id] = map[string]struct{}{}
@@ -118,13 +129,35 @@ func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph
 		}
 	}
 
+	slots := map[string][]string{}
+	for _, p := range provisions {
+		n := &node{id: p.id(), kind: kindProvide, scope: p.scope, prov: p}
+		for _, name := range sortedKeys(p.attrs) {
+			n.exprs = append(n.exprs, p.attrs[name].Expr)
+		}
+		g.byID[n.id] = n
+		g.nodes = append(g.nodes, n)
+		g.deps[n.id] = map[string]struct{}{}
+		slots[p.pkg+"."+p.slot] = append(slots[p.pkg+"."+p.slot], n.id)
+	}
+
 	for _, n := range g.nodes {
 		for _, expr := range n.exprs {
 			if expr == nil {
 				continue
 			}
 			for _, trav := range expr.Variables() {
-				_, depID, ok := producerNodeFromTrav(trav, n.svcID, n.svc.module)
+				if trav.RootName() == "collected" && len(trav) >= 2 {
+					if pkg, inPkg := packageOf(n.scope); inPkg {
+						if slot, ok := traverseAttrName(trav[1]); ok {
+							for _, id := range slots[pkg+"."+slot] {
+								g.deps[n.id][id] = struct{}{}
+							}
+						}
+					}
+					continue
+				}
+				_, depID, ok := producerNodeFromTrav(trav, n.svcID, n.scope)
 				if !ok {
 					continue
 				}
