@@ -159,12 +159,12 @@ func newProvision(target *pkgInstance, scope string, pb *provideBlock) (*provisi
 		return nil, fmt.Errorf("%s: provide %q takes attributes only: %s", pb.DefRange, pb.Slot, diags.Error())
 	}
 	for _, name := range sortedKeys(attrs) {
-		if !decl.ty.HasAttribute(name) {
+		if !decl.entry.Has(name) {
 			return nil, fmt.Errorf("%s: provide %q: input %q of package %s has no attribute %q (%s)", attrs[name].NameRange, pb.Slot, pb.Slot, target.name, name, decl.ty)
 		}
 	}
-	for _, name := range decl.ty.Attributes() {
-		if _, set := attrs[name]; !set && !decl.ty.Optional(name) {
+	for _, name := range decl.entry.Names() {
+		if _, set := attrs[name]; !set && !decl.entry.Optional(name) {
 			return nil, fmt.Errorf("%s: provide %q: input %q of package %s needs attribute %q (%s)", pb.DefRange, pb.Slot, pb.Slot, target.name, name, decl.ty)
 		}
 	}

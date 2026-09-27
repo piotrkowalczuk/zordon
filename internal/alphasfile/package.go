@@ -34,6 +34,8 @@ type inputDecl struct {
 	def    hcl.Expression
 	many   bool
 	unique []string
+	// entry is ty as an object, for an input with many = true.
+	entry ztypes.Object
 }
 
 // outputDecl is one output of a package.
@@ -186,16 +188,18 @@ func decodeInputs(pb *packageBlock) (map[string]*inputDecl, error) {
 			}
 		}
 		if decl.many {
+			entry, isObject := ty.(ztypes.Object)
 			switch {
 			case decl.def != nil:
 				return fmt.Errorf("%s: input %q has many = true, so it starts empty and takes no default", decl.def.Range(), name)
-			case !ty.IsObject():
+			case !isObject:
 				return fmt.Errorf("%s: input %q: an input with many = true takes entries from provide blocks, so its type must be object({ ... })", te.Range(), name)
-			case ty.HasAttribute("key"):
+			case entry.Has("key"):
 				return fmt.Errorf("%s: input %q: the entry type cannot declare key; every entry has it, set to its key", te.Range(), name)
 			}
+			decl.entry = entry
 			for _, a := range decl.unique {
-				if !ty.HasAttribute(a) {
+				if !entry.Has(a) {
 					return fmt.Errorf("%s: input %q: unique names %q, which the type does not declare", at, name, a)
 				}
 			}

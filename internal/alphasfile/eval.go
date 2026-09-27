@@ -20,6 +20,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/logfilter"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/ztypes"
 )
 
 // buildBarrierAttrs returns one cty.StringVal per state, each holding
@@ -769,7 +770,7 @@ func (r *resolver) evalProvision(p *provision) error {
 		}
 		vals[name] = v
 	}
-	entry, err := p.decl.ty.Convert(cty.ObjectVal(vals))
+	entry, err := ztypes.Convert(p.decl.ty, cty.ObjectVal(vals))
 	if err != nil {
 		return fmt.Errorf("%s: provide %q: the entry does not fit input %q of package %s (%s): %w", p.block.DefRange, p.input, p.input, p.pkg, p.decl.ty, err)
 	}
@@ -814,7 +815,7 @@ func (r *resolver) evalOutput(o *output) error {
 	if diags.HasErrors() {
 		return fmt.Errorf("output %q of package %s: %s", o.name, o.pkg, diags.Error())
 	}
-	v, err := o.decl.ty.Convert(v)
+	v, err := ztypes.Convert(o.decl.ty, v)
 	if err != nil {
 		return fmt.Errorf("%s: output %q of package %s is not a %s: %w", o.decl.value.Range(), o.name, o.pkg, o.decl.ty, err)
 	}
@@ -841,7 +842,7 @@ func (r *resolver) evalInput(in *input) error {
 		}
 		at = e
 	}
-	v, err := in.decl.ty.Convert(v)
+	v, err := ztypes.Convert(in.decl.ty, v)
 	if err != nil {
 		return fmt.Errorf("%s: input %q of package %s is not a %s: %w", at.Range(), in.name, in.pkg, in.decl.ty, err)
 	}
@@ -862,7 +863,7 @@ func (r *resolver) evalCheck(c *check) error {
 	if diags.HasErrors() {
 		return fmt.Errorf("input %q of package %s: %s", c.in.name, c.in.pkg, diags.Error())
 	}
-	want, err := c.in.decl.ty.Convert(v)
+	want, err := ztypes.Convert(c.in.decl.ty, v)
 	if err != nil {
 		return fmt.Errorf("%s: input %q of package %s is not a %s: %w", c.c.arg.at, c.in.name, c.in.pkg, c.in.decl.ty, err)
 	}
