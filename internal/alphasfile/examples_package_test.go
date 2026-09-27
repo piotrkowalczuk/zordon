@@ -17,12 +17,12 @@ func TestExamplePackageResolves(t *testing.T) {
 		t.Fatal(err)
 	}
 	af := openTree(t, root)
-	if got := serviceNames(af); !equalStrs(got, []string{"caddy/caddy", "hugo/hugo", "coredns/coredns"}) {
+	if got := serviceNames(af); !equalStrs(got, []string{"caddy/caddy/caddy", "hugo/hugo/hugo", "coredns/coredns/coredns"}) {
 		t.Fatalf("services = %v", got)
 	}
-	caddy := svcByName(af, "caddy/caddy")
-	hugo := svcByName(af, "hugo/hugo")
-	coredns := svcByName(af, "coredns/coredns")
+	caddy := svcByName(af, "caddy/caddy/caddy")
+	hugo := svcByName(af, "hugo/hugo/hugo")
+	coredns := svcByName(af, "coredns/coredns/coredns")
 	files := map[string]string{}
 	for _, f := range caddy.Runtime.Files {
 		files[f.Name] = f.Body
@@ -44,10 +44,10 @@ func TestExamplePackageCaddyAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	af := openTree(t, root)
-	if got := serviceNames(af); !equalStrs(got, []string{"caddy"}) {
+	if got := serviceNames(af); !equalStrs(got, []string{"caddy/caddy/caddy"}) {
 		t.Fatalf("services = %v, want caddy alone: features are off", got)
 	}
-	got := fileNames(svcByName(af, "caddy"))
+	got := fileNames(svcByName(af, "caddy/caddy/caddy"))
 	sort.Strings(got)
 	if !equalStrs(got, []string{"caddyfile", "site-base"}) {
 		t.Errorf("files = %v", got)
@@ -60,7 +60,7 @@ func TestExamplePackagePrintsWhereHugoIs(t *testing.T) {
 		t.Fatal(err)
 	}
 	af := openTree(t, stack)
-	caddy, hugo := svcByName(af, "caddy/caddy"), svcByName(af, "hugo/hugo")
+	caddy, hugo := svcByName(af, "caddy/caddy/caddy"), svcByName(af, "hugo/hugo/hugo")
 	if want := fmt.Sprintf("http://hugo.test:%v/  (caddy routes the host to hugo)", caddy.Runtime.Vars["http"]); caddy.Runtime.Print != want {
 		t.Errorf("caddy print = %q, want %q", caddy.Runtime.Print, want)
 	}
@@ -72,7 +72,7 @@ func TestExamplePackagePrintsWhereHugoIs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	caddy = svcByName(openTree(t, alone), "caddy")
+	caddy = svcByName(openTree(t, alone), "caddy/caddy/caddy")
 	if want := fmt.Sprintf("http://127.0.0.1:%v/  (caddy)", caddy.Runtime.Vars["http"]); caddy.Runtime.Print != want {
 		t.Errorf("caddy alone print = %q, want %q", caddy.Runtime.Print, want)
 	}
@@ -85,10 +85,10 @@ func TestExamplePackageHugoWithoutDNS(t *testing.T) {
 	}
 	root := writeTree(t, t.TempDir(), map[string]string{"Alphasfile": `import "` + caddyDir + `" { features = ["hugo"] }`})
 	af := openTree(t, root)
-	if got := serviceNames(af); !equalStrs(got, []string{"caddy/caddy", "hugo/hugo"}) {
+	if got := serviceNames(af); !equalStrs(got, []string{"caddy/caddy/caddy", "hugo/hugo/hugo"}) {
 		t.Fatalf("services = %v", got)
 	}
-	caddy := svcByName(af, "caddy/caddy")
+	caddy := svcByName(af, "caddy/caddy/caddy")
 	got := fileNames(caddy)
 	sort.Strings(got)
 	if !equalStrs(got, []string{"caddyfile", "site-base", "site-hugo"}) {
@@ -115,10 +115,10 @@ import "` + corednsDir + `" {
 }
 `})
 	af := openTree(t, root)
-	if got := fmt.Sprint(svcByName(af, "caddy/caddy").Runtime.Vars["http"]); got != "80" {
+	if got := fmt.Sprint(svcByName(af, "caddy/caddy/caddy").Runtime.Vars["http"]); got != "80" {
 		t.Errorf("caddy http = %s, want the http_port input", got)
 	}
-	sudo := svcByName(af, "coredns/coredns").Runtime.Sudo
+	sudo := svcByName(af, "coredns/coredns/coredns").Runtime.Sudo
 	if len(sudo) != 1 || sudo[0].Name != "resolver" || !strings.Contains(sudo[0].Apply, "/etc/resolver/test") || !strings.Contains(sudo[0].Apply, "port 49564") {
 		t.Fatalf("sudo = %+v, want the resolver step for zone test on port 49564", sudo)
 	}
@@ -129,7 +129,7 @@ func TestExamplePackageResolverIsOffByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sudo := svcByName(openTree(t, stack), "coredns/coredns").Runtime.Sudo; len(sudo) != 0 {
+	if sudo := svcByName(openTree(t, stack), "coredns/coredns/coredns").Runtime.Sudo; len(sudo) != 0 {
 		t.Errorf("sudo = %+v, want none: the resolver needs root and stays off unless asked for", sudo)
 	}
 }

@@ -26,6 +26,7 @@ import "github.com/piotrkowalczuk/zordon/examples/package/hugo@main" {
 ```
 
 `zordon plan` names any required input you left out and any input or feature the package does not declare.
+The package's own `inputs` and `features` lines list what it accepts.
 
 ## 3. Start
 
@@ -47,7 +48,7 @@ Name repositories to update only some of them: `zordon update github.com/piotrko
 
 ## Run a whole stack from a one-line Alphasfile
 
-A stack that lives in a repository is a package too.
+A stack that lives in a repository is a package too: a `package` block that imports other packages.
 In an empty directory outside any project, a single line runs it:
 
 ```hcl

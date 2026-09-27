@@ -186,8 +186,23 @@ func producerNodeFromTrav(t hcl.Traversal, selfSvcID, selfModule string) (svc, i
 		if !ok0 || !ok1 || !ok2 || !ok3 || kw != "service" {
 			return "", "", false
 		}
-		svc = ServiceRef(mod, tc, nm)
+		svc = ServiceRef(resolveModule(selfModule, mod), tc, nm)
 		rest = t[5:]
+	case "package":
+		if len(t) < 8 {
+			return "", "", false
+		}
+		pkg, ok0 := traverseAttrName(t[1])
+		kwm, ok1 := traverseAttrName(t[2])
+		mod, ok2 := traverseAttrName(t[3])
+		kws, ok3 := traverseAttrName(t[4])
+		tc, ok4 := traverseAttrName(t[5])
+		nm, ok5 := traverseAttrName(t[6])
+		if !ok0 || !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || kwm != "module" || kws != "service" {
+			return "", "", false
+		}
+		svc = ServiceRef(pkg+"/"+mod, tc, nm)
+		rest = t[7:]
 	default:
 		return "", "", false
 	}

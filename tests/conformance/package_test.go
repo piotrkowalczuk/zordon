@@ -12,17 +12,21 @@ import (
 )
 
 const pkgGreeter = `
-input "greeting" { default = "hello" }
-feature "extra" {}
+package "greeter" {
+  inputs   = { greeting = "hello" }
+  features = ["extra"]
 
-service "go" "greeter" {
-  package = "example.com/greeter@v0.0.0"
-  vars    = { greeting = input.greeting }
-}
+  module "greeter" {
+    service "go" "greeter" {
+      package = "example.com/greeter@v0.0.0"
+      vars    = { greeting = inputs.greeting }
+    }
 
-service "go" "extra" {
-  enabled = feature.extra
-  package = "example.com/extra@v0.0.0"
+    service "go" "extra" {
+      enabled = features.extra
+      package = "example.com/extra@v0.0.0"
+    }
+  }
 }
 `
 

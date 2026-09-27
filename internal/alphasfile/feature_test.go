@@ -7,38 +7,47 @@ import (
 )
 
 const pkgGated = `
-feature "extra" {}
+package "web" {
+  features = ["extra"]
 
-service "go" "web" {
-  git { url = "github.com/x/web" }
+  module "web" {
+    service "go" "web" {
+      git { url = "github.com/x/web" }
 
-  file "base" {
-    path = "/tmp/base"
-    body = "base"
-  }
+      file "base" {
+        path = "/tmp/base"
+        body = "base"
+      }
 
-  file "extra" {
-    enabled = feature.extra
-    path    = "/tmp/extra"
-    body    = "extra"
-  }
+      file "extra" {
+        enabled = features.extra
+        path    = "/tmp/extra"
+        body    = "extra"
+      }
 
-  runtime {
-    provision "always" {
-      after = never
-      cmd   = "true"
+      runtime {
+        provision "always" {
+          after = never
+          cmd   = "true"
+        }
+        provision "extra" {
+          enabled = features.extra
+          after   = never
+          cmd     = "true"
+        }
+      }
+
+      sudo "extra" {
+        enabled = features.extra
+        apply   = "true"
+      }
     }
-    provision "extra" {
-      enabled = feature.extra
-      after   = never
-      cmd     = "true"
+
+    service "go" "sidecar" {
+      enabled = features.extra
+      git { url = "github.com/x/sidecar" }
     }
   }
-}
-
-service "go" "sidecar" {
-  enabled = feature.extra
-  git { url = "github.com/x/sidecar" }
 }
 `
 
@@ -48,15 +57,18 @@ func TestOpen_featureOffRemovesGatedBlocks(t *testing.T) {
 		"web/Alphasfile": pkgGated,
 	})
 	af := openTree(t, root)
-	if got := serviceNames(af); !equalStrs(got, []string{"web/web"}) {
+	if got := serviceNames(af); !equalStrs(got, []string{"web/web/web"}) {
 		t.Fatalf("services = %v", got)
 	}
-	web := svcByName(af, "web/web")
+	web := svcByName(af, "web/web/web")
 	if files := fileNames(web); !equalStrs(files, []string{"base"}) {
 		t.Errorf("files = %v", files)
 	}
 	if provByName(web, "extra") != nil || provByName(web, "always") == nil {
 		t.Errorf("provisions = %+v", web.Runtime.Provision)
+	}
+	if len(web.Runtime.Sudo) != 0 {
+		t.Errorf("sudo = %+v", web.Runtime.Sudo)
 	}
 }
 
@@ -66,41 +78,49 @@ func TestOpen_featureOnKeepsGatedBlocks(t *testing.T) {
 		"web/Alphasfile": pkgGated,
 	})
 	af := openTree(t, root)
-	if got := serviceNames(af); !equalStrs(got, []string{"web/web", "web/sidecar"}) {
+	if got := serviceNames(af); !equalStrs(got, []string{"web/web/web", "web/web/sidecar"}) {
 		t.Fatalf("services = %v", got)
 	}
-	web := svcByName(af, "web/web")
+	web := svcByName(af, "web/web/web")
 	if files := fileNames(web); !equalStrs(files, []string{"base", "extra"}) {
 		t.Errorf("files = %v", files)
 	}
-	if provByName(web, "extra") == nil {
-		t.Errorf("provision extra missing: %+v", web.Runtime.Provision)
+	if provByName(web, "extra") == nil || len(web.Runtime.Sudo) != 1 {
+		t.Errorf("provisions = %+v, sudo = %+v", web.Runtime.Provision, web.Runtime.Sudo)
 	}
 }
 
 func TestOpen_featureGatesRequire(t *testing.T) {
 	files := map[string]string{
 		"web/Alphasfile": `
-feature "metrics" {}
+package "web" {
+  features = ["metrics"]
 
-require "../prom" {
-  enabled = feature.metrics
-}
+  require "../prom" {
+    enabled = features.metrics
+  }
 
-service "go" "web" {
-  git { url = "github.com/x/web" }
+  module "web" {
+    service "go" "web" {
+      git { url = "github.com/x/web" }
 
-  file "scrape" {
-    enabled = feature.metrics
-    path    = "/tmp/scrape"
-    body    = "port=${module.prom.service.go.prom.vars.port}"
+      file "scrape" {
+        enabled = features.metrics
+        path    = "/tmp/scrape"
+        body    = "port=${package.prom.module.prom.service.go.prom.vars.port}"
+      }
+    }
   }
 }
 `,
 		"prom/Alphasfile": `
-service "go" "prom" {
-  git { url = "github.com/x/prom" }
-  vars = { port = 9090 }
+package "prom" {
+  module "prom" {
+    service "go" "prom" {
+      git { url = "github.com/x/prom" }
+      vars = { port = 9090 }
+    }
+  }
 }
 `,
 	}
@@ -108,8 +128,8 @@ service "go" "prom" {
 		entry    string
 		services []string
 	}{
-		"off": {`import "./web" {}`, []string{"web/web"}},
-		"on":  {`import "./web" { features = ["metrics"] }`, []string{"web/web", "prom/prom"}},
+		"off": {`import "./web" {}`, []string{"web/web/web"}},
+		"on":  {`import "./web" { features = ["metrics"] }`, []string{"web/web/web", "prom/prom/prom"}},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -127,17 +147,21 @@ func TestLoadTree_referenceToSwitchedOffBlock(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `import "./web" {}`,
 		"web/Alphasfile": `
-feature "extra" {}
+package "web" {
+  features = ["extra"]
 
-service "go" "sidecar" {
-  enabled = feature.extra
-  git { url = "github.com/x/sidecar" }
-  vars = { port = 1 }
-}
+  module "web" {
+    service "go" "sidecar" {
+      enabled = features.extra
+      git { url = "github.com/x/sidecar" }
+      vars = { port = 1 }
+    }
 
-service "go" "web" {
-  git { url = "github.com/x/web" }
-  vars = { peer = service.go.sidecar.vars.port }
+    service "go" "web" {
+      git { url = "github.com/x/web" }
+      vars = { peer = service.go.sidecar.vars.port }
+    }
+  }
 }
 `,
 	})
@@ -151,21 +175,25 @@ func TestLoadTree_referenceToSwitchedOffRequire(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `import "./web" {}`,
 		"web/Alphasfile": `
-feature "metrics" {}
+package "web" {
+  features = ["metrics"]
 
-require "../prom" {
-  enabled = feature.metrics
-}
+  require "../prom" {
+    enabled = features.metrics
+  }
 
-service "go" "web" {
-  git { url = "github.com/x/web" }
-  vars = { prom = module.prom.service.go.prom.name }
+  module "web" {
+    service "go" "web" {
+      git { url = "github.com/x/web" }
+      vars = { prom = package.prom.module.prom.service.go.prom.name }
+    }
+  }
 }
 `,
-		"prom/Alphasfile": "service \"go\" \"prom\" {\n  git { url = \"github.com/x/prom\" }\n}\n",
+		"prom/Alphasfile": "package \"prom\" {\n  module \"prom\" {\n    service \"go\" \"prom\" {\n      git { url = \"github.com/x/prom\" }\n    }\n  }\n}\n",
 	})
 	_, err := LoadTree(root)
-	if err == nil || !strings.Contains(err.Error(), "references module.prom, which is switched off by enabled at") {
+	if err == nil || !strings.Contains(err.Error(), "references package.prom, which is switched off by enabled at") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -173,16 +201,16 @@ service "go" "web" {
 func TestLoadTree_enabledAcceptsFeatureExpressionsOnly(t *testing.T) {
 	cases := map[string]struct{ expr, want string }{
 		"function call":   {`upper("x") == "X"`, "cannot call functions"},
-		"other root":      {`input.flag`, "enabled may reference feature.<name> only"},
-		"unknown feature": {`feature.nope`, `unknown feature "nope" (declared: extra)`},
+		"other root":      {`inputs.flag`, "enabled may reference features.<name> only"},
+		"unknown feature": {`features.nope`, `unknown feature "nope" (declared: extra)`},
 		"not a bool":      {`"yes"`, "enabled must be true or false"},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
 			root := writeTree(t, t.TempDir(), map[string]string{
 				"Alphasfile": `import "./web" {}`,
-				"web/Alphasfile": "feature \"extra\" {}\ninput \"flag\" { default = true }\n" +
-					"service \"go\" \"web\" {\n  enabled = " + c.expr + "\n  git { url = \"github.com/x/web\" }\n}\n",
+				"web/Alphasfile": "package \"web\" {\n  features = [\"extra\"]\n  inputs = { flag = true }\n  module \"web\" {\n" +
+					"    service \"go\" \"web\" {\n      enabled = " + c.expr + "\n      git { url = \"github.com/x/web\" }\n    }\n  }\n}\n",
 			})
 			if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("want %q, got %v", c.want, err)
@@ -195,26 +223,29 @@ func TestLoadTree_enabledCombinesFeatures(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `import "./web" { features = ["a"] }`,
 		"web/Alphasfile": `
-feature "a" {}
-feature "b" {}
+package "web" {
+  features = ["a", "b"]
 
-service "go" "both" {
-  enabled = feature.a && feature.b
-  git { url = "github.com/x/both" }
-}
+  module "web" {
+    service "go" "both" {
+      enabled = features.a && features.b
+      git { url = "github.com/x/both" }
+    }
 
-service "go" "either" {
-  enabled = feature.a || feature.b
-  git { url = "github.com/x/either" }
-}
+    service "go" "either" {
+      enabled = features.a || features.b
+      git { url = "github.com/x/either" }
+    }
 
-service "go" "not-b" {
-  enabled = !feature.b
-  git { url = "github.com/x/notb" }
+    service "go" "not-b" {
+      enabled = !features.b
+      git { url = "github.com/x/notb" }
+    }
+  }
 }
 `,
 	})
-	if got := serviceNames(openTree(t, root)); !equalStrs(got, []string{"web/either", "web/not-b"}) {
+	if got := serviceNames(openTree(t, root)); !equalStrs(got, []string{"web/web/either", "web/web/not-b"}) {
 		t.Errorf("services = %v", got)
 	}
 }
@@ -229,7 +260,7 @@ func TestLoadTree_unknownFeatureInImport(t *testing.T) {
 	}
 }
 
-func TestLoadTree_enabledNeedsDeclaredFeature(t *testing.T) {
+func TestLoadTree_enabledNeedsAPackage(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `import "./Alphasfile.f" { modules = ["m"] }`,
 		"Alphasfile.f": `
@@ -248,7 +279,7 @@ module "m" {
 
 func TestLoadTree_enabledOnImportIsRejected(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":     "feature \"x\" {}\nimport \"./web\" {\n  enabled = feature.x\n}\n",
+		"Alphasfile":     "package \"stack\" {\n  features = [\"x\"]\n  import \"./web\" {\n    enabled = features.x\n  }\n}\n",
 		"web/Alphasfile": pkgWeb,
 	})
 	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "enabled is allowed on require only") {
@@ -256,47 +287,22 @@ func TestLoadTree_enabledOnImportIsRejected(t *testing.T) {
 	}
 }
 
-func TestOpen_featureGatesSudo(t *testing.T) {
-	pkg := `
-feature "resolver" {}
-
-service "go" "dns" {
-  git { url = "github.com/x/dns" }
-
-  sudo "resolver" {
-    enabled = feature.resolver
-    apply   = "true"
-  }
-}
-`
-	cases := map[string]struct {
-		entry string
-		want  []string
-	}{
-		"off": {`import "./dns" {}`, nil},
-		"on":  {`import "./dns" { features = ["resolver"] }`, []string{"resolver"}},
+func TestLoadTree_featuresAreNames(t *testing.T) {
+	cases := map[string]struct{ features, want string }{
+		"invalid":  {`["no spaces"]`, `feature "no spaces"`},
+		"repeated": {`["a", "a"]`, `feature "a" is listed twice`},
+		"object":   {`{ a = true }`, "list of string required"},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
-			af := openTree(t, writeTree(t, t.TempDir(), map[string]string{"Alphasfile": c.entry, "dns/Alphasfile": pkg}))
-			var got []string
-			for _, s := range svcByName(af, "dns/dns").Runtime.Sudo {
-				got = append(got, s.Name)
-			}
-			if !equalStrs(got, c.want) {
-				t.Errorf("sudo steps = %v, want %v", got, c.want)
+			root := writeTree(t, t.TempDir(), map[string]string{
+				"Alphasfile":     `import "./web" {}`,
+				"web/Alphasfile": "package \"web\" {\n  features = " + c.features + "\n}\n",
+			})
+			if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("want %q, got %v", c.want, err)
 			}
 		})
-	}
-}
-
-func TestLoadTree_featureTakesNoAttributes(t *testing.T) {
-	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":     `import "./web" {}`,
-		"web/Alphasfile": "feature \"extra\" {\n  default = true\n}\n" + pkgWeb,
-	})
-	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `An argument named "default" is not expected here`) {
-		t.Fatalf("a feature is off unless imported with it; got %v", err)
 	}
 }
 

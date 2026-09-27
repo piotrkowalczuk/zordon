@@ -12,11 +12,21 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
+const webPackage = `
+package "web" {
+  module "web" {
+    service "go" "web" {
+      git { url = "github.com/x/web" }
+    }
+  }
+}
+`
+
 func TestImportLines_package(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{
 		"Alphasfile":     `import "./web" "edge" { features = ["tls"] }`,
-		"web/Alphasfile": "feature \"tls\" {}\nservice \"go\" \"web\" {\n  git { url = \"github.com/x/web\" }\n}\n",
+		"web/Alphasfile": "package \"web\" {\n  features = [\"tls\"]\n}\n",
 	})
 	tree, err := alphasfile.LoadTree(filepath.Join(dir, "Alphasfile"))
 	if err != nil {
@@ -32,7 +42,7 @@ func TestImportLines_searchOrigin(t *testing.T) {
 	checkout := t.TempDir()
 	writeFiles(t, checkout, map[string]string{
 		"zordon.mod":          `module = "github.com/acme/infra"`,
-		"pkgs/web/Alphasfile": "service \"go\" \"web\" {\n  git { url = \"github.com/x/web\" }\n}\n",
+		"pkgs/web/Alphasfile": webPackage,
 	})
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
@@ -49,7 +59,7 @@ func TestImportLines_searchOrigin(t *testing.T) {
 func TestUpdateLock(t *testing.T) {
 	ztest.AssertSystem(t)
 	infra := t.TempDir()
-	writeFiles(t, infra, map[string]string{"pkgs/web/Alphasfile": "service \"go\" \"web\" {\n  git { url = \"github.com/x/web\" }\n}\n"})
+	writeFiles(t, infra, map[string]string{"pkgs/web/Alphasfile": webPackage})
 	gitIn(t, infra, "init", "-q", "-b", "main")
 	commitAll(t, infra, "init")
 	first := gitHead(t, infra)

@@ -8,9 +8,13 @@ import (
 )
 
 const pkgWeb = `
-service "go" "web" {
-  git { url = "github.com/x/web" }
-  vars = { port = 8080 }
+package "web" {
+  module "web" {
+    service "go" "web" {
+      git { url = "github.com/x/web" }
+      vars = { port = 8080 }
+    }
+  }
 }
 `
 
@@ -20,9 +24,12 @@ func TestOpen_packageDirectoryImport(t *testing.T) {
 		"web/Alphasfile": pkgWeb,
 	})
 	af := openTree(t, root)
-	web := svcByName(af, "web/web")
-	if web == nil || web.Module != "web" {
+	web := svcByName(af, "web/web/web")
+	if web == nil || web.Module != "web/web" {
 		t.Fatalf("services = %v", serviceNames(af))
+	}
+	if web.ID() != "package.web.module.web.service.go.web" {
+		t.Errorf("id = %q", web.ID())
 	}
 	if got := fmt.Sprint(web.Runtime.Vars["port"]); got != "8080" {
 		t.Errorf("port = %s", got)
@@ -34,8 +41,34 @@ func TestOpen_packageAlias(t *testing.T) {
 		"Alphasfile":     `import "./web" "edge" {}`,
 		"web/Alphasfile": pkgWeb,
 	})
-	if got := serviceNames(openTree(t, root)); !equalStrs(got, []string{"edge/web"}) {
+	if got := serviceNames(openTree(t, root)); !equalStrs(got, []string{"edge/web/web"}) {
 		t.Errorf("services = %v", got)
+	}
+}
+
+func TestOpen_packageModulesSeeEachOther(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `import "./app" {}`,
+		"app/Alphasfile": `
+package "app" {
+  module "db" {
+    service "go" "db" {
+      git { url = "github.com/x/db" }
+      vars = { port = 5432 }
+    }
+  }
+  module "api" {
+    service "go" "api" {
+      git { url = "github.com/x/api" }
+      vars = { db = module.db.service.go.db.vars.port }
+    }
+  }
+}
+`,
+	})
+	af := openTree(t, root)
+	if got := fmt.Sprint(svcByName(af, "app/api/api").Runtime.Vars["db"]); got != "5432" {
+		t.Errorf("api db = %s, services = %v", got, serviceNames(af))
 	}
 }
 
@@ -46,27 +79,26 @@ func TestLoadTree_packageNameClashNeedsAlias(t *testing.T) {
 		"b/web/Alphasfile": pkgWeb,
 	})
 	_, err := LoadTree(root)
-	if err == nil || !strings.Contains(err.Error(), `another package is already named "web"`) || !strings.Contains(err.Error(), `import "./b/web" "<alias>" {}`) {
+	if err == nil || !strings.Contains(err.Error(), `another package is already named "web"`) || !strings.Contains(err.Error(), "alias") {
 		t.Fatalf("got %v", err)
 	}
 }
 
-func TestLoadTree_packageModuleNameClash(t *testing.T) {
+func TestOpen_packageAndModuleMayShareAName(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":     "module \"web\" {}\nimport \"./web\" {}\n",
 		"web/Alphasfile": pkgWeb,
 	})
-	_, err := LoadTree(root)
-	if err == nil || !strings.Contains(err.Error(), `package "web" has the same name as module "web"`) {
-		t.Fatalf("got %v", err)
+	if got := serviceNames(openTree(t, root)); !equalStrs(got, []string{"web/web/web"}) {
+		t.Errorf("services = %v; package.web and module.web are separate names", got)
 	}
 }
 
 func TestLoadTree_packageImportsMustAgree(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":     "import \"./db\" { features = [\"replica\"] }\nimport \"./app\" {}\n",
-		"app/Alphasfile": `import "../db" {}`,
-		"db/Alphasfile":  "feature \"replica\" {}\n",
+		"app/Alphasfile": "package \"app\" {\n  import \"../db\" {}\n}\n",
+		"db/Alphasfile":  "package \"db\" {\n  features = [\"replica\"]\n}\n",
 	})
 	_, err := LoadTree(root)
 	if err == nil || !strings.Contains(err.Error(), "passes other inputs or features than the import at") {
@@ -78,46 +110,66 @@ func TestOpen_packageRequiredUsesDefaults(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `import "./app" {}`,
 		"app/Alphasfile": `
-require "../db" {}
+package "app" {
+  require "../db" {}
 
-service "go" "app" {
-  git { url = "github.com/x/app" }
-  vars = { db = module.db.service.go.db.vars.port }
+  module "app" {
+    service "go" "app" {
+      git { url = "github.com/x/app" }
+      vars = { db = package.db.module.db.service.go.db.vars.port }
+    }
+  }
 }
 `,
 		"db/Alphasfile": `
-input "port" { default = 5432 }
+package "db" {
+  inputs = { port = 5432 }
 
-service "go" "db" {
-  git { url = "github.com/x/db" }
-  vars = { port = input.port }
+  module "db" {
+    service "go" "db" {
+      git { url = "github.com/x/db" }
+      vars = { port = inputs.port }
+    }
+  }
 }
 `,
 	})
 	af := openTree(t, root)
-	if got := fmt.Sprint(svcByName(af, "app/app").Runtime.Vars["db"]); got != "5432" {
+	if got := fmt.Sprint(svcByName(af, "app/app/app").Runtime.Vars["db"]); got != "5432" {
 		t.Errorf("app db = %s, services = %v", got, serviceNames(af))
 	}
 }
 
-func TestLoadTree_packageContentRules(t *testing.T) {
-	cases := map[string]struct{ body, want string }{
-		"env":       {`env = { A = "1" }`, "top-level env is decided by the entrypoint"},
-		"dotenv":    {`dotenv = ".env"`, "top-level dotenv is decided by the entrypoint"},
-		"workspace": {"workspace {\n  branch = \"x\"\n}\n", "top-level workspace is decided by the entrypoint"},
-		"module":    {`module "m" {}`, `module "m" in a package`},
+func TestLoadTree_packageFileHoldsOnlyItsBlock(t *testing.T) {
+	cases := map[string]struct{ extra, want string }{
+		"env":       {`env = { A = "1" }`, `env outside package "p"`},
+		"dotenv":    {`dotenv = ".env"`, `dotenv outside package "p"`},
+		"sysenv":    {`sysenv = ["HOME"]`, "host variables are passed by the entrypoint"},
+		"workspace": {"workspace {\n  branch = \"x\"\n}", `workspace outside package "p"`},
+		"module":    {`module "m" {}`, `module "m" outside package "p"`},
+		"service":   {"service \"go\" \"s\" {\n  git { url = \"github.com/x/s\" }\n}", `service outside package "p"`},
+		"second":    {`package "q" {}`, "a file holds one package block"},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
 			root := writeTree(t, t.TempDir(), map[string]string{
-				"Alphasfile":     `import "./p" {}`,
-				"p/Alphasfile":   c.body + "\n",
-				"p/Alphasfile.x": "",
+				"Alphasfile":   `import "./p" {}`,
+				"p/Alphasfile": "package \"p\" {}\n" + c.extra + "\n",
 			})
 			if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("want %q, got %v", c.want, err)
 			}
 		})
+	}
+}
+
+func TestLoadTree_packageBlockRejectsEntrypointSections(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":   `import "./p" {}`,
+		"p/Alphasfile": "package \"p\" {\n  sysenv = [\"HOME\"]\n}\n",
+	})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `An argument named "sysenv" is not expected here`) {
+		t.Fatalf("got %v", err)
 	}
 }
 
@@ -129,6 +181,16 @@ func TestLoadTreeWith_packageThatIsFederationLevel(t *testing.T) {
 	})
 	_, err := LoadTreeWith(root, LoadOptions{Chain: []string{filepath.Join(dir, "web", "Alphasfile"), root}})
 	if err == nil || !strings.Contains(err.Error(), "is a federation level of this invocation") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadTree_directoryWithoutPackageBlock(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":     `import "./web" {}`,
+		"web/Alphasfile": "service \"go\" \"web\" {\n  git { url = \"github.com/x/web\" }\n}\n",
+	})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `has no package block, so it is not a package; wrap its modules in package "<name>" {}`) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -153,53 +215,67 @@ func TestLoadTree_packageImportRejectsModules(t *testing.T) {
 	}
 }
 
-func TestOpen_packageSysenvUnion(t *testing.T) {
+func TestLoadTree_packageCannotRequireFragments(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":     "sysenv = [\"HOME\"]\nimport \"./web\" {}\n",
-		"web/Alphasfile": "sysenv = [\"TZ\"]\n" + pkgWeb,
+		"Alphasfile":     `import "./app" {}`,
+		"app/Alphasfile": "package \"app\" {\n  require \"../Alphasfile.f\" { modules = [\"m\"] }\n}\n",
+		"Alphasfile.f":   `module "m" {}`,
 	})
-	if got := openTree(t, root).SysEnv; !equalStrs(got, []string{"HOME", "TZ"}) {
-		t.Errorf("SysEnv = %v", got)
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "a package depends on other packages, not on a fragment's modules") {
+		t.Fatalf("got %v", err)
 	}
 }
 
-func TestOpen_packageToolchainKey(t *testing.T) {
+func TestOpen_packageToolchainPinsItsModules(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":     `import "./web" {}`,
-		"web/Alphasfile": "toolchain {\n  go { version = \"1.22.0\" }\n}\n" + pkgWeb,
+		"Alphasfile": `import "./web" {}`,
+		"web/Alphasfile": `
+package "web" {
+  toolchain {
+    go { version = "1.22.0" }
+  }
+  module "web" {
+    service "go" "web" {
+      git { url = "github.com/x/web" }
+    }
+  }
+}
+`,
 	})
 	af := openTree(t, root)
-	if tc := af.Toolchain["web/go"]; tc == nil || tc.Version != "1.22.0" {
+	if tc := af.Toolchain["web/web/go"]; tc == nil || tc.Version != "1.22.0" {
 		t.Fatalf("toolchain = %v", toolchainKeys(af))
 	}
-	if got := svcByName(af, "web/web").ToolchainKey; got != "web/go" {
+	if got := svcByName(af, "web/web/web").ToolchainKey; got != "web/web/go" {
 		t.Errorf("ToolchainKey = %q", got)
 	}
 }
 
-func TestCompile_packageRunsOnItsOwn(t *testing.T) {
-	src := `
-input "greeting" { default = "hello" }
-feature "extra" {}
+func TestLoadTree_packageRunsOnItsOwn(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `
+package "web" {
+  inputs   = { greeting = "hello" }
+  features = ["extra"]
 
-service "go" "web" {
-  git { url = "github.com/x/web" }
-  vars = { greeting = input.greeting, extra = feature.extra }
+  module "web" {
+    service "go" "web" {
+      git { url = "github.com/x/web" }
+      vars = { greeting = inputs.greeting, extra = features.extra }
+    }
+    service "go" "extra" {
+      enabled = features.extra
+      git { url = "github.com/x/extra" }
+    }
+  }
 }
-
-service "go" "extra" {
-  enabled = feature.extra
-  git { url = "github.com/x/extra" }
-}
-`
-	af, err := Compile("Alphasfile", []byte(src), testInv(), nil, testCfgHash, TestConfig{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := serviceNames(af); !equalStrs(got, []string{"web"}) {
+`,
+	})
+	af := openTree(t, root)
+	if got := serviceNames(af); !equalStrs(got, []string{"web/web/web"}) {
 		t.Fatalf("services = %v, want only web: features are off when a package runs on its own", got)
 	}
-	web := svcByName(af, "web")
+	web := svcByName(af, "web/web/web")
 	if got := fmt.Sprint(web.Runtime.Vars["greeting"], " ", web.Runtime.Vars["extra"]); got != "hello false" {
 		t.Errorf("vars = %s", got)
 	}
@@ -209,15 +285,59 @@ func TestOpen_packageVisibilityHintNamesDirectory(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": "import \"./app\" {}\nimport \"./db\" {}\n",
 		"app/Alphasfile": `
-service "go" "app" {
-  git { url = "github.com/x/app" }
-  vars = { db = module.db.service.go.db.name }
+package "app" {
+  module "app" {
+    service "go" "app" {
+      git { url = "github.com/x/app" }
+      vars = { db = package.db.module.db.service.go.db.name }
+    }
+  }
 }
 `,
-		"db/Alphasfile": "service \"go\" \"db\" {\n  git { url = \"github.com/x/db\" }\n}\n",
+		"db/Alphasfile": "package \"db\" {\n  module \"db\" {\n    service \"go\" \"db\" {\n      git { url = \"github.com/x/db\" }\n    }\n  }\n}\n",
 	})
 	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
-	if err == nil || !strings.Contains(err.Error(), `add require "../db" {} inside package "app"`) {
+	if err == nil || !strings.Contains(err.Error(), `package.db is not visible in package "app"`) || !strings.Contains(err.Error(), `add require "../db" {} inside package "app"`) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestOpen_moduleRefInsidePackageIsASibling(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": "module \"db\" {}\nimport \"./app\" {}\n",
+		"app/Alphasfile": `
+package "app" {
+  module "api" {
+    service "go" "api" {
+      git { url = "github.com/x/api" }
+      vars = { db = module.db.service.go.db.name }
+    }
+  }
+}
+`,
+	})
+	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
+	if err == nil || !strings.Contains(err.Error(), `package "app" has no module "db"`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestOpen_moduleRequiresAPackage(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `
+module "gw" {
+  require "./web" {}
+
+  service "go" "gw" {
+    git { url = "github.com/x/gw" }
+    vars = { upstream = package.web.module.web.service.go.web.vars.port }
+  }
+}
+`,
+		"web/Alphasfile": pkgWeb,
+	})
+	af := openTree(t, root)
+	if got := fmt.Sprint(svcByName(af, "gw/gw").Runtime.Vars["upstream"]); got != "8080" {
+		t.Errorf("upstream = %s, services = %v", got, serviceNames(af))
 	}
 }

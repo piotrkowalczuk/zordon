@@ -288,13 +288,6 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, expr := range r.tree.sysenvExprs() {
-		more, err := r.evalStrList(expr, nil, "sysenv", srcDirs{})
-		if err != nil {
-			return nil, err
-		}
-		localSysEnv = mergeSysEnv(localSysEnv, more)
-	}
 	var parentSysEnv []string
 	if p.parent != nil {
 		parentSysEnv = p.parent.sysenv
@@ -1663,36 +1656,60 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 	if len(tcs) > 0 {
 		vars["toolchain"] = cty.ObjectVal(copyCtyMap(tcs))
 	}
-	// A module is addressable as module.<m>.{service,toolchain} where the
-	// scope sees it (Tree.visible); the default module has no such handle (it
-	// composes, it is not composed).
+	// A module is addressable as module.<m>.{service,toolchain}, and a
+	// package's module as package.<p>.module.<m>, where the scope sees it;
+	// inside a package, module.<m> is a sibling. The default module has no
+	// such handle (it composes, it is not composed).
 	modules := map[string]cty.Value{}
-	visible := func(name string) bool {
-		return name != DefaultModule && r.tree.visible(dirs.module, name)
+	packages := map[string]map[string]cty.Value{}
+	selfPkg, inPkg := packageOf(dirs.module)
+	ids := map[string]bool{}
+	for id := range r.serviceByModule {
+		ids[id] = true
 	}
-	for name := range r.serviceByModule {
-		if visible(name) {
-			modules[name] = r.moduleCty(name)
+	for id := range r.toolchainCty {
+		ids[id] = true
+	}
+	for id := range ids {
+		if id == DefaultModule {
+			continue
 		}
-	}
-	for name := range r.toolchainCty {
-		if _, done := modules[name]; !done && visible(name) {
-			modules[name] = r.moduleCty(name)
+		if p, m, ok := strings.Cut(id, "/"); ok {
+			if inPkg && p == selfPkg {
+				modules[m] = r.moduleCty(id)
+			}
+			if r.tree.packageVisible(dirs.module, p) {
+				if packages[p] == nil {
+					packages[p] = map[string]cty.Value{}
+				}
+				packages[p][m] = r.moduleCty(id)
+			}
+			continue
+		}
+		if !inPkg && r.tree.moduleVisible(dirs.module, id) {
+			modules[id] = r.moduleCty(id)
 		}
 	}
 	if len(modules) > 0 {
 		vars["module"] = cty.ObjectVal(modules)
 	}
+	if len(packages) > 0 {
+		pkgs := make(map[string]cty.Value, len(packages))
+		for p, mods := range packages {
+			pkgs[p] = cty.ObjectVal(map[string]cty.Value{"module": cty.ObjectVal(mods)})
+		}
+		vars["package"] = cty.ObjectVal(pkgs)
+	}
 	if s := r.tree.settingsFor(dirs.module); s != nil {
 		if len(s.inputs) > 0 {
-			vars["input"] = cty.ObjectVal(copyCtyMap(s.inputs))
+			vars["inputs"] = cty.ObjectVal(copyCtyMap(s.inputs))
 		}
 		if len(s.features) > 0 {
 			feats := make(map[string]cty.Value, len(s.features))
 			for name, on := range s.features {
 				feats[name] = cty.BoolVal(on)
 			}
-			vars["feature"] = cty.ObjectVal(feats)
+			vars["features"] = cty.ObjectVal(feats)
 		}
 	}
 	// fs::src / src::hash exist only in a SERVICE scope — they read `checkout`,

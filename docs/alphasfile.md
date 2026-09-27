@@ -185,67 +185,82 @@ See [Split an Alphasfile across files](how-to/split-an-alphasfile-across-files.m
 
 ### Packages
 
-A package is a directory with an `Alphasfile`, imported whole.
-It becomes one module, named after the directory or an alias, so its services are `module.<name>.service.<tc>.<svc>` and `<name>/<svc>`.
+A package is the API between a stack and the modules that implement it.
+Its file holds one `package` block: the package's inputs, features and dependencies, and its modules.
 
 ```hcl
+# caddy/Alphasfile
+package "caddy" {
+  inputs   = { domain = "test", http_port = null }
+  features = ["hugo"]
+
+  require "../hugo" {
+    enabled = features.hugo
+  }
+
+  module "caddy" {
+    service "go" "caddy" { … }
+  }
+}
+
 # Alphasfile
 import "./caddy" "edge" {
   features = ["hugo"]
-  inputs   = { zone = "test" }
+  inputs   = { domain = "dev" }
 }
-
-# caddy/Alphasfile
-feature "hugo" {}
-
-require "../hugo" {
-  enabled = feature.hugo
-}
-
-service "go" "caddy" { … }
 ```
 
 | rule | behavior |
 |---|---|
-| target | an import or require whose path resolves to a directory; that directory's `Alphasfile` is the package |
-| name | the second label when given, else the directory's last path segment; unique among all modules and packages, the error suggests an alias |
-| `import` | composes the package and may pass `inputs` and `features`; allowed in the entrypoint and in packages |
-| `require` | declares a dependency and passes nothing; a package only required uses input defaults and no features |
+| file | a package's `Alphasfile` holds exactly one `package "<name>" {}` block and nothing outside it |
+| block content | `inputs`, `features`, `import`, `require`, `toolchain` and `module` blocks; `env`, `dotenv`, `sysenv`, `workspace` and services outside a module are errors |
+| target | an import or require whose path resolves to a directory whose `Alphasfile` holds a package block; a directory without one is an error |
+| name | the alias label when given, else the package block's label; unique among packages in the stack |
+| identity | a module of a package is `package.<p>.module.<m>`; its services are `package.<p>.module.<m>.service.<tc>.<svc>`, shown as `<p>/<m>/<svc>` |
+| inside a package | `module.<m>` is one of the package's own modules; another package is `package.<q>.module.<m>` |
+| `import` | composes a package and may pass `inputs` and `features`; allowed at the entrypoint's top level and inside a package block |
+| `require` | declares a dependency and passes nothing; allowed inside a package block and inside a module; a package only required uses input defaults and no features |
 | several imports | every `import` of the same package must pass the same inputs and features, because it runs once |
-| content | `service`, `toolchain`, `sysenv`, `import`, `require`, `input` and `feature`; `env`, `dotenv`, `workspace` and `module` blocks are errors |
-| toolchain | the package's `toolchain {}` pins its own services, keyed `<name>/<lang>`, like a module's |
-| `sysenv` | unioned with the entrypoint's, for packages in the stack |
-| visibility | a package sees itself and what it imports or requires |
+| dependencies | a package depends on packages, never on a fragment's modules |
+| toolchain | the package's `toolchain {}` pins every module that has none of its own |
+| visibility | a package's modules see each other and whatever the package or the module imports or requires |
 | federation | importing a package that is a federation level of the invocation is an error, because it would run twice |
-| on its own | `zordon start` inside the package runs it: inputs take their defaults, features are off, a required input without a default is an error |
-| `zordon plan` | prints `# import <dir> as <name> [features: …]` |
+| on its own | `zordon start` in the package's directory runs it with default inputs and no features; a required input is an error |
+| `zordon plan` | prints `# import <dir> as <name> [features: …]` and renders `package "<p>" { module "<m>" { … } }` |
 
 ### Inputs and features
 
 ```hcl
-input "zone" { default = "test" }
-feature "coredns" {}
+package "coredns" {
+  inputs   = { zone = "test", token = required }
+  features = ["resolver"]
 
-service "go" "caddy" {
-  file "site-coredns" {
-    enabled = feature.coredns
-    path    = "${fs::etc()}/sites/coredns.caddy"
-    body    = "… ${input.zone} …"
+  module "coredns" {
+    service "go" "coredns" {
+      sudo "resolver" {
+        enabled = features.resolver
+        apply   = "… ${inputs.zone} …"
+      }
+    }
   }
 }
 ```
 
 | rule | behavior |
 |---|---|
-| `input "<n>" { default = … }` | read as `input.<n>`; without a default the importer must pass it |
+| `inputs = { <n> = <default> }` | declares the package's inputs; read as `inputs.<n>`; `null` is an ordinary default |
+| `required` | an input with no default; the importer must pass it |
 | input values | defaults and imported values are evaluated before planning: literals, `os::env` and `enc::*`, never another service's values |
 | unknown input | passing an input the package does not declare is an error listing the declared ones |
-| `feature "<n>" {}` | read as `feature.<n>`, a bool; the importer lists the ones to turn on |
+| `features = [...]` | declares the package's features; all are off unless an import lists them; read as `features.<n>`, a bool |
 | unknown feature | an error listing the declared ones |
-| `enabled` | on `service`, `file`, `provision`, `sudo` and `require` blocks; a false value removes the block before planning |
-| `enabled` expressions | `feature.<n>`, `!`, `&&`, `||` only; no functions and no other variables |
+| `enabled` | on `service`, `file`, `provision`, `sudo` and `require` blocks inside a package; a false value removes the block before planning |
+| `enabled` expressions | `features.<n>`, `!`, `&&`, `||` only; no functions and no other variables |
 | reference to a removed block | an error on the referencing block that says which `enabled` removed the target and asks to gate the reference the same way |
-| `enabled` elsewhere | an error unless the file declares a feature |
+| `enabled` outside a package | an error |
+
+A service's process gets no host variables unless the entrypoint passes them with `sysenv`.
+Without `HOME`, zordon points Go's caches at `$ZORDON_HOME/go`, so a package builds without anything from the host.
 
 ### Remote imports
 

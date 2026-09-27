@@ -28,30 +28,19 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 				return nil
 			}
 			st, ok := n.(*hclsyntax.ScopeTraversalExpr)
-			if !ok || st.Traversal.RootName() != "module" || len(st.Traversal) < 2 {
+			if !ok || len(st.Traversal) < 2 {
 				return nil
 			}
 			name, ok := traverseAttrName(st.Traversal[1])
 			if !ok {
 				return nil
 			}
-			owner := tree.owners[name]
-			if owner == nil || tree.visible(sb.module, name) {
-				return nil
+			switch st.Traversal.RootName() {
+			case "module":
+				found = moduleRefError(tree, sb, st.SrcRange, name)
+			case "package":
+				found = packageRefError(tree, sb, st.SrcRange, name)
 			}
-			scope, keyword, where := "the top level of "+sb.file.path, "import", "at the top level"
-			if sb.module != DefaultModule {
-				kind := "module"
-				if tree.packages[sb.module] != nil {
-					kind = "package"
-				}
-				scope, keyword, where = fmt.Sprintf("%s %q (%s)", kind, sb.module, sb.file.path), "require", fmt.Sprintf("inside %s %q", kind, sb.module)
-			}
-			if owner.pkg != nil {
-				found = fmt.Errorf("%s: module.%s is not visible in %s; add %s %q {} %s", st.SrcRange, name, scope, keyword, localRel(sb.file.dir, owner.dir), where)
-				return nil
-			}
-			found = fmt.Errorf("%s: module.%s is not visible in %s; add %s %q { modules = [%q] } %s", st.SrcRange, name, scope, keyword, localRel(sb.file.dir, owner.path), name, where)
 			return nil
 		})
 		if found != nil {
@@ -59,6 +48,42 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 		}
 	}
 	return nil
+}
+
+func moduleRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) error {
+	if p, inPkg := packageOf(sb.module); inPkg {
+		if tree.owners[p+"/"+name] == nil {
+			return fmt.Errorf("%s: package %q has no module %q; inside a package, module.<name> is one of its own modules, and another package's module is package.<package>.module.<name>", at, p, name)
+		}
+		return nil
+	}
+	owner := tree.owners[name]
+	if owner == nil || tree.moduleVisible(sb.module, name) {
+		return nil
+	}
+	scope, keyword, where := refScope(sb)
+	return fmt.Errorf("%s: module.%s is not visible in %s; add %s %q { modules = [%q] } %s", at, name, scope, keyword, localRel(sb.file.dir, owner.path), name, where)
+}
+
+func packageRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) error {
+	pkg := tree.packages[name]
+	if pkg == nil || tree.packageVisible(sb.module, name) {
+		return nil
+	}
+	scope, keyword, where := refScope(sb)
+	return fmt.Errorf("%s: package.%s is not visible in %s; add %s %q {} %s", at, name, scope, keyword, localRel(sb.file.dir, pkg.file.dir), where)
+}
+
+// refScope names where a service's reference sits and where the missing
+// import or require belongs.
+func refScope(sb *serviceBlock) (scope, keyword, where string) {
+	if p, inPkg := packageOf(sb.module); inPkg {
+		return fmt.Sprintf("package %q (%s)", p, sb.file.path), "require", fmt.Sprintf("inside package %q", p)
+	}
+	if sb.module != DefaultModule {
+		return fmt.Sprintf("module %q (%s)", sb.module, sb.file.path), "require", fmt.Sprintf("inside module %q", sb.module)
+	}
+	return "the top level of " + sb.file.path, "import", "at the top level"
 }
 
 // localRel spells target relative to dir the way an import path must: with a

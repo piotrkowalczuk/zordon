@@ -53,24 +53,39 @@ func sameSettings(a, b *pkgSettings) bool {
 	return true
 }
 
-// resolveSettings computes the inputs and features a package or a runnable
-// entrypoint sees. set is what its import passed; nil means defaults and no
-// features. at is where an error about a missing input points when set is
-// nil: the package's first require, or the zero range for an entrypoint.
-func resolveSettings(root *rootBlock, set *pkgSettings, who string, at hcl.Range) (*scopeSettings, error) {
+// requiredSentinel is what `required` evaluates to in a package's inputs:
+// a string no real default can collide with, as for `never`.
+const requiredSentinel = "\x00zordon:required\x00"
+
+// resolveSettings computes the inputs and features a package's modules
+// see. set is what its import passed; nil means defaults and no features.
+// at is where an error about a missing input points when set is nil: the
+// package's first require, or the zero range for a package run on its own.
+func resolveSettings(pb *packageBlock, set *pkgSettings, who string, at hcl.Range) (*scopeSettings, error) {
 	s := &scopeSettings{inputs: map[string]cty.Value{}, features: map[string]bool{}}
-	for _, fb := range root.Features {
-		if _, dup := s.features[fb.Name]; dup {
-			return nil, fmt.Errorf("%s: feature %q is declared twice in %s", fb.DefRange, fb.Name, who)
+	for _, name := range pb.Features {
+		if !moduleNameRe.MatchString(name) {
+			return nil, fmt.Errorf("%s: feature %q in %s: use letters, digits, '_' or '-' and start with a letter", pb.DefRange, name, who)
 		}
-		s.features[fb.Name] = false
+		if _, dup := s.features[name]; dup {
+			return nil, fmt.Errorf("%s: feature %q is listed twice in %s", pb.DefRange, name, who)
+		}
+		s.features[name] = false
 	}
-	declared := map[string]*inputBlock{}
-	for _, ib := range root.Inputs {
-		if declared[ib.Name] != nil {
-			return nil, fmt.Errorf("%s: input %q is declared twice in %s (first at %s)", ib.DefRange, ib.Name, who, declared[ib.Name].DefRange)
+	declared := map[string]cty.Value{}
+	if pb.InputsRange != (hcl.Range{}) {
+		ctx := staticEvalCtx()
+		ctx.Variables = map[string]cty.Value{"required": cty.StringVal(requiredSentinel)}
+		v, diags := pb.Inputs.Value(ctx)
+		if diags.HasErrors() {
+			return nil, fmt.Errorf("%s: inputs of %s: %s", pb.InputsRange, who, diags.Error())
 		}
-		declared[ib.Name] = ib
+		if !v.IsNull() {
+			if !v.Type().IsObjectType() && !v.Type().IsMapType() {
+				return nil, fmt.Errorf("%s: inputs of %s must be an object such as { name = default }, got %s", pb.InputsRange, who, v.Type().FriendlyName())
+			}
+			maps.Copy(declared, v.AsValueMap())
+		}
 	}
 	if set != nil {
 		for _, n := range set.features {
@@ -80,46 +95,42 @@ func resolveSettings(root *rootBlock, set *pkgSettings, who string, at hcl.Range
 			s.features[n] = true
 		}
 		for _, n := range sortedKeys(set.inputs) {
-			if declared[n] == nil {
+			if _, ok := declared[n]; !ok {
 				return nil, fmt.Errorf("%s: input %q is not declared by %s (declared: %s)", set.at, n, who, listOrNone(sortedKeys(declared)))
 			}
 		}
 	}
 	for _, name := range sortedKeys(declared) {
-		ib := declared[name]
 		if set != nil {
 			if v, ok := set.inputs[name]; ok {
 				s.inputs[name] = v
 				continue
 			}
 		}
-		if ib.DefaultRange != (hcl.Range{}) {
-			v, diags := ib.Default.Value(staticEvalCtx())
-			if diags.HasErrors() {
-				return nil, fmt.Errorf("%s: input %q default: %s", ib.DefaultRange, name, diags.Error())
-			}
-			s.inputs[name] = v
+		def := declared[name]
+		if !def.RawEquals(cty.StringVal(requiredSentinel)) {
+			s.inputs[name] = def
 			continue
 		}
 		switch {
 		case set != nil:
-			return nil, fmt.Errorf("%s: %s needs input %q (declared at %s); pass it with inputs = { %s = ... }", set.at, who, name, ib.DefRange, name)
+			return nil, fmt.Errorf("%s: %s needs input %q; pass it with inputs = { %s = ... }", set.at, who, name, name)
 		case at != (hcl.Range{}):
-			return nil, fmt.Errorf("%s: %s needs input %q, which has no default (declared at %s); import the package with inputs = { %s = ... } instead of only requiring it", at, who, name, ib.DefRange, name)
+			return nil, fmt.Errorf("%s: %s needs input %q, which is required; import the package with inputs = { %s = ... } instead of only requiring it", at, who, name, name)
 		default:
-			return nil, fmt.Errorf("%s: input %q has no default, so %s cannot run on its own", ib.DefRange, name, who)
+			return nil, fmt.Errorf("%s: input %q of %s is required, so the package cannot run on its own", pb.InputsRange, name, who)
 		}
 	}
 	return s, nil
 }
 
 // evalEnabled evaluates an enabled attribute. It accepts feature
-// expressions only (feature.x, !feature.x, &&, ||), so which blocks exist
+// expressions only (features.x, !features.x, &&, ||), so which blocks exist
 // is known from the features alone, before any service is evaluated.
 func evalEnabled(expr hcl.Expression, s *scopeSettings) (bool, error) {
 	r := expr.Range()
 	if s == nil || len(s.features) == 0 {
-		return false, fmt.Errorf("%s: enabled needs a feature, and none is declared here; only a package or the entrypoint declares feature \"<name>\" {}", r)
+		return false, fmt.Errorf("%s: enabled needs a feature, and none is declared here; only a package declares features = [...]", r)
 	}
 	if se, ok := expr.(hclsyntax.Expression); ok {
 		var call hcl.Range
@@ -130,12 +141,12 @@ func evalEnabled(expr hcl.Expression, s *scopeSettings) (bool, error) {
 			return nil
 		})
 		if call != (hcl.Range{}) {
-			return false, fmt.Errorf("%s: enabled accepts feature expressions only, such as feature.x, !feature.x or feature.a && feature.b; it cannot call functions", call)
+			return false, fmt.Errorf("%s: enabled accepts feature expressions only, such as features.x, !features.x or features.a && features.b; it cannot call functions", call)
 		}
 	}
 	for _, trav := range expr.Variables() {
-		if trav.RootName() != "feature" || len(trav) < 2 {
-			return false, fmt.Errorf("%s: enabled may reference feature.<name> only", trav.SourceRange())
+		if trav.RootName() != "features" || len(trav) < 2 {
+			return false, fmt.Errorf("%s: enabled may reference features.<name> only", trav.SourceRange())
 		}
 		name, ok := traverseAttrName(trav[1])
 		if _, declared := s.features[name]; !ok || !declared {
@@ -146,7 +157,7 @@ func evalEnabled(expr hcl.Expression, s *scopeSettings) (bool, error) {
 	for n, on := range s.features {
 		vals[n] = cty.BoolVal(on)
 	}
-	v, diags := expr.Value(&hcl.EvalContext{Variables: map[string]cty.Value{"feature": cty.ObjectVal(vals)}})
+	v, diags := expr.Value(&hcl.EvalContext{Variables: map[string]cty.Value{"features": cty.ObjectVal(vals)}})
 	if diags.HasErrors() {
 		return false, fmt.Errorf("%s: enabled: %s", r, diags.Error())
 	}
@@ -211,13 +222,20 @@ func (t *Tree) prune(services []*serviceBlock, s *scopeSettings, module string) 
 	return out, nil
 }
 
-func (t *Tree) pruneModule(mb *moduleBlock, s *scopeSettings) (*moduleBlock, error) {
-	services, err := t.prune(mb.Services, s, mb.Name)
+// pruneModule instantiates a module under its id: enabled applied, the id
+// stamped on its services, and the package's toolchain as its pin when it
+// has none of its own.
+func (t *Tree) pruneModule(mb *moduleBlock, s *scopeSettings, id string, pkgToolchain *toolchainBlock) (*moduleBlock, error) {
+	services, err := t.prune(mb.Services, s, id)
 	if err != nil {
 		return nil, err
 	}
 	cp := *mb
+	cp.Name = id
 	cp.Services = services
+	if cp.Toolchain == nil {
+		cp.Toolchain = pkgToolchain
+	}
 	return &cp, nil
 }
 
@@ -387,13 +405,35 @@ func (t *Tree) gatedTarget(trav hcl.Traversal, module, selfRef string) (offRecor
 		rec, ok := o.services[ServiceRef(module, names[1], names[2])]
 		return rec, ok
 	case names[0] == "module" && len(names) >= 2:
-		if rec, ok := o.links[module][names[1]]; ok && !t.visible(module, names[1]) {
+		id := resolveModule(module, names[1])
+		if rec, ok := t.offLink(module, id); ok && !t.moduleVisible(module, id) {
 			return rec, true
 		}
 		if len(names) >= 5 && names[2] == "service" {
-			rec, ok := o.services[ServiceRef(names[1], names[3], names[4])]
+			rec, ok := o.services[ServiceRef(id, names[3], names[4])]
 			return rec, ok
 		}
+	case names[0] == "package" && len(names) >= 2:
+		if rec, ok := t.offLink(module, pkgScope(names[1])); ok && !t.packageVisible(module, names[1]) {
+			return rec, true
+		}
+		if len(names) >= 7 && names[2] == "module" && names[4] == "service" {
+			rec, ok := o.services[ServiceRef(names[1]+"/"+names[3], names[5], names[6])]
+			return rec, ok
+		}
+	}
+	return offRecord{}, false
+}
+
+// offLink finds a switched-off import or require of target in a module's
+// scope or in the scope of the package it belongs to.
+func (t *Tree) offLink(module, target string) (offRecord, bool) {
+	if rec, ok := t.offs.links[module][target]; ok {
+		return rec, true
+	}
+	if p, ok := packageOf(module); ok {
+		rec, ok := t.offs.links[pkgScope(p)][target]
+		return rec, ok
 	}
 	return offRecord{}, false
 }

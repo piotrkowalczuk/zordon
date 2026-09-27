@@ -315,9 +315,15 @@ func (rb *rootBlock) allServices() []*serviceBlock {
 // module's.
 func (rb *rootBlock) allImports() []*importBlock {
 	out := append([]*importBlock(nil), rb.Imports...)
-	out = append(out, rb.Requires...)
 	for _, mb := range rb.Modules {
 		out = append(out, mb.Requires...)
+	}
+	for _, pb := range rb.Packages {
+		out = append(out, pb.Imports...)
+		out = append(out, pb.Requires...)
+		for _, mb := range pb.Modules {
+			out = append(out, mb.Requires...)
+		}
 	}
 	return out
 }
@@ -686,11 +692,9 @@ type rootBlock struct {
 	Workspace *workspaceRootBlock `hcl:"workspace,block"`
 	Modules   []*moduleBlock      `hcl:"module,block"`
 	Imports   []*importBlock      `hcl:"import,block"`
-	// Requires, Inputs and Features belong to a package; an entrypoint may
-	// declare them so the package also runs on its own.
-	Requires []*importBlock  `hcl:"require,block"`
-	Inputs   []*inputBlock   `hcl:"input,block"`
-	Features []*featureBlock `hcl:"feature,block"`
+	// Packages is set only in a package's file, which holds exactly one
+	// package block and nothing else.
+	Packages []*packageBlock `hcl:"package,block"`
 
 	// gohcl synthesizes a null expression for an absent optional
 	// attribute, so presence is read off the attribute's range.
@@ -719,21 +723,22 @@ type importBlock struct {
 	alias string
 }
 
-// inputBlock declares a value a package takes from whoever imports it:
-// `input "<name>" { default = <expr> }`. Without a default it is required.
-type inputBlock struct {
-	Name         string         `hcl:"name,label"`
-	Default      hcl.Expression `hcl:"default,optional"`
-	DefaultRange hcl.Range      `hcl:"default,attr_range"`
-	DefRange     hcl.Range      `hcl:",def_range"`
-}
-
-// featureBlock declares a switch a package's importer may turn on:
-// `feature "<name>" {}`. It is read as feature.<name> and gates blocks
-// through `enabled`.
-type featureBlock struct {
-	Name     string    `hcl:"name,label"`
-	DefRange hcl.Range `hcl:",def_range"`
+// packageBlock is the API boundary between a stack and the modules that
+// implement a package: `package "<name>" { inputs = {...} features = [...]
+// ... module "<m>" { ... } }`. Inputs map each name to its default, or to
+// `required`; they are read as inputs.<n>. Features are off unless an import
+// turns them on; they are read as features.<n>. The package's toolchain pins
+// every module that has none of its own.
+type packageBlock struct {
+	Name        string          `hcl:"name,label"`
+	DefRange    hcl.Range       `hcl:",def_range"`
+	Inputs      hcl.Expression  `hcl:"inputs,optional"`
+	InputsRange hcl.Range       `hcl:"inputs,attr_range"`
+	Features    []string        `hcl:"features,optional"`
+	Imports     []*importBlock  `hcl:"import,block"`
+	Requires    []*importBlock  `hcl:"require,block"`
+	Toolchain   *toolchainBlock `hcl:"toolchain,block"`
+	Modules     []*moduleBlock  `hcl:"module,block"`
 }
 
 // moduleBlock is a named namespace of services with an optional toolchain

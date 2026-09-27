@@ -181,13 +181,21 @@ func renderState(st *protocol.StateInfo) []byte {
 			renderService(body, s)
 		}
 	}
-	for _, m := range moduleOrder(st) {
-		mb := body.AppendNewBlock("module", []string{m}).Body()
-		if tc := toolchainOf(st.Toolchain, m); len(tc) > 0 {
+	pkgBodies := map[string]*hclwrite.Body{}
+	for _, id := range moduleOrder(st) {
+		parent, name := body, id
+		if p, m, inPkg := strings.Cut(id, "/"); inPkg {
+			if pkgBodies[p] == nil {
+				pkgBodies[p] = body.AppendNewBlock("package", []string{p}).Body()
+			}
+			parent, name = pkgBodies[p], m
+		}
+		mb := parent.AppendNewBlock("module", []string{name}).Body()
+		if tc := toolchainOf(st.Toolchain, id); len(tc) > 0 {
 			renderToolchainBlock(mb, tc)
 		}
 		for _, s := range st.Services {
-			if s != nil && s.Module == m {
+			if s != nil && s.Module == id {
 				renderService(mb, s)
 			}
 		}

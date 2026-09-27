@@ -12,6 +12,22 @@ import (
 
 const remoteRepo = "github.com/acme/infra"
 
+const pkgDB = `
+package "db" {
+  module "db" {
+    service "go" "db" {
+      git { url = "github.com/x/db" }
+    }
+  }
+}
+`
+
+// pkgWebRequiring is pkgWeb with one more line at the top of its package
+// block.
+func pkgWebRequiring(line string) string {
+	return strings.Replace(pkgWeb, "package \"web\" {\n", "package \"web\" {\n  "+line+"\n", 1)
+}
+
 func TestLoadTreeWith_remoteImportFetchesAndLocks(t *testing.T) {
 	infra, main := infraRepo(t)
 	dir := t.TempDir()
@@ -21,7 +37,7 @@ func TestLoadTreeWith_remoteImportFetchesAndLocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := serviceNames(resolveTree(t, tree)); !equalStrs(got, []string{"web/web"}) {
+	if got := serviceNames(resolveTree(t, tree)); !equalStrs(got, []string{"web/web/web"}) {
 		t.Errorf("services = %v", got)
 	}
 	lock := readFile(t, filepath.Join(dir, LockFileName))
@@ -105,7 +121,7 @@ func TestLoadTreeWith_oneVersionPerRepository(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
 		"Alphasfile":     "import \"github.com/acme/infra/pkgs/web@main\" {}\nimport \"./app\" {}\n",
-		"app/Alphasfile": `require "github.com/acme/infra/pkgs/db@v1" {}`,
+		"app/Alphasfile": "package \"app\" {\n  require \"github.com/acme/infra/pkgs/db@v1\" {}\n}\n",
 	})
 	_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
 	if err == nil || !strings.Contains(err.Error(), "one stack uses one version of a repository") {
@@ -136,7 +152,7 @@ func TestLoadTreeWith_searchByZordonMod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := serviceNames(resolveTree(t, tree)); !equalStrs(got, []string{"web/web"}) {
+	if got := serviceNames(resolveTree(t, tree)); !equalStrs(got, []string{"web/web/web"}) {
 		t.Errorf("services = %v", got)
 	}
 	if edges := tree.Imports(); len(edges) != 1 || edges[0].Origin != "search "+checkout {
@@ -158,7 +174,7 @@ func TestLoadTreeWith_searchByLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := serviceNames(resolveTree(t, tree)); !equalStrs(got, []string{"web/web"}) {
+	if got := serviceNames(resolveTree(t, tree)); !equalStrs(got, []string{"web/web/web"}) {
 		t.Errorf("services = %v", got)
 	}
 }
@@ -186,7 +202,7 @@ func TestLoadTreeWith_remoteFilesStayInsideTheirCheckout(t *testing.T) {
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
-			infra := gitRepo(t, map[string]string{"pkgs/web/Alphasfile": c.require + "\n" + pkgWeb})
+			infra := gitRepo(t, map[string]string{"pkgs/web/Alphasfile": pkgWebRequiring(c.require)})
 			dir := t.TempDir()
 			root := writeTree(t, dir, map[string]string{"Alphasfile": `import "github.com/acme/infra/pkgs/web@main" {}`})
 			_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
@@ -199,8 +215,8 @@ func TestLoadTreeWith_remoteFilesStayInsideTheirCheckout(t *testing.T) {
 
 func TestLoadTreeWith_remoteRelativeRequireInsideCheckout(t *testing.T) {
 	infra := gitRepo(t, map[string]string{
-		"pkgs/web/Alphasfile": "require \"../db\" {}\n" + pkgWeb,
-		"pkgs/db/Alphasfile":  "service \"go\" \"db\" {\n  git { url = \"github.com/x/db\" }\n}\n",
+		"pkgs/web/Alphasfile": pkgWebRequiring(`require "../db" {}`),
+		"pkgs/db/Alphasfile":  pkgDB,
 	})
 	main := gitOut(t, infra, "rev-parse", "HEAD")
 	dir := t.TempDir()
@@ -209,7 +225,7 @@ func TestLoadTreeWith_remoteRelativeRequireInsideCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := serviceNames(resolveTree(t, tree)); !equalStrs(got, []string{"web/web", "db/db"}) {
+	if got := serviceNames(resolveTree(t, tree)); !equalStrs(got, []string{"web/web/web", "db/db/db"}) {
 		t.Errorf("services = %v", got)
 	}
 	if !strings.Contains(string(tree.Bytes()), remoteRepo+"@"+main+"//pkgs/db/Alphasfile") {
@@ -299,7 +315,7 @@ func infraRepo(t *testing.T) (repo, head string) {
 	t.Helper()
 	repo = gitRepo(t, map[string]string{
 		"pkgs/web/Alphasfile": pkgWeb,
-		"pkgs/db/Alphasfile":  "service \"go\" \"db\" {\n  git { url = \"github.com/x/db\" }\n}\n",
+		"pkgs/db/Alphasfile":  pkgDB,
 	})
 	gitRun(t, repo, "tag", "v1")
 	return repo, gitOut(t, repo, "rev-parse", "HEAD")

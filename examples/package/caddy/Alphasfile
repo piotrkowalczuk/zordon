@@ -1,118 +1,118 @@
 # Caddy in front of whatever its features switch on. Each feature requires
 # the package it serves and drops site snippets into the Caddyfile. With both
 # features, Hugo is served on the host hugo.<domain>, which CoreDNS resolves.
-# go build needs these from the host; the importer may pass more.
-sysenv = ["HOME", "PATH", "TMPDIR"]
+package "caddy" {
+  inputs = {
+    # null picks a free port; 80 gives http://hugo.test/ in a browser.
+    http_port = null
+    # The DNS zone the hosts live in; keep it equal to the coredns zone.
+    domain = "test"
+  }
+  features = ["hugo", "coredns"]
 
-# null picks a free port; 80 gives http://hugo.test/ in a browser.
-input "http_port" { default = null }
-
-# The DNS zone the hosts live in; keep it equal to the coredns zone.
-input "domain" { default = "test" }
-
-feature "hugo" {}
-feature "coredns" {}
-
-require "../hugo" {
-  enabled = feature.hugo
-}
-
-require "../coredns" {
-  enabled = feature.coredns
-}
-
-service "go" "caddy" {
-  git {
-    url = "github.com/caddyserver/caddy"
-    tag = "v2.11.4"
+  require "../hugo" {
+    enabled = features.hugo
   }
 
-  build {
-    cmd = ["go", "build", "-o", "${fs::bin()}/caddy", "./cmd/caddy"]
+  require "../coredns" {
+    enabled = features.coredns
   }
 
-  vars = {
-    http  = input.http_port != null ? input.http_port : net::pickport()
-    admin = net::pickport()
-  }
-
-  print = (feature.hugo && feature.coredns ? "http://hugo.${input.domain}:${self.vars.http}/  (caddy routes the host to hugo)" :
-    feature.hugo ? "http://127.0.0.1:${self.vars.http}/  (caddy, proxies to hugo)" :
-  "http://127.0.0.1:${self.vars.http}/  (caddy)")
-
-  # Caddy autosaves its config under the user's config dir; keep it in the
-  # service's own state instead.
-  env = {
-    XDG_CONFIG_HOME = "${fs::var()}/config"
-    XDG_DATA_HOME   = "${fs::var()}/data"
-  }
-
-  file "caddyfile" {
-    path = "${fs::etc()}/Caddyfile"
-    body = <<-EOT
-      {
-        admin 127.0.0.1:${self.vars.admin}
-        auto_https off
+  module "caddy" {
+    service "go" "caddy" {
+      git {
+        url = "github.com/caddyserver/caddy"
+        tag = "v2.11.4"
       }
 
-      :${self.vars.http} {
-        respond /healthz "ok" 200
-        import ${fs::etc()}/sites/*.caddy
+      build {
+        cmd = ["go", "build", "-o", "${fs::bin()}/caddy", "./cmd/caddy"]
       }
-    EOT
-  }
 
-  file "site-base" {
-    path = "${fs::etc()}/sites/00-base.caddy"
-    body = "# site snippets switched on by features\n"
-  }
-
-  # Without DNS there is no host to route on, so Hugo takes every path.
-  file "site-hugo" {
-    enabled = feature.hugo && !feature.coredns
-    path    = "${fs::etc()}/sites/10-hugo.caddy"
-    body    = "reverse_proxy /* 127.0.0.1:${module.hugo.service.go.hugo.vars.port}\n"
-  }
-
-  file "site-hugo-host" {
-    enabled = feature.hugo && feature.coredns
-    path    = "${fs::etc()}/sites/10-hugo-host.caddy"
-    body    = <<-EOT
-      @hugo host hugo.${input.domain}
-      handle @hugo {
-        reverse_proxy 127.0.0.1:${module.hugo.service.go.hugo.vars.port}
+      vars = {
+        http  = inputs.http_port != null ? inputs.http_port : net::pickport()
+        admin = net::pickport()
       }
-    EOT
-  }
 
-  # Resolves health.<zone> through CoreDNS, which answers 127.0.0.1, and so
-  # proxies back to Caddy's own /healthz.
-  file "site-coredns" {
-    enabled = feature.coredns
-    path    = "${fs::etc()}/sites/20-coredns.caddy"
-    body    = <<-EOT
-      handle_path /dns/* {
-        reverse_proxy {
-          dynamic a {
-            name health.${module.coredns.service.go.coredns.vars.zone}
-            port ${self.vars.http}
-            resolvers 127.0.0.1:${module.coredns.service.go.coredns.vars.dns}
+      print = (features.hugo && features.coredns ? "http://hugo.${inputs.domain}:${self.vars.http}/  (caddy routes the host to hugo)" :
+        features.hugo ? "http://127.0.0.1:${self.vars.http}/  (caddy, proxies to hugo)" :
+      "http://127.0.0.1:${self.vars.http}/  (caddy)")
+
+      # Caddy autosaves its config under the user's config dir; keep it in the
+      # service's own state instead.
+      env = {
+        XDG_CONFIG_HOME = "${fs::var()}/config"
+        XDG_DATA_HOME   = "${fs::var()}/data"
+      }
+
+      file "caddyfile" {
+        path = "${fs::etc()}/Caddyfile"
+        body = <<-EOT
+          {
+            admin 127.0.0.1:${self.vars.admin}
+            auto_https off
           }
-        }
+
+          :${self.vars.http} {
+            respond /healthz "ok" 200
+            import ${fs::etc()}/sites/*.caddy
+          }
+        EOT
       }
-    EOT
-  }
 
-  runtime {
-    cmd = ["${fs::bin()}/caddy", "run", "--config", self.file.caddyfile.path, "--adapter", "caddyfile"]
-  }
+      file "site-base" {
+        path = "${fs::etc()}/sites/00-base.caddy"
+        body = "# site snippets switched on by features\n"
+      }
 
-  readiness {
-    http {
-      path = "/healthz"
-      port = self.vars.http
+      # Without DNS there is no host to route on, so Hugo takes every path.
+      file "site-hugo" {
+        enabled = features.hugo && !features.coredns
+        path    = "${fs::etc()}/sites/10-hugo.caddy"
+        body    = "reverse_proxy /* 127.0.0.1:${package.hugo.module.hugo.service.go.hugo.vars.port}\n"
+      }
+
+      file "site-hugo-host" {
+        enabled = features.hugo && features.coredns
+        path    = "${fs::etc()}/sites/10-hugo-host.caddy"
+        body    = <<-EOT
+          @hugo host hugo.${inputs.domain}
+          handle @hugo {
+            reverse_proxy 127.0.0.1:${package.hugo.module.hugo.service.go.hugo.vars.port}
+          }
+        EOT
+      }
+
+      # Resolves health.<zone> through CoreDNS, which answers 127.0.0.1, and
+      # so proxies back to Caddy's own /healthz.
+      file "site-coredns" {
+        enabled = features.coredns
+        path    = "${fs::etc()}/sites/20-coredns.caddy"
+        body    = <<-EOT
+          handle_path /dns/* {
+            reverse_proxy {
+              dynamic a {
+                name health.${package.coredns.module.coredns.service.go.coredns.vars.zone}
+                port ${self.vars.http}
+                resolvers 127.0.0.1:${package.coredns.module.coredns.service.go.coredns.vars.dns}
+              }
+            }
+          }
+        EOT
+      }
+
+      runtime {
+        cmd = ["${fs::bin()}/caddy", "run", "--config", self.file.caddyfile.path, "--adapter", "caddyfile"]
+      }
+
+      readiness {
+        http {
+          path = "/healthz"
+          port = self.vars.http
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
     }
-    period            = "200ms"
-    failure_threshold = 50
   }
 }

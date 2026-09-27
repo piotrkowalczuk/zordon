@@ -31,7 +31,7 @@ start_place() { # <dir>
 	(cd "$1" && zordon start --agent --timeout 900s --alpha-log "$1/alpha.log" 2>&1 | tee "$1/zordon.log")
 }
 
-caddy_http() { (cd "$1" && zordon get module.caddy.service.go.caddy.vars.http); }
+caddy_http() { (cd "$1" && zordon get package.caddy.module.caddy.service.go.caddy.vars.http); }
 
 ALL="$(make_place 'import "github.com/piotrkowalczuk/zordon/examples/package@main" {}')"
 HUGO="$(make_place 'import "github.com/piotrkowalczuk/zordon/examples/package/caddy@main" { features = ["hugo"] }')"
@@ -41,13 +41,13 @@ trap 'stop_place "$ALL"; stop_place "$HUGO"; stop_place "$CADDY"' EXIT
 # --- whole stack, both features ---
 start_place "$ALL"
 plan="$(cd "$ALL" && zordon --agent plan)" || fail "zordon plan failed in $ALL"
-assert_contains "$plan" "# import $ROOT/examples/package as package (search $ROOT)" "the one-liner resolves through zordon.work"
+assert_contains "$plan" "# import $ROOT/examples/package as stack (search $ROOT)" "the one-liner resolves through zordon.work"
 assert_contains "$plan" "# import $ROOT/examples/package/caddy as caddy [features: coredns, hugo]" "the stack imports caddy with both features"
 assert_contains "$plan" "# import $ROOT/examples/package/hugo as hugo" "feature hugo requires the hugo package"
 assert_contains "$plan" "# import $ROOT/examples/package/coredns as coredns" "feature coredns requires the coredns package"
 
 status="$(cd "$ALL" && zordon status --agent)"
-for svc in caddy/caddy hugo/hugo coredns/coredns; do
+for svc in caddy/caddy/caddy hugo/hugo/hugo coredns/coredns/coredns; do
 	assert_contains "$status" "$svc" "$svc is part of the stack"
 done
 http="$(caddy_http "$ALL")"
@@ -68,8 +68,8 @@ stop_place "$ALL"
 # --- caddy with hugo, no DNS ---
 start_place "$HUGO"
 status="$(cd "$HUGO" && zordon status --agent)"
-assert_contains "$status" "hugo/hugo" "feature hugo alone starts hugo"
-case "$status" in *coredns/coredns*) fail "coredns started without its feature:\n$status" ;; esac
+assert_contains "$status" "hugo/hugo/hugo" "feature hugo alone starts hugo"
+case "$status" in *coredns/coredns/coredns*) fail "coredns started without its feature:\n$status" ;; esac
 http="$(caddy_http "$HUGO")"
 page="$(http_get "http://127.0.0.1:$http/")" || fail "caddy did not serve / on $http"
 assert_contains "$page" "zordon-hugo-ok" "without DNS, caddy proxies every path to hugo"
@@ -83,8 +83,8 @@ case "$plan" in *"as hugo"* | *"as coredns"*) fail "a switched-off require must 
 pass "switched-off requires import nothing"
 
 status="$(cd "$CADDY" && zordon status --agent)"
-assert_contains "$status" "caddy/caddy" "caddy runs"
-case "$status" in *hugo/hugo* | *coredns/coredns*) fail "hugo or coredns started without their feature:\n$status" ;; esac
+assert_contains "$status" "caddy/caddy/caddy" "caddy runs"
+case "$status" in *hugo/hugo/hugo* | *coredns/coredns/coredns*) fail "hugo or coredns started without their feature:\n$status" ;; esac
 pass "hugo and coredns stay out"
 
 http="$(caddy_http "$CADDY")"

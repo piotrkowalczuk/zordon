@@ -2,7 +2,6 @@ package alphasfile
 
 import (
 	"fmt"
-	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -22,24 +21,26 @@ import (
 // transitively imports, each file loaded once. The stack is the entrypoint's
 // modules, what its imports name, and, repeated until nothing changes, what
 // any module or package already in the stack imports or requires.
+//
+// A module of a package has the id "<package>/<module>"; every other module
+// is known by its bare name.
 type Tree struct {
 	files   []*treeFile // load order, entrypoint first
 	byPath  map[string]*treeFile
-	modules []*moduleBlock // instantiated modules and packages, in load order
+	modules []*moduleBlock // instantiated modules, in load order, Name set to the id
 	edges   []ImportEdge
 	unused  []UnusedModule
 
 	// links holds every import and require per scope: DefaultModule for the
-	// entrypoint's top level, a module or package name otherwise.
+	// entrypoint's top level, a module id, or pkgScope(<package>).
 	links map[string][]importLink
-	// owners maps every declared module and package to its file; scopes maps
-	// every scope to the modules and packages it may reference.
+	// owners maps every declared module id to its file; scopes maps every
+	// scope to the modules and packages it may reference.
 	owners map[string]*treeFile
-	scopes map[string]map[string]bool
+	scopes map[string]*scopeVis
 	active map[string]bool
 
 	packages      map[string]*pkgInstance
-	entry         *scopeSettings
 	entryServices []*serviceBlock
 	// disabled are the source ranges of blocks switched off by enabled; the
 	// static passes over service bodies skip them.
@@ -118,7 +119,10 @@ func ParseTree(name string, src []byte) (*Tree, error) {
 		return nil, fmt.Errorf("%s: %q: imports need a file on disk; load this manifest with alphasfile.Open", imps[0].DefRange, imps[0].Path)
 	}
 	t := newTree(nil)
-	t.register(newTreeFile(abs, abs, src, root))
+	f := newTreeFile(abs, abs, src, root)
+	if err := t.adopt(f, nil); err != nil {
+		return nil, err
+	}
 	if err := t.finish(); err != nil {
 		return nil, err
 	}
@@ -169,7 +173,9 @@ type treeFile struct {
 	src      []byte
 	root     *rootBlock
 	declared map[string]*moduleBlock
-	pkg      *pkgInstance
+	// pkg and block are set for a package's file.
+	pkg   *pkgInstance
+	block *packageBlock
 	// confine, repoAt and origin are set for files of a remote checkout:
 	// its root, "<repo>@<commit>", and a short form for display.
 	confine string
@@ -177,9 +183,8 @@ type treeFile struct {
 	origin  string
 }
 
-// pkgInstance is a package in the stack: a directory's Alphasfile loaded
-// through import or require, instantiated once as a module named after the
-// alias or the directory.
+// pkgInstance is a package in the stack, instantiated once under its name:
+// the alias it was first imported with, or its package block's label.
 type pkgInstance struct {
 	name string
 	file *treeFile
@@ -196,16 +201,24 @@ type pkgSettings struct {
 	features []string
 }
 
-// scopeSettings is what a package, or a runnable entrypoint, sees as
-// input.<n> and feature.<n>.
+// scopeSettings is what a package's modules see as inputs.<n> and
+// features.<n>.
 type scopeSettings struct {
 	inputs   map[string]cty.Value
 	features map[string]bool
 }
 
+// scopeVis is what code in one scope may reference: modules by id and
+// packages by name.
+type scopeVis struct {
+	mods map[string]bool
+	pkgs map[string]bool
+}
+
 type importLink struct {
 	file    *treeFile
 	modules []string
+	pkg     *pkgInstance
 	block   *importBlock
 }
 
@@ -219,6 +232,20 @@ func isLocalPath(p string) bool {
 		}
 	}
 	return false
+}
+
+func pkgScope(name string) string { return "pkg:" + name }
+
+// packageOf returns the package a scope belongs to: the part before '/' of a
+// package module id, or the name in a pkgScope.
+func packageOf(scope string) (string, bool) {
+	if p, ok := strings.CutPrefix(scope, "pkg:"); ok {
+		return p, true
+	}
+	if p, _, ok := strings.Cut(scope, "/"); ok {
+		return p, true
+	}
+	return "", false
 }
 
 func newTree(src importSource) *Tree {
@@ -246,7 +273,37 @@ func newTreeFile(path, identity string, src []byte, root *rootBlock) *treeFile {
 	for _, sb := range root.allServices() {
 		sb.file = f
 	}
+	if len(root.Packages) == 1 {
+		f.block = root.Packages[0]
+		for _, mb := range f.block.Modules {
+			for _, sb := range mb.Services {
+				sb.file = f
+			}
+		}
+	}
 	return f
+}
+
+// adopt registers a loaded file. The entrypoint may be a package's file:
+// then the package runs on its own, with default inputs and no features.
+func (t *Tree) adopt(f *treeFile, pkg *pkgInstance) error {
+	if f.block != nil && pkg == nil {
+		pkg = &pkgInstance{name: f.block.Name, at: f.block.DefRange}
+		t.links[DefaultModule] = append(t.links[DefaultModule], importLink{file: f, pkg: pkg})
+	}
+	if pkg != nil {
+		if pkg.name == "" {
+			pkg.name = f.block.Name
+		}
+		if prev := t.packages[pkg.name]; prev != nil {
+			return fmt.Errorf("%s: another package is already named %q (%s, at %s); import one of them with an alias: import \"<path>\" \"<alias>\" {}", pkg.at, pkg.name, prev.file.dir, prev.at)
+		}
+		t.packages[pkg.name] = pkg
+		pkg.file = f
+		f.pkg = pkg
+	}
+	t.register(f)
+	return nil
 }
 
 func (t *Tree) register(f *treeFile) {
@@ -278,30 +335,43 @@ func (t *Tree) load(path string, importer *treeFile, imp *importBlock, pkg *pkgI
 	if err != nil {
 		return nil, err
 	}
+	isPackage := len(root.Packages) > 0
 	switch {
+	case isPackage:
+		if err := checkPackageFile(root); err != nil {
+			return nil, err
+		}
+		if importer != nil && pkg == nil {
+			return nil, fmt.Errorf("%s: %s %q: %s is a package's file; %s its directory instead", imp.DefRange, imp.keyword, imp.Path, path, imp.keyword)
+		}
 	case pkg != nil:
-		err = checkPackage(root)
+		return nil, fmt.Errorf("%s: %s %q: %s has no package block, so it is not a package; wrap its modules in package \"<name>\" {}", imp.DefRange, imp.keyword, imp.Path, path)
 	case importer != nil:
-		err = checkFragment(root)
-	}
-	if err != nil {
-		return nil, err
+		if err := checkFragment(root); err != nil {
+			return nil, err
+		}
 	}
 	f := newTreeFile(path, path, b, root)
-	f.pkg = pkg
 	f.confine, f.repoAt, f.origin = res.confine, res.repoAt, res.origin
-	if pkg != nil {
-		pkg.file = f
-	}
-	t.register(f)
-	scope := DefaultModule
-	if pkg != nil {
-		scope = pkg.name
-	}
-	if err := t.follow(f, scope, "import", root.Imports); err != nil {
+	if err := t.adopt(f, pkg); err != nil {
 		return nil, err
 	}
-	if err := t.follow(f, scope, "require", root.Requires); err != nil {
+	if f.block != nil {
+		name := f.pkg.name
+		if err := t.follow(f, pkgScope(name), "import", f.block.Imports); err != nil {
+			return nil, err
+		}
+		if err := t.follow(f, pkgScope(name), "require", f.block.Requires); err != nil {
+			return nil, err
+		}
+		for _, mb := range f.block.Modules {
+			if err := t.follow(f, name+"/"+mb.Name, "require", mb.Requires); err != nil {
+				return nil, err
+			}
+		}
+		return f, nil
+	}
+	if err := t.follow(f, DefaultModule, "import", root.Imports); err != nil {
 		return nil, err
 	}
 	for _, mb := range root.Modules {
@@ -340,8 +410,8 @@ func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, res re
 	switch {
 	case ib.InputsRange != (hcl.Range{}) || ib.Features != nil:
 		return fmt.Errorf("%s: %s %q: inputs and features are passed to a package directory, not to a fragment file", ib.DefRange, ib.keyword, ib.Path)
-	case ib.keyword == "import" && f.pkg != nil:
-		return fmt.Errorf("%s: import %q: a package takes modules from a fragment with require %q { modules = [...] }", ib.DefRange, ib.Path, ib.Path)
+	case f.block != nil:
+		return fmt.Errorf("%s: %s %q: a package depends on other packages, not on a fragment's modules; move the modules into this package or into a package of their own", ib.DefRange, ib.keyword, ib.Path)
 	case ib.Modules == nil:
 		return fmt.Errorf("%s: %s %q: \"modules\" is required when importing a fragment; name the modules to take from %s", ib.DefRange, ib.keyword, ib.Path, target)
 	case len(ib.Modules) == 0:
@@ -357,8 +427,8 @@ func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, res re
 		}
 		tf.identity = res.identity
 	}
-	if tf.pkg != nil {
-		return fmt.Errorf("%s: %s %q: %s is a package's %s; %s its directory instead", ib.DefRange, ib.keyword, ib.Path, tf.path, invocation.AlphasfileName, ib.keyword)
+	if tf.block != nil {
+		return fmt.Errorf("%s: %s %q: %s is a package's file; %s its directory instead", ib.DefRange, ib.keyword, ib.Path, tf.path, ib.keyword)
 	}
 	for _, m := range ib.Modules {
 		if tf.declared[m] == nil {
@@ -370,26 +440,17 @@ func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, res re
 }
 
 func (t *Tree) followPackage(f *treeFile, scope string, ib *importBlock, res resolved) error {
-	dir := res.path
 	if ib.Modules != nil {
 		return fmt.Errorf("%s: %s %q: a package is imported whole; drop modules", ib.DefRange, ib.keyword, ib.Path)
 	}
-	afPath := filepath.Join(dir, invocation.AlphasfileName)
-	name := ib.alias
-	if name == "" {
-		name = packageName(ib.Path, dir)
+	if ib.alias != "" && !moduleNameRe.MatchString(ib.alias) {
+		return fmt.Errorf("%s: %s %q: %q is not a valid package name", ib.DefRange, ib.keyword, ib.Path, ib.alias)
 	}
-	if !moduleNameRe.MatchString(name) {
-		return fmt.Errorf("%s: %s %q: %q is not a valid package name; give it an alias: %s %q \"<alias>\" {}", ib.DefRange, ib.keyword, ib.Path, name, ib.keyword, ib.Path)
-	}
+	afPath := filepath.Join(res.path, invocation.AlphasfileName)
 	tf := t.byPath[afPath]
 	var pkg *pkgInstance
 	if tf == nil {
-		if prev := t.packages[name]; prev != nil {
-			return fmt.Errorf("%s: %s %q: another package is already named %q (%s, imported at %s); give one of them an alias: %s %q \"<alias>\" {}", ib.DefRange, ib.keyword, ib.Path, name, prev.file.dir, prev.at, ib.keyword, ib.Path)
-		}
-		pkg = &pkgInstance{name: name, at: ib.DefRange}
-		t.packages[name] = pkg
+		pkg = &pkgInstance{name: ib.alias, at: ib.DefRange}
 		var err error
 		if tf, err = t.load(afPath, f, ib, pkg, res); err != nil {
 			return err
@@ -400,8 +461,12 @@ func (t *Tree) followPackage(f *treeFile, scope string, ib *importBlock, res res
 		if pkg == nil {
 			return fmt.Errorf("%s: %s %q: %s is the entrypoint or a fragment, not a package", ib.DefRange, ib.keyword, ib.Path, afPath)
 		}
+		name := ib.alias
+		if name == "" {
+			name = tf.block.Name
+		}
 		if name != pkg.name {
-			return fmt.Errorf("%s: %s %q: this package is already in the stack as %q (imported at %s); use the same name here", ib.DefRange, ib.keyword, ib.Path, pkg.name, pkg.at)
+			return fmt.Errorf("%s: %s %q: this package is already in the stack as %q (at %s); use the same name here", ib.DefRange, ib.keyword, ib.Path, pkg.name, pkg.at)
 		}
 	}
 	if ib.keyword == "import" {
@@ -415,7 +480,7 @@ func (t *Tree) followPackage(f *treeFile, scope string, ib *importBlock, res res
 			return fmt.Errorf("%s: import %q passes other inputs or features than the import at %s; a package runs once, so every import of it must pass the same", ib.DefRange, ib.Path, pkg.set.at)
 		}
 	}
-	t.links[scope] = append(t.links[scope], importLink{file: tf, modules: []string{pkg.name}, block: ib})
+	t.links[scope] = append(t.links[scope], importLink{file: tf, pkg: pkg, block: ib})
 	return nil
 }
 
@@ -431,76 +496,118 @@ func (t *Tree) finish() error {
 			}
 			t.owners[mb.Name] = f
 		}
+		if f.block != nil {
+			for _, mb := range f.block.Modules {
+				t.owners[f.pkg.name+"/"+mb.Name] = f
+			}
+		}
 	}
+
+	var err error
 	for _, f := range t.files {
 		if f.pkg == nil {
 			continue
 		}
-		if prev, dup := t.owners[f.pkg.name]; dup {
-			return fmt.Errorf("%s: package %q has the same name as module %q declared at %s; import the package with an alias", f.pkg.at, f.pkg.name, f.pkg.name, prev.declared[f.pkg.name].DefRange)
+		at := hcl.Range{}
+		if f.pkg.file != t.files[0] {
+			at = f.pkg.at
 		}
-		t.owners[f.pkg.name] = f
-	}
-
-	entry := t.files[0]
-	var err error
-	if t.entry, err = resolveSettings(entry.root, nil, "this "+invocation.AlphasfileName, hcl.Range{}); err != nil {
-		return err
-	}
-	for _, f := range t.files {
-		if f.pkg != nil {
-			if f.pkg.settings, err = resolveSettings(f.root, f.pkg.set, "package "+f.pkg.name, f.pkg.at); err != nil {
-				return err
-			}
+		if f.pkg.settings, err = resolveSettings(f.block, f.pkg.set, "package "+f.pkg.name, at); err != nil {
+			return err
 		}
 	}
 
 	// Every module of the entrypoint is in the stack, so the entrypoint's
 	// scopes see all of them. A fragment module sees itself and what it
-	// requires, a sibling from its own file included; a package sees itself
-	// and what it imports or requires.
-	t.scopes = map[string]map[string]bool{}
+	// requires, a sibling from its own file included. A package's modules
+	// see each other and whatever the package or the module imports or
+	// requires.
+	entry := t.files[0]
+	t.scopes = map[string]*scopeVis{}
 	for _, f := range t.files {
-		for _, mb := range f.root.Modules {
-			vis := map[string]bool{mb.Name: true}
-			if f == entry {
-				for name := range entry.declared {
-					vis[name] = true
+		if f.block != nil {
+			p := f.pkg.name
+			pv := newScopeVis()
+			for _, mb := range f.block.Modules {
+				pv.mods[p+"/"+mb.Name] = true
+			}
+			if err := t.linked(pv, pkgScope(p)); err != nil {
+				return err
+			}
+			t.scopes[pkgScope(p)] = pv
+			for _, mb := range f.block.Modules {
+				mv := pv.clone()
+				if err := t.linked(mv, p+"/"+mb.Name); err != nil {
+					return err
 				}
+				t.scopes[p+"/"+mb.Name] = mv
 			}
-			if t.scopes[mb.Name], err = t.linked(vis, mb.Name); err != nil {
-				return err
-			}
-		}
-		if f.pkg != nil {
-			if t.scopes[f.pkg.name], err = t.linked(map[string]bool{f.pkg.name: true}, f.pkg.name); err != nil {
-				return err
-			}
-		}
-	}
-	top := map[string]bool{}
-	for name := range entry.declared {
-		top[name] = true
-	}
-	if t.scopes[DefaultModule], err = t.linked(top, DefaultModule); err != nil {
-		return err
-	}
-
-	t.active = map[string]bool{DefaultModule: true}
-	queue := sortedKeys(t.scopes[DefaultModule])
-	for len(queue) > 0 {
-		name := queue[0]
-		queue = queue[1:]
-		if t.active[name] {
 			continue
 		}
-		t.active[name] = true
-		queue = append(queue, sortedKeys(t.scopes[name])...)
+		for _, mb := range f.root.Modules {
+			vis := newScopeVis()
+			vis.mods[mb.Name] = true
+			if f == entry {
+				for name := range entry.declared {
+					vis.mods[name] = true
+				}
+			}
+			if err := t.linked(vis, mb.Name); err != nil {
+				return err
+			}
+			t.scopes[mb.Name] = vis
+		}
+	}
+	top := newScopeVis()
+	for name := range entry.declared {
+		top.mods[name] = true
+	}
+	if err := t.linked(top, DefaultModule); err != nil {
+		return err
+	}
+	t.scopes[DefaultModule] = top
+
+	t.active = map[string]bool{}
+	queue := []string{DefaultModule}
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		if t.active[node] {
+			continue
+		}
+		t.active[node] = true
+		if vis := t.scopes[node]; vis != nil {
+			queue = append(queue, sortedKeys(vis.mods)...)
+			for _, p := range sortedKeys(vis.pkgs) {
+				queue = append(queue, pkgScope(p))
+			}
+		}
 	}
 
 	for _, f := range t.files {
+		if f.block != nil {
+			p := f.pkg.name
+			if !t.active[pkgScope(p)] {
+				t.unused = append(t.unused, UnusedModule{Path: f.path, Module: "package " + p})
+				continue
+			}
+			t.addEdges(pkgScope(p))
+			for _, mb := range f.block.Modules {
+				id := p + "/" + mb.Name
+				cp, err := t.pruneModule(mb, f.pkg.settings, id, f.block.Toolchain)
+				if err != nil {
+					return err
+				}
+				t.modules = append(t.modules, cp)
+				t.addEdges(id)
+			}
+			if f == entry {
+				t.addEdges(DefaultModule)
+			}
+			continue
+		}
 		if f == entry {
-			if t.entryServices, err = t.prune(entry.root.Services, t.entry, DefaultModule); err != nil {
+			if t.entryServices, err = t.prune(entry.root.Services, nil, DefaultModule); err != nil {
 				return err
 			}
 			t.addEdges(DefaultModule)
@@ -510,55 +617,64 @@ func (t *Tree) finish() error {
 				t.unused = append(t.unused, UnusedModule{Path: f.path, Module: mb.Name})
 				continue
 			}
-			if mb, err = t.pruneModule(mb, t.settingsFor(mb.Name)); err != nil {
+			cp, err := t.pruneModule(mb, nil, mb.Name, nil)
+			if err != nil {
 				return err
 			}
-			t.modules = append(t.modules, mb)
+			t.modules = append(t.modules, cp)
 			t.addEdges(mb.Name)
 		}
-		if f.pkg == nil {
-			continue
-		}
-		if !t.active[f.pkg.name] {
-			t.unused = append(t.unused, UnusedModule{Path: f.path, Module: f.pkg.name})
-			continue
-		}
-		services, err := t.prune(f.root.Services, f.pkg.settings, f.pkg.name)
-		if err != nil {
-			return err
-		}
-		t.modules = append(t.modules, &moduleBlock{Name: f.pkg.name, DefRange: f.pkg.at, Toolchain: f.root.Toolchain, Services: services})
-		t.addEdges(f.pkg.name)
 	}
 	return t.checkGated()
 }
 
+func newScopeVis() *scopeVis {
+	return &scopeVis{mods: map[string]bool{}, pkgs: map[string]bool{}}
+}
+
+func (v *scopeVis) clone() *scopeVis {
+	c := newScopeVis()
+	for k := range v.mods {
+		c.mods[k] = true
+	}
+	for k := range v.pkgs {
+		c.pkgs[k] = true
+	}
+	return c
+}
+
 // linked adds every module and package the scope imports or requires to
 // vis, skipping requires switched off by enabled.
-func (t *Tree) linked(vis map[string]bool, scope string) (map[string]bool, error) {
+func (t *Tree) linked(vis *scopeVis, scope string) error {
 	for _, l := range t.links[scope] {
 		on, err := t.linkEnabled(scope, l)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if !on {
+			if t.off().links[scope] == nil {
+				t.off().links[scope] = map[string]offRecord{}
+			}
+			if l.pkg != nil {
+				t.off().links[scope][pkgScope(l.pkg.name)] = offRecord{what: "package." + l.pkg.name, at: l.block.EnabledRange}
+			}
 			for _, m := range l.modules {
-				if t.off().links[scope] == nil {
-					t.off().links[scope] = map[string]offRecord{}
-				}
 				t.off().links[scope][m] = offRecord{what: "module." + m, at: l.block.EnabledRange}
 			}
 			continue
 		}
+		if l.pkg != nil {
+			vis.pkgs[l.pkg.name] = true
+		}
 		for _, m := range l.modules {
-			vis[m] = true
+			vis.mods[m] = true
 		}
 	}
-	return vis, nil
+	return nil
 }
 
 func (t *Tree) linkEnabled(scope string, l importLink) (bool, error) {
-	if l.block.EnabledRange == (hcl.Range{}) {
+	if l.block == nil || l.block.EnabledRange == (hcl.Range{}) {
 		return true, nil
 	}
 	return evalEnabled(l.block.Enabled, t.settingsFor(scope))
@@ -569,12 +685,15 @@ func (t *Tree) addEdges(scope string) {
 		if on, _ := t.linkEnabled(scope, l); !on {
 			continue
 		}
+		if l.pkg != nil && l.file == t.files[0] {
+			continue
+		}
 		var features []string
 		pkgName := ""
-		if l.file.pkg != nil {
-			pkgName = l.file.pkg.name
-			if l.file.pkg.set != nil {
-				features = l.file.pkg.set.features
+		if l.pkg != nil {
+			pkgName = l.pkg.name
+			if l.pkg.set != nil {
+				features = l.pkg.set.features
 			}
 		}
 		t.addEdge(l.file, l.modules, pkgName, features)
@@ -597,26 +716,44 @@ func (t *Tree) addEdge(f *treeFile, modules []string, pkg string, features []str
 	t.edges = append(t.edges, ImportEdge{Path: path, Modules: append([]string(nil), modules...), Package: pkg, Features: features, Origin: f.origin})
 }
 
-// settingsFor returns the inputs and features scope sees: a package's own,
-// the entrypoint's for its top level and its modules, nil elsewhere.
+// settingsFor returns the inputs and features a scope sees: its package's,
+// or nil outside packages.
 func (t *Tree) settingsFor(scope string) *scopeSettings {
-	if pkg := t.packages[scope]; pkg != nil {
-		return pkg.settings
-	}
-	if scope == DefaultModule || t.files[0].declared[scope] != nil {
-		return t.entry
+	if p, ok := packageOf(scope); ok {
+		if pkg := t.packages[p]; pkg != nil {
+			return pkg.settings
+		}
 	}
 	return nil
 }
 
-// visible reports whether code in scope may reference module name. A name
-// no file of this tree declares, such as a federation parent's module, is
-// not the tree's to hide.
-func (t *Tree) visible(scope, name string) bool {
-	if t.owners[name] == nil {
+// resolveModule maps `module.<m>` written in scope to a module id: a
+// sibling "<package>/<m>" inside a package, the bare name elsewhere.
+func resolveModule(scope, m string) string {
+	if p, ok := packageOf(scope); ok {
+		return p + "/" + m
+	}
+	return m
+}
+
+// moduleVisible reports whether code in scope may reference module id. An
+// id no file of this tree declares, such as a federation parent's module,
+// is not the tree's to hide.
+func (t *Tree) moduleVisible(scope, id string) bool {
+	if t.owners[id] == nil {
 		return true
 	}
-	return t.scopes[scope][name]
+	vis := t.scopes[scope]
+	return vis != nil && vis.mods[id]
+}
+
+// packageVisible reports whether code in scope may reference package p.
+func (t *Tree) packageVisible(scope, p string) bool {
+	if t.packages[p] == nil {
+		return true
+	}
+	vis := t.scopes[scope]
+	return vis != nil && vis.pkgs[p]
 }
 
 func (t *Tree) isDisabled(r hcl.Range) bool {
@@ -634,19 +771,8 @@ func (t *Tree) merged() *rootBlock {
 	rb := *t.files[0].root
 	rb.Services = t.entryServices
 	rb.Modules = t.modules
+	rb.Packages = nil
 	return &rb
-}
-
-// sysenvExprs are the `sysenv` lists of the packages in the stack, unioned
-// after the entrypoint's own.
-func (t *Tree) sysenvExprs() []hcl.Expression {
-	var out []hcl.Expression
-	for _, f := range t.files[1:] {
-		if f.pkg != nil && t.active[f.pkg.name] && f.root.SysEnvRange != (hcl.Range{}) {
-			out = append(out, f.root.SysEnv)
-		}
-	}
-	return out
 }
 
 func decodeFile(name string, src []byte) (*rootBlock, error) {
@@ -682,7 +808,7 @@ func liftAliases(body *hclsyntax.Body, aliases map[int]string) {
 				blk.Labels = blk.Labels[:1]
 				blk.LabelRanges = blk.LabelRanges[:1]
 			}
-		case "module":
+		case "module", "package":
 			liftAliases(blk.Body, aliases)
 		}
 	}
@@ -692,20 +818,10 @@ func liftAliases(body *hclsyntax.Body, aliases map[int]string) {
 // Everything else belongs to the entrypoint or a package, and dependencies
 // belong to the module that needs them.
 func checkFragment(root *rootBlock) error {
-	hint := fmt.Sprintf("is only allowed in the entrypoint %s or a package; a fragment holds module blocks only", invocation.AlphasfileName)
+	hint := fmt.Sprintf("is only allowed in the entrypoint %s; a fragment holds module blocks only", invocation.AlphasfileName)
 	if len(root.Imports) > 0 {
 		imp := root.Imports[0]
 		return fmt.Errorf("%s: import %q in a fragment; declare the dependency inside the module block that uses it as require %q { modules = [...] }, so it joins the stack only with that module", imp.DefRange, imp.Path, imp.Path)
-	}
-	if len(root.Requires) > 0 {
-		req := root.Requires[0]
-		return fmt.Errorf("%s: top-level require %q in a fragment; move it into the module block that uses it", req.DefRange, req.Path)
-	}
-	if len(root.Inputs) > 0 {
-		return fmt.Errorf("%s: input %q %s", root.Inputs[0].DefRange, root.Inputs[0].Name, hint)
-	}
-	if len(root.Features) > 0 {
-		return fmt.Errorf("%s: feature %q %s", root.Features[0].DefRange, root.Features[0].Name, hint)
 	}
 	if root.SysEnvRange != (hcl.Range{}) {
 		return fmt.Errorf("%s: top-level sysenv %s", root.SysEnvRange, hint)
@@ -728,20 +844,30 @@ func checkFragment(root *rootBlock) error {
 	return nil
 }
 
-// checkPackage enforces what a package's Alphasfile may hold when it is
-// imported: everything that describes the package itself, nothing that
-// decides for the stack around it.
-func checkPackage(root *rootBlock) error {
-	hint := "is decided by the entrypoint that imports this package, not by the package"
+// checkPackageFile enforces that a package's file is one package block and
+// nothing else, so nothing that decides for the stack around it fits in.
+func checkPackageFile(root *rootBlock) error {
+	if len(root.Packages) > 1 {
+		return fmt.Errorf("%s: a file holds one package block; %q is already declared at %s", root.Packages[1].DefRange, root.Packages[0].Name, root.Packages[0].DefRange)
+	}
+	outside := fmt.Sprintf("outside package %q; a package's file holds only its package block", root.Packages[0].Name)
 	switch {
-	case root.EnvRange != (hcl.Range{}):
-		return fmt.Errorf("%s: top-level env %s; take the values as inputs", root.EnvRange, hint)
-	case root.DotenvRange != (hcl.Range{}):
-		return fmt.Errorf("%s: top-level dotenv %s; take the values as inputs", root.DotenvRange, hint)
-	case root.Workspace != nil:
-		return fmt.Errorf("%s: top-level workspace %s", root.Workspace.DefRange, hint)
+	case len(root.Services) > 0:
+		return fmt.Errorf("%s: service %s", root.Services[0].DefRange, outside)
 	case len(root.Modules) > 0:
-		return fmt.Errorf("%s: module %q in a package; a package is one module, so declare its services at the top level", root.Modules[0].DefRange, root.Modules[0].Name)
+		return fmt.Errorf("%s: module %q %s", root.Modules[0].DefRange, root.Modules[0].Name, outside)
+	case len(root.Imports) > 0:
+		return fmt.Errorf("%s: import %q %s", root.Imports[0].DefRange, root.Imports[0].Path, outside)
+	case root.Toolchain != nil:
+		return fmt.Errorf("%s: toolchain %s", root.Toolchain.DefRange, outside)
+	case root.Workspace != nil:
+		return fmt.Errorf("%s: workspace %s", root.Workspace.DefRange, outside)
+	case root.EnvRange != (hcl.Range{}):
+		return fmt.Errorf("%s: env %s", root.EnvRange, outside)
+	case root.DotenvRange != (hcl.Range{}):
+		return fmt.Errorf("%s: dotenv %s", root.DotenvRange, outside)
+	case root.SysEnvRange != (hcl.Range{}):
+		return fmt.Errorf("%s: sysenv %s; host variables are passed by the entrypoint", root.SysEnvRange, outside)
 	}
 	return nil
 }
@@ -756,20 +882,10 @@ func checkImportAttrs(f *treeFile, ib *importBlock) error {
 	if ib.keyword != "require" {
 		return fmt.Errorf("%s: import %q: enabled is allowed on require only", ib.EnabledRange, ib.Path)
 	}
-	if len(f.root.Features) == 0 {
-		return fmt.Errorf("%s: require %q: enabled needs a feature, and none is declared here; only a package or the entrypoint declares feature \"<name>\" {}", ib.EnabledRange, ib.Path)
+	if f.block == nil || len(f.block.Features) == 0 {
+		return fmt.Errorf("%s: require %q: enabled needs a feature, and none is declared here; only a package declares features = [...]", ib.EnabledRange, ib.Path)
 	}
 	return nil
-}
-
-// packageName is the local name of a package imported without an alias:
-// the last segment of the import path, without a version suffix.
-func packageName(label, dir string) string {
-	if isLocalPath(label) {
-		return filepath.Base(dir)
-	}
-	id, _, _ := strings.Cut(label, "@")
-	return path.Base(strings.TrimSuffix(id, "/"))
 }
 
 func sortedKeys[V any](m map[string]V) []string {
