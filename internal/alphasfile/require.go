@@ -59,6 +59,9 @@ func AddRequire(afPath, repo, ref string) (string, error) {
 	}
 	blk := body.FirstMatchingBlock("require", []string{repo})
 	if blk == nil {
+		if len(body.Attributes())+len(body.Blocks()) > 0 {
+			body.AppendNewline()
+		}
 		blk = body.AppendNewBlock("require", []string{repo})
 	}
 	blk.Body().SetAttributeValue("ref", cty.StringVal(ref))

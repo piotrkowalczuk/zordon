@@ -51,7 +51,7 @@ func TestAddRequire_zordonMod(t *testing.T) {
 	if err != nil || got != filepath.Join(dir, ModFileName) {
 		t.Fatalf("got %q, %v", got, err)
 	}
-	if body := readFile(t, got); !strings.Contains(body, `require "github.com/acme/infra"`) {
+	if body := readFile(t, got); body != "module = \"github.com/acme/stack\"\n\nrequire \"github.com/acme/infra\" {\n  ref = \"main\"\n}\n" {
 		t.Errorf("zordon.mod:\n%s", body)
 	}
 	if body := readFile(t, filepath.Join(dir, "place", "Alphasfile")); body != "" {

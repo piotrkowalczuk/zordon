@@ -46,7 +46,7 @@ func TestLoadTreeWith_remoteImportFetchesAndLocks(t *testing.T) {
 		t.Errorf("services = %v", got)
 	}
 	lock := readFile(t, filepath.Join(dir, LockFileName))
-	if !strings.Contains(lock, `repo "github.com/acme/infra"`) || !strings.Contains(lock, `commit = "`+main+`"`) || !strings.Contains(lock, `ref    = "main"`) {
+	if !strings.Contains(lock, "`zordon pkg update` moves the pins") || !strings.Contains(lock, `repo "github.com/acme/infra"`) || !strings.Contains(lock, `commit = "`+main+`"`) || !strings.Contains(lock, `ref    = "main"`) {
 		t.Errorf("lock file:\n%s", lock)
 	}
 	if ch := tree.LockChanges(); len(ch) != 1 || ch[0].New != main || ch[0].Old != "" {
