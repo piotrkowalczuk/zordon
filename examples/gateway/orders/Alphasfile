@@ -5,9 +5,13 @@ package "orders" {
   }
 
   import "../gateway" {
-    provide "routes" {
-      prefix   = "/orders/"
-      upstream = "127.0.0.1:${module.orders.service.go.orders.vars.port}"
+    inputs = {
+      routes = {
+        orders = {
+          prefix   = "/orders/"
+          upstream = "127.0.0.1:${module.orders.service.go.orders.vars.port}"
+        }
+      }
     }
   }
 

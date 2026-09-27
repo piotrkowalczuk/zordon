@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Claim: a package takes static configuration once (inputs, features),
-# collects entries many importers provide (slots), and gives values back
+# collects the entries many importers add to a map input, and gives values back
 # (outputs). orders and billing each register a route with the gateway,
 # which knows neither; billing calls orders through the gateway's url
 # output; the entrypoint only configures: a greeting for orders and the

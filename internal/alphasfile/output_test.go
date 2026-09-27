@@ -10,9 +10,9 @@ const pkgDatabase = `
 package "db" {
   inputs = {
     databases = {
-      description = "Databases to create."
-      type        = object({ name = string })
-      many        = true
+      description = "Databases to create, by importer."
+      type        = map(object({ name = string }))
+      default     = {}
       unique      = ["name"]
     }
   }
@@ -21,7 +21,7 @@ package "db" {
     port  = { description = "Where Postgres listens.", type = number, value = module.db.service.go.pg.vars.port }
     ready = { description = "Postgres is ready.", type = string, value = module.db.service.go.pg.runtime.ready }
     dsn = {
-      description = "The DSN of each database, by entry key."
+      description = "The DSN of each database, by key."
       type        = map(string)
       value       = { for key, d in inputs.databases : key => "postgres://127.0.0.1:${module.db.service.go.pg.vars.port}/${d.name}" }
     }
@@ -39,9 +39,7 @@ package "db" {
 const pkgOrders = `
 package "orders" {
   import "../db" {
-    provide "databases" {
-      name = "orders"
-    }
+    inputs = { databases = { orders = { name = "orders" } } }
   }
 
   module "orders" {
@@ -64,7 +62,7 @@ func TestOpen_outputsReachTheImporter(t *testing.T) {
 	})
 	orders := svcByName(openTree(t, root), "orders/orders/orders")
 	if got := fmt.Sprint(orders.Runtime.Vars["dsn"], " ", orders.Runtime.Vars["port"]); got != "postgres://127.0.0.1:5432/orders 5432" {
-		t.Errorf("vars = %s; an output may read services and slots, and an entry reads its own value back by its key", got)
+		t.Errorf("vars = %s; an output may read services and inputs, and an importer reads its own entry back by its key", got)
 	}
 	if after := orders.Runtime.After; len(after) != 1 || !strings.HasSuffix(after[0], "package.db.module.db.service.go.pg.runtime@ready") {
 		t.Errorf("after = %v; an output carries a barrier like the reference it names", after)
@@ -104,7 +102,7 @@ func TestOpen_outputOfAPackageNotImported(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":        "import \"./db\" {}\nimport \"./orders\" {}\n",
 		"db/Alphasfile":     pkgDatabase,
-		"orders/Alphasfile": strings.Replace(pkgOrders, "  import \"../db\" {\n    provide \"databases\" {\n      name = \"orders\"\n    }\n  }\n", "", 1),
+		"orders/Alphasfile": strings.Replace(pkgOrders, "  import \"../db\" {\n    inputs = { databases = { orders = { name = \"orders\" } } }\n  }\n", "", 1),
 	})
 	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
 	if err == nil || !strings.Contains(err.Error(), `package.db is not visible in package "orders"`) {

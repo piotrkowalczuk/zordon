@@ -1,6 +1,6 @@
 // Package conformance, driven through `zordon plan` (static, no alpha): a
 // package's features switch its services on and off, its inputs reach the
-// rendered config, provided entries reach the package that owns the slot,
+// rendered config, entries imports add to a map input reach its package,
 // and an identity import resolves through zordon.work.
 package conformance_test
 
@@ -55,12 +55,12 @@ func TestPlan_packageFeaturesChangeTheStack(t *testing.T) {
 	}
 }
 
-func TestPlan_provideReachesTheOwningPackage(t *testing.T) {
+func TestPlan_mapInputEntriesReachThePackage(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.WriteFile("Alphasfile", "import \"./shop\" {}\nimport \"./blog\" {}\n")
 	p.WriteFile("proxy/Alphasfile", `
 package "proxy" {
-  inputs = { sites = { description = "Hosts to route.", type = object({ host = string, port = number }), many = true } }
+  inputs = { sites = { description = "Hosts to route.", type = map(object({ host = string, port = number })), default = {} } }
 
   module "proxy" {
     service "go" "proxy" {
@@ -77,9 +77,13 @@ package "proxy" {
 		p.WriteFile(name+"/Alphasfile", `
 package "`+name+`" {
   import "../proxy" {
-    provide "sites" {
-      host = "`+name+`.test"
-      port = module.site.service.go.site.vars.port
+    inputs = {
+      sites = {
+        `+name+` = {
+          host = "`+name+`.test"
+          port = module.site.service.go.site.vars.port
+        }
+      }
     }
   }
 
@@ -93,7 +97,7 @@ package "`+name+`" {
 `)
 	}
 	if out := planOK(t, p); !strings.Contains(out, `body = "blog.test=8082;shop.test=8081;"`) {
-		t.Errorf("provided sites missing from the package that takes them:\n%s", out)
+		t.Errorf("sites added by the importers missing from the package that takes them:\n%s", out)
 	}
 }
 

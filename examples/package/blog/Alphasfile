@@ -7,9 +7,13 @@ package "blog" {
   }
 
   import "../caddy" {
-    provide "sites" {
-      host     = "blog.${inputs.domain}"
-      upstream = "127.0.0.1:${module.blog.service.go.hugo.vars.port}"
+    inputs = {
+      sites = {
+        blog = {
+          host     = "blog.${inputs.domain}"
+          upstream = "127.0.0.1:${module.blog.service.go.hugo.vars.port}"
+        }
+      }
     }
   }
 

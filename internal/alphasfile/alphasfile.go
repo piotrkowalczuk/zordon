@@ -718,38 +718,25 @@ type rootBlock struct {
 // importBlock pulls a package, or named modules of a fragment, into the
 // stack: `import "<path>" "<alias>"? { ... }`. A remote path carries no
 // version; the require that covers its repository does. An import at the
-// entrypoint's top level is the final word on a package's inputs and
-// features; any other import of a package configures it when the
-// entrypoint does not, and must be satisfied by the entrypoint when it does.
+// entrypoint's top level is the final word on a package's features; any
+// other import turns features on when the entrypoint does not import the
+// package, and must be satisfied by the entrypoint when it does. Inputs are
+// joined from every import, as ztypes.Merge does.
 type importBlock struct {
-	Path         string          `hcl:"path,label"`
-	Modules      []string        `hcl:"modules,optional"`
-	Inputs       hcl.Expression  `hcl:"inputs,optional"`
-	InputsRange  hcl.Range       `hcl:"inputs,attr_range"`
-	Features     []string        `hcl:"features,optional"`
-	Enabled      hcl.Expression  `hcl:"enabled,optional"`
-	EnabledRange hcl.Range       `hcl:"enabled,attr_range"`
-	Provides     []*provideBlock `hcl:"provide,block"`
-	Git          *gitBlock       `hcl:"git,block"`
-	DefRange     hcl.Range       `hcl:",def_range"`
+	Path         string         `hcl:"path,label"`
+	Modules      []string       `hcl:"modules,optional"`
+	Inputs       hcl.Expression `hcl:"inputs,optional"`
+	InputsRange  hcl.Range      `hcl:"inputs,attr_range"`
+	Features     []string       `hcl:"features,optional"`
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
+	Git          *gitBlock      `hcl:"git,block"`
+	DefRange     hcl.Range      `hcl:",def_range"`
 
 	keyword string
 	// alias is the optional second label; HCL block schemas have a fixed
 	// label count, so decodeFile lifts it off before decoding.
 	alias string
-}
-
-// provideBlock contributes one entry to a slot of the imported package:
-// `provide "<slot>" "<key>"? { <attr> = <expr> ... }`. Its values are
-// evaluated with the other producers, so they may reference services.
-type provideBlock struct {
-	Slot     string    `hcl:"slot,label"`
-	Body     hcl.Body  `hcl:",remain"`
-	DefRange hcl.Range `hcl:",def_range"`
-
-	// key is the optional second label; decodeFile lifts it off, as for an
-	// import's alias.
-	key string
 }
 
 // requireBlock pins a repository that remote imports name:
@@ -766,8 +753,8 @@ type requireBlock struct {
 // { description = "...", ... }. Features are fixed before planning, because
 // they decide which blocks exist; they are read as features.<n>. Inputs are
 // what goes in and outputs what comes out, both evaluated with the services:
-// a single input takes one value from one import, an input with many = true
-// takes entries from provide blocks; both are read as inputs.<n>. Outputs
+// an input of type map(T) takes entries from every import that sets it, any
+// other input one value from one import; both are read as inputs.<n>. Outputs
 // are read from outside as package.<p>.outputs.<n>. The package's toolchain
 // pins every module that has none of its own.
 type packageBlock struct {

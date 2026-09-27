@@ -7,9 +7,13 @@ package "shop" {
   }
 
   import "../caddy" {
-    provide "sites" {
-      host     = "shop.${inputs.domain}"
-      upstream = "127.0.0.1:${module.shop.service.go.hugo.vars.port}"
+    inputs = {
+      sites = {
+        shop = {
+          host     = "shop.${inputs.domain}"
+          upstream = "127.0.0.1:${module.shop.service.go.hugo.vars.port}"
+        }
+      }
     }
   }
 

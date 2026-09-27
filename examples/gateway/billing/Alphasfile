@@ -2,9 +2,13 @@
 # it reads the gateway's url output, not the gateway's service.
 package "billing" {
   import "../gateway" {
-    provide "routes" {
-      prefix   = "/billing/"
-      upstream = "127.0.0.1:${module.billing.service.go.billing.vars.port}"
+    inputs = {
+      routes = {
+        billing = {
+          prefix   = "/billing/"
+          upstream = "127.0.0.1:${module.billing.service.go.billing.vars.port}"
+        }
+      }
     }
   }
 

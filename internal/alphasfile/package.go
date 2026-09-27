@@ -9,7 +9,6 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
-	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/piotrkowalczuk/zordon/internal/ztypes"
@@ -23,19 +22,16 @@ type pkgNeed struct {
 	set   *pkgSettings
 }
 
-// inputDecl is one input of a package. A single input takes one value from
-// one source; a many input takes entries from every provide block of its
-// importers, keyed by provider.
+// inputDecl is one input of a package. Every import that sets it gives a
+// part and ztypes.Merge joins them: a map takes entries from all of them,
+// any other type one value.
 type inputDecl struct {
 	description string
 	ty          ztypes.Type
-	// def is the default value's expression; nil marks a required single
-	// input.
+	// def is the default value's expression, used when no import sets the
+	// input; nil marks a required input.
 	def    hcl.Expression
-	many   bool
 	unique []string
-	// entry is ty as an object, for an input with many = true.
-	entry ztypes.Object
 }
 
 // outputDecl is one output of a package.
@@ -151,7 +147,7 @@ func decodeFeatures(pb *packageBlock) (map[string]string, error) {
 func decodeInputs(pb *packageBlock) (map[string]*inputDecl, error) {
 	out := map[string]*inputDecl{}
 	err := declItems(pb.Inputs, pb.InputsRange, "input", `{ port = { description = "Port to listen on.", type = number, default = null } }`, pb.Name, func(name string, at hcl.Range, fields map[string]hcl.Expression) error {
-		if err := onlyFields(fields, "input", name, at, "description", "type", "default", "many", "unique"); err != nil {
+		if err := onlyFields(fields, "input", name, at, "description", "type", "default", "unique"); err != nil {
 			return err
 		}
 		d, _ := fields["description"].Value(nil)
@@ -165,16 +161,13 @@ func decodeInputs(pb *packageBlock) (map[string]*inputDecl, error) {
 			return fmt.Errorf("%s: input %q: type: %w", te.Range(), name, err)
 		}
 		decl.ty = ty
-		if m, ok := fields["many"]; ok {
-			v, diags := m.Value(nil)
-			if diags.HasErrors() || v.IsNull() || !v.Type().Equals(cty.Bool) {
-				return fmt.Errorf("%s: input %q: many must be true or false", m.Range(), name)
-			}
-			decl.many = v.True()
-		}
 		if u, ok := fields["unique"]; ok {
-			if !decl.many {
-				return fmt.Errorf("%s: input %q: unique applies to an input with many = true", u.Range(), name)
+			entry, isObject := ztypes.Object{}, false
+			if m, isMap := ty.(ztypes.Map); isMap {
+				entry, isObject = m.Elem.(ztypes.Object)
+			}
+			if !isObject {
+				return fmt.Errorf("%s: input %q: unique applies to a map of objects, such as map(object({ host = string }))", u.Range(), name)
 			}
 			v, diags := u.Value(nil)
 			if diags.HasErrors() || v.IsNull() || !(v.Type().IsTupleType() || v.Type().IsListType()) {
@@ -184,24 +177,10 @@ func decodeInputs(pb *packageBlock) (map[string]*inputDecl, error) {
 				if a.IsNull() || !a.Type().Equals(cty.String) {
 					return fmt.Errorf("%s: input %q: unique lists entry attributes, such as [\"host\"]", u.Range(), name)
 				}
-				decl.unique = append(decl.unique, a.AsString())
-			}
-		}
-		if decl.many {
-			entry, isObject := ty.(ztypes.Object)
-			switch {
-			case decl.def != nil:
-				return fmt.Errorf("%s: input %q has many = true, so it starts empty and takes no default", decl.def.Range(), name)
-			case !isObject:
-				return fmt.Errorf("%s: input %q: an input with many = true takes entries from provide blocks, so its type must be object({ ... })", te.Range(), name)
-			case entry.Has("key"):
-				return fmt.Errorf("%s: input %q: the entry type cannot declare key; every entry has it, set to its key", te.Range(), name)
-			}
-			decl.entry = entry
-			for _, a := range decl.unique {
-				if !entry.Has(a) {
-					return fmt.Errorf("%s: input %q: unique names %q, which the type does not declare", at, name, a)
+				if !entry.Has(a.AsString()) {
+					return fmt.Errorf("%s: input %q: unique names %q, which the type does not declare", u.Range(), name, a.AsString())
 				}
+				decl.unique = append(decl.unique, a.AsString())
 			}
 		}
 		out[name] = decl
@@ -320,6 +299,14 @@ func (t *Tree) resolvePackages() error {
 			if err := checkSatisfied(p, n); err != nil {
 				return err
 			}
+			addArgs(p, n.set)
+		}
+	}
+	for _, name := range sortedKeys(t.packages) {
+		if p := t.packages[name]; p.active {
+			if err := checkRequired(p); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -342,12 +329,14 @@ func (t *Tree) resolvePackage(p *pkgInstance, plain map[string]bool) error {
 		return nil
 	}
 	p.active, p.needs = true, needs
-	set, err := mergeNeeds(p, needs)
+	p.settings, err = resolveSettings(p, pb, mergeNeeds(needs), who)
 	if err != nil {
 		return err
 	}
-	p.settings, err = resolveSettings(p, pb, set, who)
-	return err
+	for _, n := range needs {
+		addArgs(p, n.set)
+	}
+	return nil
 }
 
 // needsOf lists the imports of p that are part of the stack, other than the
@@ -433,29 +422,20 @@ func (t *Tree) plainActive() map[string]bool {
 	return seen
 }
 
-func mergeNeeds(p *pkgInstance, needs []pkgNeed) (*pkgSettings, error) {
-	set := &pkgSettings{at: needs[0].block.DefRange, inputs: map[string]*inputArg{}}
-	from := map[string]pkgNeed{}
+// mergeNeeds joins the features the imports of a package outside the
+// entrypoint's top level pass.
+func mergeNeeds(needs []pkgNeed) *pkgSettings {
 	on := map[string]bool{}
 	for _, n := range needs {
 		for _, f := range n.set.features {
 			on[f] = true
 		}
-		for _, k := range sortedKeys(n.set.inputs) {
-			if prev, ok := from[k]; ok {
-				return nil, fmt.Errorf("%s: %s sets input %q of package %s, but %s already sets it at %s; an input has one source, so set it where the entrypoint imports package %s", n.block.DefRange, n.by, k, p.name, prev.by, prev.block.DefRange, p.name)
-			}
-			from[k] = n
-			set.inputs[k] = n.set.inputs[k]
-		}
 	}
-	set.features = sortedKeys(on)
-	return set, nil
+	return &pkgSettings{at: needs[0].block.DefRange, features: sortedKeys(on)}
 }
 
 // checkSatisfied reports a feature another importer needs and the
-// entrypoint's import of p leaves off. An input it sets is compared with the
-// value p runs with once both are evaluated.
+// entrypoint's import of p leaves off.
 func checkSatisfied(p *pkgInstance, n pkgNeed) error {
 	at := p.at
 	if p.set != nil {
@@ -466,9 +446,6 @@ func checkSatisfied(p *pkgInstance, n pkgNeed) error {
 			continue
 		}
 		return fmt.Errorf("%s: package %s runs with feature %q off, but %s needs it (%s):\n  %s: %s\nturn it on here with features = [%q], or %s", at, p.name, f, n.by, n.block.DefRange, f, p.file.block.features[f], f, dropHint(n))
-	}
-	for _, k := range sortedKeys(n.set.inputs) {
-		p.checks = append(p.checks, &inputCheck{name: k, arg: n.set.inputs[k], by: n.by, at: at})
 	}
 	return nil
 }
@@ -489,13 +466,6 @@ func dropHint(n pkgNeed) string {
 	return fmt.Sprintf("turn off what enables that import in %s (features %s)", n.by, strings.Join(names, ", "))
 }
 
-func hclValue(v cty.Value) string {
-	if v == cty.NilVal {
-		return "unset"
-	}
-	return strings.TrimSpace(string(hclwrite.TokensForValue(v).Bytes()))
-}
-
 func checkDeclared(pb *packageBlock, set *pkgSettings, who string) error {
 	for _, n := range set.features {
 		if _, ok := pb.features[n]; !ok {
@@ -503,23 +473,19 @@ func checkDeclared(pb *packageBlock, set *pkgSettings, who string) error {
 		}
 	}
 	for _, n := range sortedKeys(set.inputs) {
-		decl, ok := pb.inputs[n]
-		if !ok {
+		if _, ok := pb.inputs[n]; !ok {
 			return fmt.Errorf("%s: input %q is not declared by %s (declared: %s)", set.at, n, who, listOrNone(sortedKeys(pb.inputs)))
-		}
-		if decl.many {
-			return fmt.Errorf("%s: input %q of %s has many = true, so importers add entries with provide %q {} instead of setting it", set.inputs[n].at, n, who, n)
 		}
 	}
 	return nil
 }
 
-// resolveSettings fixes the features a package runs with and the source of
-// each of its single inputs: what configures it, else the default. set nil
-// means a package run on its own: defaults and no features.
+// resolveSettings fixes the features a package runs with and records what
+// set passes to its inputs. set nil means a package run on its own: no
+// features.
 func resolveSettings(p *pkgInstance, pb *packageBlock, set *pkgSettings, who string) (*scopeSettings, error) {
 	s := idleSettings(pb)
-	p.inputs = map[string]*inputArg{}
+	p.args = map[string][]*inputArg{}
 	if set != nil {
 		if err := checkDeclared(pb, set, who); err != nil {
 			return nil, err
@@ -527,19 +493,35 @@ func resolveSettings(p *pkgInstance, pb *packageBlock, set *pkgSettings, who str
 		for _, n := range set.features {
 			s.features[n] = true
 		}
-		maps.Copy(p.inputs, set.inputs)
-	}
-	for _, name := range sortedKeys(pb.inputs) {
-		decl := pb.inputs[name]
-		if decl.many || p.inputs[name] != nil || decl.def != nil {
-			continue
-		}
-		if set != nil {
-			return nil, fmt.Errorf("%s: %s needs input %q; pass it with inputs = { %s = ... }", set.at, who, name, name)
-		}
-		return nil, fmt.Errorf("%s: input %q of %s is required, so the package cannot run on its own", pb.InputsRange, name, who)
+		addArgs(p, set)
 	}
 	return s, nil
+}
+
+// addArgs appends what set passes to each input of p.
+func addArgs(p *pkgInstance, set *pkgSettings) {
+	for _, k := range sortedKeys(set.inputs) {
+		p.args[k] = append(p.args[k], set.inputs[k])
+	}
+}
+
+// checkRequired reports an input of p that no import sets and that has no
+// default.
+func checkRequired(p *pkgInstance) error {
+	pb, who := p.file.block, "package "+p.name
+	for _, name := range sortedKeys(pb.inputs) {
+		if len(p.args[name]) > 0 || pb.inputs[name].def != nil {
+			continue
+		}
+		if p.set == nil {
+			if p.entry {
+				return fmt.Errorf("%s: input %q of %s is required, so the package cannot run on its own", pb.InputsRange, name, who)
+			}
+			return fmt.Errorf("%s: %s needs input %q; pass it with inputs = { %s = ... }", p.needs[0].block.DefRange, who, name, name)
+		}
+		return fmt.Errorf("%s: %s needs input %q; pass it with inputs = { %s = ... }", p.set.at, who, name, name)
+	}
+	return nil
 }
 
 // idleSettings are every feature off: what a package outside the stack sees,

@@ -1,6 +1,7 @@
 package ztypes
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -197,6 +198,125 @@ func TestConvert_nilTypePanics(t *testing.T) {
 	_, _ = Convert(nil, cty.True)
 }
 
+func TestMerge(t *testing.T) {
+	sites := "map(object({ host = string, port = optional(number, 80) }))"
+	cases := map[string]struct {
+		typ   string
+		parts []string
+		want  cty.Value
+	}{
+		"no parts":         {typ: "string", want: cty.NullVal(cty.String)},
+		"one string":       {typ: "string", parts: []string{`"a"`}, want: cty.StringVal("a")},
+		"converted":        {typ: "number", parts: []string{`"8080"`}, want: cty.NumberIntVal(8080)},
+		"null and one":     {typ: "bool", parts: []string{`null`, `true`}, want: cty.True},
+		"only nulls":       {typ: "list(string)", parts: []string{`null`, `null`}, want: cty.NullVal(cty.List(cty.String))},
+		"one object":       {typ: "object({ a = string })", parts: []string{`{ a = "x" }`}, want: cty.ObjectVal(map[string]cty.Value{"a": cty.StringVal("x")})},
+		"one map":          {typ: "map(string)", parts: []string{`{ a = "x" }`}, want: cty.MapVal(map[string]cty.Value{"a": cty.StringVal("x")})},
+		"maps joined":      {typ: "map(string)", parts: []string{`{ a = "x" }`, `{ b = "y", c = "z" }`}, want: cty.MapVal(map[string]cty.Value{"a": cty.StringVal("x"), "b": cty.StringVal("y"), "c": cty.StringVal("z")})},
+		"empty map":        {typ: "map(number)", parts: []string{`{}`}, want: cty.MapValEmpty(cty.Number)},
+		"empty and entry":  {typ: "map(number)", parts: []string{`{}`, `{ a = 1 }`}, want: cty.MapVal(map[string]cty.Value{"a": cty.NumberIntVal(1)})},
+		"null map skipped": {typ: "map(number)", parts: []string{`null`, `{ a = 1 }`}, want: cty.MapVal(map[string]cty.Value{"a": cty.NumberIntVal(1)})},
+		"entries converted": {typ: sites, parts: []string{`{ shop = { host = "shop.test" } }`, `{ blog = { host = "blog.test", port = "81" } }`}, want: cty.MapVal(map[string]cty.Value{
+			"shop": cty.ObjectVal(map[string]cty.Value{"host": cty.StringVal("shop.test"), "port": cty.NumberIntVal(80)}),
+			"blog": cty.ObjectVal(map[string]cty.Value{"host": cty.StringVal("blog.test"), "port": cty.NumberIntVal(81)}),
+		})},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			got, err := Merge(mustParse(t, c.typ), parts(t, c.parts...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.RawEquals(c.want) {
+				t.Errorf("Merge = %#v, want %#v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestMerge_unique(t *testing.T) {
+	ty := mustParse(t, "map(object({ host = string, port = optional(number) }))")
+	got, err := Merge(ty, parts(t, `{ shop = { host = "shop.test", port = 80 } }`, `{ blog = { host = "blog.test" }, api = { host = "api.test" } }`), "host", "port")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := got.LengthInt(); n != 3 {
+		t.Errorf("Merge kept %d entries, want 3", n)
+	}
+}
+
+func TestMerge_unknown(t *testing.T) {
+	ty := Map{Elem: String{}}
+	got, err := Merge(ty, []Part{{Value: cty.MapVal(map[string]cty.Value{"a": cty.StringVal("x")}), At: "p0"}, {Value: cty.UnknownVal(cty.Map(cty.String)), At: "p1"}})
+	if err != nil || got.IsKnown() || !got.Type().Equals(cty.Map(cty.String)) {
+		t.Errorf("Merge with an unknown part = %#v, %v; want an unknown map(string)", got, err)
+	}
+}
+
+func TestMerge_errors(t *testing.T) {
+	sites := "map(object({ host = string, port = optional(number) }))"
+	cases := map[string]struct {
+		typ    string
+		parts  []string
+		unique []string
+		want   string
+	}{
+		"string twice":     {typ: "string", parts: []string{`"a"`, `"b"`}, want: "p1: already set at p0; a string takes one value"},
+		"same value twice": {typ: "string", parts: []string{`"a"`, `"a"`}, want: "p1: already set at p0"},
+		"number twice":     {typ: "number", parts: []string{`1`, `null`, `2`}, want: "p2: already set at p0; a number takes one value"},
+		"list twice":       {typ: "list(string)", parts: []string{`["a"]`, `["b"]`}, want: "p1: already set at p0; a list(string) takes one value"},
+		"object twice":     {typ: "object({ a = string })", parts: []string{`{ a = "x" }`, `{ a = "y" }`}, want: "p1: already set at p0; a object({ a = string }) takes one value"},
+		"single mismatch":  {typ: "number", parts: []string{`"eighty"`}, want: "p0: a number is required, got string"},
+		"key twice":        {typ: "map(string)", parts: []string{`{ a = "x", b = "y" }`, `{ b = "z" }`}, want: `p1: key "b" is already set at p0`},
+		"key twice at one": {typ: "map(string)", parts: []string{`{ a = "x" }`, `{ c = "y" }`, `{ a = "z" }`}, want: `p2: key "a" is already set at p0`},
+		"entry mismatch":   {typ: sites, parts: []string{`{ shop = { host = "h" } }`, `{ blog = { port = 1 } }`}, want: `p1: ["blog"]: attribute "host" is required`},
+		"map from string":  {typ: "map(string)", parts: []string{`"a"`}, want: "p0: a map is required, got string"},
+		"unique across":    {typ: sites, parts: []string{`{ shop = { host = "a.test" } }`, `{ blog = { host = "a.test" } }`}, unique: []string{"host"}, want: `p1: entry "blog": host = "a.test" is already used by entry "shop" at p0`},
+		"unique within":    {typ: sites, parts: []string{`{ x = { host = "a.test" }, y = { host = "a.test" } }`}, unique: []string{"host"}, want: `p0: entry "y": host = "a.test" is already used by entry "x" at p0`},
+		"unique bool":      {typ: "map(object({ on = bool }))", parts: []string{`{ a = { on = false }, b = { on = "false" } }`}, unique: []string{"on"}, want: `p0: entry "b": on = false is already used by entry "a" at p0`},
+		"unique list":      {typ: "map(object({ tags = list(string) }))", parts: []string{`{ a = { tags = ["x"] } }`, `{ b = { tags = ["x"] } }`}, unique: []string{"tags"}, want: `entry "b": tags = ["x"] is already used`},
+		"unique object":    {typ: "map(object({ at = object({ h = string, p = number }) }))", parts: []string{`{ a = { at = { h = "x", p = 1 } }, b = { at = { p = 1, h = "x" } } }`}, unique: []string{"at"}, want: `entry "b": at = { h = "x", p = 1 } is already used`},
+		"unique converted": {typ: sites, parts: []string{`{ a = { host = "h1", port = 80 } }`, `{ b = { host = "h2", port = "80" } }`}, unique: []string{"host", "port"}, want: `p1: entry "b": port = 80 is already used by entry "a" at p0`},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			_, err := Merge(mustParse(t, c.typ), parts(t, c.parts...), c.unique...)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("want %q, got %v", c.want, err)
+			}
+		})
+	}
+}
+
+func TestMerge_uniqueSkipsNull(t *testing.T) {
+	ty := mustParse(t, "map(object({ host = optional(string) }))")
+	if _, err := Merge(ty, parts(t, `{ a = {} }`, `{ b = {} }`), "host"); err != nil {
+		t.Errorf("two entries leaving a unique attribute out: %v", err)
+	}
+}
+
+func TestMerge_panics(t *testing.T) {
+	cases := map[string]struct {
+		typ    Type
+		unique []string
+	}{
+		"nil type":              {typ: nil},
+		"unique on a string":    {typ: String{}, unique: []string{"host"}},
+		"unique on map(string)": {typ: Map{Elem: String{}}, unique: []string{"host"}},
+		"unique undeclared":     {typ: Map{Elem: Object{Attrs: map[string]Attribute{"host": {Type: String{}}}}}, unique: []string{"port"}},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("Merge must panic")
+				}
+			}()
+			_, _ = Merge(c.typ, nil, c.unique...)
+		})
+	}
+}
+
 func mustParse(t *testing.T, src string) Type {
 	t.Helper()
 	ty, err := Parse(expr(t, src))
@@ -222,4 +342,13 @@ func value(t *testing.T, src string) cty.Value {
 		t.Fatalf("value %q: %s", src, diags.Error())
 	}
 	return v
+}
+
+func parts(t *testing.T, srcs ...string) []Part {
+	t.Helper()
+	out := make([]Part, len(srcs))
+	for i, src := range srcs {
+		out[i] = Part{Value: value(t, src), At: fmt.Sprintf("p%d", i)}
+	}
+	return out
 }

@@ -1,5 +1,5 @@
-# An API gateway. It knows no service: each one provides an entry to the
-# routes input, and two services claiming the same prefix are an error. Its
+# An API gateway. It knows no service: each one adds an entry to the routes
+# map, and two services claiming the same key or prefix are an error. Its
 # inputs and outputs are its API: what it takes, where it listens and when it
 # is ready.
 package "gateway" {
@@ -13,9 +13,9 @@ package "gateway" {
       default     = null
     }
     routes = {
-      description = "Path prefixes to proxy, such as { prefix = \"/orders/\", upstream = \"127.0.0.1:8081\" }."
-      type        = object({ prefix = string, upstream = string })
-      many        = true
+      description = "Path prefixes to proxy, by service, such as { orders = { prefix = \"/orders/\", upstream = \"127.0.0.1:8081\" } }."
+      type        = map(object({ prefix = string, upstream = string }))
+      default     = {}
       unique      = ["prefix"]
     }
   }

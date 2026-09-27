@@ -2,7 +2,7 @@
 # Claim: a working place outside the project runs a whole stack from an
 # Alphasfile of two lines, a require and an import of the stack by its
 # Go-style path, and a zordon.work search entry serves that path from a local
-# checkout. Two sites, shop and blog, each provide an entry to the sites slot
+# checkout. Two sites, shop and blog, each add an entry to the sites input
 # of Caddy, which routes them by host; Caddy's dns feature imports CoreDNS and
 # resolves through it. Importing the shop alone brings the Caddy it
 # registers with and no blog; importing Caddy alone runs Caddy without

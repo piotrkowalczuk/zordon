@@ -196,7 +196,7 @@ package "caddy" {
   }
   inputs = {
     domain = { description = "The zone hosts live in.", type = string, default = "test" }
-    sites  = { description = "Hosts to route.", type = object({ host = string, upstream = string }), many = true }
+    sites  = { description = "Hosts to route, by site.", type = map(object({ host = string, upstream = string })), default = {} }
   }
   outputs = {
     url = { description = "Where Caddy serves.", type = string, value = "http://127.0.0.1:${module.caddy.service.go.caddy.vars.http}" }
@@ -228,11 +228,11 @@ import "./caddy" "edge" {
 | name | the alias label when given, else the package block's label; unique among packages in the stack |
 | identity | a module of a package is `package.<p>.module.<m>`; its services are `package.<p>.module.<m>.service.<tc>.<svc>`, shown as `<p>/<m>/<svc>` |
 | inside a package | `module.<m>` is one of the package's own modules; another package is `package.<q>.module.<m>` |
-| import at the entrypoint's top level | the final word on the package's features and inputs; every other import of the package must be satisfied by it |
-| any other import | configures the package when the entrypoint does not import it |
+| import at the entrypoint's top level | the final word on the package's features; every other import of the package must be satisfied by it |
+| any other import | turns features on when the entrypoint does not import the package |
 | features from several imports | unite; every importer gets what it needs |
-| an input from several imports | an error: an input has one source; set it where the entrypoint imports the package |
-| unmet need | a feature the entrypoint leaves off is an error on the entrypoint's import that quotes the feature's description and names the importer; an input it sets to another value is the same error once both values are evaluated |
+| an input from several imports | see [Inputs](#inputs): a map takes entries from all of them, any other type is an error |
+| unmet need | a feature the entrypoint leaves off is an error on the entrypoint's import that quotes the feature's description and names the importer |
 | entrypoint imports | several imports of the same package at the entrypoint's top level must pass the same features and inputs |
 | cycle | packages that import each other cannot be configured first; importing one of them at the entrypoint's top level breaks the cycle |
 | dependencies | a package depends on packages, never on a fragment's modules |
@@ -279,15 +279,15 @@ Without `HOME`, zordon points Go's caches at `$ZORDON_HOME/go`, so a package bui
 ### Inputs
 
 Inputs are what goes into a package, evaluated with the services, so a value may carry another service's port.
-A single input takes one value from one import; an input with `many = true` takes entries from every importer at once.
-Entries are data merged into one map before the package is evaluated, never calls: the package runs once with every entry.
+Every import that sets an input gives it a value, and the input's type decides how they join: a map takes the entries of all of them, any other type exactly one.
+Entries are data joined into one map before the package is evaluated, never calls: the package runs once with every entry.
 
 ```hcl
 # gateway/Alphasfile
 package "gateway" {
   inputs = {
     port   = { description = "Port to listen on; null picks one.", type = number, default = null }
-    routes = { description = "Paths to proxy.", type = object({ prefix = string, upstream = string }), many = true, unique = ["prefix"] }
+    routes = { description = "Paths to proxy, by service.", type = map(object({ prefix = string, upstream = string })), default = {}, unique = ["prefix"] }
   }
   …
 }
@@ -295,9 +295,10 @@ package "gateway" {
 # orders/Alphasfile
 package "orders" {
   import "../gateway" {
-    provide "routes" {
-      prefix   = "/orders/"
-      upstream = "127.0.0.1:${module.orders.service.go.orders.vars.port}"
+    inputs = {
+      routes = {
+        orders = { prefix = "/orders/", upstream = "127.0.0.1:${module.orders.service.go.orders.vars.port}" }
+      }
     }
   }
   …
@@ -309,24 +310,23 @@ import "./gateway" { inputs = { port = 8080 } }
 
 | rule | behavior |
 |---|---|
-| `inputs = { <n> = { description, type, default?, many?, unique? } }` | declares the package's inputs; `type` is one of the [types](#types) |
-| `default` | a single input's value when no import sets it; without one the input is required; it is evaluated in the package, so it may read the package's own services |
-| `inputs = { <n> = <expr> }` on an import | sets a single input; evaluated in the scope of the import, so it may read what the importer sees, such as its own `inputs` or another package's `outputs` |
-| `many = true` | the input takes entries from `provide` blocks and starts empty; its type must be `object({ … })`; it takes no default |
-| `provide "<input>" "<key>"? { <attr> = <expr> … }` | inside any import of a package, at the entrypoint's top level, in a package block or in a module; attributes only; setting a `many` input with `inputs = {…}` is an error, and so is providing to a single one |
-| key | the provider's name, the package or module holding the import, followed by `.<key>` when the block has a key; at the entrypoint's top level the key is required and used alone |
-| collisions | two packages never collide, because package names are unique in the stack; the same key twice from one provider is an error naming both blocks; a `unique` attribute with the same value in two entries is an error naming both |
-| type check | a value that does not fit the type is an error naming the input and where in the value it went wrong; an attribute the type does not declare, or a required one left out, is an error on the `provide` block |
-| `inputs.<n>` | inside the package: a single input's value; for `many`, a map of key to entry, sorted by key, each entry with its attributes, defaults applied, and `key` |
-| evaluation | an input is evaluated with the other producers; a reference to `inputs.<n>` waits for its value, or for every entry of a `many` input |
-| unknown input | setting, providing or reading an input the package does not declare is an error listing the declared ones |
-| switched-off import | an import removed by `enabled`, or outside the stack, sets and provides nothing |
-| fragment | `provide` on a fragment import is an error |
+| `inputs = { <n> = { description, type, default?, unique? } }` | declares the package's inputs; `type` is one of the [types](#types) |
+| `inputs = { <n> = <expr> }` on an import | gives the input a value; evaluated in the scope of the import, so it may read what the importer sees, such as its own `inputs` or another package's `outputs` |
+| `map(T)` from several imports | the entries of every import joined into one map; the entrypoint's import adds entries like any other |
+| key set twice | an error naming both imports |
+| `unique = ["<attr>", …]` | for a `map(object({ … }))`: the same value of the attribute in two entries is an error naming both; a null value is not compared |
+| any other type from several imports | an error naming both imports, even when they give the same value; an input has one source |
+| `default` | the value when no import sets the input, or every import sets it to `null`; a map's default is not joined with entries; without a default the input is required; it is evaluated in the package, so it may read the package's own services |
+| type check | a value that does not fit the type is an error naming the input, the import and where in the value it went wrong, such as `["orders"].prefix: a string is required` |
+| `inputs.<n>` | inside the package: the input's value; a map is sorted by key, each entry with defaults applied |
+| evaluation | an input is evaluated with the other producers; a reference to `inputs.<n>` waits for every import that sets it |
+| unknown input | setting or reading an input the package does not declare is an error listing the declared ones |
+| switched-off import | an import removed by `enabled`, or outside the stack, sets nothing |
 | `inputs` outside a package | an error |
 
 ### Outputs
 
-Outputs are what a package gives back: where it listens, when it is ready, a value per entry of a `many` input.
+Outputs are what a package gives back: where it listens, when it is ready, a value per entry of a map input.
 
 ```hcl
 # gateway/Alphasfile
@@ -350,7 +350,7 @@ runtime {
 | `outputs = { <n> = { description, type, value } }` | declares the package's outputs; each value is evaluated in the package's scope, with the other producers, so it may read its services, features and inputs |
 | type check | a value that does not fit its type is an error naming the output |
 | `package.<p>.outputs.<n>` | reads an output wherever package `p` is visible: after an import of it, at the entrypoint's top level after the entrypoint imports it |
-| per-entry values | an output may be a map keyed like a `many` input, such as `{ for key, d in inputs.databases : key => "…/${d.name}" }`, so a provider reads its own entry's value as `package.db.outputs.dsn.<key>` |
+| per-entry values | an output may be a map keyed like a map input, such as `{ for key, d in inputs.databases : key => "…/${d.name}" }`, so an importer reads its own entry's value as `package.db.outputs.dsn.<key>` |
 | barriers | an output that names a barrier, such as `runtime.ready`, carries it, so `after = [package.<p>.outputs.ready]` waits for it |
 | unknown output | an error listing the declared ones |
 

@@ -40,10 +40,8 @@ type Tree struct {
 	active map[string]bool
 
 	packages      map[string]*pkgInstance
-	provisions    []*provision
 	outputs       []*output
 	inputs        []*input
-	checks        []*check
 	entryServices []*serviceBlock
 	// disabled are the source ranges of blocks switched off by enabled; the
 	// static passes over service bodies skip them.
@@ -202,26 +200,15 @@ type pkgInstance struct {
 	needs    []pkgNeed
 	active   bool
 	settings *scopeSettings
-	// inputs is the source of each single input that an import sets; the
-	// rest take their default. checks are the other imports that set an
-	// input too, compared with the value once both are evaluated.
-	inputs map[string]*inputArg
-	checks []*inputCheck
+	// args are the values the imports in the stack pass to each input, the
+	// entrypoint's first; an input no import sets takes its default.
+	args map[string][]*inputArg
 }
 
 type pkgSettings struct {
 	at       hcl.Range
 	inputs   map[string]*inputArg
 	features []string
-}
-
-// inputCheck is an import that sets an input the entrypoint's import also
-// decides; its value must match.
-type inputCheck struct {
-	name string
-	arg  *inputArg
-	by   string
-	at   hcl.Range
 }
 
 // scopeSettings is what a package's modules see as features.<n>, fixed
@@ -432,8 +419,6 @@ func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, res re
 	switch {
 	case ib.InputsRange != (hcl.Range{}) || ib.Features != nil:
 		return fmt.Errorf("%s: %s %q: inputs and features are passed to a package directory, not to a fragment file", ib.DefRange, ib.keyword, ib.Path)
-	case len(ib.Provides) > 0:
-		return fmt.Errorf("%s: %s %q: provide adds an entry to an input of a package, not to a fragment file", ib.Provides[0].DefRange, ib.keyword, ib.Path)
 	case f.block != nil:
 		return fmt.Errorf("%s: %s %q: a package depends on other packages, not on a fragment's modules; move the modules into this package or into a package of their own", ib.DefRange, ib.keyword, ib.Path)
 	case ib.Modules == nil:
@@ -640,9 +625,6 @@ func (t *Tree) finish() error {
 			t.addEdges(mb.Name)
 		}
 	}
-	if err := t.gatherProvisions(); err != nil {
-		return err
-	}
 	t.gatherValues()
 	return t.checkGated()
 }
@@ -817,9 +799,6 @@ func decodeFile(name string, src []byte) (*rootBlock, error) {
 	}
 	for _, ib := range root.allImports() {
 		ib.alias = aliases[ib.DefRange.Start.Byte]
-		for _, pb := range ib.Provides {
-			pb.key = aliases[pb.DefRange.Start.Byte]
-		}
 	}
 	if err := annotateModules(&root); err != nil {
 		return nil, err
@@ -833,19 +812,15 @@ func decodeFile(name string, src []byte) (*rootBlock, error) {
 }
 
 // liftAliases moves the optional second label of import blocks (the alias)
-// and of provide blocks (the key) into aliases, keyed by the block's start
-// offset, so gohcl sees one label.
+// into aliases, keyed by the block's start offset, so gohcl sees one label.
 func liftAliases(body *hclsyntax.Body, aliases map[int]string) {
 	for _, blk := range body.Blocks {
 		switch blk.Type {
-		case "import", "provide":
+		case "import":
 			if len(blk.Labels) == 2 {
 				aliases[blk.TypeRange.Start.Byte] = blk.Labels[1]
 				blk.Labels = blk.Labels[:1]
 				blk.LabelRanges = blk.LabelRanges[:1]
-			}
-			if blk.Type == "import" {
-				liftAliases(blk.Body, aliases)
 			}
 		case "module", "package":
 			liftAliases(blk.Body, aliases)

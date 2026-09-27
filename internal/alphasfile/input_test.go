@@ -2,6 +2,7 @@ package alphasfile
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -120,7 +121,7 @@ func TestOpen_inputMustFitItsType(t *testing.T) {
 		"web/Alphasfile": "package \"web\" {\n  inputs = { port = { description = \"Port.\", type = number } }\n}\n",
 	})
 	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
-	if err == nil || !strings.Contains(err.Error(), `input "port" of package web is not a number`) {
+	if err == nil || !strings.Contains(err.Error(), `input "port" of package web: `+root+":1") || !strings.Contains(err.Error(), "a number is required, got string") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -146,17 +147,19 @@ func TestLoadTree_inputErrors(t *testing.T) {
 
 func TestLoadTree_inputDeclarationErrors(t *testing.T) {
 	cases := map[string]struct{ inputs, want string }{
-		"not a map":           {`["a"]`, `inputs of package "web" map each name to { description = "...", ... }`},
-		"short form":          {`{ port = 8080 }`, `input "port": inputs of package "web" map each name to`},
-		"no description":      {`{ port = { type = number } }`, `input "port" of package "web" needs a description`},
-		"empty description":   {`{ port = { description = "", type = number } }`, `input "port" of package "web" needs a description`},
-		"no type":             {`{ port = { description = "Port." } }`, `input "port" of package "web" needs a type`},
-		"bad type":            {`{ port = { description = "Port.", type = any } }`, "type any is not supported"},
-		"unknown field":       {`{ port = { description = "Port.", type = number, max = 1 } }`, `input "port" takes description, type, default, many, unique only`},
-		"many with default":   {`{ r = { description = "R.", type = object({ a = string }), many = true, default = {} } }`, `input "r" has many = true, so it starts empty and takes no default`},
-		"many not an object":  {`{ r = { description = "R.", type = string, many = true } }`, `input "r": an input with many = true takes entries from provide blocks, so its type must be object`},
-		"unique without many": {`{ r = { description = "R.", type = object({ a = string }), unique = ["a"] } }`, `input "r": unique applies to an input with many = true`},
-		"bad name":            {`{ "no spaces" = { description = "x", type = string } }`, `input of package "web": name it with letters`},
+		"not a map":             {`["a"]`, `inputs of package "web" map each name to { description = "...", ... }`},
+		"short form":            {`{ port = 8080 }`, `input "port": inputs of package "web" map each name to`},
+		"no description":        {`{ port = { type = number } }`, `input "port" of package "web" needs a description`},
+		"empty description":     {`{ port = { description = "", type = number } }`, `input "port" of package "web" needs a description`},
+		"no type":               {`{ port = { description = "Port." } }`, `input "port" of package "web" needs a type`},
+		"bad type":              {`{ port = { description = "Port.", type = any } }`, "type any is not supported"},
+		"unknown field":         {`{ port = { description = "Port.", type = number, max = 1 } }`, `input "port" takes description, type, default, unique only`},
+		"many is gone":          {`{ r = { description = "R.", type = map(string), many = true } }`, `input "r" takes description, type, default, unique only`},
+		"unique on an object":   {`{ r = { description = "R.", type = object({ a = string }), unique = ["a"] } }`, `input "r": unique applies to a map of objects`},
+		"unique on map(string)": {`{ r = { description = "R.", type = map(string), unique = ["a"] } }`, `input "r": unique applies to a map of objects`},
+		"unique not a list":     {`{ r = { description = "R.", type = map(object({ a = string })), unique = "a" } }`, `input "r": unique lists entry attributes`},
+		"unique undeclared":     {`{ r = { description = "R.", type = map(object({ a = string })), unique = ["b"] } }`, `input "r": unique names "b", which the type does not declare`},
+		"bad name":              {`{ "no spaces" = { description = "x", type = string } }`, `input of package "web": name it with letters`},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -168,16 +171,6 @@ func TestLoadTree_inputDeclarationErrors(t *testing.T) {
 				t.Fatalf("want %q, got %v", c.want, err)
 			}
 		})
-	}
-}
-
-func TestLoadTree_manyInputIsNotSet(t *testing.T) {
-	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":     `import "./web" { inputs = { routes = {} } }`,
-		"web/Alphasfile": "package \"web\" {\n  inputs = { routes = { description = \"Routes.\", type = object({ path = string }), many = true } }\n}\n",
-	})
-	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `input "routes" of package web has many = true, so importers add entries with provide "routes" {} instead of setting it`) {
-		t.Fatalf("got %v", err)
 	}
 }
 
@@ -204,39 +197,48 @@ func TestOpen_packageImportConfiguresItsDependency(t *testing.T) {
 	}
 }
 
-func TestLoadTree_inputHasOneSource(t *testing.T) {
+func TestOpen_inputHasOneSource(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":         "import \"./a\" {}\nimport \"./b\" {}\n",
 		"a/Alphasfile":       "package \"a\" {\n  import \"../greeter\" { inputs = { name = \"x\" } }\n}\n",
-		"b/Alphasfile":       "package \"b\" {\n  import \"../greeter\" { inputs = { name = \"x\" } }\n}\n",
+		"b/Alphasfile":       "package \"b\" {\n  import \"../greeter\" { inputs = { name = \"y\" } }\n}\n",
 		"greeter/Alphasfile": pkgGreeter,
 	})
-	_, err := LoadTree(root)
-	if err == nil || !strings.Contains(err.Error(), `package b sets input "name" of package greeter, but package a already sets it at`) || !strings.Contains(err.Error(), "an input has one source, so set it where the entrypoint imports package greeter") {
+	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
+	if err == nil || !strings.Contains(err.Error(), `input "name" of package greeter: `+filepath.Dir(root)+"/b/Alphasfile:2") || !strings.Contains(err.Error(), "already set at "+filepath.Dir(root)+"/a/Alphasfile:2") || !strings.Contains(err.Error(), "a string takes one value") {
 		t.Fatalf("got %v", err)
 	}
 }
 
-func TestOpen_entrypointSetsAnInputOthersAlsoSet(t *testing.T) {
+func TestOpen_sameValueTwiceIsSetTwice(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":         "import \"./greeter\" { inputs = { name = \"x\" } }\nimport \"./a\" {}\n",
 		"a/Alphasfile":       "package \"a\" {\n  import \"../greeter\" { inputs = { name = \"x\" } }\n}\n",
 		"greeter/Alphasfile": pkgGreeter,
 	})
-	af := openTree(t, root)
-	if got := fmt.Sprint(svcByName(af, "greeter/greeter/greeter").Runtime.Vars["text"]); got != "hello x" {
-		t.Errorf("text = %q", got)
+	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
+	if err == nil || !strings.Contains(err.Error(), filepath.Dir(root)+"/a/Alphasfile:2") || !strings.Contains(err.Error(), "already set at "+root+":1") {
+		t.Fatalf("an input takes one value even when both places agree, got %v", err)
 	}
 }
 
-func TestOpen_entrypointInputConflictsWithAnImport(t *testing.T) {
+func TestOpen_nullTakesTheDefault(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":         "import \"./greeter\" { inputs = { name = \"y\" } }\nimport \"./a\" {}\n",
-		"a/Alphasfile":       "package \"a\" {\n  import \"../greeter\" { inputs = { name = \"x\" } }\n}\n",
+		"Alphasfile":         `import "./greeter" { inputs = { name = "x", greeting = null } }`,
+		"greeter/Alphasfile": pkgGreeter,
+	})
+	if got := fmt.Sprint(svcByName(openTree(t, root), "greeter/greeter/greeter").Runtime.Vars["text"]); got != "hello x" {
+		t.Errorf("text = %q; null leaves the input to its default", got)
+	}
+}
+
+func TestOpen_requiredInputSetToNull(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":         `import "./greeter" { inputs = { name = null } }`,
 		"greeter/Alphasfile": pkgGreeter,
 	})
 	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
-	if err == nil || !strings.Contains(err.Error(), `Alphasfile:1`) || !strings.Contains(err.Error(), `package greeter runs with input "name" = "y", but package a needs "x"`) || !strings.Contains(err.Error(), `set inputs = { name = "x" } here`) {
+	if err == nil || !strings.Contains(err.Error(), `input "name" of package greeter: `+root+":1") || !strings.Contains(err.Error(), "the input is required, and every import sets it to null") {
 		t.Fatalf("got %v", err)
 	}
 }

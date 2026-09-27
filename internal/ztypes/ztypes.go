@@ -117,6 +117,44 @@ func Convert(t Type, v cty.Value) (cty.Value, error) {
 	return t.convert(v, "")
 }
 
+// Part is one value given for a declaration, with where it is given, such
+// as a source range. At only appears in errors.
+type Part struct {
+	Value cty.Value
+	At    string
+}
+
+// Merge joins the values given for one declaration of type t, each converted
+// as by Convert. A map takes the entries of every part: a key given twice is
+// an error naming both places, and so is a value of a unique attribute of
+// the map's object entries used by two entries. Any other type takes one
+// value, so a second part is an error naming both places. No parts, or only
+// null ones, give null.
+//
+// unique names attributes of t's entries; it is only valid for a map of
+// objects declaring them.
+func Merge(t Type, parts []Part, unique ...string) (cty.Value, error) {
+	if t == nil {
+		panic("ztypes: Merge with a nil Type")
+	}
+	m, isMap := t.(Map)
+	if len(unique) > 0 {
+		obj, ok := m.Elem.(Object)
+		if !isMap || !ok {
+			panic(fmt.Sprintf("ztypes: Merge with unique attributes of %s, which is not a map of objects", t))
+		}
+		for _, a := range unique {
+			if !obj.Has(a) {
+				panic(fmt.Sprintf("ztypes: Merge with unique attribute %q, which %s does not declare", a, obj))
+			}
+		}
+	}
+	if !isMap {
+		return mergeOne(t, parts)
+	}
+	return m.merge(parts, unique)
+}
+
 // Parse reads a type expression such as object({ host = string, port = number }).
 func Parse(expr hcl.Expression) (Type, error) {
 	return parse(expr)
@@ -359,6 +397,117 @@ func (t Object) convert(v cty.Value, at string) (cty.Value, error) {
 		}
 	}
 	return cty.ObjectVal(out), nil
+}
+
+func mergeOne(t Type, parts []Part) (cty.Value, error) {
+	var got *Part
+	for i := range parts {
+		p := &parts[i]
+		if p.Value.IsNull() {
+			continue
+		}
+		if got != nil {
+			return cty.NilVal, fmt.Errorf("%s: already set at %s; a %s takes one value", p.At, got.At, t)
+		}
+		got = p
+	}
+	if got == nil {
+		return cty.NullVal(t.cty()), nil
+	}
+	v, err := t.convert(got.Value, "")
+	if err != nil {
+		return cty.NilVal, fmt.Errorf("%s: %w", got.At, err)
+	}
+	return v, nil
+}
+
+type entry struct {
+	value cty.Value
+	at    string
+}
+
+func (t Map) merge(parts []Part, unique []string) (cty.Value, error) {
+	entries := map[string]entry{}
+	var order []string
+	given := false
+	for _, p := range parts {
+		v, err := t.convert(p.Value, "")
+		if err != nil {
+			return cty.NilVal, fmt.Errorf("%s: %w", p.At, err)
+		}
+		if !v.IsKnown() {
+			return cty.UnknownVal(t.cty()), nil
+		}
+		if v.IsNull() {
+			continue
+		}
+		given = true
+		vals := v.AsValueMap()
+		for _, k := range sortedKeys(vals) {
+			if prev, dup := entries[k]; dup {
+				return cty.NilVal, fmt.Errorf("%s: key %q is already set at %s", p.At, k, prev.at)
+			}
+			entries[k] = entry{value: vals[k], at: p.At}
+			order = append(order, k)
+		}
+	}
+	if !given {
+		return cty.NullVal(t.cty()), nil
+	}
+	for _, a := range unique {
+		used := map[string]string{}
+		for _, k := range order {
+			av := entries[k].value.GetAttr(a)
+			if av.IsNull() || !av.IsKnown() {
+				continue
+			}
+			r := render(av)
+			if other, dup := used[r]; dup {
+				return cty.NilVal, fmt.Errorf("%s: entry %q: %s = %s is already used by entry %q at %s", entries[k].at, k, a, r, other, entries[other].at)
+			}
+			used[r] = k
+		}
+	}
+	if len(entries) == 0 {
+		return cty.MapValEmpty(t.Elem.cty()), nil
+	}
+	out := make(map[string]cty.Value, len(entries))
+	for k, e := range entries {
+		out[k] = e.value
+	}
+	return cty.MapVal(out), nil
+}
+
+// render writes a value the way it is written in HCL, for errors and for
+// comparing values of unique attributes.
+func render(v cty.Value) string {
+	switch {
+	case v.IsNull():
+		return "null"
+	case v.Type() == cty.String:
+		return fmt.Sprintf("%q", v.AsString())
+	case v.Type() == cty.Number:
+		return v.AsBigFloat().Text('f', -1)
+	case v.Type() == cty.Bool:
+		if v.True() {
+			return "true"
+		}
+		return "false"
+	case v.Type().IsListType():
+		parts := make([]string, 0, v.LengthInt())
+		for _, e := range v.AsValueSlice() {
+			parts = append(parts, render(e))
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	case v.Type().IsMapType() || v.Type().IsObjectType():
+		m := v.AsValueMap()
+		parts := make([]string, 0, len(m))
+		for _, k := range sortedKeys(m) {
+			parts = append(parts, fmt.Sprintf("%s = %s", k, render(m[k])))
+		}
+		return "{ " + strings.Join(parts, ", ") + " }"
+	}
+	return v.GoString()
 }
 
 // passThrough handles what every type accepts as it is: null and a value not

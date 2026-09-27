@@ -22,26 +22,22 @@ const (
 	kindArguments
 	kindEnv
 	kindFile
-	// kindProvide is one provide entry; the package that owns the slot reads
-	// it through slots.<slot>, so it is a producer without a service.
-	kindProvide
+	// kindPart is one value an import passes to an input, evaluated in the
+	// import's scope; a producer without a service.
+	kindPart
 	// kindOutput is one output of a package, read as
 	// package.<p>.outputs.<n>; also a producer without a service.
 	kindOutput
-	// kindInput is one single input of a package, read as inputs.<n> in it.
+	// kindInput is one input of a package, read as inputs.<n> in it: its
+	// parts joined, or its default.
 	kindInput
-	// kindCheck compares another import's value for an input with the value
-	// the package runs with; it produces nothing.
-	kindCheck
 )
 
 // graphValues are the producers that belong to packages rather than to
 // services.
 type graphValues struct {
-	provisions []*provision
-	outputs    []*output
-	inputs     []*input
-	checks     []*check
+	outputs []*output
+	inputs  []*input
 }
 
 func (k nodeKind) String() string {
@@ -54,14 +50,12 @@ func (k nodeKind) String() string {
 		return "env"
 	case kindFile:
 		return "file"
-	case kindProvide:
-		return "provide"
+	case kindPart:
+		return "part"
 	case kindOutput:
 		return "output"
 	case kindInput:
 		return "input"
-	case kindCheck:
-		return "check"
 	}
 	return "?"
 }
@@ -79,12 +73,11 @@ type node struct {
 	name  string // file name (kindFile only)
 	exprs []hcl.Expression
 	// scope is where the expressions are evaluated: the service's module,
-	// or the scope of the import that holds a provide.
+	// the package's for an output or a default, or the import's for a part.
 	scope string
-	prov  *provision
+	part  *part
 	out   *output
 	in    *input
-	check *check
 }
 
 // graph holds nodes and forward edges (id → set of ids it depends on —
@@ -105,11 +98,10 @@ func nodeID(svcID string, kind nodeKind, name string) string {
 // newGraph builds the cross-service per-producer DAG. parentKnown lists
 // services already resolved by a federation parent; references to those
 // are valid but never carry an intra-graph edge (the parent was
-// evaluated end-to-end before this graph runs). Every single input of a
-// package is a node too, and so is every provision to an input with
-// many = true: inputs.<n> in a package depends on the one or on all of
-// them. So is every package output, which package.<p>.outputs.<n> depends
-// on, and every check of an input's value against another import.
+// evaluated end-to-end before this graph runs). Every input of a package
+// is a node too, which inputs.<n> in the package depends on, and so is
+// every value an import passes to it, which the input depends on. So is
+// every package output, which package.<p>.outputs.<n> depends on.
 func newGraph(services []*serviceBlock, vals *graphValues, parentKnown map[string]struct{}) (*graph, error) {
 	g := &graph{
 		byID: map[string]*node{},
@@ -162,28 +154,19 @@ func newGraph(services []*serviceBlock, vals *graphValues, parentKnown map[strin
 		g.nodes = append(g.nodes, n)
 		g.deps[n.id] = map[string]struct{}{}
 	}
-	many := map[string][]string{}
-	for _, p := range vals.provisions {
-		n := &node{id: p.id(), kind: kindProvide, scope: p.scope, prov: p}
-		for _, name := range sortedKeys(p.attrs) {
-			n.exprs = append(n.exprs, p.attrs[name].Expr)
-		}
-		addNode(n)
-		many[p.pkg+"."+p.input] = append(many[p.pkg+"."+p.input], n.id)
-	}
 	for _, o := range vals.outputs {
 		addNode(&node{id: o.id(), kind: kindOutput, scope: pkgScope(o.pkg), out: o, exprs: []hcl.Expression{o.decl.value}})
 	}
 	for _, in := range vals.inputs {
-		n := &node{id: in.id(), kind: kindInput, scope: in.scope(), in: in}
-		if e := in.expr(); e != nil {
+		n := &node{id: in.id(), kind: kindInput, scope: pkgScope(in.pkg), in: in}
+		if e := in.defaultExpr(); e != nil {
 			n.exprs = []hcl.Expression{e}
 		}
 		addNode(n)
-	}
-	for _, c := range vals.checks {
-		addNode(&node{id: c.id(), kind: kindCheck, scope: c.c.arg.scope, check: c, exprs: []hcl.Expression{c.c.arg.expr}})
-		g.deps[c.id()][c.in.id()] = struct{}{}
+		for _, pt := range in.parts() {
+			addNode(&node{id: in.partID(pt.i), kind: kindPart, scope: pt.arg.scope, part: pt, exprs: []hcl.Expression{pt.arg.expr}})
+			g.deps[n.id][in.partID(pt.i)] = struct{}{}
+		}
 	}
 
 	for _, n := range g.nodes {
@@ -196,10 +179,7 @@ func newGraph(services []*serviceBlock, vals *graphValues, parentKnown map[strin
 					if pkg, inPkg := packageOf(n.scope); inPkg {
 						if name, ok := traverseAttrName(trav[1]); ok {
 							id := (&input{pkg: pkg, name: name}).id()
-							if _, single := g.byID[id]; single && id != n.id {
-								g.deps[n.id][id] = struct{}{}
-							}
-							for _, id := range many[pkg+"."+name] {
+							if _, ok := g.byID[id]; ok && id != n.id {
 								g.deps[n.id][id] = struct{}{}
 							}
 						}

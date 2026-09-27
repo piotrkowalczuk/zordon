@@ -1,6 +1,6 @@
 # Caddy routes every site that registers with it by host name. It knows no
-# site itself: each one provides an entry to the sites slot, and two sites
-# claiming the same host are an error.
+# site itself: each one adds an entry to the sites map, and two sites
+# claiming the same key or the same host are an error.
 package "caddy" {
   inputs = {
     http_port = {
@@ -14,9 +14,9 @@ package "caddy" {
       default     = "test"
     }
     sites = {
-      description = "Hosts to route by name, such as { host = \"shop.test\", upstream = \"127.0.0.1:8080\" }."
-      type        = object({ host = string, upstream = string })
-      many        = true
+      description = "Hosts to route, by site, such as { shop = { host = \"shop.test\", upstream = \"127.0.0.1:8080\" } }."
+      type        = map(object({ host = string, upstream = string }))
+      default     = {}
       unique      = ["host"]
     }
   }
@@ -76,10 +76,10 @@ package "caddy" {
         EOT
       }
 
-      # One host matcher per provided site.
+      # One host matcher per site.
       file "site-routes" {
         path = "${fs::etc()}/sites/10-routes.caddy"
-        body = "# sites provided to caddy\n%{for name, s in inputs.sites}@${name} host ${s.host}\nhandle @${name} {\n  reverse_proxy ${s.upstream}\n}\n%{endfor}"
+        body = "# sites registered with caddy\n%{for name, s in inputs.sites}@${name} host ${s.host}\nhandle @${name} {\n  reverse_proxy ${s.upstream}\n}\n%{endfor}"
       }
 
       # Resolves health.<zone> through CoreDNS, which answers 127.0.0.1, and
