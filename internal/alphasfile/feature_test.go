@@ -290,6 +290,16 @@ service "go" "dns" {
 	}
 }
 
+func TestLoadTree_featureTakesNoAttributes(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":     `import "./web" {}`,
+		"web/Alphasfile": "feature \"extra\" {\n  default = true\n}\n" + pkgWeb,
+	})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `An argument named "default" is not expected here`) {
+		t.Fatalf("a feature is off unless imported with it; got %v", err)
+	}
+}
+
 func fileNames(s *Service) []string {
 	var out []string
 	for _, f := range s.Runtime.Files {
