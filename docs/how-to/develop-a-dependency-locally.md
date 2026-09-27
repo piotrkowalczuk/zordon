@@ -31,8 +31,8 @@ Every import of `github.com/acme/infra/...` now reads your checkout's current fi
 zordon plan
 ```
 
-The header shows `(search ~/code/infra)` next to every import your checkout provides.
-Edits in the checkout restart the stack on the next `zordon start`, like edits to the Alphasfile.
+The header shows `(search /home/you/code/infra)`, the absolute path of the entry, next to every import your checkout provides.
+Edits to the checkout's Alphasfiles restart the stack on the next `zordon start`, like edits to your own Alphasfile.
 
 ## 4. Go back to the pinned version
 

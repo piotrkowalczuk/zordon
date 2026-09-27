@@ -289,6 +289,32 @@ func TestLoadTreeWith_searchByZordonMod(t *testing.T) {
 	}
 }
 
+func TestLoadTreeWith_searchKeepsTheLockedPin(t *testing.T) {
+	infra, main := infraRepo(t)
+	other := gitRepo(t, map[string]string{"pkgs/db/Alphasfile": pkgDB})
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
+	f := newRepoFetcher(map[string]string{remoteRepo: infra, "github.com/acme/other": other})
+	opts := remoteOpts(t, dir, f)
+	if _, err := LoadTreeWith(root, opts); err != nil {
+		t.Fatal(err)
+	}
+	checkout := t.TempDir()
+	writeTree(t, checkout, map[string]string{
+		ModFileName:           `module = "github.com/acme/infra"`,
+		"pkgs/web/Alphasfile": pkgWeb,
+	})
+	writeTree(t, dir, map[string]string{"Alphasfile": webAt("main") + "require \"github.com/acme/other\" { ref = \"main\" }\nimport \"github.com/acme/other/pkgs/db\" {}\n"})
+	opts.Search = []string{checkout}
+	if _, err := LoadTreeWith(root, opts); err != nil {
+		t.Fatal(err)
+	}
+	lock := readFile(t, filepath.Join(dir, LockFileName))
+	if !strings.Contains(lock, `repo "github.com/acme/other"`) || !strings.Contains(lock, `repo "github.com/acme/infra"`) || !strings.Contains(lock, main) {
+		t.Errorf("a repository served by search keeps its pin when the lock is rewritten; lock:\n%s", lock)
+	}
+}
+
 func TestLoadTreeWith_searchByLayout(t *testing.T) {
 	src := t.TempDir()
 	writeTree(t, src, map[string]string{"github.com/acme/infra/pkgs/web/Alphasfile": pkgWeb})

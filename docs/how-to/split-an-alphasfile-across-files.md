@@ -17,9 +17,10 @@ Create `services/kafka/Alphasfile.kafka` and wrap the service in a `module` bloc
 module "kafka" {
   service "go" "kafka" {
     src {
-      path = "../../.."            # relative to THIS file, not the entrypoint
+      path = "../.."               # relative to THIS file, not the entrypoint
       exe  = "./cmd/kafka"
     }
+    vars = { port = net::pickport() }
     runtime {
       cmd = ["${fs::bin()}/${self.name}"]
     }
@@ -53,6 +54,10 @@ module "app" {
   }
 
   service "go" "app" {
+    src {
+      path = "../.."
+      exe  = "./cmd/app"
+    }
     runtime {
       after = [module.kafka.service.go.kafka.runtime.ready]
     }
@@ -74,8 +79,8 @@ zordon plan
 The header lists every imported file with the modules taken from it, plus modules that were loaded but not imported:
 
 ```
-# import /repo/services/kafka/Alphasfile.kafka [kafka]
 # import /repo/services/apps/Alphasfile.apps [app]
+# import /repo/services/kafka/Alphasfile.kafka [kafka]
 ```
 
 !!! note "Running one service on its own"

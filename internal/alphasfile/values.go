@@ -1,10 +1,6 @@
 package alphasfile
 
-import (
-	"fmt"
-
-	"github.com/hashicorp/hcl/v2"
-)
+import "fmt"
 
 // output is one output of a package in the stack, evaluated in the
 // package's scope.
@@ -61,12 +57,4 @@ func (in *input) parts() []*part {
 		out[i] = &part{in: in, i: i, arg: a}
 	}
 	return out
-}
-
-// defaultExpr is the expression evaluated when no import sets the input.
-func (in *input) defaultExpr() hcl.Expression {
-	if len(in.args) > 0 {
-		return nil
-	}
-	return in.decl.def
 }

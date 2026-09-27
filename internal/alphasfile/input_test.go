@@ -232,6 +232,30 @@ func TestOpen_nullTakesTheDefault(t *testing.T) {
 	}
 }
 
+func TestOpen_nullWaitsForADefaultThatReadsAService(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `import "./p" { inputs = { port = null } }`,
+		"p/Alphasfile": `
+package "p" {
+  inputs = { port = { description = "Port.", type = number, default = module.m.service.go.s.vars.port } }
+  module "m" {
+    service "go" "s" {
+      git { url = "github.com/x/s" }
+      vars = { port = 1234 }
+    }
+    service "go" "t" {
+      git { url = "github.com/x/t" }
+      vars = { port = inputs.port }
+    }
+  }
+}
+`,
+	})
+	if got := fmt.Sprint(svcByName(openTree(t, root), "p/m/t").Runtime.Vars["port"]); got != "1234" {
+		t.Errorf("port = %q; a default is evaluated after the services it reads, even when an import passes null", got)
+	}
+}
+
 func TestOpen_requiredInputSetToNull(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":         `import "./greeter" { inputs = { name = null } }`,

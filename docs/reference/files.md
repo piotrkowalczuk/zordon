@@ -12,7 +12,7 @@ An import in an Alphasfile says what a stack uses; a `require` in `zordon.mod`, 
 | file | lives | committed | written by |
 |---|---|---|---|
 | `zordon.work` | anywhere above the working directory | never | you |
-| `zordon.mod` | at the root of a module: a repository or directory that holds one or more Alphasfiles | yes | the module's authors, or `zordon pkg get` |
+| `zordon.mod` | at the root of a module: a repository or directory that holds one or more Alphasfiles | yes | the module's authors; `zordon pkg get` adds requires to an existing one |
 | `zordon.lock` | next to the entrypoint `Alphasfile` | yes | zordon |
 
 ## zordon.work
@@ -30,10 +30,10 @@ search "../checkouts" {}
 | more than one file | an error that lists every `zordon.work` found on the way |
 | repeated entry | an error naming both entries |
 | match by `zordon.mod` | a directory whose `zordon.mod` module is a prefix of the import identity provides it; the rest of the identity is the path inside the directory |
-| match by layout | a directory holding `<host>/<owner>/<repo>` provides that repository |
+| match by layout | a directory holding `<host>/<owner>/<repo>/<path>` for the imported identity provides it |
 | two matching entries | an error that lists both and says which rule matched |
 | version | the ref of the require is ignored; the directory's current files are used; the require is still needed |
-| lock | search-resolved repositories are not written to `zordon.lock` |
+| lock | a search-resolved repository is not added to `zordon.lock`; a pin it already has stays untouched |
 | unmatched entry | ignored |
 
 ## zordon.mod
@@ -69,13 +69,13 @@ repo "github.com/acme/infra" {
 
 | rule | behavior |
 |---|---|
-| key | one `repo` block per repository the stack imports remotely |
+| key | one `repo` block per repository that a loaded file imports remotely, including imports of modules outside the stack |
 | missing entry | zordon fetches the repository, resolves the ref, and adds the entry |
 | changed ref | a require that names another ref than the entry resolves again and replaces the entry |
 | same ref | the locked commit is used even if the branch moved; its checkout is reused without the network |
-| `zordon pkg update` | resolves every entry, or the named repositories, to the newest commit of its ref and prints what moved |
+| `zordon pkg update` | re-resolves every repository the stack imports, or only the named ones, to the newest commit of its ref, and prints what moved or that the lock is up to date |
 | which lock | only the entrypoint's lock is read; locks inside imported repositories are ignored |
-| rewrite | zordon writes the entries this load used, sorted by repository |
+| rewrite | when an entry is added or moved, zordon rewrites the lock with only the entries this load used, sorted by repository |
 
 Checkouts live in `$ZORDON_HOME/mod/<host>/<owner>/<repo>@<commit>`.
 

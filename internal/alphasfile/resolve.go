@@ -176,6 +176,10 @@ func (s *identitySource) resolve(importer *treeFile, imp *importBlock) (resolved
 	}
 	id := strings.TrimSuffix(repo+"/"+sub, "/")
 	if res, ok, err := s.search(imp, id); err != nil || ok {
+		// A pin the search stands in for survives a rewrite of the lock.
+		if _, locked := s.lock.repos[repo]; ok && locked {
+			s.lock.used[repo] = true
+		}
 		return res, err
 	}
 	ref, at := req.Ref, req.DefRange

@@ -159,8 +159,10 @@ func newGraph(services []*serviceBlock, vals *graphValues, parentKnown map[strin
 	}
 	for _, in := range vals.inputs {
 		n := &node{id: in.id(), kind: kindInput, scope: pkgScope(in.pkg), in: in}
-		if e := in.defaultExpr(); e != nil {
-			n.exprs = []hcl.Expression{e}
+		// The default may be needed even when imports set the input, if they
+		// all pass null, so the input always waits for what it reads.
+		if in.decl.def != nil {
+			n.exprs = []hcl.Expression{in.decl.def}
 		}
 		addNode(n)
 		for _, pt := range in.parts() {
