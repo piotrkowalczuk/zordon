@@ -1129,6 +1129,7 @@ func (r *resolver) finishService(st *svcState) error {
 		}
 		svc := &Service{
 			Toolchain: ToolchainPkg,
+			Module:    sb.module,
 			Runtime:   rt,
 			Pkg:       &PkgSpec{Name: pname, Version: pversion},
 		}
