@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
@@ -739,14 +740,17 @@ type importBlock struct {
 	alias string
 }
 
-// provideBlock contributes one entry to a slot the imported package
-// collects: `provide "<slot>" "<key>" { <attr> = <expr> ... }`. Its values
-// are evaluated with the other producers, so they may reference services.
+// provideBlock contributes one entry to a slot of the imported package:
+// `provide "<slot>" "<key>"? { <attr> = <expr> ... }`. Its values are
+// evaluated with the other producers, so they may reference services.
 type provideBlock struct {
 	Slot     string    `hcl:"slot,label"`
-	Key      string    `hcl:"key,label"`
 	Body     hcl.Body  `hcl:",remain"`
 	DefRange hcl.Range `hcl:",def_range"`
+
+	// key is the optional second label; decodeFile lifts it off, as for an
+	// import's alias.
+	key string
 }
 
 // requireBlock pins a repository that remote imports name:
@@ -762,9 +766,9 @@ type requireBlock struct {
 // ... module "<m>" { ... } }`. Inputs map each name to its default, or to
 // `required`; they are read as inputs.<n>. Features map each name to a
 // description of what it turns on; they are off unless an import turns them
-// on, and are read as features.<n>. Collect maps each slot to a description
-// of the entries it takes; importers fill it with provide blocks, and the
-// package reads it as collected.<slot>, a map of key to entry. The
+// on, and are read as features.<n>. Slots map each slot to a description
+// and the type of its entries; importers fill it with provide blocks, and
+// the package reads it as slots.<slot>, a map of key to entry. The
 // package's toolchain pins every module that has none of its own.
 type packageBlock struct {
 	Name          string          `hcl:"name,label"`
@@ -773,17 +777,25 @@ type packageBlock struct {
 	InputsRange   hcl.Range       `hcl:"inputs,attr_range"`
 	Features      hcl.Expression  `hcl:"features,optional"`
 	FeaturesRange hcl.Range       `hcl:"features,attr_range"`
-	Collect       hcl.Expression  `hcl:"collect,optional"`
-	CollectRange  hcl.Range       `hcl:"collect,attr_range"`
+	Slots         hcl.Expression  `hcl:"slots,optional"`
+	SlotsRange    hcl.Range       `hcl:"slots,attr_range"`
 	Imports       []*importBlock  `hcl:"import,block"`
 	Requires      []*requireBlock `hcl:"require,block"`
 	Toolchain     *toolchainBlock `hcl:"toolchain,block"`
 	Modules       []*moduleBlock  `hcl:"module,block"`
 
-	// features and collects are Features and Collect decoded: name →
-	// description.
+	// features and slots are Features and Slots decoded.
 	features map[string]string
-	collects map[string]string
+	slots    map[string]*slotDecl
+}
+
+// slotDecl is one slot of a package: what an entry is for, its type, and
+// the attributes no two entries may share.
+type slotDecl struct {
+	description string
+	entry       cty.Type
+	defaults    *typeexpr.Defaults
+	unique      []string
 }
 
 // moduleBlock is a named namespace of services with an optional toolchain

@@ -1,6 +1,6 @@
 // Package conformance, driven through `zordon plan` (static, no alpha): a
 // package's features switch its services on and off, its inputs reach the
-// rendered config, provided entries reach the package that collects them,
+// rendered config, provided entries reach the package that owns the slot,
 // and an identity import resolves through zordon.work.
 package conformance_test
 
@@ -60,14 +60,14 @@ func TestPlan_provideReachesTheCollectingPackage(t *testing.T) {
 	p.WriteFile("Alphasfile", "import \"./shop\" {}\nimport \"./blog\" {}\n")
 	p.WriteFile("proxy/Alphasfile", `
 package "proxy" {
-  collect = { sites = "Hosts to route: { host, port }" }
+  slots = { sites = { description = "Hosts to route.", entry = object({ host = string, port = number }) } }
 
   module "proxy" {
     service "go" "proxy" {
       package = "example.com/proxy@v0.0.0"
       file "routes" {
         path = "/tmp/routes"
-        body = "%{for name, s in collected.sites}${s.host}=${s.port};%{endfor}"
+        body = "%{for name, s in slots.sites}${s.host}=${s.port};%{endfor}"
       }
     }
   }
@@ -77,7 +77,7 @@ package "proxy" {
 		p.WriteFile(name+"/Alphasfile", `
 package "`+name+`" {
   import "../proxy" {
-    provide "sites" "`+name+`" {
+    provide "sites" {
       host = "`+name+`.test"
       port = module.site.service.go.site.vars.port
     }

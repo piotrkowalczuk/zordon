@@ -12,7 +12,9 @@ import (
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/zclconf/go-cty/cty"
+	"github.com/zclconf/go-cty/cty/convert"
 	"github.com/zclconf/go-cty/cty/function"
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
@@ -115,7 +117,10 @@ type resolver struct {
 	serviceByModule map[string]map[string]map[string]cty.Value
 
 	// collected holds evaluated provide entries: package, slot, key.
+	// provided keeps them per "<package>.<slot>" with where they came from,
+	// for the unique check.
 	collected map[string]map[string]map[string]cty.Value
+	provided  map[string][]providedEntry
 
 	// toolchainCty is the per-module projection of `toolchain { <lang> {
 	// ... } }` declarations into cty: `toolchain.<lang>.ready` etc. resolve
@@ -731,18 +736,47 @@ func (r *resolver) evalProducerNode(n *node, st *svcState) error {
 	return nil
 }
 
-// evalProvision evaluates one provide entry in the scope of its import and
-// files it under collected.<slot>.<key> of the package it provides to.
+// evalProvision evaluates one provide entry in the scope of its import,
+// converts it to the slot's entry type, and files it under
+// slots.<slot>["<key>"] of the package it provides to, with key set.
 func (r *resolver) evalProvision(p *provision) error {
 	ctx := r.ctxWith(nil, srcDirs{module: p.scope})
-	obj := make(map[string]cty.Value, len(p.attrs))
+	vals := make(map[string]cty.Value, len(p.attrs))
 	for name, attr := range p.attrs {
 		v, diags := attr.Expr.Value(ctx)
 		if diags.HasErrors() {
-			return fmt.Errorf("%s: provide %q %q: %s", p.block.DefRange, p.slot, p.key, diags.Error())
+			return fmt.Errorf("%s: provide %q: %s", p.block.DefRange, p.slot, diags.Error())
 		}
-		obj[name] = v
+		vals[name] = v
 	}
+	entry := cty.ObjectVal(vals)
+	if p.decl.defaults != nil {
+		entry = p.decl.defaults.Apply(entry)
+	}
+	entry, err := convert.Convert(entry, p.decl.entry)
+	if err != nil {
+		return fmt.Errorf("%s: provide %q: the entry does not fit slot %q of package %s (%s): %w", p.block.DefRange, p.slot, p.slot, p.pkg, typeexpr.TypeString(p.decl.entry), err)
+	}
+	obj := entry.AsValueMap()
+	if obj == nil {
+		obj = map[string]cty.Value{}
+	}
+	for _, attr := range p.decl.unique {
+		v := obj[attr]
+		if v.IsNull() {
+			continue
+		}
+		for _, other := range r.provided[p.pkg+"."+p.slot] {
+			if ov := other.entry[attr]; !ov.IsNull() && ov.RawEquals(v) {
+				return fmt.Errorf("%s: provide %q: %s = %s is already provided by entry %q at %s; slot %q of package %s takes each %s once", p.block.DefRange, p.slot, attr, hclValue(v), other.p.key, other.p.block.DefRange, p.slot, p.pkg, attr)
+			}
+		}
+	}
+	if r.provided == nil {
+		r.provided = map[string][]providedEntry{}
+	}
+	r.provided[p.pkg+"."+p.slot] = append(r.provided[p.pkg+"."+p.slot], providedEntry{p: p, entry: obj})
+	obj["key"] = cty.StringVal(p.key)
 	if r.collected == nil {
 		r.collected = map[string]map[string]map[string]cty.Value{}
 	}
@@ -754,6 +788,11 @@ func (r *resolver) evalProvision(p *provision) error {
 	}
 	r.collected[p.pkg][p.slot][p.key] = cty.ObjectVal(obj)
 	return nil
+}
+
+type providedEntry struct {
+	p     *provision
+	entry map[string]cty.Value
 }
 
 // producerLabel returns the user-facing field name of a producer node
@@ -1734,15 +1773,15 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 		}
 		vars["package"] = cty.ObjectVal(pkgs)
 	}
-	if pkg := r.tree.packages[selfPkg]; inPkg && pkg != nil && len(pkg.file.block.collects) > 0 {
-		slots := make(map[string]cty.Value, len(pkg.file.block.collects))
-		for slot := range pkg.file.block.collects {
+	if pkg := r.tree.packages[selfPkg]; inPkg && pkg != nil && len(pkg.file.block.slots) > 0 {
+		slots := make(map[string]cty.Value, len(pkg.file.block.slots))
+		for slot := range pkg.file.block.slots {
 			slots[slot] = cty.EmptyObjectVal
 			if entries := r.collected[selfPkg][slot]; len(entries) > 0 {
 				slots[slot] = cty.ObjectVal(copyCtyMap(entries))
 			}
 		}
-		vars["collected"] = cty.ObjectVal(slots)
+		vars["slots"] = cty.ObjectVal(slots)
 	}
 	if s := r.tree.settingsFor(dirs.module); s != nil {
 		if len(s.inputs) > 0 {

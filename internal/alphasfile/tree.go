@@ -418,7 +418,7 @@ func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, res re
 	case ib.InputsRange != (hcl.Range{}) || ib.Features != nil:
 		return fmt.Errorf("%s: %s %q: inputs and features are passed to a package directory, not to a fragment file", ib.DefRange, ib.keyword, ib.Path)
 	case len(ib.Provides) > 0:
-		return fmt.Errorf("%s: %s %q: provide fills a slot a package collects, not a fragment file", ib.Provides[0].DefRange, ib.keyword, ib.Path)
+		return fmt.Errorf("%s: %s %q: provide fills a slot of a package, not a fragment file", ib.Provides[0].DefRange, ib.keyword, ib.Path)
 	case f.block != nil:
 		return fmt.Errorf("%s: %s %q: a package depends on other packages, not on a fragment's modules; move the modules into this package or into a package of their own", ib.DefRange, ib.keyword, ib.Path)
 	case ib.Modules == nil:
@@ -801,6 +801,9 @@ func decodeFile(name string, src []byte) (*rootBlock, error) {
 	}
 	for _, ib := range root.allImports() {
 		ib.alias = aliases[ib.DefRange.Start.Byte]
+		for _, pb := range ib.Provides {
+			pb.key = aliases[pb.DefRange.Start.Byte]
+		}
 	}
 	if err := annotateModules(&root); err != nil {
 		return nil, err
@@ -813,16 +816,20 @@ func decodeFile(name string, src []byte) (*rootBlock, error) {
 	return &root, nil
 }
 
-// liftAliases moves the optional second label of import blocks into
-// aliases, keyed by the block's start offset, so gohcl sees one label.
+// liftAliases moves the optional second label of import blocks (the alias)
+// and of provide blocks (the key) into aliases, keyed by the block's start
+// offset, so gohcl sees one label.
 func liftAliases(body *hclsyntax.Body, aliases map[int]string) {
 	for _, blk := range body.Blocks {
 		switch blk.Type {
-		case "import":
+		case "import", "provide":
 			if len(blk.Labels) == 2 {
 				aliases[blk.TypeRange.Start.Byte] = blk.Labels[1]
 				blk.Labels = blk.Labels[:1]
 				blk.LabelRanges = blk.LabelRanges[:1]
+			}
+			if blk.Type == "import" {
+				liftAliases(blk.Body, aliases)
 			}
 		case "module", "package":
 			liftAliases(blk.Body, aliases)

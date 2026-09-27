@@ -1,5 +1,6 @@
 # Caddy routes every site that registers with it by host name. It knows no
-# site itself: each one provides an entry to the sites slot.
+# site itself: each one provides an entry to the sites slot, and two sites
+# claiming the same host are an error.
 package "caddy" {
   inputs = {
     # null picks a free port; 80 gives http://shop.test/ in a browser.
@@ -10,8 +11,12 @@ package "caddy" {
   features = {
     dns = "Adds /dns/healthz, answered by looking up health.<domain> in CoreDNS: proof that the zone resolves."
   }
-  collect = {
-    sites = "Hosts to route, each { host = \"shop.test\", upstream = \"127.0.0.1:8080\" }."
+  slots = {
+    sites = {
+      description = "Hosts to route by name, such as { host = \"shop.test\", upstream = \"127.0.0.1:8080\" }."
+      entry       = object({ host = string, upstream = string })
+      unique      = ["host"]
+    }
   }
 
   import "../coredns" {
@@ -35,7 +40,7 @@ package "caddy" {
         admin = net::pickport()
       }
 
-      print = "http://127.0.0.1:${self.vars.http}/  (caddy)%{for name, s in collected.sites} http://${s.host}:${self.vars.http}/%{endfor}"
+      print = "http://127.0.0.1:${self.vars.http}/  (caddy)%{for name, s in slots.sites} http://${s.host}:${self.vars.http}/%{endfor}"
 
       # Caddy autosaves its config under the user's config dir; keep it in the
       # service's own state instead.
@@ -62,7 +67,7 @@ package "caddy" {
       # One host matcher per provided site.
       file "site-routes" {
         path = "${fs::etc()}/sites/10-routes.caddy"
-        body = "# sites provided to caddy\n%{for name, s in collected.sites}@${name} host ${s.host}\nhandle @${name} {\n  reverse_proxy ${s.upstream}\n}\n%{endfor}"
+        body = "# sites provided to caddy\n%{for name, s in slots.sites}@${name} host ${s.host}\nhandle @${name} {\n  reverse_proxy ${s.upstream}\n}\n%{endfor}"
       }
 
       # Resolves health.<zone> through CoreDNS, which answers 127.0.0.1, and

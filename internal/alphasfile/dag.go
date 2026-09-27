@@ -22,8 +22,8 @@ const (
 	kindArguments
 	kindEnv
 	kindFile
-	// kindProvide is one provide entry; the package that collects it reads
-	// it through collected.<slot>, so it is a producer without a service.
+	// kindProvide is one provide entry; the package that owns the slot reads
+	// it through slots.<slot>, so it is a producer without a service.
 	kindProvide
 )
 
@@ -80,7 +80,7 @@ func nodeID(svcID string, kind nodeKind, name string) string {
 // services already resolved by a federation parent; references to those
 // are valid but never carry an intra-graph edge (the parent was
 // evaluated end-to-end before this graph runs). Every provision is a node
-// too, and a reference to collected.<slot> depends on every provision to
+// too, and a reference to slots.<slot> depends on every provision to
 // that slot of the referencing package.
 func newGraph(services []*serviceBlock, provisions []*provision, parentKnown map[string]struct{}) (*graph, error) {
 	g := &graph{
@@ -147,7 +147,7 @@ func newGraph(services []*serviceBlock, provisions []*provision, parentKnown map
 				continue
 			}
 			for _, trav := range expr.Variables() {
-				if trav.RootName() == "collected" && len(trav) >= 2 {
+				if trav.RootName() == "slots" && len(trav) >= 2 {
 					if pkg, inPkg := packageOf(n.scope); inPkg {
 						if slot, ok := traverseAttrName(trav[1]); ok {
 							for _, id := range slots[pkg+"."+slot] {

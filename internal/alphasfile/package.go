@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
@@ -21,16 +22,104 @@ type pkgNeed struct {
 	set   *pkgSettings
 }
 
-// decodeDescribed reads a package's features and collect slots: each a map
-// of name to description.
+// decodeDescribed reads a package's features, a map of name to
+// description, and its slots.
 func (pb *packageBlock) decodeDescribed() error {
 	var err error
 	pb.features, err = described(pb.Features, pb.FeaturesRange, "feature", fmt.Sprintf(`features of package %q map each name to what it turns on, such as { tls = "Serves HTTPS with a local CA" }`, pb.Name), "what it turns on, so whoever imports the package can decide", pb.Name)
 	if err != nil {
 		return err
 	}
-	pb.collects, err = described(pb.Collect, pb.CollectRange, "slot", fmt.Sprintf(`collect of package %q maps each slot to the entries it takes, such as { sites = "Virtual hosts: { host, upstream }" }`, pb.Name), "the entries it takes and their attributes, so importers know what to provide", pb.Name)
+	pb.slots, err = decodeSlots(pb)
 	return err
+}
+
+// decodeSlots reads `slots = { <slot> = { description = "...", entry =
+// object({...}) } }`. The entry is a type, so it is read from the syntax, not
+// evaluated.
+func decodeSlots(pb *packageBlock) (map[string]*slotDecl, error) {
+	out := map[string]*slotDecl{}
+	if pb.SlotsRange == (hcl.Range{}) {
+		return out, nil
+	}
+	shape := fmt.Sprintf(`slots of package %q map each slot to { description = "...", entry = object({ ... }) }, such as { sites = { description = "Hosts to route.", entry = object({ host = string, upstream = string }) } }`, pb.Name)
+	obj, ok := pb.Slots.(*hclsyntax.ObjectConsExpr)
+	if !ok {
+		return nil, fmt.Errorf("%s: %s", pb.SlotsRange, shape)
+	}
+	for _, item := range obj.Items {
+		kv, diags := item.KeyExpr.Value(nil)
+		if diags.HasErrors() || kv.IsNull() || !kv.Type().Equals(cty.String) {
+			return nil, fmt.Errorf("%s: %s", item.KeyExpr.Range(), shape)
+		}
+		name := kv.AsString()
+		at := item.KeyExpr.Range()
+		if !moduleNameRe.MatchString(name) {
+			return nil, fmt.Errorf("%s: slot %q of package %q: use letters, digits, '_' or '-' and start with a letter", at, name, pb.Name)
+		}
+		if _, dup := out[name]; dup {
+			return nil, fmt.Errorf("%s: slot %q of package %q is declared twice", at, name, pb.Name)
+		}
+		body, ok := item.ValueExpr.(*hclsyntax.ObjectConsExpr)
+		if !ok {
+			return nil, fmt.Errorf("%s: slot %q: %s", at, name, shape)
+		}
+		decl := &slotDecl{}
+		hasEntry := false
+		for _, field := range body.Items {
+			fv, _ := field.KeyExpr.Value(nil)
+			key := ""
+			if fv.IsKnown() && !fv.IsNull() && fv.Type().Equals(cty.String) {
+				key = fv.AsString()
+			}
+			switch key {
+			case "description":
+				d, diags := field.ValueExpr.Value(nil)
+				if diags.HasErrors() || d.IsNull() || !d.Type().Equals(cty.String) {
+					return nil, fmt.Errorf("%s: slot %q: description must be a string", field.ValueExpr.Range(), name)
+				}
+				decl.description = strings.TrimSpace(d.AsString())
+			case "entry":
+				ty, defaults, diags := typeexpr.TypeConstraintWithDefaults(field.ValueExpr)
+				if diags.HasErrors() {
+					return nil, fmt.Errorf("%s: slot %q: entry: %s", field.ValueExpr.Range(), name, diags.Error())
+				}
+				if !ty.IsObjectType() {
+					return nil, fmt.Errorf("%s: slot %q: entry must be object({ ... }), because a provide block holds attributes", field.ValueExpr.Range(), name)
+				}
+				if ty.HasAttribute("key") {
+					return nil, fmt.Errorf("%s: slot %q: entry cannot declare key; every entry has it, set to its key", field.ValueExpr.Range(), name)
+				}
+				decl.entry, decl.defaults, hasEntry = ty, defaults, true
+			case "unique":
+				u, diags := field.ValueExpr.Value(nil)
+				if diags.HasErrors() || u.IsNull() || !(u.Type().IsTupleType() || u.Type().IsListType()) {
+					return nil, fmt.Errorf("%s: slot %q: unique lists entry attributes, such as [\"host\"]", field.ValueExpr.Range(), name)
+				}
+				for _, v := range u.AsValueSlice() {
+					if v.IsNull() || !v.Type().Equals(cty.String) {
+						return nil, fmt.Errorf("%s: slot %q: unique lists entry attributes, such as [\"host\"]", field.ValueExpr.Range(), name)
+					}
+					decl.unique = append(decl.unique, v.AsString())
+				}
+			default:
+				return nil, fmt.Errorf("%s: slot %q takes description, entry and unique only", field.KeyExpr.Range(), name)
+			}
+		}
+		for _, attr := range decl.unique {
+			if hasEntry && !decl.entry.HasAttribute(attr) {
+				return nil, fmt.Errorf("%s: slot %q: unique names %q, which entry does not declare", at, name, attr)
+			}
+		}
+		if decl.description == "" {
+			return nil, fmt.Errorf("%s: slot %q of package %q needs a description of what an entry is for, so importers know what to provide", at, name, pb.Name)
+		}
+		if !hasEntry {
+			return nil, fmt.Errorf("%s: slot %q of package %q needs entry = object({ ... }), the type of what importers provide", at, name, pb.Name)
+		}
+		out[name] = decl
+	}
+	return out, nil
 }
 
 func described(expr hcl.Expression, at hcl.Range, what, shape, needs, pkg string) (map[string]string, error) {
