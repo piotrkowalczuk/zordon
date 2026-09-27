@@ -21,12 +21,40 @@ func SplitIdentity(id string) (repo, sub, ref string, err error) {
 		return "", "", "", fmt.Errorf("%q: empty version after @", id)
 	}
 	path = strings.Trim(path, "/")
+	for seg := range strings.SplitSeq(path, "/") {
+		if seg == "" || seg == "." || seg == ".." || strings.ContainsAny(seg, "\\\x00") {
+			return "", "", "", fmt.Errorf("%q: a path segment cannot be empty, . or .., so an identity always stays inside its repository", id)
+		}
+	}
+	if hasRef {
+		if err := CheckRef(ref); err != nil {
+			return "", "", "", fmt.Errorf("%q: %w", id, err)
+		}
+	}
 	repo, err = normalizeGit(path)
 	if err != nil {
 		return "", "", "", err
 	}
 	sub = strings.TrimPrefix(strings.TrimPrefix(path, repo), "/")
 	return repo, sub, ref, nil
+}
+
+// CheckRef rejects a ref git could read as an option or that no branch, tag
+// or commit can be named: one starting with - or holding whitespace or
+// control characters.
+func CheckRef(ref string) error {
+	if ref == "" || strings.HasPrefix(ref, "-") || strings.IndexFunc(ref, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
+		return fmt.Errorf("ref names a branch, tag or commit; it cannot start with - or hold spaces, got %q", ref)
+	}
+	return nil
+}
+
+// IsCommit reports whether s is a full sha-1 or sha-256 commit hash.
+func IsCommit(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	return strings.IndexFunc(s, func(r rune) bool { return (r < '0' || r > '9') && (r < 'a' || r > 'f') }) < 0
 }
 
 // ResolveCommit resolves a branch, tag or commit to a full commit sha in the
@@ -37,6 +65,9 @@ func (p Primary) ResolveCommit(ctx context.Context, ref string) (string, error) 
 		return "", errors.New("source.ResolveCommit: service has no git/dir primary")
 	}
 	var out bytes.Buffer
+	if err := CheckRef(ref); err != nil {
+		return "", err
+	}
 	cmd := exec.CommandContext(ctx, "git", "-C", p.primaryPath(), "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
@@ -67,6 +98,9 @@ func (f ModFetcher) Resolve(repo, ref string) (string, error) {
 // Materialize checks repo out at commit into dest. A finished checkout of the
 // same commit is reused without touching the network.
 func (f ModFetcher) Materialize(repo, commit, dest string) error {
+	if !IsCommit(commit) {
+		return fmt.Errorf("check out %s: %q is not a commit hash", repo, commit)
+	}
 	p, err := NewPrimary(f.Home, repo, "", commit, nil)
 	if err != nil {
 		return err

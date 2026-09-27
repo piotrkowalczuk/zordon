@@ -168,7 +168,7 @@ func (s *identitySource) resolve(importer *treeFile, imp *importBlock) (resolved
 		return resolved{}, fmt.Errorf("%s: %s %q: a version is not part of an import path; drop @%s and add require %q { ref = %q } %s", imp.DefRange, imp.keyword, imp.Path, ref, repo, ref, sc.hint)
 	}
 	if res, ok := sameCheckout(importer, repo, sub); ok {
-		return res, nil
+		return confinedResult(imp, res)
 	}
 	req := sc.reqs[repo]
 	if req == nil {
@@ -201,13 +201,20 @@ func (s *identitySource) resolve(importer *treeFile, imp *importBlock) (resolved
 		return resolved{}, fmt.Errorf("%s: %s %q: %w", imp.DefRange, imp.keyword, imp.Path, err)
 	}
 	repoAt := repo + "@" + commit
-	return resolved{
+	return confinedResult(imp, resolved{
 		path:     filepath.Join(dest, filepath.FromSlash(sub)),
 		identity: repoAt + "//" + sub,
 		confine:  dest,
 		repoAt:   repoAt,
 		origin:   repo + "@" + shortCommit(commit),
-	}, nil
+	})
+}
+
+func confinedResult(imp *importBlock, res resolved) (resolved, error) {
+	if !confined(res.confine, res.path) {
+		return resolved{}, fmt.Errorf("%s: %s %q: leaves the checkout of %s", imp.DefRange, imp.keyword, imp.Path, res.repoAt)
+	}
+	return res, nil
 }
 
 // resolveLocal resolves a path relative to the importing file. Inside a
@@ -221,7 +228,7 @@ func (s *identitySource) resolveLocal(importer *treeFile, imp *importBlock) (res
 	if !strings.HasPrefix(imp.Path, "./") && !strings.HasPrefix(imp.Path, "../") {
 		return resolved{}, fmt.Errorf("%s: %s %q: a file fetched from a remote repository may import relative paths only", imp.DefRange, imp.keyword, imp.Path)
 	}
-	if !zfs.Within(importer.confine, p) {
+	if !confined(importer.confine, p) {
 		return resolved{}, fmt.Errorf("%s: %s %q: leaves the checkout of %s", imp.DefRange, imp.keyword, imp.Path, importer.repoAt)
 	}
 	rel, err := filepath.Rel(importer.confine, p)
@@ -235,6 +242,21 @@ func (s *identitySource) resolveLocal(importer *treeFile, imp *importBlock) (res
 		repoAt:   importer.repoAt,
 		origin:   importer.origin,
 	}, nil
+}
+
+// confined reports whether p lies inside root, both as spelled and where its
+// symlinks really lead, so a link committed to a fetched repository cannot
+// reach the machine.
+func confined(root, p string) bool {
+	if !zfs.Within(root, p) {
+		return false
+	}
+	realRoot, err := zfs.EvalExisting(root)
+	if err != nil {
+		return false
+	}
+	realP, err := zfs.EvalExisting(p)
+	return err == nil && zfs.Within(realRoot, realP)
 }
 
 // search finds id in the zordon.work search directories: a directory whose
@@ -335,6 +357,9 @@ func requireMap(blocks []*requireBlock) (map[string]*requireBlock, error) {
 		case strings.TrimSpace(rb.Ref) == "":
 			return nil, fmt.Errorf("%s: require %q: ref names a branch, tag or commit and cannot be empty", rb.DefRange, rb.Repo)
 		}
+		if err := source.CheckRef(rb.Ref); err != nil {
+			return nil, fmt.Errorf("%s: require %q: %w", rb.DefRange, rb.Repo, err)
+		}
 		if prev, dup := out[repo]; dup {
 			return nil, fmt.Errorf("%s: require %q repeats the require at %s", rb.DefRange, rb.Repo, prev.DefRange)
 		}
@@ -407,6 +432,9 @@ func readLock(path string) (*lockFile, error) {
 		return nil, fmt.Errorf("%s: %s", LockFileName, diags.Error())
 	}
 	for _, r := range doc.Repos {
+		if !source.IsCommit(r.Commit) {
+			return nil, fmt.Errorf("%s: repo %q: commit %q is not a commit hash; remove the entry and run zordon pkg update", path, r.Repo, r.Commit)
+		}
 		l.repos[r.Repo] = lockEntry{ref: r.Ref, commit: r.Commit}
 	}
 	return l, nil

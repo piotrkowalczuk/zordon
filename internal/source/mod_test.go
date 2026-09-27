@@ -35,6 +35,63 @@ func TestSplitIdentity(t *testing.T) {
 	}
 }
 
+func TestSplitIdentity_staysInsideItsRepository(t *testing.T) {
+	cases := []string{
+		"github.com/acme/infra/../../etc",
+		"github.com/acme/infra/./x",
+		"github.com/../infra",
+		"github.com/acme//infra",
+		"github.com/acme/infra/a\\b",
+		"github.com/acme/infra@-x",
+	}
+	for _, id := range cases {
+		if _, _, _, err := SplitIdentity(id); err == nil {
+			t.Errorf("SplitIdentity(%q) accepted it", id)
+		}
+	}
+}
+
+func TestCheckRef(t *testing.T) {
+	cases := map[string]bool{
+		"main":                  true,
+		"v1.2.0":                true,
+		"feat/packages":         true,
+		"--upload-pack=touch x": false,
+		"-x":                    false,
+		"a b":                   false,
+		"a\nb":                  false,
+		"":                      false,
+	}
+	for ref, ok := range cases {
+		if err := CheckRef(ref); (err == nil) != ok {
+			t.Errorf("CheckRef(%q) = %v, want ok=%v", ref, err, ok)
+		}
+	}
+}
+
+func TestIsCommit(t *testing.T) {
+	cases := map[string]bool{
+		strings.Repeat("a", 40):       true,
+		strings.Repeat("0", 64):       true,
+		strings.Repeat("a", 39):       false,
+		strings.Repeat("A", 40):       false,
+		"../../../../etc":             false,
+		"-" + strings.Repeat("a", 39): false,
+	}
+	for s, ok := range cases {
+		if IsCommit(s) != ok {
+			t.Errorf("IsCommit(%q) = %v, want %v", s, !ok, ok)
+		}
+	}
+}
+
+func TestPrimary_ResolveCommit_rejectsAnOption(t *testing.T) {
+	p := mustDirPrimary(t, taggedRepo(t), "")
+	if _, err := p.ResolveCommit(t.Context(), "--output=x"); err == nil || !strings.Contains(err.Error(), "cannot start with -") {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestPrimary_ResolveCommit(t *testing.T) {
 	repo := taggedRepo(t)
 	p := mustDirPrimary(t, repo, "")

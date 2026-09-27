@@ -339,6 +339,72 @@ func TestLoadTreeWith_remoteFilesStayInsideTheirCheckout(t *testing.T) {
 	}
 }
 
+func TestLoadTreeWith_identityCannotLeaveItsRepository(t *testing.T) {
+	cases := map[string]string{
+		"parent in path":  "github.com/acme/infra/../../outside",
+		"dot in path":     "github.com/acme/infra/./pkgs/web",
+		"parent as owner": "github.com/../infra/pkgs/web",
+	}
+	for hint, path := range cases {
+		t.Run(hint, func(t *testing.T) {
+			dir := t.TempDir()
+			root := writeTree(t, dir, map[string]string{"Alphasfile": "require \"github.com/acme/infra\" { ref = \"main\" }\nimport \"" + path + "\" {}\n"})
+			_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(nil)))
+			if err == nil || !strings.Contains(err.Error(), "cannot be empty, . or ..") {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadTreeWith_remoteFileImportsItsOwnRepositoryOutsideIt(t *testing.T) {
+	infra := gitRepo(t, map[string]string{"pkgs/web/Alphasfile": pkgWebRequiring(`import "github.com/acme/infra/../../../outside" {}`)})
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
+	_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
+	if err == nil || !strings.Contains(err.Error(), "cannot be empty, . or ..") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadTreeWith_symlinkCannotLeaveTheCheckout(t *testing.T) {
+	outside := t.TempDir()
+	writeTree(t, outside, map[string]string{"Alphasfile": pkgDB})
+	infra := gitRepo(t, map[string]string{"pkgs/web/Alphasfile": pkgWebRequiring(`import "../evil" {}`)})
+	if err := zfs.Symlink(outside, filepath.Join(infra, "pkgs", "evil")); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, infra, "add", "-A")
+	gitRun(t, infra, "-c", "user.email=a@b", "-c", "user.name=z", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "link")
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
+	_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
+	if err == nil || !strings.Contains(err.Error(), "leaves the checkout of github.com/acme/infra@") {
+		t.Fatalf("a symlink inside a fetched repository must not reach the machine, got %v", err)
+	}
+}
+
+func TestLoadTreeWith_refCannotBeAnOption(t *testing.T) {
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{"Alphasfile": "require \"github.com/acme/infra\" { ref = \"--upload-pack=touch /tmp/x\" }\nimport \"github.com/acme/infra/pkgs/web\" {}\n"})
+	_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(nil)))
+	if err == nil || !strings.Contains(err.Error(), "ref names a branch, tag or commit; it cannot start with - or hold spaces") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadTreeWith_lockCommitMustBeAHash(t *testing.T) {
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{
+		"Alphasfile": webAt("main"),
+		LockFileName: "repo \"github.com/acme/infra\" {\n  ref    = \"main\"\n  commit = \"../../../../etc\"\n}\n",
+	})
+	_, err := LoadTreeWith(root, remoteOpts(t, dir, nil))
+	if err == nil || !strings.Contains(err.Error(), `commit "../../../../etc" is not a commit hash`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestLoadTreeWith_remoteRelativeRequireInsideCheckout(t *testing.T) {
 	infra := gitRepo(t, map[string]string{
 		"pkgs/web/Alphasfile": pkgWebRequiring(`import "../db" {}`),
