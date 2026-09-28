@@ -1,0 +1,66 @@
+# examples/ruby_ror — a Rails app the way zordon wants to run one: the
+# pinned ruby and bundler, gems out of tree, the database prepared by a
+# provision before the server starts, and nothing written into the source
+# tree. The app itself (src/app) is a minimal hand-written Rails 8.1 API
+# app — railties + actionpack + activerecord + sqlite3 + puma — rather than
+# a full `rails new` skeleton, so every file in it is one the example uses.
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  ruby {
+    version = "3.3.6"
+    # Matches the lockfile's BUNDLED WITH, so `bundle` runs exactly this
+    # version instead of self-installing the lockfile's over the network.
+    tools = { bundler = "2.5.6" }
+  }
+}
+
+service "ruby" "web" {
+  src {
+    path = "../.."
+    exe  = "examples/ruby_ror/src/app"
+  }
+
+  vars = { port = net::pickport() }
+
+  # Shared by the build, the `db` provision and the server. The SQLite file
+  # lives in fs::var() — per-workspace state, never in the checkout — and
+  # the secret is a fixed, non-secret dev value so Rails does not generate
+  # tmp/local_secret.txt.
+  env = {
+    RAILS_ENV       = "development"
+    DATABASE_PATH   = "${fs::var()}/development.sqlite3"
+    SECRET_KEY_BASE = "zordon-example-development-only"
+  }
+
+  # No build block: the default `bundle install` runs with BUNDLE_PATH at
+  # <state>/bundle/web. First start compiles puma/json/bigdecimal; nokogiri
+  # and sqlite3 come prebuilt for linux and darwin (see Gemfile.lock).
+
+  runtime {
+    # db:prepare creates the database and runs pending migrations; it is
+    # idempotent, so a restart just finds the schema current.
+    after = [self.runtime.provision.db.success]
+
+    # Provisions start as soon as their own deps allow, not after the
+    # service's build — and this one runs the app, so it needs the bundle
+    # `bundle install` just produced.
+    provision "db" {
+      after = [self.build.success]
+      cmd   = "bin/rails db:prepare"
+    }
+
+    cmd = ["bundle", "exec", "puma", "--bind", "tcp://127.0.0.1:${self.vars.port}", "config.ru"]
+  }
+
+  # Rails' built-in health check (Rails::HealthController) — 200 once the
+  # app has booted.
+  readiness {
+    http {
+      path = "/up"
+      port = self.vars.port
+    }
+    period            = "500ms"
+    failure_threshold = 120
+  }
+}
