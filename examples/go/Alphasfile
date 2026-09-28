@@ -2,7 +2,7 @@
 # zordon-invoking shell. Everything else (GOPATH, GOROOT from user mise,
 # random shell exports) is stripped, so the Go pinned below is the only
 # one services actually run with.
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 toolchain {
   # Pin the Go version alpha will use to build and run every `service "go"`

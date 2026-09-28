@@ -4,7 +4,7 @@
 # what `gem install bundler` runs under, so a service "pinned" to the
 # ruby below actually uses THAT ruby and THAT bundler, not whatever the
 # user shell happens to expose.
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 toolchain {
   # Ruby toolchains in mise live as fully separate worlds: every pinned
