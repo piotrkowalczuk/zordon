@@ -119,15 +119,301 @@ module "payments" {
 
 Rules:
 
-- A module name is a plain identifier (`[A-Za-z][A-Za-z0-9_-]*`) and is declared once per file.
+- A module name is a plain identifier (`[A-Za-z][A-Za-z0-9_-]*`) and is declared once across all loaded files.
+- A module may not share its name with a top-level service, because both would own `<state>/{bin,src,etc,var}/<name>` and the branch `zordon/<ws>/<name>`.
 - Services are unique per `(module, toolchain, name)`, so the same name in two modules is not a duplicate.
-- Inside a module the default module and federation parents are not addressable; the entrypoint composes modules, modules do not reach up.
+- Inside a module the default module is not addressable, neither this level's nor a federation parent's; a parent's modules stay reachable as `module.<m>.…`.
 - `self.module` holds the declaring module's name (empty at top level), handy for `-name "${self.module}/${self.name}"` style flags.
 - `fs::service::bin`, `fs::service::etc` and `fs::service::var` accept `module.<m>.service.<tc>.<name>` references.
 - A module's `toolchain { }` pins are keyed `<m>/<lang>` in the resolved manifest and the plan renders them inside the module block.
 - `env`, `dotenv` and `sysenv` stay top-level only; module-scoped env is not supported.
 
 See [Pin different toolchain versions per module](how-to/pin-different-toolchain-versions.md) for the recipe and [examples/modules](https://github.com/piotrkowalczuk/zordon/tree/main/examples/modules) for a runnable stack.
+
+### Imports
+
+An `import` block pulls named modules out of another file into the stack.
+At the entrypoint's top level it composes the stack; inside a module it declares what that module depends on.
+A module is the only unit of import; a file is just a container that may hold several modules.
+
+```hcl
+# Alphasfile (entrypoint)
+import "./services/apps/Alphasfile.apps" {
+  modules = ["app", "billing"]
+}
+
+# services/apps/Alphasfile.apps (fragment)
+module "app" {
+  import "../kafka/Alphasfile.kafka" {
+    modules = ["kafka"]
+  }
+
+  service "go" "app" {
+    runtime {
+      provision "topic" {
+        cmd = module.kafka.service.go.kafka.runtime.provision.create-topic
+      }
+    }
+  }
+}
+module "billing" { … }
+
+# services/kafka/Alphasfile.kafka (fragment)
+module "kafka" { service "go" "kafka" { … } }
+```
+
+| rule | behavior |
+|---|---|
+| syntax | `import "<path>" { modules = ["<m>", …] }`, repeatable; `modules` is required and non-empty for a fragment |
+| placement | the entrypoint's top level, a `module` block in any file, and a `package` block |
+| path | starts with `./`, `../`, `/` or `~/`; relative paths resolve against the declaring file's directory; any other spelling is a [remote identity](#remote-imports) |
+| entrypoint vs fragment | a file named exactly `Alphasfile` is an entrypoint and cannot be imported as a file; import its directory to use it as a [package](#packages), or a fragment, by convention `Alphasfile.<name>` |
+| fragment content | `module` blocks and `require` blocks only; a top-level `import`, `service`, `toolchain`, `env`, `dotenv`, `sysenv` and `workspace` are errors |
+| loading | every file loads once; diamonds and cycles between files are fine; imports inside modules outside the stack are loaded and checked too |
+| stack | the entrypoint's modules, the modules its imports name, and, repeated until nothing changes, the modules imported by any module already in the stack; every other module is left out |
+| visibility at the entrypoint's top level | the entrypoint's modules and the modules its imports name |
+| visibility inside a module | the module itself and what it imports; in the entrypoint also every other module of the entrypoint, because all of them are in the stack |
+| sibling in a fragment | imported like any other module, by the fragment's own file name: `import "./Alphasfile.apps" { modules = ["billing"] }` |
+| visibility error | names the expression and the missing `import` and where it goes |
+| duplicates | a module name is declared once across all loaded files |
+| relative `src { path }` | resolves against the directory of the file that declares the service |
+| `cfg::hash()` and drift | covers the bytes of every loaded file, so editing a fragment restarts a level like editing its Alphasfile |
+| `zordon plan` | prints `# import <file> [modules]` per file the stack takes modules from and `# unused module <m> in <file>` under the level header |
+
+An import inside a module joins the stack only with that module, so taking one module from a shared file never starts what its neighbours need.
+
+See [Split an Alphasfile across files](how-to/split-an-alphasfile-across-files.md) for the recipe and [examples/import](https://github.com/piotrkowalczuk/zordon/tree/main/examples/import) for a runnable stack.
+
+### Packages
+
+A package is the API between a stack and the modules that implement it.
+Its file holds one `package` block: what goes in (`features`, `inputs`), what comes out (`outputs`), its imports, and its modules.
+
+```hcl
+# caddy/Alphasfile
+package "caddy" {
+  features = {
+    dns = { description = "Resolves hosts through CoreDNS." }
+  }
+  inputs = {
+    domain = { description = "The zone hosts live in.", type = string, default = "test" }
+    sites  = { description = "Hosts to route, by site.", type = map(object({ host = string, upstream = string })), default = {} }
+  }
+  outputs = {
+    url = { description = "Where Caddy serves.", type = string, value = "http://127.0.0.1:${module.caddy.service.go.caddy.vars.http}" }
+  }
+
+  import "../coredns" {
+    enabled = features.dns
+    inputs  = { zone = inputs.domain }
+  }
+
+  module "caddy" {
+    service "go" "caddy" { … }
+  }
+}
+
+# Alphasfile
+import "./caddy" "edge" {
+  features = ["dns"]
+  inputs   = { domain = "dev" }
+}
+```
+
+| rule | behavior |
+|---|---|
+| file | a package's `Alphasfile` holds exactly one `package "<name>" {}` block and nothing outside it |
+| block content | `features`, `inputs`, `outputs`, `import`, `require`, `toolchain` and `module` blocks; `env`, `dotenv`, `sysenv`, `workspace` and services outside a module are errors |
+| declarations | `features`, `inputs` and `outputs` each map a name to `{ description = "…", … }`; the description is required |
+| target | an import whose path resolves to a directory whose `Alphasfile` holds a package block; a directory without one is an error |
+| name | the alias label when given, else the package block's label; unique among packages in the stack |
+| identity | a module of a package is `package.<p>.module.<m>`; its services are `package.<p>.module.<m>.service.<tc>.<svc>`, shown as `<p>/<m>/<svc>` |
+| short name | `zordon status` shows `<p>/<svc>` for a service of a module named like its package |
+| picks | `zordon start`, `zordon plan` and `zordon workspace create` pick a package as `<p>`, one of its modules as `<p>/<m>`, and a service by its own name when that name is unique in the stack; see [picks](lifecycle.md) |
+| inside a package | `module.<m>` is one of the package's own modules; another package is `package.<q>.module.<m>` |
+| import at the entrypoint's top level | the final word on the package's features; every other import's features must be among them, while its inputs join as in [Inputs](#inputs) |
+| any other import | turns features on when the entrypoint does not import the package |
+| features from several imports | unite; every importer gets what it needs |
+| an input from several imports | see [Inputs](#inputs): a map takes entries from all of them, any other type is an error |
+| unmet need | a feature the entrypoint leaves off is an error on the entrypoint's import that quotes the feature's description and names the importer |
+| entrypoint imports | several imports of the same package at the entrypoint's top level must pass the same features and the same input expressions, compared as written |
+| cycle | packages that import each other cannot be configured first; importing one of them at the entrypoint's top level breaks the cycle |
+| dependencies | a package depends on packages, never on a fragment's modules |
+| toolchain | the package's `toolchain {}` pins every module that has none of its own |
+| visibility | a package's modules see each other and whatever the package or the module imports |
+| federation | importing a package that is a federation level of the invocation is an error, because it would run twice |
+| on its own | `zordon start` in the package's directory runs it with default inputs and no features; a required input is an error |
+| host variables | a service's process gets none unless the entrypoint passes them with `sysenv`; without `HOME`, zordon points Go's caches at `$ZORDON_HOME/go`, so a package builds without anything from the host |
+| `zordon plan` | prints `# import <dir> as <name> [features: …] (imported by …)` and renders `package "<p>" { module "<m>" { … } }` |
+
+### Features
+
+Features are the only part of a package known before planning, because they decide which blocks exist.
+
+```hcl
+package "coredns" {
+  features = {
+    resolver = { description = "Writes /etc/resolver/<zone> with sudo, so a browser resolves the zone." }
+  }
+
+  module "coredns" {
+    service "go" "coredns" {
+      sudo "resolver" {
+        enabled = features.resolver
+        apply   = "…"
+      }
+    }
+  }
+}
+```
+
+| rule | behavior |
+|---|---|
+| `features = { <n> = { description = "…" } }` | declares the package's features; the description says what the feature turns on and is quoted in errors |
+| value | off unless an import lists it in `features = [...]`; read as `features.<n>`, a bool |
+| unknown feature | an error listing the declared ones |
+| `enabled` | on `service`, `file`, `provision`, `sudo` and `import` blocks inside a package; a false value removes the block before planning |
+| `enabled` expressions | only `features.<n>` may be referenced and no function may be called; the result must be a bool |
+| reference to a removed block | an error on the referencing block that says which `enabled` removed the target and asks to gate the reference the same way |
+| `enabled` outside a package | an error |
+
+### Inputs
+
+Inputs are what goes into a package, evaluated with the services, so a value may carry another service's port.
+Every import that sets an input gives it a value, and the input's type decides how they join: a map takes the entries of all of them, any other type exactly one.
+Entries are data joined into one map before the package is evaluated, never calls: the package runs once with every entry.
+
+```hcl
+# gateway/Alphasfile
+package "gateway" {
+  inputs = {
+    port   = { description = "Port to listen on; null picks one.", type = number, default = null }
+    routes = { description = "Paths to proxy, by service.", type = map(object({ prefix = string, upstream = string })), default = {}, unique = ["prefix"] }
+  }
+  …
+}
+
+# orders/Alphasfile
+package "orders" {
+  import "../gateway" {
+    inputs = {
+      routes = {
+        orders = { prefix = "/orders/", upstream = "127.0.0.1:${module.orders.service.go.orders.vars.port}" }
+      }
+    }
+  }
+  …
+}
+
+# Alphasfile
+import "./gateway" { inputs = { port = 8080 } }
+```
+
+| rule | behavior |
+|---|---|
+| `inputs = { <n> = { description, type, default?, unique? } }` | declares the package's inputs; `type` is one of the [types](#types) |
+| `inputs = { <n> = <expr> }` on an import | gives the input a value; evaluated in the scope of the import, so it may read what the importer sees, such as its own `inputs` or another package's `outputs` |
+| `map(T)` from several imports | the entries of every import joined into one map; the entrypoint's import adds entries like any other |
+| key set twice | an error naming both imports |
+| `unique = ["<attr>", …]` | for a `map(object({ … }))`: the same value of the attribute in two entries is an error naming both; a null value is not compared |
+| any other type from several imports | an error naming where both imports set it, even when they give the same value; an import that passes `null` sets nothing |
+| `default` | the value when no import sets the input, or every import sets it to `null`; a map's default is not joined with entries; without a default the input is required; it is evaluated in the package, so it may read the package's own services |
+| type check | a value that does not fit the type is an error naming the input, the import and where in the value it went wrong, such as `["orders"].prefix: a string is required` |
+| `inputs.<n>` | inside the package: the input's value; a map is sorted by key, each entry with defaults applied |
+| evaluation | an input is evaluated with the other producers; a reference to `inputs.<n>` waits for every import that sets it |
+| unknown input | setting an input the package does not declare is an error listing the declared ones, and so is reading one in a service |
+| switched-off import | an import removed by `enabled`, or outside the stack, sets nothing |
+| `inputs` outside a package | an error |
+
+### Outputs
+
+Outputs are what a package gives back: where it listens, when it is ready, a value per entry of a map input.
+
+```hcl
+# gateway/Alphasfile
+package "gateway" {
+  outputs = {
+    url   = { description = "Where the gateway listens.", type = string, value = "http://127.0.0.1:${module.gateway.service.go.gateway.vars.port}" }
+    ready = { description = "The gateway answers requests.", type = string, value = module.gateway.service.go.gateway.runtime.ready }
+  }
+  …
+}
+
+# billing/Alphasfile
+package "billing" {
+  import "../gateway" {}
+
+  module "billing" {
+    service "go" "billing" {
+      runtime {
+        cmd   = ["billing", "-gateway", package.gateway.outputs.url]
+        after = [package.gateway.outputs.ready]
+      }
+    }
+  }
+}
+```
+
+| rule | behavior |
+|---|---|
+| `outputs = { <n> = { description, type, value } }` | declares the package's outputs; each value is evaluated in the package's scope, with the other producers, so it may read its services, features and inputs |
+| type check | a value that does not fit its type is an error naming the output |
+| `package.<p>.outputs.<n>` | reads an output wherever package `p` is visible: after an import of it, at the entrypoint's top level after the entrypoint imports it |
+| per-entry values | an output may be a map keyed like a map input, such as `{ for key, d in inputs.databases : key => "…/${d.name}" }`, so an importer reads its own entry's value as `package.db.outputs.dsn.<key>` |
+| barriers | an output that names a barrier, such as `runtime.ready`, carries it, so `after = [package.<p>.outputs.ready]` waits for it |
+| unknown output | reading an output the package does not declare in a service is an error listing the declared ones |
+
+See [examples/gateway](https://github.com/piotrkowalczuk/zordon/tree/main/examples/gateway) for features, inputs and outputs in one runnable stack.
+
+### Types
+
+Inputs and outputs name their type in the syntax of Terraform's type constraints; zordon reads it with its own parser.
+
+| type | values |
+|---|---|
+| `string` | text; a number or a bool is converted to its text |
+| `number` | a number; a string holding a number, such as `"8080"`, is converted |
+| `bool` | `true` or `false`; the strings `"true"` and `"false"` are converted |
+| `list(T)` | an ordered list of `T` |
+| `map(T)` | string keys to `T` |
+| `object({ <attr> = T, … })` | named attributes; `optional(T)` may be left out and is then null, `optional(T, <default>)` takes the default, which must be a constant |
+
+| rule | behavior |
+|---|---|
+| unsupported | `any`, `set(T)` and `tuple([…])` are errors that say what to use instead |
+| unknown | any other keyword, such as `int`, is an error that lists the types |
+| undeclared attribute | a value with an attribute the object type does not declare is an error, where HCL would drop it silently |
+| mismatch | an error names the path inside the value, such as `[1].port: a number is required, got string` |
+
+### Remote imports
+
+An import path that does not start with `./`, `../`, `/` or `~/` is an identity: a repository followed by a path inside it.
+The version lives in a `require` block, not in the path.
+
+```hcl
+require "github.com/piotrkowalczuk/zordon" { ref = "v1.4.0" }
+
+import "github.com/piotrkowalczuk/zordon/examples/package/caddy" {}
+```
+
+| rule | behavior |
+|---|---|
+| identity | `<host>/<owner>/<repo>[/<path>]`; hosts github.com, gitlab.com and bitbucket.org; `@<ref>` in a path is an error that shows the `require` to write |
+| `require "<repo>" { ref = "<ref>" }` | pins a repository to a branch, a tag or a commit; the label is the repository alone |
+| where requires live | in the nearest `zordon.mod` above the file; a file with no `zordon.mod` above it declares them itself, at its top level or inside its package block |
+| `require` under a `zordon.mod` | an error: the versions of a module live in its `zordon.mod` |
+| missing require | an error that names the file to add the require to; `zordon pkg get <repo>@<ref>` fixes it only when that file is the entrypoint or shares its `zordon.mod` |
+| own repository | a file fetched from a repository that names that repository reads the same checkout and needs no require |
+| one version per repository | the entrypoint's require wins; without one, two requires of the same repository with different refs are an error that asks to pin it for the entrypoint |
+| resolution order | a `search` entry of the applying `zordon.work`, then the `zordon.lock` pin, then a fetch; the require is needed in every case |
+| checkout | `$ZORDON_HOME/mod/<host>/<owner>/<repo>@<commit>`, reused without the network once present |
+| confinement | a file of a remote checkout may not import `/` or `~/` paths, and its relative imports never leave its checkout; remote identities are allowed as anywhere else |
+| `cfg::hash()` | records `<repo>@<commit>//<path>` for remote files, so moving a pin restarts the level |
+| `zordon plan` | appends `(<repo>@<first 12 characters of the commit>)` or `(search <dir>)` to every remote import |
+| `zordon pkg get <repo>@<ref>` | writes the require to the `zordon.mod` above the Alphasfile, or into the Alphasfile (inside its package block if it has one), and locks the repository once the stack imports it |
+| `zordon pkg update [repo ...]` | moves the pins in `zordon.lock` to the newest commits of their refs |
+
+See [zordon.work, zordon.mod and zordon.lock](reference/files.md) for the three files, [Use a package from another repository](how-to/use-a-package-from-another-repository.md), [Develop a dependency locally](how-to/develop-a-dependency-locally.md), and [examples/package](https://github.com/piotrkowalczuk/zordon/tree/main/examples/package) for a runnable stack.
 
 ### Source: `git { }`, `src { }`, `crate { }`
 

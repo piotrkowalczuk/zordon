@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1158,6 +1159,7 @@ func runProvision(b *bringup, pc *provisionCtx, parent *serviceCtx) {
 	// rather than replacing it the way a Join overlay would. Plain entries
 	// still overlay verbatim.
 	base := zenv.FromHost(sysenv).Join(tcEnv, parentEnv)
+	base = zenv.EnvironmentVariables(baselineVars(func(k string) bool { _, ok := base[k]; return ok }, state.zordonHome)).Join(base)
 	for k, v := range pc.step.Env {
 		v = alphasfile.SubstituteBins(v, resolveBin)
 		if op, args, ok := alphasfile.ParseEnvOp(v); ok {
@@ -2716,6 +2718,9 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 	}
 
 	cmd, err := buildCmd(svc, repoDir, globalDotenv, globalEnv, agent, sysenv, tcEnv)
+	if err == nil {
+		cmd.Env = withBaseline(cmd.Env, state.zordonHome)
+	}
 	if err != nil {
 		log.Error("alpha", "build cmd %s: %v", name, err)
 		stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: fmt.Sprintf("Ayiyiyiyi! %s", err)})
@@ -3073,6 +3078,51 @@ func serviceEnv(allow []string, toolchain map[string]string, globalDotenv []stri
 		JoinFile(svcDotenv...).
 		Join(env).
 		Slice()
+}
+
+// withBaseline adds baselineVars to a composed env for the keys it lacks.
+func withBaseline(env []string, zordonHome string) []string {
+	have := make(map[string]bool, len(env))
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		have[k] = true
+	}
+	extra := baselineVars(func(k string) bool { return have[k] }, zordonHome)
+	for _, k := range sortedMapKeys(extra) {
+		env = append(env, k+"="+extra[k])
+	}
+	return env
+}
+
+// baselineVars is what zordon supplies when the stack passes nothing from
+// the host, so a package builds without any sysenv: without HOME, the Go
+// caches under the zordon home instead of the ones Go would derive from
+// HOME. Whatever the env already has wins. PATH stays unset: with none, a
+// bare `go` still resolves against alpha's own PATH (see relookupPath).
+func baselineVars(has func(string) bool, zordonHome string) map[string]string {
+	out := map[string]string{}
+	if has("HOME") || zordonHome == "" {
+		return out
+	}
+	for k, v := range map[string]string{
+		"GOPATH":     filepath.Join(zordonHome, "go"),
+		"GOMODCACHE": filepath.Join(zordonHome, "go", "pkg", "mod"),
+		"GOCACHE":    filepath.Join(zordonHome, "go", "cache"),
+	} {
+		if !has(k) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func sortedMapKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // phaseEnv is the explicit env map for one phase: the service-wide
@@ -3709,7 +3759,7 @@ func prepareBuild(ctx context.Context, svc *alphasfile.Service, name, dest strin
 	// and undo the closed-world whitelist. The build stays hermetic:
 	// like file-level dotenv, the global env overlay is a runtime concern
 	// and does not reach the build (use build.env / toolchain.env for that).
-	c.Env = serviceEnv(sysenv, tcEnv, nil, nil, nil, be)
+	c.Env = withBaseline(serviceEnv(sysenv, tcEnv, nil, nil, nil, be), state.zordonHome)
 	// exec.Command resolved c.Path against alpha's os.Environ()
 	// BEFORE we set c.Env. If the user passed a bare name (`go`,
 	// `cargo`, etc.) it now points at whatever is on alpha's PATH

@@ -189,6 +189,13 @@ jobs:
           # and filesystem work — no network, no toolchain download.
           - workspace_files
           - modules
+          - import
+          - pick_groups
+          # remote fetches a local repository through url.insteadOf: offline.
+          - remote
+          # package builds Caddy, CoreDNS and Hugo from source: network-bound.
+          - package
+          - gateway
           # java clones spring-petclinic and runs its Maven wrapper: a
           # real (heavy, network-bound) JVM build per distro. The wrapper
           # downloads Maven + deps into HOME's ~/.m2 on a cold cache.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -31,7 +32,7 @@ import (
 // (they are shared context, not what you're starting).
 func runPlan(_ context.Context, w io.Writer, zordonHome string, picks []string, testCfg alphasfile.TestConfig) error {
 	levels, err := walkChain(zordonHome, func(lv *level) (*protocol.StateInfo, error) {
-		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
+		af, err := alphasfile.Resolve(lv.tree, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
 		if err != nil {
 			return nil, err
 		}
@@ -60,6 +61,7 @@ func runPlan(_ context.Context, w io.Writer, zordonHome string, picks []string, 
 			marker = " (invocation)"
 		}
 		fmt.Fprintf(w, "# === [%s] %s%s ===\n", lv.inv.FsHash, lv.afPath, marker)
+		fmt.Fprint(w, importLines("# ", lv.tree))
 		if _, err := w.Write(renderState(lv.state)); err != nil {
 			return err
 		}
@@ -122,6 +124,39 @@ func renderWorkspaceBlock(spec *alphasfile.WorkspaceSpec) []byte {
 	return f.Bytes()
 }
 
+// importLines lists the packages and fragments a level imports, with the
+// modules taken from each fragment, then modules that were loaded but never
+// imported. Empty for a manifest without imports.
+func importLines(prefix string, tree *alphasfile.Tree) string {
+	if tree == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, e := range tree.Imports() {
+		origin := ""
+		if e.Origin != "" {
+			origin = " (" + e.Origin + ")"
+		}
+		if e.Package != "" {
+			features := ""
+			if len(e.Features) > 0 {
+				features = " [features: " + strings.Join(e.Features, ", ") + "]"
+			}
+			by := ""
+			if len(e.ImportedBy) > 0 {
+				by = " (imported by " + strings.Join(e.ImportedBy, ", ") + ")"
+			}
+			fmt.Fprintf(&b, "%simport %s as %s%s%s%s\n", prefix, filepath.Dir(e.Path), e.Package, features, by, origin)
+			continue
+		}
+		fmt.Fprintf(&b, "%simport %s [%s]%s\n", prefix, e.Path, strings.Join(e.Modules, ", "), origin)
+	}
+	for _, u := range tree.Unused() {
+		fmt.Fprintf(&b, "%sunused module %s in %s\n", prefix, u.Module, u.Path)
+	}
+	return b.String()
+}
+
 // renderState writes a resolved StateInfo back as HCL bytes, every
 // interpolation already substituted. Output is for human inspection
 // and golden-file diffs, not round-tripping: block ordering follows
@@ -150,13 +185,21 @@ func renderState(st *protocol.StateInfo) []byte {
 			renderService(body, s)
 		}
 	}
-	for _, m := range moduleOrder(st) {
-		mb := body.AppendNewBlock("module", []string{m}).Body()
-		if tc := toolchainOf(st.Toolchain, m); len(tc) > 0 {
+	pkgBodies := map[string]*hclwrite.Body{}
+	for _, id := range moduleOrder(st) {
+		parent, name := body, id
+		if p, m, inPkg := strings.Cut(id, "/"); inPkg {
+			if pkgBodies[p] == nil {
+				pkgBodies[p] = body.AppendNewBlock("package", []string{p}).Body()
+			}
+			parent, name = pkgBodies[p], m
+		}
+		mb := parent.AppendNewBlock("module", []string{name}).Body()
+		if tc := toolchainOf(st.Toolchain, id); len(tc) > 0 {
 			renderToolchainBlock(mb, tc)
 		}
 		for _, s := range st.Services {
-			if s != nil && s.Module == m {
+			if s != nil && s.Module == id {
 				renderService(mb, s)
 			}
 		}

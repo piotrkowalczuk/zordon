@@ -44,8 +44,11 @@ func TestPickServices_modulePrefixedNames(t *testing.T) {
 	if want := []string{"payments/db", "payments/api"}; !equalStrings(names(got), want) {
 		t.Errorf("picked %v, want %v", names(got), want)
 	}
-	if _, err := pickServices(all, []string{"api"}); err == nil || !strings.Contains(err.Error(), "payments/api") {
-		t.Errorf("a bare name must not match a module service; available list should show payments/api, got %v", err)
+	if got, err := pickServices(all, []string{"api"}); err != nil || !equalStrings(names(got), []string{"payments/db", "payments/api"}) {
+		t.Errorf("a bare name unique in the stack picks the module service; got %v, %v", names(got), err)
+	}
+	if _, err := pickServices(all, []string{"db"}); err == nil || !strings.Contains(err.Error(), "service payments/db") || !strings.Contains(err.Error(), "service auth/db") {
+		t.Errorf("a bare name two modules share must name both, got %v", err)
 	}
 }
 

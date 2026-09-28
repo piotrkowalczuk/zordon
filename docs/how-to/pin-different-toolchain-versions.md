@@ -24,6 +24,7 @@ module "legacy" {
 
   service "go" "billing" {
     src { path = "./services/billing" }
+    vars    = { port = net::pickport() }
     runtime { after = [toolchain.go.ready] }     # this module's Go
   }
 }
@@ -40,9 +41,9 @@ The same expression at top level waits for the default pin.
 ## 2. Address the moved services by their new names
 
 - In expressions: `module.legacy.service.go.billing.vars.port`.
-- In picks: `zordon start legacy/billing`.
+- In picks: `zordon start legacy/billing`, `zordon start billing` while no other service is named billing, or `zordon start legacy` for the whole module.
 - In `zordon get`: `zordon get module.legacy.service.go.billing.vars.port`.
-- On disk: the binary builds to `<state>/bin/legacy/billing` (inside the module `fs::bin()` already points at `<state>/bin/legacy`, so `${fs::bin()}/billing` needs no edit) and the checkout lives under `src/legacy/billing`.
+- On disk: the binary builds to `<state>/bin/legacy/billing` (inside the module `fs::bin()` already points at `<state>/bin/legacy`, so `${fs::bin()}/billing` needs no edit) and a checkout, when the service has one (a git source, or a workspace that owns it), lives under `src/legacy/billing`.
 
 Inside the module, keep using bare `service.go.<name>` for sibling services.
 
