@@ -91,15 +91,16 @@ func TestIsolatedEnv_keepsAllowedHostVars(t *testing.T) {
 	}
 }
 
-// When the Alphasfile does not declare PATH, mise still has to find
-// git/curl/tar, so the host PATH is used — with the zordon mise bin dir
-// first so `mise reshim` hooks resolve to the zordon-owned binary.
-func TestIsolatedEnv_pathFallsBackToHostWhenUndeclared(t *testing.T) {
-	t.Setenv("PATH", "/host/bin:/usr/bin")
+// When the Alphasfile does not declare PATH, installs get the system dirs
+// (where git/curl/tar/cc live) — never the host PATH, which would flow into
+// the toolchain's `mise env` PATH and from there into every service — with
+// the zordon mise bin dir first so `mise reshim` hooks resolve to it.
+func TestIsolatedEnv_undeclaredPathIsSystemNotHost(t *testing.T) {
+	t.Setenv("PATH", "/host/bin:/opt/homebrew/bin")
 
 	got := envMap(isolatedEnv(zenv.FromHost(nil), "/z/toolchain", "/z/bin/mise"))
 
-	want := "/z/bin" + string(filepath.ListSeparator) + "/host/bin:/usr/bin"
+	want := "/z/bin" + string(filepath.ListSeparator) + "/usr/bin:/bin:/usr/sbin:/sbin"
 	if got["PATH"] != want {
 		t.Errorf("PATH = %q, want %q", got["PATH"], want)
 	}
@@ -133,22 +134,26 @@ func TestIsolatedEnv_pinsRustHomes(t *testing.T) {
 	}
 }
 
-// mise authenticates its GitHub API lookups with a token from alpha's own
-// environment — MISE_GITHUB_TOKEN first, GITHUB_TOKEN as the CI-shaped
-// fallback — without the Alphasfile having to declare it: it is the
-// installer's credential and never reaches a service.
-func TestIsolatedEnv_passesGithubTokenToMise(t *testing.T) {
+// mise authenticates its own GitHub API lookups (install, env) with a token
+// from alpha's environment — MISE_GITHUB_TOKEN first, GITHUB_TOKEN as the
+// CI-shaped fallback — without the Alphasfile declaring it. `mise exec`
+// runs third-party code (gem/npm install scripts), so it never gets the
+// token, and neither the raw GITHUB_TOKEN.
+func TestMiseCommand_githubTokenOnlyForMiseItself(t *testing.T) {
 	t.Setenv("MISE_GITHUB_TOKEN", "")
 	t.Setenv("GITHUB_TOKEN", "ghs_ci")
-	if got := envMap(isolatedEnv(zenv.FromHost(nil), "/z/toolchain", ""))["MISE_GITHUB_TOKEN"]; got != "ghs_ci" {
-		t.Errorf("MISE_GITHUB_TOKEN = %q, want GITHUB_TOKEN fallback", got)
+	if got := envMap(miseCommand("/z/bin/mise", "/z/toolchain", nil, "install", "ruby@3.3.6").Env)["MISE_GITHUB_TOKEN"]; got != "ghs_ci" {
+		t.Errorf("install: MISE_GITHUB_TOKEN = %q, want the GITHUB_TOKEN fallback", got)
 	}
 	t.Setenv("MISE_GITHUB_TOKEN", "ghp_dev")
-	if got := envMap(isolatedEnv(zenv.FromHost(nil), "/z/toolchain", ""))["MISE_GITHUB_TOKEN"]; got != "ghp_dev" {
-		t.Errorf("MISE_GITHUB_TOKEN = %q, want the explicit mise token", got)
+	if got := envMap(miseCommand("/z/bin/mise", "/z/toolchain", nil, "env", "--json", "ruby@3.3.6").Env)["MISE_GITHUB_TOKEN"]; got != "ghp_dev" {
+		t.Errorf("env: MISE_GITHUB_TOKEN = %q, want the explicit mise token", got)
 	}
-	if _, ok := envMap(isolatedEnv(zenv.FromHost(nil), "/z/toolchain", ""))["GITHUB_TOKEN"]; ok {
-		t.Error("raw GITHUB_TOKEN leaked into the install env")
+	exec := envMap(miseCommand("/z/bin/mise", "/z/toolchain", nil, "exec", "ruby@3.3.6", "--", "gem", "install", "x").Env)
+	for _, k := range []string{"MISE_GITHUB_TOKEN", "GITHUB_TOKEN"} {
+		if v, ok := exec[k]; ok {
+			t.Errorf("exec leaks %s=%q to third-party install code", k, v)
+		}
 	}
 }
 

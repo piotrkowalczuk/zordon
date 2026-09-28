@@ -766,6 +766,11 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, sysenv []string, log 
 	// before MiseEnv because mise env's PATH lists the per-version bin
 	// dir — but the gem/bundler binaries land under
 	// `installs/<lang>/<version>/lib/.../gems/...` only after gem install.
+	if err := tools.EnsureToolchain(bin, dataDir, tc.lang, tc.version, host, envWriter); err != nil {
+		log.Error("alpha", "toolchain %s: install: %v", tc.lang, err)
+		tc.lifecycle.Reach("failed")
+		return
+	}
 	layer3, err := tools.LangEnv(tc.lang, bin, dataDir, tc.version, tc.tools, host, envWriter)
 	if err != nil {
 		log.Error("alpha", "toolchain %s: lang env: %v", tc.lang, err)

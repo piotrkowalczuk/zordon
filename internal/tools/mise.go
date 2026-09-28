@@ -140,13 +140,10 @@ func ResolveDataDir(from, defaultDataDir, tool, version string) string {
 //   - MISE_CARGO_HOME / MISE_RUSTUP_HOME are pinned under dataDir — mise's
 //     rust backend otherwise installs rustup into the user's real
 //     ~/.rustup and puts `cargo install` output into ~/.cargo/bin;
-//   - PATH falls back to the host PATH when the Alphasfile did not declare
-//     it, since mise still has to find git/curl/tar to install anything;
-//   - MISE_GITHUB_TOKEN (or GITHUB_TOKEN) from alpha's own environment is
-//     handed to mise as MISE_GITHUB_TOKEN. mise resolves ruby/rust/aqua
-//     releases through the GitHub API, whose anonymous limit CI runners
-//     exhaust in minutes; the token is the installer's credential, never
-//     part of a service's env, so it does not go through sysenv;
+//   - PATH falls back to systemPath, not the host PATH, when the Alphasfile
+//     did not declare it: mise still has to find git/curl/tar/cc, which
+//     live there, and whatever PATH mise sees ends up in the toolchain's
+//     `mise env` PATH and thus in every service;
 //   - the mise binary's dir is prepended to PATH so subprocesses that reach
 //     back to call `mise` resolve to the zordon-owned binary.
 //
@@ -163,9 +160,7 @@ func isolatedEnv(host zenv.EnvironmentVariables, dataDir, miseBin string) []stri
 		env[k] = v
 	}
 	if env["PATH"] == "" {
-		if p, ok := zenv.Lookup("PATH"); ok {
-			env["PATH"] = p
-		}
+		env["PATH"] = systemPath
 	}
 	env["MISE_DATA_DIR"] = dataDir
 	env["MISE_CONFIG_DIR"] = filepath.Join(cfgRoot, "mise-config")
@@ -173,9 +168,6 @@ func isolatedEnv(host zenv.EnvironmentVariables, dataDir, miseBin string) []stri
 	env["MISE_CACHE_DIR"] = filepath.Join(cfgRoot, "mise-cache")
 	env["MISE_CARGO_HOME"] = filepath.Join(dataDir, "cargo-home")
 	env["MISE_RUSTUP_HOME"] = filepath.Join(dataDir, "rustup-home")
-	if token := githubToken(); token != "" {
-		env["MISE_GITHUB_TOKEN"] = token
-	}
 	if miseBin != "" {
 		env = env.PrependPath("PATH", []string{filepath.Dir(miseBin)})
 	}
@@ -200,11 +192,44 @@ func githubToken() string {
 // discovered one would only pollute toolchain resolution. Env is the closed
 // world from isolatedEnv(host, ...). Callers set Stdout/Stderr and may
 // append to cmd.Env.
+//
+// Every subcommand except `exec` also gets MISE_GITHUB_TOKEN (from alpha's
+// own MISE_GITHUB_TOKEN or GITHUB_TOKEN): mise resolves ruby/rust/aqua
+// releases through the GitHub API, whose anonymous limit shared CI runners
+// exhaust in minutes. `exec` runs third-party code — gem/npm install
+// scripts, the interpreter itself — so it never sees the token; callers
+// `mise install` a tool first (EnsureToolchain) so exec has nothing left to
+// download.
 func miseCommand(binPath, dataDir string, host zenv.EnvironmentVariables, args ...string) *exec.Cmd {
 	full := append([]string{"--no-config"}, args...)
 	cmd := exec.Command(binPath, full...)
 	cmd.Env = isolatedEnv(host, dataDir, binPath)
+	if len(args) > 0 && args[0] != "exec" {
+		if token := githubToken(); token != "" {
+			cmd.Env = append(cmd.Env, "MISE_GITHUB_TOKEN="+token)
+		}
+	}
 	return cmd
+}
+
+// systemPath is the PATH installs get when the Alphasfile's sysenv does not
+// pass one through: the base system dirs every supported OS keeps git,
+// curl, tar and the C toolchain in.
+const systemPath = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+// EnsureToolchain installs a language toolchain (`mise install
+// <tool>@<version>`) before anything execs it, so the later `mise exec`
+// calls — which run without the GitHub token — never need to download.
+// Idempotent; callers hold the per-(tool, version) Acquire lock.
+func EnsureToolchain(binPath, dataDir, tool, version string, host zenv.EnvironmentVariables, logOut io.Writer) error {
+	spec := miseToolName(tool) + "@" + version
+	cmd := miseCommand(binPath, dataDir, host, "install", spec)
+	cmd.Stdout = logOut
+	cmd.Stderr = logOut
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("mise install %s (data dir %s): %w", spec, dataDir, err)
+	}
+	return nil
 }
 
 // MiseEnv runs `mise env --json <tool>@<version>` with the resolved
