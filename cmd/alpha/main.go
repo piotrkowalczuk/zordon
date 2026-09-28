@@ -947,7 +947,7 @@ type serviceCtx struct {
 	// lifecycle.ReachedAt; the start summary uses it to split the
 	// dep-wait phase from the service's own work.
 	startedAt time.Time
-	// deps records, per dependency (implicitRuntimeAfter order), when its
+	// deps records, per dependency (buildDeps then runtimeDeps order), when its
 	// barrier actually fired — captured from the barrier itself, so the
 	// start summary can attribute the wait phase correctly regardless of
 	// the order this goroutine observed the barriers in.
@@ -2282,7 +2282,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	// a package share one install + one barrier. Same bringup goroutine
 	// as language toolchains (EnsureMise → install → MiseEnv → ready);
 	// gated into each pkg service via the implicit toolchain.<tool>@ready
-	// dep (see implicitRuntimeAfter / toolchainKey).
+	// dep (see buildDeps / toolchainKey).
 	pkgSeen := map[string]bool{}
 	for _, svc := range services {
 		if svc.Toolchain != alphasfile.ToolchainPkg || svc.Pkg == nil {
@@ -2496,15 +2496,6 @@ func provisionTerminalAt(pc *provisionCtx) (time.Time, bool) {
 	return pc.lifecycle.ReachedAt("failure")
 }
 
-// implicitRuntimeAfter returns the full list of barrier refs a service
-// must wait on before its build/runtime start — the user-declared
-// `runtime.after` prepended by the implicit toolchain dep when the
-// service's language is pinned in Alphasfile.toolchain{}.
-//
-// The toolchain entity becomes a hard precondition because every spawn
-// (build cmd, runtime cmd, provision shells) layers tc.env onto its
-// cmd.Env via applyToolchainEnv — and that env can only be cached once
-// `mise install` + `gem install bundler` etc. have completed.
 // toolchainKey is the state.toolchains map key (and barrier-ref segment)
 // for a service's materialized toolchain. Language services key by their
 // toolchain label; a pkg service keys by its mise tool name, so peers
@@ -2540,23 +2531,39 @@ func serviceNameOfRef(id string) (string, bool) {
 	return alphasfile.DisplayName(module, name), true
 }
 
-func implicitRuntimeAfter(svc *alphasfile.Service, state *alphaState) []string {
-	var deps []string
+// buildDeps is what the build waits on: only the service's pinned
+// toolchain — a hard precondition, since every spawn (build, runtime,
+// provisions) runs on the toolchain's env, which exists only once
+// `mise install` + `gem install bundler` etc. have completed. The user's
+// runtime.after gates the cmd, not the build, so a provision that needs the
+// built artifact (self.build.success) can sit between the two without a
+// cycle.
+func buildDeps(svc *alphasfile.Service, state *alphaState) []string {
 	key := toolchainKey(svc)
 	state.mu.RLock()
 	_, pinned := state.toolchains[key]
 	state.mu.RUnlock()
-	if pinned {
-		ref := "toolchain." + key
-		if prefix := svc.Module + "/"; svc.Module != alphasfile.DefaultModule && key == svc.ToolchainKey && strings.HasPrefix(key, prefix) {
-			ref = alphasfile.ToolchainRef(svc.Module, strings.TrimPrefix(key, prefix))
-		}
-		deps = append(deps, ref+"@ready")
+	if !pinned {
+		return nil
 	}
-	if svc.Runtime != nil {
-		deps = append(deps, svc.Runtime.After...)
+	ref := "toolchain." + key
+	if prefix := svc.Module + "/"; svc.Module != alphasfile.DefaultModule && key == svc.ToolchainKey && strings.HasPrefix(key, prefix) {
+		ref = alphasfile.ToolchainRef(svc.Module, strings.TrimPrefix(key, prefix))
 	}
-	return deps
+	return []string{ref + "@ready"}
+}
+
+// implicitRuntimeAfter is every dep a service waits on before its cmd: the
+// toolchain the build waits on, then the user's runtime.after.
+func implicitRuntimeAfter(svc *alphasfile.Service, state *alphaState) []string {
+	return append(buildDeps(svc, state), runtimeDeps(svc)...)
+}
+
+func runtimeDeps(svc *alphasfile.Service) []string {
+	if svc.Runtime == nil {
+		return nil
+	}
+	return svc.Runtime.After
 }
 
 // bringupAndSupervise runs one service's full lifecycle on a single
@@ -2577,53 +2584,14 @@ func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
 
 	name := svc.Name()
 
-	// 1. Wait for runtime.after deps. With no deps the loop's a no-op
-	//    and we proceed immediately — pre-allocated barriers + uniform
-	//    select treatment, no special case.
-	//
-	// Implicit dep: if this service's toolchain is pinned (an entity
-	// exists for it), prepend `toolchain.<lang>@ready` so build AND
-	// runtime AND provisions are gated on the toolchain having
-	// materialized. Done here (not in the resolver) because pinning is
-	// alpha-state's concern — federation children may pin a toolchain
-	// that the resolver doesn't see locally.
-	after := implicitRuntimeAfter(svc, state)
-	for _, ref := range after {
-		bt, err := state.resolveBarrier(ref)
-		if err != nil {
-			log.Error("alpha", "service[%s]: unresolvable dep %s: %v", name, ref, err)
-			sc.lifecycle.Reach("failed")
-			sc.build.Reach("failure")
-			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "dep: " + err.Error()})
-			if failfast {
-				state.requestShutdown(fmt.Sprintf("failfast: service %s unresolvable dep %s: %v", name, ref, err))
-			}
-			return
-		}
-		select {
-		case <-bt.target.Wait():
-			at, _ := bt.target.FiredAt()
-			sc.deps = append(sc.deps, depSat{ref: ref, at: at})
-		case <-bt.fail.Wait():
-			// Dep already failed. The first failure in the bringup chain
-			// is the one that triggers shutdown; subsequent dep-failure
-			// returns are just the chain unwinding, so don't double-fire
-			// requestShutdown here (it's idempotent, but the log noise
-			// would mislead).
-			log.Error("alpha", "service[%s]: dep %s reached terminal failure", name, ref)
-			sc.lifecycle.Reach("failed")
-			sc.build.Reach("failure")
-			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "dep " + ref + " failed"})
-			return
-		case <-sc.stopCh:
-			sc.lifecycle.Reach("failed")
-			sc.build.Reach("failure")
-			return
-		case <-state.shutdownCh:
-			sc.lifecycle.Reach("failed")
-			sc.build.Reach("failure")
-			return
-		}
+	// 1. The build waits only on the pinned toolchain (buildDeps); the
+	//    user's runtime.after is awaited after the build, right before the
+	//    cmd (step 3). Waiting on runtime.after here deadlocked any
+	//    provision gated on self.build.success that the runtime in turn
+	//    waited on — the documented "prepare with the artifact, then start"
+	//    shape.
+	if !waitDeps(b, svc, sc, buildDeps(svc, state), true) {
+		return
 	}
 
 	log.Info("alpha", "bringup service=%s toolchain=%s", name, svc.Toolchain)
@@ -2728,7 +2696,61 @@ func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
 	default:
 	}
 
+	// 3. runtime.after: everything the cmd needs — other services ready,
+	//    this service's provisions done (which may themselves have waited
+	//    on the build above).
+	if !waitDeps(b, svc, sc, runtimeDeps(svc), false) {
+		return
+	}
+
 	bringupAndSuperviseStart(b, svc, sc, repoDir, agent)
+}
+
+// waitDeps blocks until every ref's barrier fires, recording when each did
+// on sc.deps. It returns false — having already reported the failure and
+// moved the service (and, when beforeBuild, its build) to terminal
+// failure — if a ref cannot be resolved, a dep fails, or the service or
+// alpha is stopping.
+func waitDeps(b *bringup, svc *alphasfile.Service, sc *serviceCtx, refs []string, beforeBuild bool) bool {
+	state, stream, log, failfast := b.state, b.stream, b.log, b.failfast
+	name := svc.Name()
+	fail := func() {
+		sc.lifecycle.Reach("failed")
+		if beforeBuild {
+			sc.build.Reach("failure")
+		}
+	}
+	for _, ref := range refs {
+		bt, err := state.resolveBarrier(ref)
+		if err != nil {
+			log.Error("alpha", "service[%s]: unresolvable dep %s: %v", name, ref, err)
+			fail()
+			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "dep: " + err.Error()})
+			if failfast {
+				state.requestShutdown(fmt.Sprintf("failfast: service %s unresolvable dep %s: %v", name, ref, err))
+			}
+			return false
+		}
+		select {
+		case <-bt.target.Wait():
+			at, _ := bt.target.FiredAt()
+			sc.deps = append(sc.deps, depSat{ref: ref, at: at})
+		case <-bt.fail.Wait():
+			// The first failure in the bringup chain triggers shutdown;
+			// this is the chain unwinding, so no second requestShutdown.
+			log.Error("alpha", "service[%s]: dep %s reached terminal failure", name, ref)
+			fail()
+			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "dep " + ref + " failed"})
+			return false
+		case <-sc.stopCh:
+			fail()
+			return false
+		case <-state.shutdownCh:
+			fail()
+			return false
+		}
+	}
+	return true
 }
 
 // primaryKeyOf returns the cross-service-shareable key for a primary
