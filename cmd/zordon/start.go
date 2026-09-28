@@ -1,9 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"slices"
-	"sort"
 	"strings"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
@@ -31,7 +28,8 @@ func parsePicks(args []string) []string {
 	return out
 }
 
-// pickServices filters `all` down to picks, transitively expanded to
+// pickServices filters `all` down to picks (services, modules or packages,
+// see resolvePick), transitively expanded to
 // include any service referenced from a kept service's `runtime.after`
 // or `provision.after`. Order in the returned slice matches the order
 // in `all` so the wire shape stays deterministic. Unknown picks are an
@@ -44,26 +42,12 @@ func parsePicks(args []string) []string {
 // referenced dep would fail at configure time, not start it.
 func pickServices(all []*alphasfile.Service, picks []string) ([]*alphasfile.Service, error) {
 	byName := make(map[string]*alphasfile.Service, len(all))
-	short := make(map[string]string, len(all))
 	for _, s := range all {
 		byName[s.Name()] = s
-		short[s.ShortName()] = s.Name()
 	}
-	picks = slices.Clone(picks)
-	for i, p := range picks {
-		if _, ok := byName[p]; !ok && short[p] != "" {
-			picks[i] = short[p]
-		}
-	}
-	var unknown []string
-	for _, p := range picks {
-		if _, ok := byName[p]; !ok {
-			unknown = append(unknown, p)
-		}
-	}
-	if len(unknown) > 0 {
-		return nil, fmt.Errorf("unknown service(s): %s (available: %s)",
-			strings.Join(unknown, ", "), strings.Join(sortedNames(all), ", "))
+	picks, err := expandPicks(servicePickables(all), picks)
+	if err != nil {
+		return nil, err
 	}
 
 	keep := map[string]struct{}{}
@@ -120,13 +104,4 @@ func serviceNameFromBarrierRef(ref string) (string, bool) {
 		return "", false
 	}
 	return alphasfile.DisplayName(module, name), true
-}
-
-func sortedNames(all []*alphasfile.Service) []string {
-	out := make([]string, 0, len(all))
-	for _, s := range all {
-		out = append(out, s.Name())
-	}
-	sort.Strings(out)
-	return out
 }

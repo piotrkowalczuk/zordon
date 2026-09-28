@@ -190,6 +190,7 @@ jobs:
           - workspace_files
           - modules
           - import
+          - pick_groups
           # remote fetches a local repository through url.insteadOf: offline.
           - remote
           # package builds Caddy, CoreDNS and Hugo from source: network-bound.

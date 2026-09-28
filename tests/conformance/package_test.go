@@ -172,6 +172,38 @@ func TestPlan_twoZordonWorkFilesFail(t *testing.T) {
 	}
 }
 
+func TestPlan_picksAPackageOrAModule(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.WriteFile("Alphasfile", "import \"./shop\" {}\nimport \"./billing\" {}\n")
+	p.WriteFile("shop/Alphasfile", `
+package "shop" {
+  module "shop" {
+    service "go" "storefront" { package = "example.com/storefront@v0.0.0" }
+  }
+  module "admin" {
+    service "go" "panel" { package = "example.com/panel@v0.0.0" }
+  }
+}
+`)
+	p.WriteFile("billing/Alphasfile", "package \"billing\" {\n  module \"billing\" {\n    service \"go\" \"invoicer\" { package = \"example.com/invoicer@v0.0.0\" }\n  }\n}\n")
+	cases := map[string]struct{ pick, in, out string }{
+		"package":             {pick: "shop", in: `service "go" "storefront"`, out: `service "go" "invoicer"`},
+		"module of a package": {pick: "shop/admin", in: `service "go" "panel"`, out: `service "go" "storefront"`},
+		"unique service":      {pick: "invoicer", in: `service "go" "invoicer"`, out: `service "go" "panel"`},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			res := p.Zordon("plan", c.pick).Run(t)
+			if res.ExitCode != 0 {
+				t.Fatalf("zordon plan %s: exit %d\n%s", c.pick, res.ExitCode, res.Stderr)
+			}
+			if !strings.Contains(res.Stdout, c.in) || strings.Contains(res.Stdout, c.out) {
+				t.Errorf("zordon plan %s must render %s and leave out %s:\n%s", c.pick, c.in, c.out, res.Stdout)
+			}
+		})
+	}
+}
+
 func planOK(t *testing.T, p *zordontest.Project) string {
 	t.Helper()
 	res := p.Zordon("plan").Run(t)

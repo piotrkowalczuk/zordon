@@ -314,6 +314,51 @@ func runWorkspaceServiceAdd(ctx context.Context, log *zlog.Logger, out io.Writer
 	return nil
 }
 
+// checkoutTarget is one service a workspace pick checks out, at rev when
+// the pick gave one.
+type checkoutTarget struct{ svc, rev string }
+
+// workspaceTargets resolves workspace picks to services. A pick names a
+// service, module or package (see resolvePick); only a service may carry
+// @rev. A module or package checks out its members that have a git or dir
+// source, and is an error when none has.
+func workspaceTargets(metas []*alphasfile.ServiceMeta, picks []string) ([]checkoutTarget, error) {
+	all := metaPickables(metas)
+	workspaceable := map[string]bool{}
+	for _, m := range metas {
+		workspaceable[m.Name] = m.Workspaceable()
+	}
+	var out []checkoutTarget
+	seen := map[string]bool{}
+	for _, raw := range picks {
+		pick, rev, _ := strings.Cut(raw, "@")
+		sel, err := resolvePick(all, pick)
+		switch {
+		case errors.Is(err, errUnknownPick):
+			return nil, fmt.Errorf("unknown service, module or package %q (%s)", pick, available(all))
+		case err != nil:
+			return nil, err
+		case !sel.single && rev != "":
+			return nil, fmt.Errorf("%q: a revision names one service's checkout; pick the services of %s one by one", raw, pick)
+		}
+		kept := 0
+		for _, name := range sel.names {
+			if !sel.single && !workspaceable[name] {
+				continue
+			}
+			kept++
+			if !seen[name] {
+				seen[name] = true
+				out = append(out, checkoutTarget{svc: name, rev: rev})
+			}
+		}
+		if kept == 0 {
+			return nil, fmt.Errorf("%q has no service with a git or dir source; nothing to check out", pick)
+		}
+	}
+	return out, nil
+}
+
 // runWorkspaceServiceRm detaches one or more service checkouts from an
 // existing workspace (`zordon workspace service rm`), removing the git
 // worktree and its tree while leaving the rest of the workspace intact.
@@ -349,15 +394,34 @@ func runWorkspaceServiceRm(ctx context.Context, log *zlog.Logger, out io.Writer,
 		c.Stderr = os.Stderr
 		return c.Run()
 	}
-	for _, svc := range svcs {
+	var remove []string
+	for _, pick := range svcs {
+		sel, err := resolvePick(metaPickables(metas), pick)
+		switch {
+		case errors.Is(err, errUnknownPick):
+			return fmt.Errorf("no service, module or package %q in %s", pick, af)
+		case err != nil:
+			return err
+		case sel.single:
+			if !zfs.Exists(filepath.Join(dir, "src", sel.names[0])) {
+				return fmt.Errorf("service %q is not checked out in workspace %q", sel.names[0], ws.Name())
+			}
+			remove = append(remove, sel.names[0])
+			continue
+		}
+		n := len(remove)
+		for _, name := range sel.names {
+			if zfs.Exists(filepath.Join(dir, "src", name)) {
+				remove = append(remove, name)
+			}
+		}
+		if len(remove) == n {
+			return fmt.Errorf("no service of %q is checked out in workspace %q", pick, ws.Name())
+		}
+	}
+	for _, svc := range remove {
 		m := byName[svc]
-		if m == nil {
-			return fmt.Errorf("no service %q in %s", svc, af)
-		}
 		dest := filepath.Join(dir, "src", svc)
-		if !zfs.Exists(dest) {
-			return fmt.Errorf("service %q is not checked out in workspace %q", svc, ws.Name())
-		}
 		p, err := source.NewPrimary(zordonHome, m.Package.Git, m.Package.Src, m.Ref(), nil)
 		if err != nil {
 			return fmt.Errorf("%s: %w", svc, err)
@@ -399,15 +463,19 @@ func checkoutServices(ctx context.Context, log *zlog.Logger, spec *alphasfile.Wo
 	if err != nil {
 		return err
 	}
-	explicit := len(picks) > 0
-	if !explicit {
+	var targets []checkoutTarget
+	if len(picks) > 0 {
+		if targets, err = workspaceTargets(metas, picks); err != nil {
+			return err
+		}
+	} else {
 		// No args ⇒ every workspaceable service gets a checkout.
 		for _, m := range metas {
 			if m.Workspaceable() {
-				picks = append(picks, m.Name)
+				targets = append(targets, checkoutTarget{svc: m.Name})
 			}
 		}
-		if len(picks) == 0 {
+		if len(targets) == 0 {
 			log.Info("zordon", "no workspaceable services (all run from $PATH); nothing to check out")
 			return nil
 		}
@@ -417,8 +485,8 @@ func checkoutServices(ctx context.Context, log *zlog.Logger, spec *alphasfile.Wo
 		c.Stderr = os.Stderr
 		return c.Run()
 	}
-	for _, pick := range picks {
-		svc, rev, _ := strings.Cut(pick, "@")
+	for _, target := range targets {
+		svc, rev := target.svc, target.rev
 		m := byName[svc]
 		if m == nil {
 			return fmt.Errorf("no service %q in %s", svc, af)

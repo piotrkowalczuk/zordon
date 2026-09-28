@@ -102,14 +102,28 @@ a stable `CARGO_TARGET_DIR` so rebuilds stay incremental.
 
 ## Picking a subset
 
-`zordon start <svc> [...]` filters the **invocation level** down to the
-named services plus the transitive closure of their `runtime.after` and
+`zordon start <pick> [...]` filters the **invocation level** down to the
+picked services plus the transitive closure of their `runtime.after` and
 `provision.after` deps — federation parents are unaffected and always
 come up in full (shared infra). Anything not in the closure is omitted
 from the Configure payload, so on reconfigure `alpha` treats those as
 "removed from the manifest" and stops them. A subsequent
 `zordon start` with no picks brings the rest back up. Unknown picks
-fail before contacting alpha and list the available service names.
+fail before contacting alpha and list the services, modules and packages
+that exist.
+
+| pick | selects |
+| --- | --- |
+| `<svc>` | the service named `svc` wherever it lives, when no other service has that name |
+| `<m>` | every service of module `m` |
+| `<p>` | every service of package `p` |
+| `<p>/<m>` | every service of module `m` of package `p` |
+| `m/<svc>`, `p/m/<svc>`, `p/<svc>` | one service by its full or short name |
+
+A pick that selects different services in two of these readings — two
+services named `worker` in two packages, or a package and a service that
+share a name — is refused with every candidate listed; pick by full name
+instead.
 
 `zordon plan <svc> [...]` accepts the same picks and renders exactly
 that subset statically — a preflight of "just what I'm about to start"

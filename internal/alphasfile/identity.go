@@ -110,6 +110,13 @@ func ShortName(module, name string) string {
 	return DisplayName(module, name)
 }
 
+// PackageOf returns the package a module id belongs to: the part before '/'
+// of <package>/<module>.
+func PackageOf(module string) (string, bool) {
+	p, _, ok := strings.Cut(module, "/")
+	return p, ok
+}
+
 // SplitDisplayName is the inverse of DisplayName.
 func SplitDisplayName(display string) (module, name string) {
 	if i := strings.LastIndexByte(display, '/'); i >= 0 {
