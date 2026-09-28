@@ -54,6 +54,28 @@ Ruby has no single binary, so the run command is **not** inferred — give an ex
 It runs with cwd = the per-invocation checkout, so `Gemfile`/app files resolve.
 Override the install step with `build { cmd = [...] }` if `bundle install` isn't what you want.
 
+## Rails
+
+A Rails app follows the same shape: the default `bundle install`, then a provision that prepares the database, then the server.
+The provision needs the bundle, so it waits on the build, and the server waits on the provision:
+
+```hcl
+runtime {
+  after = [self.runtime.provision.db.success]
+
+  provision "db" {
+    after = [self.build.success]
+    cmd   = "bin/rails db:prepare"
+  }
+
+  cmd = ["bundle", "exec", "puma", "--bind", "tcp://127.0.0.1:${self.vars.port}", "config.ru"]
+}
+```
+
+Point the database at `fs::var()` (for SQLite, via `database.yml` and an env var) so it lives in per-workspace state rather than the checkout.
+Rails' built-in `/up` health check makes a good HTTP readiness probe.
+`examples/ruby_ror` is a complete, minimal app built this way.
+
 ## Gem environment
 
 The pinned ruby's gem world is the only one a service sees, and bundler's per-user state is zordon-owned.

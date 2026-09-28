@@ -211,6 +211,10 @@ jobs:
           # downloads Maven + deps into the zordon-owned java-home under
           # .zordon/toolchain on a cold cache.
           - java
+          # ruby_ror installs a Rails 8.1 bundle (native gems compile with
+          # the distro gcc) and prepares its SQLite database in a provision
+          # gated on the build, before puma starts.
+          - ruby_ror
     container:
       image: ${{ matrix.distro }}
       # tini as pid 1 to reap zombies; GitHub's bare `tail` pid 1
