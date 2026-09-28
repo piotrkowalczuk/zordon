@@ -18,11 +18,12 @@ That was always true for services, builds and provisions.
 It is now equally true for the installs that materialize a toolchain: every `mise` invocation, and every installer it runs (`gem install`, `npm install -g`, `go install`, `cargo install`, `mise install`), sees the sysenv-filtered environment plus zordon's own pins.
 A `GEM_HOME`, `NPM_CONFIG_REGISTRY`, `GOFLAGS` or `CARGO_HOME` exported by the shell cannot decide where a declared tool lands or which registry it comes from, because it never reaches the installer.
 
-`PATH` is one deliberate exception.
-When `sysenv` does not declare it, mise still needs to find `git`, `curl` and `tar`, so the host `PATH` is used for the install.
-Declaring `PATH` in `sysenv` makes that explicit and is what every shipped example does.
-The other is mise's own GitHub credential: `MISE_GITHUB_TOKEN` (or `GITHUB_TOKEN`) from the environment zordon was started in is handed to mise, because ruby, rust and aqua releases are resolved through the GitHub API and its anonymous limit is exhausted within minutes on shared CI runners.
-It reaches mise only, never a service, so it is the installer's credential rather than a hole in the closed world.
+`PATH` needs a word.
+When `sysenv` does not declare it, installs run with the base system directories (`/usr/bin:/bin:/usr/sbin:/sbin`), where `git`, `curl`, `tar` and the C toolchain live — never with the developer's `PATH`.
+Whatever `PATH` mise sees ends up in the toolchain's environment and so in every service, which is why the shipped examples leave `PATH` out of `sysenv` and pin every toolchain they use instead.
+
+mise's own GitHub credential is the one value that crosses the boundary: `MISE_GITHUB_TOKEN` (or `GITHUB_TOKEN`) from the environment zordon was started in is handed to `mise install` and `mise env`, because ruby, rust and aqua releases are resolved through the GitHub API and its anonymous limit is exhausted within minutes on shared CI runners.
+It never reaches `mise exec` — the path that runs third-party code such as gem and npm install scripts — and never a service; zordon installs each toolchain up front so `exec` has nothing left to download.
 
 ## Relocating what lives in HOME
 
