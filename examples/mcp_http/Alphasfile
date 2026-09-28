@@ -8,7 +8,7 @@
 #
 # The service binary is borrowed from examples/mcp — this example is about the
 # transport, not about what is being supervised.
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 toolchain {
   go {

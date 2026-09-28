@@ -1,4 +1,4 @@
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 # examples/summary — demonstrates `zordon start --summary`.
 #
