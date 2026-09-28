@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 # Every GET / records a visit, so the count proves the database zordon's
 # `db` provision prepared is the one the server talks to.
 class VisitsController < ApplicationController
@@ -7,7 +9,7 @@ class VisitsController < ApplicationController
       visits: Visit.count,
       rails: Rails.version,
       ruby: RUBY_VERSION,
-      bundler: Bundler::VERSION,
+      bundler: Bundler::VERSION
     }
   end
 end
