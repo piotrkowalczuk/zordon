@@ -20,6 +20,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/logfilter"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/ztypes"
 )
 
 // buildBarrierAttrs returns one cty.StringVal per state, each holding
@@ -113,6 +114,12 @@ type resolver struct {
 	// "module.<m>.service". May be pre-seeded with parent services for
 	// federation.
 	serviceByModule map[string]map[string]map[string]cty.Value
+
+	// outputs and inputs hold evaluated package outputs and inputs:
+	// package, name. parts holds the values imports pass, by part id.
+	outputs map[string]map[string]cty.Value
+	inputs  map[string]map[string]cty.Value
+	parts   map[string]cty.Value
 
 	// toolchainCty is the per-module projection of `toolchain { <lang> {
 	// ... } }` declarations into cty: `toolchain.<lang>.ready` etc. resolve
@@ -232,7 +239,7 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	// not a whole-service edge. A.env→B.vars and B.env→A.vars are
 	// independent and resolve cleanly; only a literal A.vars→B.vars
 	// while B.vars→A.vars is a cycle, and that's a real bug.
-	g, err := newGraph(services, parentKnown)
+	g, err := newGraph(services, &graphValues{outputs: r.tree.outputs, inputs: r.tree.inputs}, parentKnown)
 	if err != nil {
 		return nil, err
 	}
@@ -253,6 +260,24 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	r := p.r
 	root := r.root
 	for _, n := range p.order {
+		if n.kind == kindPart {
+			if err := r.evalPart(n.part); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if n.kind == kindOutput {
+			if err := r.evalOutput(n.out); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if n.kind == kindInput {
+			if err := r.evalInput(n.in); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		st := p.states[n.svcID]
 		if err := r.evalProducerNode(n, st); err != nil {
 			return nil, fmt.Errorf("%s.%s: %w", n.svcID, producerLabel(n), err)
@@ -287,13 +312,6 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	localSysEnv, err := r.evalStrList(root.SysEnv, nil, "sysenv", srcDirs{})
 	if err != nil {
 		return nil, err
-	}
-	for _, expr := range r.tree.sysenvExprs() {
-		more, err := r.evalStrList(expr, nil, "sysenv", srcDirs{})
-		if err != nil {
-			return nil, err
-		}
-		localSysEnv = mergeSysEnv(localSysEnv, more)
 	}
 	var parentSysEnv []string
 	if p.parent != nil {
@@ -729,6 +747,77 @@ func (r *resolver) evalProducerNode(n *node, st *svcState) error {
 	return nil
 }
 
+// evalPart evaluates one value an import passes to an input, in the
+// import's scope.
+func (r *resolver) evalPart(pt *part) error {
+	v, diags := pt.arg.expr.Value(r.ctxWith(nil, srcDirs{module: pt.arg.scope}))
+	if diags.HasErrors() {
+		return fmt.Errorf("input %q of package %s: %s", pt.in.name, pt.in.pkg, diags.Error())
+	}
+	if r.parts == nil {
+		r.parts = map[string]cty.Value{}
+	}
+	r.parts[pt.in.partID(pt.i)] = v
+	return nil
+}
+
+// evalOutput evaluates one package output in the package's scope and checks
+// it against its type.
+func (r *resolver) evalOutput(o *output) error {
+	v, diags := o.decl.value.Value(r.ctxWith(nil, srcDirs{module: pkgScope(o.pkg)}))
+	if diags.HasErrors() {
+		return fmt.Errorf("output %q of package %s: %s", o.name, o.pkg, diags.Error())
+	}
+	v, err := ztypes.Convert(o.decl.ty, v)
+	if err != nil {
+		return fmt.Errorf("%s: output %q of package %s is not a %s: %w", o.decl.value.Range(), o.name, o.pkg, o.decl.ty, err)
+	}
+	if r.outputs == nil {
+		r.outputs = map[string]map[string]cty.Value{}
+	}
+	if r.outputs[o.pkg] == nil {
+		r.outputs[o.pkg] = map[string]cty.Value{}
+	}
+	r.outputs[o.pkg][o.name] = v
+	return nil
+}
+
+// evalInput joins the values the imports pass to an input with
+// ztypes.Merge, which checks them against the input's type: a map takes the
+// entries of all of them, any other type one value. With none, or only
+// nulls, the input takes its default, evaluated in the package's scope.
+func (r *resolver) evalInput(in *input) error {
+	what := fmt.Sprintf("input %q of package %s", in.name, in.pkg)
+	parts := make([]ztypes.Part, len(in.args))
+	for i, a := range in.args {
+		parts[i] = ztypes.Part{Value: r.parts[in.partID(i)], At: a.at.String()}
+	}
+	v, err := ztypes.Merge(in.decl.ty, parts, in.decl.unique...)
+	if err != nil {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	if v.IsNull() && in.decl.def != nil {
+		d, diags := in.decl.def.Value(r.ctxWith(nil, srcDirs{module: pkgScope(in.pkg)}))
+		if diags.HasErrors() {
+			return fmt.Errorf("%s: %s", what, diags.Error())
+		}
+		if v, err = ztypes.Convert(in.decl.ty, d); err != nil {
+			return fmt.Errorf("%s: %s: the default is not a %s: %w", what, in.decl.def.Range(), in.decl.ty, err)
+		}
+	}
+	if v.IsNull() && in.decl.def == nil {
+		return fmt.Errorf("%s: %s: the input is required, and every import sets it to null", what, in.args[0].at)
+	}
+	if r.inputs == nil {
+		r.inputs = map[string]map[string]cty.Value{}
+	}
+	if r.inputs[in.pkg] == nil {
+		r.inputs[in.pkg] = map[string]cty.Value{}
+	}
+	r.inputs[in.pkg][in.name] = v
+	return nil
+}
+
 // producerLabel returns the user-facing field name of a producer node
 // for error messages (e.g., "vars" or "file.config").
 func producerLabel(n *node) string {
@@ -1063,6 +1152,7 @@ func (r *resolver) finishService(st *svcState) error {
 		}
 		svc := &Service{
 			Toolchain: ToolchainPkg,
+			Module:    sb.module,
 			Runtime:   rt,
 			Pkg:       &PkgSpec{Name: pname, Version: pversion},
 		}
@@ -1663,25 +1753,72 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 	if len(tcs) > 0 {
 		vars["toolchain"] = cty.ObjectVal(copyCtyMap(tcs))
 	}
-	// A module is addressable as module.<m>.{service,toolchain} where the
-	// scope sees it (Tree.visible); the default module has no such handle (it
-	// composes, it is not composed).
+	// A module is addressable as module.<m>.{service,toolchain}, and a
+	// package's module as package.<p>.module.<m>, where the scope sees it;
+	// inside a package, module.<m> is a sibling. The default module has no
+	// such handle (it composes, it is not composed).
 	modules := map[string]cty.Value{}
-	visible := func(name string) bool {
-		return name != DefaultModule && r.tree.visible(dirs.module, name)
+	packages := map[string]map[string]cty.Value{}
+	selfPkg, inPkg := packageOf(dirs.module)
+	ids := map[string]bool{}
+	for id := range r.serviceByModule {
+		ids[id] = true
 	}
-	for name := range r.serviceByModule {
-		if visible(name) {
-			modules[name] = r.moduleCty(name)
+	for id := range r.toolchainCty {
+		ids[id] = true
+	}
+	for id := range ids {
+		if id == DefaultModule {
+			continue
 		}
-	}
-	for name := range r.toolchainCty {
-		if _, done := modules[name]; !done && visible(name) {
-			modules[name] = r.moduleCty(name)
+		if p, m, ok := strings.Cut(id, "/"); ok {
+			if inPkg && p == selfPkg {
+				modules[m] = r.moduleCty(id)
+			}
+			if r.tree.packageVisible(dirs.module, p) {
+				if packages[p] == nil {
+					packages[p] = map[string]cty.Value{}
+				}
+				packages[p][m] = r.moduleCty(id)
+			}
+			continue
+		}
+		if !inPkg && r.tree.moduleVisible(dirs.module, id) {
+			modules[id] = r.moduleCty(id)
 		}
 	}
 	if len(modules) > 0 {
 		vars["module"] = cty.ObjectVal(modules)
+	}
+	for p, outs := range r.outputs {
+		if len(outs) > 0 && r.tree.packageVisible(dirs.module, p) && packages[p] == nil {
+			packages[p] = map[string]cty.Value{}
+		}
+	}
+	if len(packages) > 0 {
+		pkgs := make(map[string]cty.Value, len(packages))
+		for p, mods := range packages {
+			obj := map[string]cty.Value{"module": cty.ObjectVal(mods)}
+			if outs := r.outputs[p]; len(outs) > 0 {
+				obj["outputs"] = cty.ObjectVal(copyCtyMap(outs))
+			}
+			pkgs[p] = cty.ObjectVal(obj)
+		}
+		vars["package"] = cty.ObjectVal(pkgs)
+	}
+	if pkg := r.tree.packages[selfPkg]; inPkg && pkg != nil && len(pkg.file.block.inputs) > 0 {
+		if inputs := copyCtyMap(r.inputs[selfPkg]); len(inputs) > 0 {
+			vars["inputs"] = cty.ObjectVal(inputs)
+		}
+	}
+	if s := r.tree.settingsFor(dirs.module); s != nil {
+		if len(s.features) > 0 {
+			feats := make(map[string]cty.Value, len(s.features))
+			for name, on := range s.features {
+				feats[name] = cty.BoolVal(on)
+			}
+			vars["features"] = cty.ObjectVal(feats)
+		}
 	}
 	// fs::src / src::hash exist only in a SERVICE scope — they read `checkout`,
 	// which the caller passes as the current service's checkout, or "" at file

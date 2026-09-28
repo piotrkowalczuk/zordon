@@ -45,6 +45,35 @@ func TestParseServiceRef(t *testing.T) {
 	}
 }
 
+func TestServiceRef_package(t *testing.T) {
+	id := ServiceRef("caddy/edge", "go", "caddy")
+	if id != "package.caddy.module.edge.service.go.caddy" {
+		t.Fatalf("ServiceRef = %q", id)
+	}
+	module, tc, name, rest, ok := ParseServiceRef(id + ".runtime@ready")
+	if !ok || module != "caddy/edge" || tc != "go" || name != "caddy" || rest != "runtime" {
+		t.Errorf("ParseServiceRef = (%q,%q,%q,%q,%v)", module, tc, name, rest, ok)
+	}
+	for _, bad := range []string{"package.caddy.service.go.caddy", "package..module.edge.service.go.caddy", "package.caddy.module..service.go.caddy", "package.caddy.module.edge"} {
+		if _, _, _, _, ok := ParseServiceRef(bad); ok {
+			t.Errorf("ParseServiceRef(%q) accepted it", bad)
+		}
+	}
+	if m, n := SplitDisplayName(DisplayName("caddy/edge", "caddy")); m != "caddy/edge" || n != "caddy" {
+		t.Errorf("display round trip = (%q,%q)", m, n)
+	}
+}
+
+func TestToolchainRef_package(t *testing.T) {
+	ref := ToolchainRef("caddy/edge", "go")
+	if ref != "package.caddy.module.edge.toolchain.go" {
+		t.Fatalf("ToolchainRef = %q", ref)
+	}
+	if key, ok := ParseToolchainRef(ref); !ok || key != "caddy/edge/go" {
+		t.Errorf("ParseToolchainRef = (%q,%v)", key, ok)
+	}
+}
+
 func TestDisplayName_roundTrip(t *testing.T) {
 	cases := map[string]struct{ module, name, display string }{
 		"flat":   {"", "api", "api"},

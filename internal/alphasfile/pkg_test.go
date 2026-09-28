@@ -124,6 +124,30 @@ service "pkg" "redis" {
 	}
 }
 
+func TestResolvePkg_keepsItsModule(t *testing.T) {
+	af := compile(t, `
+service "pkg" "redis" {
+  package = "redis@7.4.1"
+  runtime { cmd = ["redis-server"] }
+}
+
+module "payments" {
+  service "pkg" "redis" {
+    package = "redis@7.4.1"
+    runtime { cmd = ["redis-server"] }
+  }
+}
+`, nil)
+	var ids, names []string
+	for _, s := range af.Services {
+		ids = append(ids, s.ID())
+		names = append(names, s.Name())
+	}
+	if !equalStrs(ids, []string{"service.pkg.redis", "module.payments.service.pkg.redis"}) || !equalStrs(names, []string{"redis", "payments/redis"}) {
+		t.Errorf("ids = %v, names = %v; a pkg service in a module is known by its module", ids, names)
+	}
+}
+
 func TestResolveGo_packageRejectsObject(t *testing.T) {
 	err := compileErr(t, `
 service "go" "api" {

@@ -28,7 +28,7 @@ Rules:
   above it are *verified*: if a healthy alpha is already serving that
   Alphasfile, it's reused as-is.
 - **Drift auto-restarts a parent.** zordon binds each level's config to a
-  hash of (the bytes of the level's Alphasfile and every fragment it imports + the parent context that fed it). If you edit a
+  hash of (the bytes and identity of every file the level loads — its Alphasfile, fragments and packages, local or remote — + the parent context that fed it). If you edit a
   parent Alphasfile — or a grandparent restarts with new ports — the hash
   changes and zordon restarts that level (and the cascade continues
   downward). Untouched levels keep running.

@@ -251,7 +251,13 @@ func (m *ServiceMeta) Workspaceable() bool {
 // (vars / arguments / files / readiness / sudo are ignored). Pure, needs no
 // Invocation — the entry point for `zordon workspace`.
 func ParseServices(path string) ([]*ServiceMeta, error) {
-	tree, err := LoadTree(path)
+	return ParseServicesWith(path, LoadOptions{})
+}
+
+// ParseServicesWith is ParseServices with load options, so imports resolve
+// the same way they do for the rest of a command.
+func ParseServicesWith(path string, opts LoadOptions) ([]*ServiceMeta, error) {
+	tree, err := LoadTreeWith(path, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +316,23 @@ func (rb *rootBlock) allServices() []*serviceBlock {
 func (rb *rootBlock) allImports() []*importBlock {
 	out := append([]*importBlock(nil), rb.Imports...)
 	for _, mb := range rb.Modules {
-		out = append(out, mb.Requires...)
+		out = append(out, mb.Imports...)
+	}
+	for _, pb := range rb.Packages {
+		out = append(out, pb.Imports...)
+		for _, mb := range pb.Modules {
+			out = append(out, mb.Imports...)
+		}
+	}
+	return out
+}
+
+// fileRequires is the file's own require blocks: the top level's, or the
+// package block's in a package's file.
+func (rb *rootBlock) fileRequires() []*requireBlock {
+	out := append([]*requireBlock(nil), rb.Requires...)
+	for _, pb := range rb.Packages {
+		out = append(out, pb.Requires...)
 	}
 	return out
 }
@@ -350,6 +372,14 @@ func cleanSparse(in []string) []string {
 func (s *Service) Name() string {
 	if s.Runtime != nil {
 		return DisplayName(s.Module, s.Runtime.Name)
+	}
+	return ""
+}
+
+// ShortName is Name shortened as ShortName does.
+func (s *Service) ShortName() string {
+	if s.Runtime != nil {
+		return ShortName(s.Module, s.Runtime.Name)
 	}
 	return ""
 }
@@ -679,6 +709,12 @@ type rootBlock struct {
 	Workspace *workspaceRootBlock `hcl:"workspace,block"`
 	Modules   []*moduleBlock      `hcl:"module,block"`
 	Imports   []*importBlock      `hcl:"import,block"`
+	// Requires pin the repositories remote imports name, for a file that is
+	// its own module; under a zordon.mod they belong there.
+	Requires []*requireBlock `hcl:"require,block"`
+	// Packages is set only in a package's file, which holds exactly one
+	// package block and nothing else.
+	Packages []*packageBlock `hcl:"package,block"`
 
 	// gohcl synthesizes a null expression for an absent optional
 	// attribute, so presence is read off the attribute's range.
@@ -687,16 +723,66 @@ type rootBlock struct {
 	SysEnvRange hcl.Range `hcl:"sysenv,attr_range"`
 }
 
-// importBlock pulls named modules out of another file:
-// `import "<path>" { modules = ["a", "b"] }` at the entrypoint's top level,
-// `require "<path>" { modules = [...] }` inside a module.
+// importBlock pulls a package, or named modules of a fragment, into the
+// stack: `import "<path>" "<alias>"? { ... }`. A remote path carries no
+// version; the require that covers its repository does. An import at the
+// entrypoint's top level is the final word on a package's features; any
+// other import turns features on when the entrypoint does not import the
+// package, and must be satisfied by the entrypoint when it does. Inputs are
+// joined from every import, as ztypes.Merge does.
 type importBlock struct {
-	Path     string    `hcl:"path,label"`
-	Modules  []string  `hcl:"modules"`
-	Git      *gitBlock `hcl:"git,block"`
-	DefRange hcl.Range `hcl:",def_range"`
+	Path         string         `hcl:"path,label"`
+	Modules      []string       `hcl:"modules,optional"`
+	Inputs       hcl.Expression `hcl:"inputs,optional"`
+	InputsRange  hcl.Range      `hcl:"inputs,attr_range"`
+	Features     []string       `hcl:"features,optional"`
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
+	Git          *gitBlock      `hcl:"git,block"`
+	DefRange     hcl.Range      `hcl:",def_range"`
 
 	keyword string
+	// alias is the optional second label; HCL block schemas have a fixed
+	// label count, so decodeFile lifts it off before decoding.
+	alias string
+}
+
+// requireBlock pins a repository that remote imports name:
+// `require "github.com/owner/repo" { ref = "v1.0.0" }`.
+type requireBlock struct {
+	Repo     string    `hcl:"repo,label"`
+	Ref      string    `hcl:"ref"`
+	DefRange hcl.Range `hcl:",def_range"`
+}
+
+// packageBlock is the API boundary between a stack and the modules that
+// implement a package: `package "<name>" { features = {...} inputs = {...}
+// outputs = {...} ... module "<m>" { ... } }`. Each maps a name to
+// { description = "...", ... }. Features are fixed before planning, because
+// they decide which blocks exist; they are read as features.<n>. Inputs are
+// what goes in and outputs what comes out, both evaluated with the services:
+// an input of type map(T) takes entries from every import that sets it, any
+// other input one value from one import; both are read as inputs.<n>. Outputs
+// are read from outside as package.<p>.outputs.<n>. The package's toolchain
+// pins every module that has none of its own.
+type packageBlock struct {
+	Name          string          `hcl:"name,label"`
+	DefRange      hcl.Range       `hcl:",def_range"`
+	Inputs        hcl.Expression  `hcl:"inputs,optional"`
+	InputsRange   hcl.Range       `hcl:"inputs,attr_range"`
+	Features      hcl.Expression  `hcl:"features,optional"`
+	FeaturesRange hcl.Range       `hcl:"features,attr_range"`
+	Outputs       hcl.Expression  `hcl:"outputs,optional"`
+	OutputsRange  hcl.Range       `hcl:"outputs,attr_range"`
+	Imports       []*importBlock  `hcl:"import,block"`
+	Requires      []*requireBlock `hcl:"require,block"`
+	Toolchain     *toolchainBlock `hcl:"toolchain,block"`
+	Modules       []*moduleBlock  `hcl:"module,block"`
+
+	// features, inputs and outputs are Features, Inputs and Outputs decoded.
+	features map[string]string
+	inputs   map[string]*inputDecl
+	outputs  map[string]*outputDecl
 }
 
 // moduleBlock is a named namespace of services with an optional toolchain
@@ -706,7 +792,7 @@ type importBlock struct {
 type moduleBlock struct {
 	Name      string          `hcl:"name,label"`
 	DefRange  hcl.Range       `hcl:",def_range"`
-	Requires  []*importBlock  `hcl:"require,block"`
+	Imports   []*importBlock  `hcl:"import,block"`
 	Toolchain *toolchainBlock `hcl:"toolchain,block"`
 	Services  []*serviceBlock `hcl:"service,block"`
 }
@@ -771,6 +857,9 @@ type serviceBlock struct {
 	Body      hcl.Body  `hcl:",body"`
 	module    string
 	file      *treeFile // declaring file: anchors relative src.path, scopes module visibility
+
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
 
 	// static fields
 	Color string    `hcl:"color,optional"`
@@ -871,6 +960,9 @@ type provisionBlock struct {
 	Env         hcl.Expression   `hcl:"env,optional"`
 	After       hcl.Expression   `hcl:"after,optional"`
 	Detached    bool             `hcl:"detached,optional"`
+
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
 }
 
 // argumentBlock declares one typed input of a provision (`argument "<name>" {
@@ -954,6 +1046,9 @@ type sudoBlock struct {
 	Check  hcl.Expression `hcl:"check,optional"`
 	Apply  hcl.Expression `hcl:"apply"`
 	Verify hcl.Expression `hcl:"verify,optional"`
+
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
 }
 
 type logBlock struct {
@@ -1030,6 +1125,9 @@ type fileBlock struct {
 	Name string         `hcl:"name,label"`
 	Path hcl.Expression `hcl:"path"`
 	Body hcl.Expression `hcl:"body"`
+
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
 }
 
 // workspaceRootBlock is the top-level `workspace {}`: how to PREPARE a

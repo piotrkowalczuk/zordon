@@ -15,7 +15,7 @@ func TestOpen_transitiveModuleChain(t *testing.T) {
 		"Alphasfile": "import \"./a/Alphasfile.a\" { modules = [\"a\"] }\nimport \"./c/Alphasfile.c\" { modules = [\"c\"] }\n",
 		"a/Alphasfile.a": `
 module "a" {
-  require "../b/Alphasfile.b" { modules = ["b"] }
+  import "../b/Alphasfile.b" { modules = ["b"] }
 
   service "go" "a" {
     git { url = "github.com/x/a" }
@@ -71,7 +71,7 @@ service "go" "z" {
 `, body),
 				"a/Alphasfile.a": `
 module "a" {
-  require "../b/Alphasfile.b" { modules = ["b"] }
+  import "../b/Alphasfile.b" { modules = ["b"] }
 }
 `,
 				"b/Alphasfile.b": `
@@ -110,7 +110,7 @@ func TestOpen_visibilityOK_cycle(t *testing.T) {
 		"Alphasfile": `import "./Alphasfile.a" { modules = ["a"] }`,
 		"Alphasfile.a": `
 module "a" {
-  require "./Alphasfile.b" { modules = ["b"] }
+  import "./Alphasfile.b" { modules = ["b"] }
 
   service "go" "a" {
     git { url = "github.com/x/a" }
@@ -121,7 +121,7 @@ module "a" {
 `,
 		"Alphasfile.b": `
 module "b" {
-  require "./Alphasfile.a" { modules = ["a"] }
+  import "./Alphasfile.a" { modules = ["a"] }
 
   service "go" "b" {
     git { url = "github.com/x/b" }

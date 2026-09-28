@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -132,7 +133,23 @@ func importLines(prefix string, tree *alphasfile.Tree) string {
 	}
 	var b strings.Builder
 	for _, e := range tree.Imports() {
-		fmt.Fprintf(&b, "%simport %s [%s]\n", prefix, e.Path, strings.Join(e.Modules, ", "))
+		origin := ""
+		if e.Origin != "" {
+			origin = " (" + e.Origin + ")"
+		}
+		if e.Package != "" {
+			features := ""
+			if len(e.Features) > 0 {
+				features = " [features: " + strings.Join(e.Features, ", ") + "]"
+			}
+			by := ""
+			if len(e.ImportedBy) > 0 {
+				by = " (imported by " + strings.Join(e.ImportedBy, ", ") + ")"
+			}
+			fmt.Fprintf(&b, "%simport %s as %s%s%s%s\n", prefix, filepath.Dir(e.Path), e.Package, features, by, origin)
+			continue
+		}
+		fmt.Fprintf(&b, "%simport %s [%s]%s\n", prefix, e.Path, strings.Join(e.Modules, ", "), origin)
 	}
 	for _, u := range tree.Unused() {
 		fmt.Fprintf(&b, "%sunused module %s in %s\n", prefix, u.Module, u.Path)
@@ -168,13 +185,21 @@ func renderState(st *protocol.StateInfo) []byte {
 			renderService(body, s)
 		}
 	}
-	for _, m := range moduleOrder(st) {
-		mb := body.AppendNewBlock("module", []string{m}).Body()
-		if tc := toolchainOf(st.Toolchain, m); len(tc) > 0 {
+	pkgBodies := map[string]*hclwrite.Body{}
+	for _, id := range moduleOrder(st) {
+		parent, name := body, id
+		if p, m, inPkg := strings.Cut(id, "/"); inPkg {
+			if pkgBodies[p] == nil {
+				pkgBodies[p] = body.AppendNewBlock("package", []string{p}).Body()
+			}
+			parent, name = pkgBodies[p], m
+		}
+		mb := parent.AppendNewBlock("module", []string{name}).Body()
+		if tc := toolchainOf(st.Toolchain, id); len(tc) > 0 {
 			renderToolchainBlock(mb, tc)
 		}
 		for _, s := range st.Services {
-			if s != nil && s.Module == m {
+			if s != nil && s.Module == id {
 				renderService(mb, s)
 			}
 		}

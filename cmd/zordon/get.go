@@ -76,6 +76,7 @@ func byName(node map[string]any, srcKey string) map[string]any {
 func buildTree(levels []*level) map[string]any {
 	svcRoot := map[string]any{}
 	modRoot := map[string]any{}
+	pkgRoot := map[string]any{}
 	for _, lv := range levels {
 		if lv.state == nil {
 			continue
@@ -127,7 +128,9 @@ func buildTree(levels []*level) map[string]any {
 				node["running"] = false
 			}
 			byTC := svcRoot
-			if s.Module != alphasfile.DefaultModule {
+			if p, m, inPkg := strings.Cut(s.Module, "/"); inPkg {
+				byTC = moduleServices(packageModules(pkgRoot, p), m)
+			} else if s.Module != alphasfile.DefaultModule {
 				byTC = moduleServices(modRoot, s.Module)
 			}
 			tc, _ := byTC[s.Toolchain].(map[string]any)
@@ -138,7 +141,23 @@ func buildTree(levels []*level) map[string]any {
 			tc[s.Runtime.Name] = node
 		}
 	}
-	return map[string]any{"service": svcRoot, "module": modRoot}
+	return map[string]any{"service": svcRoot, "module": modRoot, "package": pkgRoot}
+}
+
+// packageModules returns the `package.<name>.module` map, creating the
+// package node on first use.
+func packageModules(pkgRoot map[string]any, name string) map[string]any {
+	pkg, _ := pkgRoot[name].(map[string]any)
+	if pkg == nil {
+		pkg = map[string]any{}
+		pkgRoot[name] = pkg
+	}
+	mods, _ := pkg["module"].(map[string]any)
+	if mods == nil {
+		mods = map[string]any{}
+		pkg["module"] = mods
+	}
+	return mods
 }
 
 // moduleServices returns the `module.<name>.service` map, creating the
