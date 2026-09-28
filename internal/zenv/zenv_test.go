@@ -160,3 +160,17 @@ func TestEnvironmentVariables_PrependPath_doesNotMutateReceiver(t *testing.T) {
 		t.Errorf("PrependPath mutated receiver: %q", base["PATH"])
 	}
 }
+
+func TestEnvironmentVariables_Fill_receiverWins(t *testing.T) {
+	base := EnvironmentVariables{"A": "base", "EMPTY": ""}
+	got := base.Fill(EnvironmentVariables{"A": "def", "EMPTY": "def", "B": "def"})
+	want := EnvironmentVariables{"A": "base", "EMPTY": "def", "B": "def"}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
+		}
+	}
+	if base["B"] != "" {
+		t.Error("Fill mutated the receiver")
+	}
+}

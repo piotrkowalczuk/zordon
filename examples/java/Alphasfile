@@ -9,7 +9,7 @@
 # file, not a dir) that the plugin can't resolve. Skipping it leaves a fully
 # runnable jar. Drop the build block for a project without such a plugin.
 
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 toolchain {
   # Pin the JDK zordon materializes via mise. mise's java plugin exports
