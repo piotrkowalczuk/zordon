@@ -413,12 +413,7 @@ func (r *resolver) evalToolchainBlock(tb *toolchainBlock, module string, out map
 	if tb == nil {
 		return nil
 	}
-	label := func(lang string) string {
-		if module == DefaultModule {
-			return "toolchain." + lang
-		}
-		return "module." + module + ".toolchain." + lang
-	}
+	label := func(lang string) string { return ToolchainRef(module, lang) }
 	for lang, sub := range tb.byLabel() {
 		envMap, err := r.evalMap(sub.Env, nil, label(lang)+".env", srcDirs{})
 		if err != nil {
@@ -478,13 +473,25 @@ func projectToolchains(toolchain map[string]*ToolchainConfig, modules []*moduleB
 	for _, mb := range modules {
 		own := maps.Clone(base)
 		for key := range toolchain {
-			if m, lang, ok := strings.Cut(key, "/"); ok && m == mb.Name {
-				own[lang] = attrs(m, lang)
+			if lang, ok := strings.CutPrefix(key, mb.Name+"/"); ok && lang != "" && !pinnedDeeper(key, mb.Name, modules) {
+				own[lang] = attrs(mb.Name, lang)
 			}
 		}
 		out[mb.Name] = own
 	}
 	return out
+}
+
+// pinnedDeeper reports whether key belongs to a module whose id extends
+// module's, such as package module p/m for a plain module p: a module and a
+// package may share a name, and a pkg tool's key may itself hold '/'.
+func pinnedDeeper(key, module string, modules []*moduleBlock) bool {
+	for _, other := range modules {
+		if len(other.Name) > len(module) && strings.HasPrefix(key, other.Name+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // binDir is fs::bin() for a scope: the invocation's bin dir, one level

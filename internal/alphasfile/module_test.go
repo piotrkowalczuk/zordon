@@ -316,6 +316,28 @@ module "modern" {
 	}
 }
 
+func TestOpen_packageToolchainReadyBarrierRef(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `import "./p" {}`,
+		"p/Alphasfile": `
+package "p" {
+  toolchain {
+    go { version = "1.22.0" }
+  }
+  module "m" {
+    service "go" "api" {
+      git { url = "github.com/x/api" }
+      runtime { after = [toolchain.go.ready] }
+    }
+  }
+}
+`,
+	})
+	if got := svcByName(openTree(t, root), "p/m/api").Runtime.After; len(got) != 1 || got[0] != "package.p.module.m.toolchain.go@ready" {
+		t.Errorf("after = %v; inside a package's module, toolchain.go is the package's pin", got)
+	}
+}
+
 func TestCompile_moduleToolchainWithoutVersionFails(t *testing.T) {
 	err := compileErr(t, `
 module "legacy" {
