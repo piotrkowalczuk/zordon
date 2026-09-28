@@ -125,7 +125,8 @@ type Part struct {
 }
 
 // Merge joins the values given for one declaration of type t, each converted
-// as by Convert. A map takes the entries of every part: a key given twice is
+// as by Convert. A map takes the entries of every part, where a null entry
+// is no entry: a key given twice is
 // an error naming both places, and so is a value of a unique attribute of
 // the map's object entries used by two entries. Any other type takes one
 // value, so a second part is an error naming both places. No parts, or only
@@ -444,6 +445,9 @@ func (t Map) merge(parts []Part, unique []string) (cty.Value, error) {
 		given = true
 		vals := v.AsValueMap()
 		for _, k := range sortedKeys(vals) {
+			if vals[k].IsNull() {
+				continue
+			}
 			if prev, dup := entries[k]; dup {
 				return cty.NilVal, fmt.Errorf("%s: key %q is already set at %s", p.At, k, prev.at)
 			}

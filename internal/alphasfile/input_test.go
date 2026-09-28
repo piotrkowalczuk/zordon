@@ -273,3 +273,33 @@ func TestLoadTree_requiredInputStopsARunOnItsOwn(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestOpen_defaultMustFitItsType(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":     `import "./web" {}`,
+		"web/Alphasfile": "package \"web\" {\n  inputs = { port = { description = \"Port.\", type = number, default = \"eighty\" } }\n}\n",
+	})
+	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
+	if err == nil || !strings.Contains(err.Error(), `input "port" of package web: `) || !strings.Contains(err.Error(), "the default is not a number") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestOpen_inputExpressionErrors(t *testing.T) {
+	cases := map[string]struct{ entry, greeting string }{
+		"import value": {entry: `import "./greeter" { inputs = { name = module.nope.service.go.x.vars.y } }`, greeting: `"hello"`},
+		"default":      {entry: `import "./greeter" { inputs = { name = "x" } }`, greeting: `module.nope.service.go.x.vars.y`},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			root := writeTree(t, t.TempDir(), map[string]string{
+				"Alphasfile":         c.entry,
+				"greeter/Alphasfile": strings.Replace(pkgGreeter, `default = "hello"`, "default = "+c.greeting, 1),
+			})
+			_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
+			if err == nil || !strings.Contains(err.Error(), `of package greeter: `) {
+				t.Fatalf("an expression that fails names the input and its package, got %v", err)
+			}
+		})
+	}
+}

@@ -38,6 +38,7 @@ The zordon MCP tools are the declared interface to the stack; the `zordon`/`alph
 | Apply privileged wiring (DNS, port :80) | `sudo` |
 | Stop this level | `stop` |
 | Tear down a provision's side effects | `clean` |
+| Pin a remote package's repository, or move the pins in `zordon.lock` | `pkg` with `["get", "<repo>@<ref>"]` or `["update"]` |
 
 For a command tool's flags and arguments, pass `["-h"]`; for a provision, read the tool's own description (it carries the resolved `cmd` and env keys).
 

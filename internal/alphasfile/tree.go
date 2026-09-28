@@ -20,7 +20,7 @@ import (
 // Tree is an entrypoint Alphasfile plus every fragment and package it
 // transitively imports, each file loaded once. The stack is the entrypoint's
 // modules, what its imports name, and, repeated until nothing changes, what
-// any module or package already in the stack imports or requires.
+// any module or package already in the stack imports.
 //
 // A module of a package has the id "<package>/<module>"; every other module
 // is known by its bare name.
@@ -31,7 +31,7 @@ type Tree struct {
 	edges   []ImportEdge
 	unused  []UnusedModule
 
-	// links holds every import and require per scope: DefaultModule for the
+	// links holds every import per scope: DefaultModule for the
 	// entrypoint's top level, a module id, or pkgScope(<package>).
 	links map[string][]importLink
 	// owners maps every declared module id to its file; scopes maps every
@@ -464,6 +464,9 @@ func (t *Tree) followPackage(f *treeFile, scope string, ib *importBlock, res res
 		return fmt.Errorf("%s: %s %q: %q is not a valid package name", ib.DefRange, ib.keyword, ib.Path, ib.alias)
 	}
 	afPath := filepath.Join(res.path, invocation.AlphasfileName)
+	if res.confine != "" && !confined(res.confine, afPath) {
+		return fmt.Errorf("%s: %s %q: its %s leaves the checkout of %s", ib.DefRange, ib.keyword, ib.Path, invocation.AlphasfileName, res.repoAt)
+	}
 	tf := t.byPath[afPath]
 	var pkg *pkgInstance
 	if tf == nil {
@@ -519,6 +522,9 @@ func (t *Tree) finish() error {
 			}
 		}
 	}
+	if err := t.checkPackageNames(); err != nil {
+		return err
+	}
 
 	if err := t.resolvePackages(); err != nil {
 		return err
@@ -527,9 +533,8 @@ func (t *Tree) finish() error {
 
 	// Every module of the entrypoint is in the stack, so the entrypoint's
 	// scopes see all of them. A fragment module sees itself and what it
-	// requires, a sibling from its own file included. A package's modules
-	// see each other and whatever the package or the module imports or
-	// requires.
+	// imports, a sibling from its own file included. A package's modules
+	// see each other and whatever the package or the module imports.
 	entry := t.files[0]
 	t.scopes = map[string]*scopeVis{}
 	for _, f := range t.files {
@@ -637,6 +642,33 @@ func (t *Tree) finish() error {
 	return t.checkGated()
 }
 
+// checkPackageNames reports a package whose services' state directories and
+// branches would nest inside another service's: a top-level service named
+// like the package, or a module named like it with a service named like one
+// of the package's modules.
+func (t *Tree) checkPackageNames() error {
+	const fix = "both would own <state>/{bin,src,etc,var}/%s, so import it with an alias: import \"<path>\" \"<alias>\" {}"
+	for _, name := range sortedKeys(t.packages) {
+		p := t.packages[name]
+		if owner := t.owners[name]; owner != nil && p.file.block != nil {
+			mb := owner.declared[name]
+			for _, sb := range mb.Services {
+				for _, pm := range p.file.block.Modules {
+					if pm.Name == sb.Name {
+						return fmt.Errorf("%s: package %q has module %q, and module %q declared at %s has service %q; "+fix, p.at, name, pm.Name, name, mb.DefRange, sb.Name, name+"/"+sb.Name)
+					}
+				}
+			}
+		}
+		for _, sb := range t.files[0].root.Services {
+			if sb.Name == name {
+				return fmt.Errorf("%s: package %q has the same name as the top-level service declared at %s; "+fix, p.at, name, sb.DefRange, name)
+			}
+		}
+	}
+	return nil
+}
+
 func newScopeVis() *scopeVis {
 	return &scopeVis{mods: map[string]bool{}, pkgs: map[string]bool{}}
 }
@@ -652,8 +684,8 @@ func (v *scopeVis) clone() *scopeVis {
 	return c
 }
 
-// linked adds every module and package the scope imports or requires to
-// vis, skipping requires switched off by enabled.
+// linked adds every module and package the scope imports to vis, skipping
+// imports switched off by enabled.
 func (t *Tree) linked(vis *scopeVis, scope string) error {
 	for _, l := range t.links[scope] {
 		on, err := t.linkEnabled(scope, l)

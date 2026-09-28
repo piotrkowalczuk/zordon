@@ -295,6 +295,24 @@ func TestMerge_uniqueSkipsNull(t *testing.T) {
 	}
 }
 
+func TestMerge_nullEntrySetsNothing(t *testing.T) {
+	ty := mustParse(t, "map(object({ host = string }))")
+	got, err := Merge(ty, parts(t, `{ a = null, b = { host = "b" } }`, `{ a = { host = "a" } }`), "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := cty.MapVal(map[string]cty.Value{
+		"a": cty.ObjectVal(map[string]cty.Value{"host": cty.StringVal("a")}),
+		"b": cty.ObjectVal(map[string]cty.Value{"host": cty.StringVal("b")}),
+	})
+	if !got.RawEquals(want) {
+		t.Errorf("Merge = %#v, want %#v; a null entry is no entry, so it neither collides nor reaches unique", got, want)
+	}
+	if got, err := Merge(ty, parts(t, `{ a = null }`)); err != nil || !got.RawEquals(cty.MapValEmpty(ty.cty().ElementType())) {
+		t.Errorf("Merge of only a null entry = %#v, %v; want an empty map", got, err)
+	}
+}
+
 func TestMerge_panics(t *testing.T) {
 	cases := map[string]struct {
 		typ    Type

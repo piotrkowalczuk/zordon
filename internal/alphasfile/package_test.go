@@ -327,6 +327,9 @@ func TestLoadTree_packageFileHoldsOnlyItsBlock(t *testing.T) {
 		"module":    {`module "m" {}`, `module "m" outside package "p"`},
 		"service":   {"service \"go\" \"s\" {\n  git { url = \"github.com/x/s\" }\n}", `service outside package "p"`},
 		"second":    {`package "q" {}`, "a file holds one package block"},
+		"import":    {`import "./x" {}`, `import "./x" outside package "p"`},
+		"require":   {`require "github.com/a/b" { ref = "main" }`, `require "github.com/a/b" outside package "p"`},
+		"toolchain": {"toolchain {\n  go { version = \"1.22.0\" }\n}", `toolchain outside package "p"`},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -517,5 +520,54 @@ module "gw" {
 	af := openTree(t, root)
 	if got := fmt.Sprint(svcByName(af, "gw/gw").Runtime.Vars["upstream"]); got != "8080" {
 		t.Errorf("upstream = %s, services = %v", got, serviceNames(af))
+	}
+}
+
+func TestLoadTree_packageKeepsOneName(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":     "import \"./db\" {}\nimport \"./app\" {}\n",
+		"db/Alphasfile":  `package "db" {}`,
+		"app/Alphasfile": "package \"app\" {\n  import \"../db\" \"pg\" {}\n}\n",
+	})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `this package is already in the stack as "db"`) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadTree_packageCannotImportTheEntrypoint(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":   `import "./p" {}`,
+		"p/Alphasfile": "package \"p\" {\n  import \"../\" {}\n}\n",
+	})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "is the entrypoint or a fragment, not a package") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadTree_packageNameClashesWithTheEntrypoint(t *testing.T) {
+	cases := map[string]struct{ entry, want string }{
+		"top-level service": {"service \"go\" \"gw\" {\n  git { url = \"github.com/x/gw\" }\n}\nimport \"./gw\" {}\n", `package "gw" has the same name as the top-level service declared at`},
+		"module":            {"module \"gw\" {\n  service \"go\" \"web\" {\n    git { url = \"github.com/x/web\" }\n  }\n}\nimport \"./gw\" {}\n", `package "gw" has module "web", and module "gw" declared at`},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			root := writeTree(t, t.TempDir(), map[string]string{
+				"Alphasfile":    c.entry,
+				"gw/Alphasfile": "package \"gw\" {\n  module \"web\" {\n    service \"go\" \"x\" {\n      git { url = \"github.com/x/x\" }\n    }\n  }\n}\n",
+			})
+			if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "import it with an alias") {
+				t.Fatalf("want %q, got %v", c.want, err)
+			}
+		})
+	}
+}
+
+func TestLoadTree_invalidPackageAlias(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":    `import "./db" "no spaces" {}`,
+		"db/Alphasfile": `package "db" {}`,
+	})
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `"no spaces" is not a valid package name`) {
+		t.Fatalf("got %v", err)
 	}
 }

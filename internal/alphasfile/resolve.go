@@ -90,6 +90,9 @@ type identitySource struct {
 	scopes  map[*treeFile]*reqScope
 	entry   *reqScope
 	changes []LockChange
+	// fresh are the repositories resolved by this load, so an update
+	// fetches each once and every import of it reads the same commit.
+	fresh map[string]bool
 }
 
 type refUse struct {
@@ -119,6 +122,7 @@ func newIdentitySource(opts LoadOptions) (*identitySource, error) {
 		refs:   map[string]refUse{},
 		mods:   map[string]*modFile{},
 		scopes: map[*treeFile]*reqScope{},
+		fresh:  map[string]bool{},
 	}, nil
 }
 
@@ -321,6 +325,9 @@ func (s *identitySource) modIn(dir string) (*modFile, error) {
 // checkout the search stops at the checkout's root.
 func (s *identitySource) modAbove(dir, confine string) (*modFile, error) {
 	for {
+		if p := filepath.Join(dir, ModFileName); confine != "" && !confined(confine, p) {
+			return nil, fmt.Errorf("%s leaves the checkout %s", p, confine)
+		}
 		mod, err := s.modIn(dir)
 		if err != nil || mod != nil {
 			return mod, err
@@ -374,7 +381,7 @@ func requireMap(blocks []*requireBlock) (map[string]*requireBlock, error) {
 
 func (s *identitySource) commitFor(repo, ref string, imp *importBlock) (string, error) {
 	e, locked := s.lock.repos[repo]
-	if locked && e.ref == ref && !s.updating(repo) {
+	if locked && e.ref == ref && (!s.updating(repo) || s.fresh[repo]) {
 		s.lock.used[repo] = true
 		return e.commit, nil
 	}
@@ -391,6 +398,7 @@ func (s *identitySource) commitFor(repo, ref string, imp *importBlock) (string, 
 	}
 	s.lock.repos[repo] = lockEntry{ref: ref, commit: commit}
 	s.lock.used[repo] = true
+	s.fresh[repo] = true
 	return commit, nil
 }
 

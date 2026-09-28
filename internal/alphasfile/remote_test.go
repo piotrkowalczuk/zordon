@@ -101,6 +101,21 @@ func TestLoadTreeWith_updateMovesTheLock(t *testing.T) {
 	}
 }
 
+func TestLoadTreeWith_updateResolvesARepositoryOnce(t *testing.T) {
+	infra, _ := infraRepo(t)
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main") + "import \"github.com/acme/infra/pkgs/db\" {}\n"})
+	f := newRepoFetcher(map[string]string{remoteRepo: infra})
+	opts := remoteOpts(t, dir, f)
+	opts.UpdateAll = true
+	if _, err := LoadTreeWith(root, opts); err != nil {
+		t.Fatal(err)
+	}
+	if f.resolves != 1 {
+		t.Errorf("resolves = %d; one load resolves a repository once, so every import of it reads the same commit", f.resolves)
+	}
+}
+
 func TestLoadTreeWith_changedRefResolvesAgain(t *testing.T) {
 	infra, _ := infraRepo(t)
 	v1 := gitOut(t, infra, "rev-parse", "v1^{commit}")
@@ -407,6 +422,63 @@ func TestLoadTreeWith_symlinkCannotLeaveTheCheckout(t *testing.T) {
 	_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
 	if err == nil || !strings.Contains(err.Error(), "leaves the checkout of github.com/acme/infra@") {
 		t.Fatalf("a symlink inside a fetched repository must not reach the machine, got %v", err)
+	}
+}
+
+func TestLoadTreeWith_symlinkedIdentityCannotLeaveTheCheckout(t *testing.T) {
+	cases := map[string]struct{ entry, web string }{
+		"from the entrypoint":          {entry: "require \"github.com/acme/infra\" { ref = \"main\" }\nimport \"github.com/acme/infra/pkgs/evil\" {}\n"},
+		"from a file of the same repo": {entry: webAt("main"), web: `import "github.com/acme/infra/pkgs/evil" {}`},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			outside := t.TempDir()
+			writeTree(t, outside, map[string]string{"Alphasfile": pkgDB})
+			web := pkgWeb
+			if c.web != "" {
+				web = pkgWebRequiring(c.web)
+			}
+			infra := gitRepo(t, map[string]string{"pkgs/web/Alphasfile": web})
+			if err := zfs.Symlink(outside, filepath.Join(infra, "pkgs", "evil")); err != nil {
+				t.Fatal(err)
+			}
+			gitRun(t, infra, "add", "-A")
+			gitRun(t, infra, "-c", "user.email=a@b", "-c", "user.name=z", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "link")
+			dir := t.TempDir()
+			root := writeTree(t, dir, map[string]string{"Alphasfile": c.entry})
+			_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
+			if err == nil || !strings.Contains(err.Error(), "leaves the checkout of github.com/acme/infra@") {
+				t.Fatalf("an identity whose path is a symlink out of the repository must not reach the machine, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadTreeWith_symlinkedFileCannotLeaveTheCheckout(t *testing.T) {
+	cases := map[string]struct {
+		link  string
+		files map[string]string
+	}{
+		"package Alphasfile": {link: "pkgs/web/Alphasfile", files: map[string]string{"pkgs/web/README": "web"}},
+		"zordon.mod":         {link: ModFileName, files: map[string]string{"pkgs/web/Alphasfile": pkgWeb}},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			outside := t.TempDir()
+			writeTree(t, outside, map[string]string{"Alphasfile": pkgWeb, ModFileName: `module = "github.com/acme/infra"`})
+			infra := gitRepo(t, c.files)
+			if err := zfs.Symlink(filepath.Join(outside, filepath.Base(c.link)), filepath.Join(infra, filepath.FromSlash(c.link))); err != nil {
+				t.Fatal(err)
+			}
+			gitRun(t, infra, "add", "-A")
+			gitRun(t, infra, "-c", "user.email=a@b", "-c", "user.name=z", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "link")
+			dir := t.TempDir()
+			root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
+			_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
+			if err == nil || !strings.Contains(err.Error(), "leaves the checkout") {
+				t.Fatalf("a file of a fetched repository that links out of it must not be read, got %v", err)
+			}
+		})
 	}
 }
 

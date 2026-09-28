@@ -345,3 +345,34 @@ func fileNames(s *Service) []string {
 	}
 	return out
 }
+
+func TestLoadTree_referenceToSwitchedOffProvision(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `import "./web" {}`,
+		"web/Alphasfile": `
+package "web" {
+  features = { seed = { description = "Seeds the database" } }
+
+  module "web" {
+    service "go" "web" {
+      git { url = "github.com/x/web" }
+      runtime {
+        provision "seed" {
+          enabled = features.seed
+          cmd     = "true"
+        }
+        provision "report" {
+          cmd   = "true"
+          after = [self.runtime.provision.seed]
+        }
+      }
+    }
+  }
+}
+`,
+	})
+	_, err := LoadTree(root)
+	if err == nil || !strings.Contains(err.Error(), `references provision "seed", which is switched off by enabled at`) {
+		t.Fatalf("got %v", err)
+	}
+}

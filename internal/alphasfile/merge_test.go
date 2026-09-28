@@ -209,3 +209,14 @@ func TestLoadTree_provideIsGone(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestOpen_mapInputOfNullsTakesItsDefault(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":       "import \"./proxy\" {\n  inputs = { sites = null }\n}\n",
+		"proxy/Alphasfile": strings.Replace(pkgProxy, "default     = {}", `default     = { base = { host = "base.test", port = 1 } }`, 1),
+	})
+	af := openTree(t, root)
+	if got := fmt.Sprint(svcByName(af, "proxy/proxy/proxy").Runtime.Vars["routes"]); got != "base:base.test=1/false;" {
+		t.Errorf("routes = %q; a map every import sets to null takes its default", got)
+	}
+}

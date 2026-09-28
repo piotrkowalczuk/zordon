@@ -95,10 +95,14 @@ func TestLoadTree_importErrors(t *testing.T) {
 	cases := map[string]struct {
 		entry, fragment, want string
 	}{
-		"empty modules":   {`import "./Alphasfile.f" { modules = [] }`, `module "a" {}`, "modules must name at least one module"},
-		"missing modules": {`import "./Alphasfile.f" {}`, `module "a" {}`, `"modules" is required`},
-		"unknown module":  {`import "./Alphasfile.f" { modules = ["zz"] }`, "module \"a\" {}\nmodule \"b\" {}\n", `module "zz" is not declared in`},
-		"git import":      {"import \"./Alphasfile.f\" {\n  modules = [\"a\"]\n  git { url = \"github.com/x/y\" }\n}\n", `module "a" {}`, "remote imports (git {}) are not supported yet"},
+		"empty modules":            {`import "./Alphasfile.f" { modules = [] }`, `module "a" {}`, "modules must name at least one module"},
+		"missing modules":          {`import "./Alphasfile.f" {}`, `module "a" {}`, `"modules" is required`},
+		"unknown module":           {`import "./Alphasfile.f" { modules = ["zz"] }`, "module \"a\" {}\nmodule \"b\" {}\n", `module "zz" is not declared in`},
+		"inputs on a fragment":     {"import \"./Alphasfile.f\" {\n  modules = [\"a\"]\n  inputs  = { x = 1 }\n}\n", `module "a" {}`, "inputs and features are passed to a package directory, not to a fragment file"},
+		"features on a fragment":   {"import \"./Alphasfile.f\" {\n  modules  = [\"a\"]\n  features = [\"x\"]\n}\n", `module "a" {}`, "inputs and features are passed to a package directory, not to a fragment file"},
+		"alias on a fragment":      {`import "./Alphasfile.f" "x" { modules = ["a"] }`, `module "a" {}`, "an alias names a package; a fragment's modules keep their declared names"},
+		"package file as fragment": {`import "./Alphasfile.f" { modules = ["a"] }`, `package "p" {}`, "is a package's file; import its directory instead"},
+		"git import":               {"import \"./Alphasfile.f\" {\n  modules = [\"a\"]\n  git { url = \"github.com/x/y\" }\n}\n", `module "a" {}`, "remote imports (git {}) are not supported yet"},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -188,6 +192,26 @@ func TestLoadTree_bytesSingleFileEqualsSource(t *testing.T) {
 	}
 	if !bytes.Equal(tree.Bytes(), []byte(src)) {
 		t.Errorf("a manifest without imports must hash exactly like before")
+	}
+}
+
+func TestLoadTree_bytesChangeWhenPackageChanges(t *testing.T) {
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{
+		"Alphasfile":   "import \"./p\" {}\n",
+		"p/Alphasfile": `package "p" {}`,
+	})
+	before, err := LoadTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, dir, map[string]string{"p/Alphasfile": "package \"p\" {\n  module \"m\" {}\n}\n"})
+	after, err := LoadTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invocation.ConfigHash(before.Bytes(), nil) == invocation.ConfigHash(after.Bytes(), nil) {
+		t.Error("editing a package's Alphasfile must change the manifest hash")
 	}
 }
 

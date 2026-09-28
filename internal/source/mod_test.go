@@ -1,6 +1,7 @@
 package source
 
 import (
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,43 @@ func TestModFetcher(t *testing.T) {
 	}
 	if _, err := f.Resolve("github.com/acme/infra", "nope"); err == nil || !strings.Contains(err.Error(), `no branch, tag or commit "nope"`) {
 		t.Errorf("Resolve of an unknown ref: %v", err)
+	}
+}
+
+func TestModFetcher_concurrent(t *testing.T) {
+	upstream := taggedRepo(t)
+	gitHome := t.TempDir()
+	cfg := "[url \"file://" + upstream + "\"]\n\tinsteadOf = https://github.com/acme/infra.git\n"
+	if err := zfs.AtomicWrite(filepath.Join(gitHome, ".gitconfig"), []byte(cfg)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", gitHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(gitHome, ".config"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	f := ModFetcher{Home: t.TempDir()}
+	dest := filepath.Join(t.TempDir(), "checkout")
+	want := revParse(t, upstream, "v1")
+	errs := make(chan error, 6)
+	for range 6 {
+		go func() {
+			commit, err := f.Resolve("github.com/acme/infra", "v1")
+			if err == nil && commit != want {
+				err = fmt.Errorf("Resolve = %q, want %q", commit, want)
+			}
+			if err == nil {
+				err = f.Materialize("github.com/acme/infra", commit, dest)
+			}
+			errs <- err
+		}()
+	}
+	for range 6 {
+		if err := <-errs; err != nil {
+			t.Errorf("two zordons fetching one repository at once must both succeed: %v", err)
+		}
+	}
+	if got := revParse(t, dest, "HEAD"); got != want {
+		t.Errorf("checkout HEAD = %q, want %q", got, want)
 	}
 }
 

@@ -111,7 +111,7 @@ func packageRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) er
 }
 
 // refScope names where a service's reference sits and where the missing
-// import or require belongs.
+// import belongs.
 func refScope(sb *serviceBlock) (scope, keyword, where string) {
 	if p, inPkg := packageOf(sb.module); inPkg {
 		return fmt.Sprintf("package %q (%s)", p, sb.file.path), "import", fmt.Sprintf("inside package %q", p)

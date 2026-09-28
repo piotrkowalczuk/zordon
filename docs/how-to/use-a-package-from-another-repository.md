@@ -65,4 +65,5 @@ require "github.com/piotrkowalczuk/zordon" { ref = "main" }
 import "github.com/piotrkowalczuk/zordon/examples/package" {}
 ```
 
+See [examples/remote](https://github.com/piotrkowalczuk/zordon/tree/main/examples/remote) for `zordon pkg get`, the lock and `zordon pkg update` in one runnable script.
 See [Packages](../alphasfile.md#packages) and [Remote imports](../alphasfile.md#remote-imports) for every rule.

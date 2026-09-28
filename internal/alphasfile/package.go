@@ -829,7 +829,7 @@ func (t *Tree) gatedTarget(trav hcl.Traversal, module, selfRef string) (offRecor
 	return offRecord{}, false
 }
 
-// offLink finds a switched-off import or require of target in a module's
+// offLink finds a switched-off import of target in a module's
 // scope or in the scope of the package it belongs to.
 func (t *Tree) offLink(module, target string) (offRecord, bool) {
 	if rec, ok := t.offs.links[module][target]; ok {

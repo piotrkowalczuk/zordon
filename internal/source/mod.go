@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 // SplitIdentity splits a Go-style identity such as
@@ -84,6 +86,11 @@ type ModFetcher struct {
 
 // Resolve fetches repo and returns the commit ref points at now.
 func (f ModFetcher) Resolve(repo, ref string) (string, error) {
+	release, err := f.lock(repo)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	ctx := context.Background()
 	p, err := NewPrimary(f.Home, repo, "", ref, nil)
 	if err != nil {
@@ -101,6 +108,11 @@ func (f ModFetcher) Materialize(repo, commit, dest string) error {
 	if !IsCommit(commit) {
 		return fmt.Errorf("check out %s: %q is not a commit hash", repo, commit)
 	}
+	release, err := f.lock(repo)
+	if err != nil {
+		return err
+	}
+	defer release()
 	p, err := NewPrimary(f.Home, repo, "", commit, nil)
 	if err != nil {
 		return err
@@ -109,6 +121,12 @@ func (f ModFetcher) Materialize(repo, commit, dest string) error {
 		return fmt.Errorf("check out %s@%s: %w", repo, commit, err)
 	}
 	return nil
+}
+
+// lock serializes fetches and checkouts of repo across zordon processes,
+// which share its bare clone and checkouts under the home.
+func (f ModFetcher) lock(repo string) (func(), error) {
+	return zfs.AcquireLock(filepath.Join(f.Home, "locks"), "mod-"+strings.ReplaceAll(repo, "/", "_"))
 }
 
 // captureRunner runs git quietly and folds its output into the error, so a
