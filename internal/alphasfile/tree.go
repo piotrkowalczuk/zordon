@@ -2,6 +2,7 @@ package alphasfile
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -65,6 +66,10 @@ type ImportEdge struct {
 	// Origin is where a remote file came from: "search <dir>" or
 	// "<repo>@<commit>"; empty for a local file.
 	Origin string
+	// Remote is the identity of the imported file's directory when it was
+	// reached through a remote import, directly or by a relative import
+	// from such a file; empty otherwise.
+	Remote string
 }
 
 // UnusedModule is a module or package of a loaded file that is not part of
@@ -184,6 +189,8 @@ type treeFile struct {
 	confine string
 	repoAt  string
 	origin  string
+	// remote is ImportEdge.Remote for this file.
+	remote string
 }
 
 // pkgInstance is a package in the stack, instantiated once under its name:
@@ -362,6 +369,7 @@ func (t *Tree) load(path string, importer *treeFile, imp *importBlock, pkg *pkgI
 	}
 	f := newTreeFile(path, path, b, root)
 	f.confine, f.repoAt, f.origin = res.confine, res.repoAt, res.origin
+	f.remote = remoteDir(importer, imp, pkg != nil, f.dir)
 	if err := t.adopt(f, pkg); err != nil {
 		return nil, err
 	}
@@ -722,7 +730,28 @@ func (t *Tree) addEdge(f *treeFile, modules []string, pkg string, features, by [
 		}
 		return
 	}
-	t.edges = append(t.edges, ImportEdge{Path: path, Modules: append([]string(nil), modules...), Package: pkg, Features: features, ImportedBy: by, Origin: f.origin})
+	t.edges = append(t.edges, ImportEdge{Path: path, Modules: append([]string(nil), modules...), Package: pkg, Features: features, ImportedBy: by, Origin: f.origin, Remote: f.remote})
+}
+
+// remoteDir is the identity dir is known by when a file in it was reached
+// through a remote import: the import's path, or the importer's identity
+// joined with the relative path it imported.
+func remoteDir(importer *treeFile, imp *importBlock, isPackage bool, dir string) string {
+	switch {
+	case imp == nil:
+		return ""
+	case !isLocalPath(imp.Path) && isPackage:
+		return imp.Path
+	case !isLocalPath(imp.Path):
+		return path.Dir(imp.Path)
+	case importer == nil || importer.remote == "" || !strings.HasPrefix(imp.Path, "."):
+		return ""
+	}
+	rel, err := filepath.Rel(importer.dir, dir)
+	if err != nil {
+		return ""
+	}
+	return path.Join(importer.remote, filepath.ToSlash(rel))
 }
 
 // settingsFor returns the inputs and features a scope sees: its package's,

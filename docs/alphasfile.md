@@ -228,6 +228,7 @@ import "./caddy" "edge" {
 | target | an import whose path resolves to a directory whose `Alphasfile` holds a package block; a directory without one is an error |
 | name | the alias label when given, else the package block's label; unique among packages in the stack |
 | identity | a module of a package is `package.<p>.module.<m>`; its services are `package.<p>.module.<m>.service.<tc>.<svc>`, shown as `<p>/<m>/<svc>` |
+| short name | `zordon status` shows `<p>/<svc>` for a service of a module named like its package, and `zordon start` accepts it too; package and module names are unique in the stack, so it names one service |
 | inside a package | `module.<m>` is one of the package's own modules; another package is `package.<q>.module.<m>` |
 | import at the entrypoint's top level | the final word on the package's features; every other import's features must be among them, while its inputs join as in [Inputs](#inputs) |
 | any other import | turns features on when the entrypoint does not import the package |

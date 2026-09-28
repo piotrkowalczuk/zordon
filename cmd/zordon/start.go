@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -43,8 +44,16 @@ func parsePicks(args []string) []string {
 // referenced dep would fail at configure time, not start it.
 func pickServices(all []*alphasfile.Service, picks []string) ([]*alphasfile.Service, error) {
 	byName := make(map[string]*alphasfile.Service, len(all))
+	short := make(map[string]string, len(all))
 	for _, s := range all {
 		byName[s.Name()] = s
+		short[s.ShortName()] = s.Name()
+	}
+	picks = slices.Clone(picks)
+	for i, p := range picks {
+		if _, ok := byName[p]; !ok && short[p] != "" {
+			picks[i] = short[p]
+		}
 	}
 	var unknown []string
 	for _, p := range picks {

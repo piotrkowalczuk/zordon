@@ -376,6 +376,14 @@ func (s *Service) Name() string {
 	return ""
 }
 
+// ShortName is Name shortened as ShortName does.
+func (s *Service) ShortName() string {
+	if s.Runtime != nil {
+		return ShortName(s.Module, s.Runtime.Name)
+	}
+	return ""
+}
+
 // ID is the canonical service id (see ServiceRef).
 func (s *Service) ID() string {
 	if s.Runtime == nil {

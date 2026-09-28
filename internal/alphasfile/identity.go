@@ -100,6 +100,16 @@ func DisplayName(module, name string) string {
 	return module + "/" + name
 }
 
+// ShortName is DisplayName without the module of a package when the module
+// is named like the package: <p>/<svc> for <p>/<p>/<svc>. Package and
+// module names are unique across the stack, so it names one service.
+func ShortName(module, name string) string {
+	if p, m, ok := strings.Cut(module, "/"); ok && p == m {
+		return p + "/" + name
+	}
+	return DisplayName(module, name)
+}
+
 // SplitDisplayName is the inverse of DisplayName.
 func SplitDisplayName(display string) (module, name string) {
 	if i := strings.LastIndexByte(display, '/'); i >= 0 {

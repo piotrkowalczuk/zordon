@@ -53,7 +53,7 @@ assert_contains "$plan" "# import $ROOT/examples/package/caddy as caddy [feature
 assert_contains "$plan" "# import $ROOT/examples/package/coredns as coredns (imported by package caddy)" "feature dns imports coredns"
 
 status="$(cd "$ALL" && zordon status --agent)"
-for svc in caddy/caddy/caddy shop/shop/hugo blog/blog/hugo coredns/coredns/coredns; do
+for svc in caddy/caddy shop/hugo blog/hugo coredns/coredns; do
 	assert_contains "$status" "$svc" "$svc is part of the stack"
 done
 http="$(caddy_http "$ALL")"
@@ -77,8 +77,8 @@ stop_place "$ALL"
 # --- the shop alone: it brings caddy, not the blog ---
 start_place "$SHOP"
 status="$(cd "$SHOP" && zordon status --agent)"
-assert_contains "$status" "caddy/caddy/caddy" "the shop brings the caddy it registers with"
-case "$status" in *blog/blog/hugo* | *coredns/coredns/coredns*) fail "the blog or coredns started with the shop alone:\n$status" ;; esac
+assert_contains "$status" "caddy/caddy" "the shop brings the caddy it registers with"
+case "$status" in *blog/hugo* | *coredns/coredns*) fail "the blog or coredns started with the shop alone:\n$status" ;; esac
 pass "no blog and no coredns"
 http="$(caddy_http "$SHOP")"
 page="$(site "$http" shop.test)" || fail "caddy did not serve shop.test on $http"
@@ -96,8 +96,8 @@ case "$plan" in *"as coredns"*) fail "a switched-off import must not pull in its
 pass "switched-off imports pull in nothing"
 
 status="$(cd "$CADDY" && zordon status --agent)"
-assert_contains "$status" "caddy/caddy/caddy" "caddy runs"
-case "$status" in *hugo* | *coredns/coredns/coredns*) fail "a site or coredns started with caddy alone:\n$status" ;; esac
+assert_contains "$status" "caddy/caddy" "caddy runs"
+case "$status" in *hugo* | *coredns/coredns*) fail "a site or coredns started with caddy alone:\n$status" ;; esac
 pass "no site and no coredns"
 
 http="$(caddy_http "$CADDY")"

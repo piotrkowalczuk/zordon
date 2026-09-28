@@ -847,49 +847,21 @@ func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome 
 		return err
 	}
 
+	wd, _ := zfs.Getwd()
 	anyRunning := false
 	for i, lv := range levels {
 		if i > 0 {
 			fmt.Fprintln(out)
 		}
-		marker := ""
-		if lv.isInvocation {
-			marker = fmt.Sprintf(" (invocation, workspace=%s)", lv.inv.Workspace)
+		fmt.Fprint(out, statusHeader(lv, wd))
+		if imports := statusImports(lv.tree, wd); imports != "" {
+			fmt.Fprint(out, "\n"+imports)
 		}
-		fmt.Fprintf(out, "# [%s] %s%s\n", lv.inv.FsHash, lv.afPath, marker)
-		fmt.Fprint(out, importLines("#   ", lv.tree))
-
 		if lv.state == nil {
-			fmt.Fprintln(out, "  alpha: not running")
 			continue
 		}
 		anyRunning = true
-		st := lv.state
-		fmt.Fprintf(out, "  alpha pid=%d started=%s\n", st.PID, st.StartedAt)
-		if len(st.Services) == 0 {
-			fmt.Fprintln(out, "  services: (none configured yet)")
-			continue
-		}
-		runningByName := make(map[string]protocol.ServiceStatus, len(st.Running))
-		for _, r := range st.Running {
-			runningByName[r.Name] = r
-		}
-		fmt.Fprintf(out, "  services (%d):\n", len(st.Services))
-		for _, s := range st.Services {
-			state := "stopped"
-			if status, ok := runningByName[s.Name()]; ok {
-				state = serviceState(ctx, s, status)
-			}
-			fmt.Fprintf(out, "    - [%s] %s — %s\n", s.Toolchain, s.Name(), state)
-			if s.Runtime != nil && s.Runtime.Print != "" {
-				// Plain text: the value is the composed (interpolated)
-				// string; the terminal linkifies any URL itself.
-				fmt.Fprintf(out, "        %s\n", s.Runtime.Print)
-			}
-			if co := checkoutStatus(ctx, s, lv.inv.Workspace); co != "" {
-				fmt.Fprintf(out, "        %s\n", co)
-			}
-		}
+		fmt.Fprint(out, "\n"+statusServices(ctx, lv.state, lv.inv.Workspace))
 	}
 	if !anyRunning {
 		return errors.New("no alpha running in the federation chain")

@@ -15,7 +15,7 @@ plan="$(zordon --agent plan)" || fail "zordon plan failed"
 assert_contains "$plan" "# import $EXROOT/gateway as gateway [features: access_log] (imported by package billing, package orders)" "orders and billing import the gateway; the entrypoint turns on access_log"
 
 status="$(zordon status --agent)"
-for svc in gateway/gateway/gateway orders/orders/orders billing/billing/billing; do
+for svc in gateway/gateway orders/orders billing/billing; do
 	assert_contains "$status" "$svc" "$svc is part of the stack"
 done
 
