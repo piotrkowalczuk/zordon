@@ -17,7 +17,7 @@ package "proxy" {
     }
   }
 
-  module "proxy" {
+  component "proxy" {
     service "go" "proxy" {
       git { url = "github.com/x/proxy" }
       vars = { routes = "%{ for k, s in inputs.sites }${k}:${s.host}=${s.port}/${s.tls};%{ endfor }" }
@@ -35,13 +35,13 @@ package %[1]q {
       sites = {
         %[1]s = {
           host = "%[1]s.test"
-          port = module.site.service.go.site.vars.port
+          port = component.site.service.go.site.vars.port
         }
       }
     }
   }
 
-  module "site" {
+  component "site" {
     service "go" "site" {
       git { url = "github.com/x/site" }
       vars = { port = %[2]d }
@@ -172,7 +172,7 @@ func TestOpen_inputRefErrors(t *testing.T) {
 			"p/Alphasfile": `
 package "p" {
   inputs = { sites = { description = "Sites.", type = map(object({ host = string })), default = {} } }
-  module "m" {
+  component "m" {
     service "go" "s" {
       git { url = "github.com/x/s" }
       vars = { n = inputs.nope }

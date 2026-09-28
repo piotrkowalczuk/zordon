@@ -63,7 +63,7 @@ Lowest to highest, last wins:
 1. `alpha`'s process environment, **filtered by `sysenv`** (closed-world
    whitelist — anything not listed is stripped; defaults to empty)
 2. **toolchain env** — `mise env --json` output for the pin the service
-   runs under (its module's own `toolchain { }`, else its package's
+   runs under (its component's own `toolchain { }`, else its package's
    `toolchain { }`, else the top-level `toolchain.<lang>.version`), with per-language pin
    reinforcement (e.g. `GOTOOLCHAIN=local` for Go), then the user's
    `toolchain.<lang>.env` overlay
@@ -109,15 +109,15 @@ come up in full (shared infra). Anything not in the closure is omitted
 from the Configure payload, so on reconfigure `alpha` treats those as
 "removed from the manifest" and stops them. A subsequent
 `zordon start` with no picks brings the rest back up. Unknown picks
-fail before contacting alpha and list the services, modules and packages
+fail before contacting alpha and list the services, components and packages
 that exist.
 
 | pick | selects |
 | --- | --- |
 | `<svc>` | the service named `svc` wherever it lives, when no other service has that name |
-| `<m>` | every service of module `m` |
+| `<c>` | every service of component `m` |
 | `<p>` | every service of package `p` |
-| `<p>/<m>` | every service of module `m` of package `p` |
+| `<p>/<c>` | every service of component `m` of package `p` |
 | `m/<svc>`, `p/m/<svc>`, `p/<svc>` | one service by its full or short name |
 
 A pick that selects different services in two of these readings — two

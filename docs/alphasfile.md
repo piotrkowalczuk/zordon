@@ -77,117 +77,117 @@ service "go" "my-app" {
 }
 ```
 
-### Modules
+### Components
 
-A `module "<name>" { }` block is a namespace for services with an optional toolchain pin of its own.
-Two modules may each declare a `service "go" "db"`; the module keeps them apart.
+A `component "<name>" { }` block is a namespace for services with an optional toolchain pin of its own.
+Two components may each declare a `service "go" "db"`; the component keeps them apart.
 
 ```hcl
 toolchain {
-  go { version = "1.27.0" }            # the default module's pin, and the fallback for every module
+  go { version = "1.27.0" }            # the default component's pin, and the fallback for every component
 }
 
-service "go" "gateway" {               # top-level = the default module; identity unchanged
-  vars = { upstream = module.payments.service.go.api.vars.port }
-  runtime { after = [module.payments.service.go.api.runtime.ready] }
+service "go" "gateway" {               # top-level = the default component; identity unchanged
+  vars = { upstream = component.payments.service.go.api.vars.port }
+  runtime { after = [component.payments.service.go.api.runtime.ready] }
 }
 
-module "payments" {
+component "payments" {
   toolchain {
     go { version = "1.22.0" }          # only payments' services run under this pin
   }
 
   service "go" "db" { … }
   service "go" "api" {
-    vars = { db = service.go.db.vars.port }        # bare `service.*` = this module
+    vars = { db = service.go.db.vars.port }        # bare `service.*` = this component
     runtime { after = [service.go.db.runtime.ready, toolchain.go.ready] }
   }
 }
 ```
 
-| aspect | default module (top level) | inside `module "m"` |
+| aspect | default component (top level) | inside `component "m"` |
 |---|---|---|
-| canonical id | `service.<tc>.<name>` | `module.m.service.<tc>.<name>` |
+| canonical id | `service.<tc>.<name>` | `component.m.service.<tc>.<name>` |
 | display name (picks, `zordon status`, checkout dir, worktree branch) | `<name>` | `m/<name>` |
-| bare `service.<tc>.<name>` in expressions | default module | module `m` only, no fallback |
-| cross-module reference | `module.<other>.service.<tc>.<name>…` | `module.<other>.service.<tc>.<name>…` |
-| `toolchain.<lang>.ready` | `toolchain.<lang>@ready` | `module.m.toolchain.<lang>@ready` for the module's own pin, else `toolchain.<lang>@ready` |
-| `fs::bin()` and build output | `<state>/bin`, artifact `<name>` | `<state>/bin/m`, artifact `<name>` (a block moved into a module keeps `${fs::bin()}/${self.name}` unchanged) |
+| bare `service.<tc>.<name>` in expressions | default component | component `m` only, no fallback |
+| cross-component reference | `component.<other>.service.<tc>.<name>…` | `component.<other>.service.<tc>.<name>…` |
+| `toolchain.<lang>.ready` | `toolchain.<lang>@ready` | `component.m.toolchain.<lang>@ready` for the component's own pin, else `toolchain.<lang>@ready` |
+| `fs::bin()` and build output | `<state>/bin`, artifact `<name>` | `<state>/bin/m`, artifact `<name>` (a block moved into a component keeps `${fs::bin()}/${self.name}` unchanged) |
 | state dirs (`fs::etc()`, `fs::var()`) | `<state>/etc/<name>` | `<state>/etc/m/<name>` |
-| `zordon get` path | `service.<tc>.<name>.…` | `module.m.service.<tc>.<name>.…` |
+| `zordon get` path | `service.<tc>.<name>.…` | `component.m.service.<tc>.<name>.…` |
 | MCP provision tool | `provision__<tc>_<name>__<step>` | `provision__<tc>_m_<name>__<step>` |
 
 Rules:
 
-- A module name is a plain identifier (`[A-Za-z][A-Za-z0-9_-]*`) and is declared once across all loaded files.
-- A module may not share its name with a top-level service, because both would own `<state>/{bin,src,etc,var}/<name>` and the branch `zordon/<ws>/<name>`.
-- Services are unique per `(module, toolchain, name)`, so the same name in two modules is not a duplicate.
-- Inside a module the default module is not addressable, neither this level's nor a federation parent's; a parent's modules stay reachable as `module.<m>.…`.
-- `self.module` holds the declaring module's name (empty at top level), handy for `-name "${self.module}/${self.name}"` style flags.
-- `fs::service::bin`, `fs::service::etc` and `fs::service::var` accept `module.<m>.service.<tc>.<name>` references.
-- A module's `toolchain { }` pins are keyed `<m>/<lang>` in the resolved manifest and the plan renders them inside the module block.
-- `env`, `dotenv` and `sysenv` stay top-level only; module-scoped env is not supported.
+- A component name is a plain identifier (`[A-Za-z][A-Za-z0-9_-]*`) and is declared once across all loaded files.
+- A component may not share its name with a top-level service, because both would own `<state>/{bin,src,etc,var}/<name>` and the branch `zordon/<ws>/<name>`.
+- Services are unique per `(component, toolchain, name)`, so the same name in two components is not a duplicate.
+- Inside a component the default component is not addressable, neither this level's nor a federation parent's; a parent's components stay reachable as `component.<c>.…`.
+- `self.component` holds the declaring component's name (empty at top level), handy for `-name "${self.component}/${self.name}"` style flags.
+- `fs::service::bin`, `fs::service::etc` and `fs::service::var` accept `component.<c>.service.<tc>.<name>` references.
+- A component's `toolchain { }` pins are keyed `<c>/<lang>` in the resolved manifest and the plan renders them inside the component block.
+- `env`, `dotenv` and `sysenv` stay top-level only; component-scoped env is not supported.
 
-See [Pin different toolchain versions per module](how-to/pin-different-toolchain-versions.md) for the recipe and [examples/modules](https://github.com/piotrkowalczuk/zordon/tree/main/examples/modules) for a runnable stack.
+See [Pin different toolchain versions per component](how-to/pin-different-toolchain-versions.md) for the recipe and [examples/components](https://github.com/piotrkowalczuk/zordon/tree/main/examples/components) for a runnable stack.
 
 ### Imports
 
-An `import` block pulls named modules out of another file into the stack.
-At the entrypoint's top level it composes the stack; inside a module it declares what that module depends on.
-A module is the only unit of import; a file is just a container that may hold several modules.
+An `import` block pulls named components out of another file into the stack.
+At the entrypoint's top level it composes the stack; inside a component it declares what that component depends on.
+A component is the only unit of import; a file is just a container that may hold several components.
 
 ```hcl
 # Alphasfile (entrypoint)
 import "./services/apps/Alphasfile.apps" {
-  modules = ["app", "billing"]
+  components = ["app", "billing"]
 }
 
 # services/apps/Alphasfile.apps (fragment)
-module "app" {
+component "app" {
   import "../kafka/Alphasfile.kafka" {
-    modules = ["kafka"]
+    components = ["kafka"]
   }
 
   service "go" "app" {
     runtime {
       provision "topic" {
-        cmd = module.kafka.service.go.kafka.runtime.provision.create-topic
+        cmd = component.kafka.service.go.kafka.runtime.provision.create-topic
       }
     }
   }
 }
-module "billing" { … }
+component "billing" { … }
 
 # services/kafka/Alphasfile.kafka (fragment)
-module "kafka" { service "go" "kafka" { … } }
+component "kafka" { service "go" "kafka" { … } }
 ```
 
 | rule | behavior |
 |---|---|
-| syntax | `import "<path>" { modules = ["<m>", …] }`, repeatable; `modules` is required and non-empty for a fragment |
-| placement | the entrypoint's top level, a `module` block in any file, and a `package` block |
+| syntax | `import "<path>" { components = ["<m>", …] }`, repeatable; `components` is required and non-empty for a fragment |
+| placement | the entrypoint's top level, a `component` block in any file, and a `package` block |
 | path | starts with `./`, `../`, `/` or `~/`; relative paths resolve against the declaring file's directory; any other spelling is a [remote identity](#remote-imports) |
 | entrypoint vs fragment | a file named exactly `Alphasfile` is an entrypoint and cannot be imported as a file; import its directory to use it as a [package](#packages), or a fragment, by convention `Alphasfile.<name>` |
-| fragment content | `module` blocks and `require` blocks only; a top-level `import`, `service`, `toolchain`, `env`, `dotenv`, `sysenv` and `workspace` are errors |
-| loading | every file loads once; diamonds and cycles between files are fine; imports inside modules outside the stack are loaded and checked too |
-| stack | the entrypoint's modules, the modules its imports name, and, repeated until nothing changes, the modules imported by any module already in the stack; every other module is left out |
-| visibility at the entrypoint's top level | the entrypoint's modules and the modules its imports name |
-| visibility inside a module | the module itself and what it imports; in the entrypoint also every other module of the entrypoint, because all of them are in the stack |
-| sibling in a fragment | imported like any other module, by the fragment's own file name: `import "./Alphasfile.apps" { modules = ["billing"] }` |
+| fragment content | `component` blocks and `require` blocks only; a top-level `import`, `service`, `toolchain`, `env`, `dotenv`, `sysenv` and `workspace` are errors |
+| loading | every file loads once; diamonds and cycles between files are fine; imports inside components outside the stack are loaded and checked too |
+| stack | the entrypoint's components, the components its imports name, and, repeated until nothing changes, the components imported by any component already in the stack; every other component is left out |
+| visibility at the entrypoint's top level | the entrypoint's components and the components its imports name |
+| visibility inside a component | the component itself and what it imports; in the entrypoint also every other component of the entrypoint, because all of them are in the stack |
+| sibling in a fragment | imported like any other component, by the fragment's own file name: `import "./Alphasfile.apps" { components = ["billing"] }` |
 | visibility error | names the expression and the missing `import` and where it goes |
-| duplicates | a module name is declared once across all loaded files |
+| duplicates | a component name is declared once across all loaded files |
 | relative `src { path }` | resolves against the directory of the file that declares the service |
 | `cfg::hash()` and drift | covers the bytes of every loaded file, so editing a fragment restarts a level like editing its Alphasfile |
-| `zordon plan` | prints `# import <file> [modules]` per file the stack takes modules from and `# unused module <m> in <file>` under the level header |
+| `zordon plan` | prints `# import <file> [components]` per file the stack takes components from and `# unused component <m> in <file>` under the level header |
 
-An import inside a module joins the stack only with that module, so taking one module from a shared file never starts what its neighbours need.
+An import inside a component joins the stack only with that component, so taking one component from a shared file never starts what its neighbours need.
 
 See [Split an Alphasfile across files](how-to/split-an-alphasfile-across-files.md) for the recipe and [examples/import](https://github.com/piotrkowalczuk/zordon/tree/main/examples/import) for a runnable stack.
 
 ### Packages
 
-A package is the API between a stack and the modules that implement it.
-Its file holds one `package` block: what goes in (`features`, `inputs`), what comes out (`outputs`), its imports, and its modules.
+A package is the API between a stack and the components that implement it.
+Its file holds one `package` block: what goes in (`features`, `inputs`), what comes out (`outputs`), its imports, and its components.
 
 ```hcl
 # caddy/Alphasfile
@@ -200,7 +200,7 @@ package "caddy" {
     sites  = { description = "Hosts to route, by site.", type = map(object({ host = string, upstream = string })), default = {} }
   }
   outputs = {
-    url = { description = "Where Caddy serves.", type = string, value = "http://127.0.0.1:${module.caddy.service.go.caddy.vars.http}" }
+    url = { description = "Where Caddy serves.", type = string, value = "http://127.0.0.1:${component.caddy.service.go.caddy.vars.http}" }
   }
 
   import "../coredns" {
@@ -208,7 +208,7 @@ package "caddy" {
     inputs  = { zone = inputs.domain }
   }
 
-  module "caddy" {
+  component "caddy" {
     service "go" "caddy" { … }
   }
 }
@@ -223,14 +223,14 @@ import "./caddy" "edge" {
 | rule | behavior |
 |---|---|
 | file | a package's `Alphasfile` holds exactly one `package "<name>" {}` block and nothing outside it |
-| block content | `features`, `inputs`, `outputs`, `import`, `require`, `toolchain` and `module` blocks; `env`, `dotenv`, `sysenv`, `workspace` and services outside a module are errors |
+| block content | `features`, `inputs`, `outputs`, `import`, `require`, `toolchain` and `component` blocks; `env`, `dotenv`, `sysenv`, `workspace` and services outside a component are errors |
 | declarations | `features`, `inputs` and `outputs` each map a name to `{ description = "…", … }`; the description is required |
 | target | an import whose path resolves to a directory whose `Alphasfile` holds a package block; a directory without one is an error |
 | name | the alias label when given, else the package block's label; unique among packages in the stack |
-| identity | a module of a package is `package.<p>.module.<m>`; its services are `package.<p>.module.<m>.service.<tc>.<svc>`, shown as `<p>/<m>/<svc>` |
-| short name | `zordon status` shows `<p>/<svc>` for a service of a module named like its package |
-| picks | `zordon start`, `zordon plan` and `zordon workspace create` pick a package as `<p>`, one of its modules as `<p>/<m>`, and a service by its own name when that name is unique in the stack; see [picks](lifecycle.md) |
-| inside a package | `module.<m>` is one of the package's own modules; another package is `package.<q>.module.<m>` |
+| identity | a component of a package is `package.<p>.component.<c>`; its services are `package.<p>.component.<c>.service.<tc>.<svc>`, shown as `<p>/<c>/<svc>` |
+| short name | `zordon status` shows `<p>/<svc>` for a service of a component named like its package |
+| picks | `zordon start`, `zordon plan` and `zordon workspace create` pick a package as `<p>`, one of its components as `<p>/<c>`, and a service by its own name when that name is unique in the stack; see [picks](lifecycle.md) |
+| inside a package | `component.<c>` is one of the package's own components; another package is `package.<q>.component.<c>` |
 | import at the entrypoint's top level | the final word on the package's features; every other import's features must be among them, while its inputs join as in [Inputs](#inputs) |
 | any other import | turns features on when the entrypoint does not import the package |
 | features from several imports | unite; every importer gets what it needs |
@@ -238,13 +238,13 @@ import "./caddy" "edge" {
 | unmet need | a feature the entrypoint leaves off is an error on the entrypoint's import that quotes the feature's description and names the importer |
 | entrypoint imports | several imports of the same package at the entrypoint's top level must pass the same features and the same input expressions, compared as written |
 | cycle | packages that import each other cannot be configured first; importing one of them at the entrypoint's top level breaks the cycle |
-| dependencies | a package depends on packages, never on a fragment's modules |
-| toolchain | the package's `toolchain {}` pins every module that has none of its own |
-| visibility | a package's modules see each other and whatever the package or the module imports |
+| dependencies | a package depends on packages, never on a fragment's components |
+| toolchain | the package's `toolchain {}` pins every component that has none of its own |
+| visibility | a package's components see each other and whatever the package or the component imports |
 | federation | importing a package that is a federation level of the invocation is an error, because it would run twice |
 | on its own | `zordon start` in the package's directory runs it with default inputs and no features; a required input is an error |
 | host variables | a service's process gets none unless the entrypoint passes them with `sysenv`; without `HOME`, zordon points Go's caches at `$ZORDON_HOME/go`, so a package builds without anything from the host |
-| `zordon plan` | prints `# import <dir> as <name> [features: …] (imported by …)` and renders `package "<p>" { module "<m>" { … } }` |
+| `zordon plan` | prints `# import <dir> as <name> [features: …] (imported by …)` and renders `package "<p>" { component "<m>" { … } }` |
 
 ### Features
 
@@ -256,7 +256,7 @@ package "coredns" {
     resolver = { description = "Writes /etc/resolver/<zone> with sudo, so a browser resolves the zone." }
   }
 
-  module "coredns" {
+  component "coredns" {
     service "go" "coredns" {
       sudo "resolver" {
         enabled = features.resolver
@@ -298,7 +298,7 @@ package "orders" {
   import "../gateway" {
     inputs = {
       routes = {
-        orders = { prefix = "/orders/", upstream = "127.0.0.1:${module.orders.service.go.orders.vars.port}" }
+        orders = { prefix = "/orders/", upstream = "127.0.0.1:${component.orders.service.go.orders.vars.port}" }
       }
     }
   }
@@ -333,8 +333,8 @@ Outputs are what a package gives back: where it listens, when it is ready, a val
 # gateway/Alphasfile
 package "gateway" {
   outputs = {
-    url   = { description = "Where the gateway listens.", type = string, value = "http://127.0.0.1:${module.gateway.service.go.gateway.vars.port}" }
-    ready = { description = "The gateway answers requests.", type = string, value = module.gateway.service.go.gateway.runtime.ready }
+    url   = { description = "Where the gateway listens.", type = string, value = "http://127.0.0.1:${component.gateway.service.go.gateway.vars.port}" }
+    ready = { description = "The gateway answers requests.", type = string, value = component.gateway.service.go.gateway.runtime.ready }
   }
   …
 }
@@ -343,7 +343,7 @@ package "gateway" {
 package "billing" {
   import "../gateway" {}
 
-  module "billing" {
+  component "billing" {
     service "go" "billing" {
       runtime {
         cmd   = ["billing", "-gateway", package.gateway.outputs.url]

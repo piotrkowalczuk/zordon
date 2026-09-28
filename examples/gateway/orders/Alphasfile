@@ -9,13 +9,13 @@ package "orders" {
       routes = {
         orders = {
           prefix   = "/orders/"
-          upstream = "127.0.0.1:${module.orders.service.go.orders.vars.port}"
+          upstream = "127.0.0.1:${component.orders.service.go.orders.vars.port}"
         }
       }
     }
   }
 
-  module "orders" {
+  component "orders" {
     service "go" "orders" {
       src {
         path = "../../.."

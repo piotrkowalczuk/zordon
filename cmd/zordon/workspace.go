@@ -335,7 +335,7 @@ func workspaceTargets(metas []*alphasfile.ServiceMeta, picks []string) ([]checko
 		sel, err := resolvePick(all, pick)
 		switch {
 		case errors.Is(err, errUnknownPick):
-			return nil, fmt.Errorf("unknown service, module or package %q (%s)", pick, available(all))
+			return nil, fmt.Errorf("unknown service, component or package %q (%s)", pick, available(all))
 		case err != nil:
 			return nil, err
 		case !sel.single && rev != "":
@@ -399,7 +399,7 @@ func runWorkspaceServiceRm(ctx context.Context, log *zlog.Logger, out io.Writer,
 		sel, err := resolvePick(metaPickables(metas), pick)
 		switch {
 		case errors.Is(err, errUnknownPick):
-			return fmt.Errorf("no service, module or package %q in %s", pick, af)
+			return fmt.Errorf("no service, component or package %q in %s", pick, af)
 		case err != nil:
 			return err
 		case sel.single:

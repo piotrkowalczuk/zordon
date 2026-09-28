@@ -15,7 +15,7 @@ service "go" "gateway" {
   git { url = "github.com/x/gw" }
   runtime { cmd = ["${fs::bin()}/${self.name}"] }
 }
-module "payments" {
+component "payments" {
   service "go" "db" {
     git { url = "github.com/x/db" }
     runtime { cmd = ["${fs::bin()}/${self.name}"] }
@@ -44,7 +44,7 @@ func TestCompile_debuggerToolsGoToModulePin(t *testing.T) {
 toolchain {
   go { version = "1.27.0" }
 }
-module "legacy" {
+component "legacy" {
   toolchain {
     go { version = "1.22.0" }
   }
@@ -64,7 +64,7 @@ module "legacy" {
 
 func TestCompile_debuggerInModuleWithoutPinFails(t *testing.T) {
 	err := compileErr(t, `
-module "m" {
+component "m" {
   service "go" "a" {
     git { url = "github.com/x/a" }
     debugger { enabled = true }
@@ -78,7 +78,7 @@ module "m" {
 
 func TestCompile_modulePkgToolchainBinRef(t *testing.T) {
 	af := compile(t, `
-module "m" {
+component "m" {
   toolchain {
     pkg {
       tools = { "aqua:ariga/atlas" = "0.29.0" }
@@ -100,7 +100,7 @@ module "m" {
 
 func TestCompile_moduleProvisionCmdRefWithArgumentsRejected(t *testing.T) {
 	err := compileErr(t, `
-module "infra" {
+component "infra" {
   service "go" "db" {
     git { url = "github.com/x/db" }
     runtime {
@@ -118,7 +118,7 @@ service "go" "app" {
   git { url = "github.com/x/app" }
   runtime {
     provision "use" {
-      cmd = module.infra.service.go.db.runtime.provision.seed
+      cmd = component.infra.service.go.db.runtime.provision.seed
     }
   }
 }
@@ -137,7 +137,7 @@ func TestCompile_federationParentModuleRef(t *testing.T) {
 	af := compile(t, `
 service "go" "app" {
   git { url = "github.com/x/app" }
-  vars = { db = module.infra.service.go.db.vars.port }
+  vars = { db = component.infra.service.go.db.vars.port }
 }
 `, parent)
 	if got := fmt.Sprint(svcByName(af, "app").Runtime.Vars["db"]); got != "5432" {
@@ -169,7 +169,7 @@ func TestParseServices_modules(t *testing.T) {
 service "go" "gateway" {
   src { path = "." }
 }
-module "payments" {
+component "payments" {
   service "go" "db" {
     src { path = "./db" }
   }

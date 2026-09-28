@@ -10,7 +10,7 @@ const pkgGated = `
 package "web" {
   features = { extra = { description = "Adds the extra blocks" } }
 
-  module "web" {
+  component "web" {
     service "go" "web" {
       git { url = "github.com/x/web" }
 
@@ -100,14 +100,14 @@ package "web" {
     enabled = features.metrics
   }
 
-  module "web" {
+  component "web" {
     service "go" "web" {
       git { url = "github.com/x/web" }
 
       file "scrape" {
         enabled = features.metrics
         path    = "/tmp/scrape"
-        body    = "port=${package.prom.module.prom.service.go.prom.vars.port}"
+        body    = "port=${package.prom.component.prom.service.go.prom.vars.port}"
       }
     }
   }
@@ -115,7 +115,7 @@ package "web" {
 `,
 		"prom/Alphasfile": `
 package "prom" {
-  module "prom" {
+  component "prom" {
     service "go" "prom" {
       git { url = "github.com/x/prom" }
       vars = { port = 9090 }
@@ -155,7 +155,7 @@ package "prom" {
   }
 }
 `,
-		"tsdb/Alphasfile": "package \"tsdb\" {\n  module \"tsdb\" {\n    nope = 1\n  }\n}\n",
+		"tsdb/Alphasfile": "package \"tsdb\" {\n  component \"tsdb\" {\n    nope = 1\n  }\n}\n",
 	})
 	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "tsdb/Alphasfile") {
 		t.Fatalf("a package behind a switched-off feature is loaded and checked too, got %v", err)
@@ -169,7 +169,7 @@ func TestLoadTree_referenceToSwitchedOffBlock(t *testing.T) {
 package "web" {
   features = { extra = { description = "Adds the extra blocks" } }
 
-  module "web" {
+  component "web" {
     service "go" "sidecar" {
       enabled = features.extra
       git { url = "github.com/x/sidecar" }
@@ -201,15 +201,15 @@ package "web" {
     enabled = features.metrics
   }
 
-  module "web" {
+  component "web" {
     service "go" "web" {
       git { url = "github.com/x/web" }
-      vars = { prom = package.prom.module.prom.service.go.prom.name }
+      vars = { prom = package.prom.component.prom.service.go.prom.name }
     }
   }
 }
 `,
-		"prom/Alphasfile": "package \"prom\" {\n  module \"prom\" {\n    service \"go\" \"prom\" {\n      git { url = \"github.com/x/prom\" }\n    }\n  }\n}\n",
+		"prom/Alphasfile": "package \"prom\" {\n  component \"prom\" {\n    service \"go\" \"prom\" {\n      git { url = \"github.com/x/prom\" }\n    }\n  }\n}\n",
 	})
 	_, err := LoadTree(root)
 	if err == nil || !strings.Contains(err.Error(), "references package.prom, which is switched off by enabled at") {
@@ -228,7 +228,7 @@ func TestLoadTree_enabledAcceptsFeatureExpressionsOnly(t *testing.T) {
 		t.Run(hint, func(t *testing.T) {
 			root := writeTree(t, t.TempDir(), map[string]string{
 				"Alphasfile": `import "./web" {}`,
-				"web/Alphasfile": "package \"web\" {\n  features = { extra = { description = \"Adds the extra blocks\" } }\n  inputs = { flag = { description = \"A flag.\", type = bool, default = true } }\n  module \"web\" {\n" +
+				"web/Alphasfile": "package \"web\" {\n  features = { extra = { description = \"Adds the extra blocks\" } }\n  inputs = { flag = { description = \"A flag.\", type = bool, default = true } }\n  component \"web\" {\n" +
 					"    service \"go\" \"web\" {\n      enabled = " + c.expr + "\n      git { url = \"github.com/x/web\" }\n    }\n  }\n}\n",
 			})
 			if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -245,7 +245,7 @@ func TestLoadTree_enabledCombinesFeatures(t *testing.T) {
 package "web" {
   features = { a = { description = "Turns on a" }, b = { description = "Turns on b" } }
 
-  module "web" {
+  component "web" {
     service "go" "both" {
       enabled = features.a && features.b
       git { url = "github.com/x/both" }
@@ -281,9 +281,9 @@ func TestLoadTree_unknownFeatureInImport(t *testing.T) {
 
 func TestLoadTree_enabledNeedsAPackage(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": `import "./Alphasfile.f" { modules = ["m"] }`,
+		"Alphasfile": `import "./Alphasfile.f" { components = ["m"] }`,
 		"Alphasfile.f": `
-module "m" {
+component "m" {
   service "go" "web" {
     enabled = true
     git { url = "github.com/x/web" }
@@ -353,7 +353,7 @@ func TestLoadTree_referenceToSwitchedOffProvision(t *testing.T) {
 package "web" {
   features = { seed = { description = "Seeds the database" } }
 
-  module "web" {
+  component "web" {
     service "go" "web" {
       git { url = "github.com/x/web" }
       runtime {

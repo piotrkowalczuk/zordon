@@ -15,7 +15,7 @@ func TestProvisions_moduleService(t *testing.T) {
 		t.Fatalf("len = %d", len(got))
 	}
 	p := got[0]
-	if p.ID != "module.payments.service.go.db.runtime.provision.seed" {
+	if p.ID != "component.payments.service.go.db.runtime.provision.seed" {
 		t.Errorf("ID = %q", p.ID)
 	}
 	if p.Module != "payments" || p.Service != "payments/db" {

@@ -1,5 +1,5 @@
-// Command auth_db is one of the module services of examples/modules; the
-// module block, not the binary, decides its identity (auth/db).
+// Command payments_db is one of the component services of examples/components;
+// the component block, not the binary, decides its identity (payments/db).
 package main
 
 import (
@@ -11,7 +11,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
-	name := flag.String("name", "", "display name (module/name)")
+	name := flag.String("name", "", "display name (component/name)")
 	upstream := flag.String("upstream", "", "label=addr pairs this service talks to")
 	flag.Parse()
 

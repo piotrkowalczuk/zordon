@@ -707,7 +707,7 @@ type rootBlock struct {
 	// branch naming) — not to be confused with serviceBlock.Workspace, which
 	// is how to cut one service's checkout.
 	Workspace *workspaceRootBlock `hcl:"workspace,block"`
-	Modules   []*moduleBlock      `hcl:"module,block"`
+	Modules   []*moduleBlock      `hcl:"component,block"`
 	Imports   []*importBlock      `hcl:"import,block"`
 	// Requires pin the repositories remote imports name, for a file that is
 	// its own module; under a zordon.mod they belong there.
@@ -732,7 +732,7 @@ type rootBlock struct {
 // joined from every import, as ztypes.Merge does.
 type importBlock struct {
 	Path         string         `hcl:"path,label"`
-	Modules      []string       `hcl:"modules,optional"`
+	Modules      []string       `hcl:"components,optional"`
 	Inputs       hcl.Expression `hcl:"inputs,optional"`
 	InputsRange  hcl.Range      `hcl:"inputs,attr_range"`
 	Features     []string       `hcl:"features,optional"`
@@ -777,7 +777,7 @@ type packageBlock struct {
 	Imports       []*importBlock  `hcl:"import,block"`
 	Requires      []*requireBlock `hcl:"require,block"`
 	Toolchain     *toolchainBlock `hcl:"toolchain,block"`
-	Modules       []*moduleBlock  `hcl:"module,block"`
+	Modules       []*moduleBlock  `hcl:"component,block"`
 
 	// features, inputs and outputs are Features, Inputs and Outputs decoded.
 	features map[string]string
@@ -787,7 +787,7 @@ type packageBlock struct {
 
 // moduleBlock is a named namespace of services with an optional toolchain
 // pin of its own. Its services are addressed as
-// `module.<name>.service.<tc>.<svc>` from outside and as `service.<tc>.<svc>`
+// `component.<name>.service.<tc>.<svc>` from outside and as `service.<tc>.<svc>`
 // from inside the block.
 type moduleBlock struct {
 	Name      string          `hcl:"name,label"`
@@ -1276,7 +1276,7 @@ func NewParentContext(services []*Service) *ParentContext {
 		tc, name := s.Toolchain, s.Runtime.Name
 		obj := map[string]cty.Value{
 			"name":      cty.StringVal(name),
-			"module":    cty.StringVal(s.Module),
+			"component": cty.StringVal(s.Module),
 			"toolchain": cty.StringVal(tc),
 			"dir":       cty.StringVal(serviceDirOf(s)),
 			"vars":      mapValToCty(s.Runtime.Vars),

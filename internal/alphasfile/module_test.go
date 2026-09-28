@@ -11,10 +11,10 @@ func TestCompile_moduleServiceIdentity(t *testing.T) {
 service "go" "gateway" {
   git { url = "github.com/x/gw" }
 }
-module "payments" {
+component "payments" {
   service "go" "db" {
     git { url = "github.com/x/db" }
-    vars = { etc = fs::etc(), var = fs::var(), me = self.module }
+    vars = { etc = fs::etc(), var = fs::var(), me = self.component }
   }
 }
 `, nil)
@@ -25,7 +25,7 @@ module "payments" {
 	if db.Module != "payments" || db.Runtime.Name != "db" {
 		t.Errorf("Module=%q Runtime.Name=%q; want payments / db", db.Module, db.Runtime.Name)
 	}
-	if got := db.ID(); got != "module.payments.service.go.db" {
+	if got := db.ID(); got != "component.payments.service.go.db" {
 		t.Errorf("ID() = %q", got)
 	}
 	if got := db.Runtime.Vars["etc"]; got != "/proj/workspaces/main/etc/payments/db" {
@@ -35,7 +35,7 @@ module "payments" {
 		t.Errorf("fs::var() = %v", got)
 	}
 	if got := db.Runtime.Vars["me"]; got != "payments" {
-		t.Errorf("self.module = %v", got)
+		t.Errorf("self.component = %v", got)
 	}
 	gw := svcByName(af, "gateway")
 	if gw == nil || gw.Module != DefaultModule || gw.ID() != "service.go.gateway" {
@@ -45,7 +45,7 @@ module "payments" {
 
 func TestCompile_moduleShortRefResolvesWithinModule(t *testing.T) {
 	af := compile(t, `
-module "payments" {
+component "payments" {
   service "go" "db" {
     git { url = "github.com/x/db" }
     vars = { port = 5432 }
@@ -61,14 +61,14 @@ module "payments" {
 	if got := fmt.Sprint(api.Runtime.Vars["upstream"]); got != "5432" {
 		t.Errorf("service.go.db inside the module = %v; want 5432", got)
 	}
-	if got := api.Runtime.After; len(got) != 1 || got[0] != "module.payments.service.go.db.runtime@ready" {
+	if got := api.Runtime.After; len(got) != 1 || got[0] != "component.payments.service.go.db.runtime@ready" {
 		t.Errorf("after = %v", got)
 	}
 }
 
 func TestCompile_crossModuleRefViaModuleRoot(t *testing.T) {
 	af := compile(t, `
-module "infra" {
+component "infra" {
   service "go" "kafka" {
     git { url = "github.com/x/kafka" }
     vars = { port = 9092 }
@@ -80,14 +80,14 @@ module "infra" {
     }
   }
 }
-module "apps" {
+component "apps" {
   service "go" "app" {
     git { url = "github.com/x/app" }
-    vars = { broker = "127.0.0.1:${module.infra.service.go.kafka.vars.port}" }
+    vars = { broker = "127.0.0.1:${component.infra.service.go.kafka.vars.port}" }
     runtime {
-      after = [module.infra.service.go.kafka.runtime.ready]
+      after = [component.infra.service.go.kafka.runtime.ready]
       provision "topic" {
-        cmd = module.infra.service.go.kafka.runtime.provision.create-topic
+        cmd = component.infra.service.go.kafka.runtime.provision.create-topic
         env = { TOPIC = "app-events" }
       }
     }
@@ -98,18 +98,18 @@ module "apps" {
 	if got := app.Runtime.Vars["broker"]; got != "127.0.0.1:9092" {
 		t.Errorf("broker = %v", got)
 	}
-	if got := app.Runtime.After; len(got) != 1 || got[0] != "module.infra.service.go.kafka.runtime@ready" {
+	if got := app.Runtime.After; len(got) != 1 || got[0] != "component.infra.service.go.kafka.runtime@ready" {
 		t.Errorf("after = %v", got)
 	}
 	topic := provByName(app, "topic")
-	if topic == nil || topic.CmdRef != "module.infra.service.go.kafka.runtime.provision.create-topic" {
+	if topic == nil || topic.CmdRef != "component.infra.service.go.kafka.runtime.provision.create-topic" {
 		t.Errorf("provision cmd-ref across modules: %+v", topic)
 	}
 }
 
 func TestCompile_defaultModuleReferencesModule(t *testing.T) {
 	af := compile(t, `
-module "payments" {
+component "payments" {
   service "go" "api" {
     git { url = "github.com/x/api" }
     vars = { port = 8080 }
@@ -117,7 +117,7 @@ module "payments" {
 }
 service "go" "gateway" {
   git { url = "github.com/x/gw" }
-  vars = { upstream = module.payments.service.go.api.vars.port }
+  vars = { upstream = component.payments.service.go.api.vars.port }
 }
 `, nil)
 	gw := svcByName(af, "gateway")
@@ -128,13 +128,13 @@ service "go" "gateway" {
 
 func TestCompile_shortRefDoesNotLeakAcrossModules(t *testing.T) {
 	err := compileErr(t, `
-module "infra" {
+component "infra" {
   service "go" "db" {
     git { url = "github.com/x/db" }
     vars = { port = 5432 }
   }
 }
-module "apps" {
+component "apps" {
   service "go" "api" {
     git { url = "github.com/x/api" }
     vars = { upstream = service.go.db.vars.port }
@@ -148,12 +148,12 @@ module "apps" {
 
 func TestCompile_sameNameInTwoModulesIsNotDuplicate(t *testing.T) {
 	af := compile(t, `
-module "payments" {
+component "payments" {
   service "go" "db" {
     git { url = "github.com/x/db" }
   }
 }
-module "auth" {
+component "auth" {
   service "go" "db" {
     git { url = "github.com/x/db" }
   }
@@ -172,7 +172,7 @@ module "auth" {
 
 func TestCompile_duplicateServiceInOneModule(t *testing.T) {
 	err := compileErr(t, `
-module "payments" {
+component "payments" {
   service "go" "db" {
     git { url = "github.com/x/db" }
   }
@@ -202,23 +202,23 @@ func TestCompile_moduleNameCollidesWithTopLevelService(t *testing.T) {
 service "go" "payments" {
   git { url = "github.com/x/p" }
 }
-module "payments" {
+component "payments" {
   service "go" "db" {
     git { url = "github.com/x/db" }
   }
 }
 `)
-	if err == nil || !strings.Contains(err.Error(), `module "payments" has the same name as the top-level service`) {
+	if err == nil || !strings.Contains(err.Error(), `component "payments" has the same name as the top-level service`) {
 		t.Fatalf("got %v", err)
 	}
 }
 
 func TestCompile_duplicateModuleName(t *testing.T) {
 	err := compileErr(t, `
-module "payments" {}
-module "payments" {}
+component "payments" {}
+component "payments" {}
 `)
-	if err == nil || !strings.Contains(err.Error(), `duplicate module "payments"`) {
+	if err == nil || !strings.Contains(err.Error(), `duplicate component "payments"`) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -232,8 +232,8 @@ func TestCompile_invalidModuleName(t *testing.T) {
 	}
 	for hint, name := range cases {
 		t.Run(hint, func(t *testing.T) {
-			err := compileErr(t, fmt.Sprintf("module %q {}\n", name))
-			if err == nil || !strings.Contains(err.Error(), "invalid module name") {
+			err := compileErr(t, fmt.Sprintf("component %q {}\n", name))
+			if err == nil || !strings.Contains(err.Error(), "invalid component name") {
 				t.Fatalf("got %v", err)
 			}
 		})
@@ -250,7 +250,7 @@ service "go" "gateway" {
   git { url = "github.com/x/gw" }
 }
 
-module "legacy" {
+component "legacy" {
   toolchain {
     go { version = "1.22.0" }
   }
@@ -258,7 +258,7 @@ module "legacy" {
     git { url = "github.com/x/billing" }
   }
 }
-module "modern" {
+component "modern" {
   service "go" "api" {
     git { url = "github.com/x/api" }
   }
@@ -286,9 +286,9 @@ toolchain {
 
 service "go" "gateway" {
   git { url = "github.com/x/gw" }
-  runtime { after = [module.legacy.toolchain.go.ready] }
+  runtime { after = [component.legacy.toolchain.go.ready] }
 }
-module "legacy" {
+component "legacy" {
   toolchain {
     go { version = "1.22.0" }
   }
@@ -297,7 +297,7 @@ module "legacy" {
     runtime { after = [toolchain.go.ready] }
   }
 }
-module "modern" {
+component "modern" {
   service "go" "api" {
     git { url = "github.com/x/api" }
     runtime { after = [toolchain.go.ready] }
@@ -305,9 +305,9 @@ module "modern" {
 }
 `, nil)
 	cases := map[string]string{
-		"legacy/billing": "module.legacy.toolchain.go@ready",
+		"legacy/billing": "component.legacy.toolchain.go@ready",
 		"modern/api":     "toolchain.go@ready",
-		"gateway":        "module.legacy.toolchain.go@ready",
+		"gateway":        "component.legacy.toolchain.go@ready",
 	}
 	for name, want := range cases {
 		if got := svcByName(af, name).Runtime.After; len(got) != 1 || got[0] != want {
@@ -324,7 +324,7 @@ package "p" {
   toolchain {
     go { version = "1.22.0" }
   }
-  module "m" {
+  component "m" {
     service "go" "api" {
       git { url = "github.com/x/api" }
       runtime { after = [toolchain.go.ready] }
@@ -333,14 +333,14 @@ package "p" {
 }
 `,
 	})
-	if got := svcByName(openTree(t, root), "p/m/api").Runtime.After; len(got) != 1 || got[0] != "package.p.module.m.toolchain.go@ready" {
+	if got := svcByName(openTree(t, root), "p/m/api").Runtime.After; len(got) != 1 || got[0] != "package.p.component.m.toolchain.go@ready" {
 		t.Errorf("after = %v; inside a package's module, toolchain.go is the package's pin", got)
 	}
 }
 
 func TestCompile_moduleToolchainWithoutVersionFails(t *testing.T) {
 	err := compileErr(t, `
-module "legacy" {
+component "legacy" {
   toolchain {
     go {}
   }
@@ -356,7 +356,7 @@ module "legacy" {
 
 func TestCompile_unpinnedServiceHasNoToolchainKey(t *testing.T) {
 	af := compile(t, `
-module "m" {
+component "m" {
   service "go" "a" {
     git { url = "github.com/x/a" }
   }
@@ -369,7 +369,7 @@ module "m" {
 
 func TestCompile_moduleServiceBinAndEtcRefs(t *testing.T) {
 	af := compile(t, `
-module "payments" {
+component "payments" {
   service "go" "db" {
     git { url = "github.com/x/db" }
   }
@@ -377,8 +377,8 @@ module "payments" {
 service "go" "gateway" {
   git { url = "github.com/x/gw" }
   env = {
-    DB_ETC = fs::service::etc(module.payments.service.go.db)
-    DB_BIN = fs::service::bin(module.payments.service.go.db)
+    DB_ETC = fs::service::etc(component.payments.service.go.db)
+    DB_BIN = fs::service::bin(component.payments.service.go.db)
   }
 }
 `, nil)
@@ -386,23 +386,23 @@ service "go" "gateway" {
 	if got := gw.Runtime.Env["DB_ETC"]; got != "/proj/workspaces/main/etc/payments/db" {
 		t.Errorf("DB_ETC = %q", got)
 	}
-	if got, want := gw.Runtime.Env["DB_BIN"], BinSentinel("svc", "module.payments.service.go.db"); got != want {
+	if got, want := gw.Runtime.Env["DB_BIN"], BinSentinel("svc", "component.payments.service.go.db"); got != want {
 		t.Errorf("DB_BIN = %q, want %q", got, want)
 	}
 }
 
 func TestManifestState_Plan_moduleCycleIsPlanningError(t *testing.T) {
 	src := `
-module "a" {
+component "a" {
   service "go" "x" {
     git { url = "github.com/x/x" }
-    vars = { v = module.b.service.go.y.vars.v }
+    vars = { v = component.b.service.go.y.vars.v }
   }
 }
-module "b" {
+component "b" {
   service "go" "y" {
     git { url = "github.com/x/y" }
-    vars = { v = module.a.service.go.x.vars.v }
+    vars = { v = component.a.service.go.x.vars.v }
   }
 }
 `

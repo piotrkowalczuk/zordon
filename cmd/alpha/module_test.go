@@ -94,14 +94,14 @@ func TestAlphaState_ResolveBarrier_module(t *testing.T) {
 		ref string
 		ok  bool
 	}{
-		"module runtime":             {"module.payments.service.go.db.runtime@ready", true},
-		"module build":               {"module.payments.service.go.db.build@success", true},
+		"module runtime":             {"component.payments.service.go.db.runtime@ready", true},
+		"module build":               {"component.payments.service.go.db.build@success", true},
 		"flat runtime":               {"service.go.db.runtime@ready", true},
-		"module toolchain ref":       {"module.legacy.toolchain.go@ready", true},
+		"module toolchain ref":       {"component.legacy.toolchain.go@ready", true},
 		"module toolchain by key":    {"toolchain.legacy/go@ready", true},
-		"unknown module":             {"module.auth.service.go.db.runtime@ready", false},
-		"unpinned module toolchain":  {"module.auth.toolchain.go@ready", false},
-		"module ref without service": {"module.payments.runtime@ready", false},
+		"unknown module":             {"component.auth.service.go.db.runtime@ready", false},
+		"unpinned module toolchain":  {"component.auth.toolchain.go@ready", false},
+		"module ref without service": {"component.payments.runtime@ready", false},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -197,7 +197,7 @@ func TestImplicitRuntimeAfter_moduleToolchainRef(t *testing.T) {
 		svc  *alphasfile.Service
 		want string
 	}{
-		"module pin":            {&alphasfile.Service{Toolchain: "go", Module: "legacy", ToolchainKey: "legacy/go"}, "module.legacy.toolchain.go@ready"},
+		"module pin":            {&alphasfile.Service{Toolchain: "go", Module: "legacy", ToolchainKey: "legacy/go"}, "component.legacy.toolchain.go@ready"},
 		"module on default pin": {&alphasfile.Service{Toolchain: "go", Module: "modern", ToolchainKey: "go"}, "toolchain.go@ready"},
 		"top level":             {&alphasfile.Service{Toolchain: "go", ToolchainKey: "go"}, "toolchain.go@ready"},
 	}
@@ -217,7 +217,7 @@ func TestImplicitRuntimeAfter_moduleToolchainRef(t *testing.T) {
 func TestNewServiceCtx_idFromDisplayName(t *testing.T) {
 	cases := map[string]struct{ name, want string }{
 		"flat":   {"db", "service.go.db"},
-		"module": {"payments/db", "module.payments.service.go.db"},
+		"module": {"payments/db", "component.payments.service.go.db"},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {

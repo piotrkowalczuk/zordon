@@ -14,10 +14,10 @@ func TestServiceNameFromBarrierRef_module(t *testing.T) {
 		want    string
 		present bool
 	}{
-		"module runtime":   {"module.payments.service.go.api.runtime@ready", "payments/api", true},
-		"module build":     {"module.payments.service.go.api.build@success", "payments/api", true},
-		"module provision": {"module.payments.service.go.db.runtime.provision.migrate@ready", "payments/db", true},
-		"module toolchain": {"module.payments.toolchain.go@ready", "", false},
+		"module runtime":   {"component.payments.service.go.api.runtime@ready", "payments/api", true},
+		"module build":     {"component.payments.service.go.api.build@success", "payments/api", true},
+		"module provision": {"component.payments.service.go.db.runtime.provision.migrate@ready", "payments/db", true},
+		"module toolchain": {"component.payments.toolchain.go@ready", "", false},
 		"flat unchanged":   {"service.go.api.runtime@ready", "api", true},
 	}
 	for hint, c := range cases {
@@ -33,9 +33,9 @@ func TestServiceNameFromBarrierRef_module(t *testing.T) {
 func TestPickServices_modulePrefixedNames(t *testing.T) {
 	all := []*alphasfile.Service{
 		modSvc("payments", "db"),
-		modSvc("payments", "api", "module.payments.service.go.db.runtime@ready"),
+		modSvc("payments", "api", "component.payments.service.go.db.runtime@ready"),
 		modSvc("auth", "db"),
-		svc("gateway", "module.payments.service.go.api.runtime@ready"),
+		svc("gateway", "component.payments.service.go.api.runtime@ready"),
 	}
 	got, err := pickServices(all, []string{"payments/api"})
 	if err != nil {
@@ -69,8 +69,8 @@ func TestRenderState_moduleBlocks(t *testing.T) {
 	for _, want := range []string{
 		"toolchain {\n  go {\n    version = \"1.27.0\"",
 		"service \"go\" \"gateway\"",
-		"module \"legacy\" {",
-		"module \"auth\" {",
+		"component \"legacy\" {",
+		"component \"auth\" {",
 		"    version = \"1.22.0\"",
 		"  service \"go\" \"billing\"",
 		"  service \"go\" \"db\"",
@@ -79,7 +79,7 @@ func TestRenderState_moduleBlocks(t *testing.T) {
 			t.Errorf("missing %q in\n%s", want, out)
 		}
 	}
-	if strings.Index(out, "service \"go\" \"gateway\"") > strings.Index(out, "module \"legacy\"") {
+	if strings.Index(out, "service \"go\" \"gateway\"") > strings.Index(out, "component \"legacy\"") {
 		t.Errorf("default module must render before module blocks\n%s", out)
 	}
 	if strings.Contains(out, "legacy/go") {
@@ -92,7 +92,7 @@ func TestRenderState_toolchainOnlyModule(t *testing.T) {
 		Toolchain: map[string]*alphasfile.ToolchainConfig{"tools/go": {Version: "1.22.0"}},
 		Services:  []*alphasfile.Service{svc("api")},
 	}))
-	if !strings.Contains(out, "module \"tools\" {") || !strings.Contains(out, "version = \"1.22.0\"") {
+	if !strings.Contains(out, "component \"tools\" {") || !strings.Contains(out, "version = \"1.22.0\"") {
 		t.Errorf("a module that only pins a toolchain must still render\n%s", out)
 	}
 }
@@ -119,9 +119,9 @@ func TestBuildTree_moduleRoot(t *testing.T) {
 		path string
 		want string
 	}{
-		"module var":      {"module.payments.service.go.db.vars.port", "5432"},
-		"module running":  {"module.payments.service.go.db.running", "true"},
-		"module pid":      {"module.payments.service.go.db.pid", "42"},
+		"module var":      {"component.payments.service.go.db.vars.port", "5432"},
+		"module running":  {"component.payments.service.go.db.running", "true"},
+		"module pid":      {"component.payments.service.go.db.pid", "42"},
 		"default var":     {"service.go.gateway.vars.port", "8080"},
 		"default running": {"service.go.gateway.running", "false"},
 	}

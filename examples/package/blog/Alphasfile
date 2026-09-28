@@ -11,13 +11,13 @@ package "blog" {
       sites = {
         blog = {
           host     = "blog.${inputs.domain}"
-          upstream = "127.0.0.1:${module.blog.service.go.hugo.vars.port}"
+          upstream = "127.0.0.1:${component.blog.service.go.hugo.vars.port}"
         }
       }
     }
   }
 
-  module "blog" {
+  component "blog" {
     service "go" "hugo" {
       git {
         url = "github.com/gohugoio/hugo"

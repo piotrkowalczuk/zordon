@@ -152,7 +152,7 @@ func importLines(prefix string, tree *alphasfile.Tree) string {
 		fmt.Fprintf(&b, "%simport %s [%s]%s\n", prefix, e.Path, strings.Join(e.Modules, ", "), origin)
 	}
 	for _, u := range tree.Unused() {
-		fmt.Fprintf(&b, "%sunused module %s in %s\n", prefix, u.Module, u.Path)
+		fmt.Fprintf(&b, "%sunused component %s in %s\n", prefix, u.Module, u.Path)
 	}
 	return b.String()
 }
@@ -194,7 +194,7 @@ func renderState(st *protocol.StateInfo) []byte {
 			}
 			parent, name = pkgBodies[p], m
 		}
-		mb := parent.AppendNewBlock("module", []string{name}).Body()
+		mb := parent.AppendNewBlock("component", []string{name}).Body()
 		if tc := toolchainOf(st.Toolchain, id); len(tc) > 0 {
 			renderToolchainBlock(mb, tc)
 		}

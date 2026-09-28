@@ -48,7 +48,7 @@ func TestExampleImportResolves(t *testing.T) {
 	}
 	for _, name := range []string{"app/app", "billing/billing"} {
 		topic := provByName(svcByName(af, name), "topic")
-		if topic == nil || topic.CmdRef != "module.kafka.service.go.kafka.runtime.provision.create-topic" {
+		if topic == nil || topic.CmdRef != "component.kafka.service.go.kafka.runtime.provision.create-topic" {
 			t.Errorf("%s topic provision = %+v", name, topic)
 		}
 	}

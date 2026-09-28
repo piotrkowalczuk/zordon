@@ -10,25 +10,25 @@ import (
 func TestLoadTree_unusedModuleImportStaysOut(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile": `import "./shared/Alphasfile.shared" { modules = ["kafka"] }`,
+		"Alphasfile": `import "./shared/Alphasfile.shared" { components = ["kafka"] }`,
 		"shared/Alphasfile.shared": `
-module "kafka" {
+component "kafka" {
   service "go" "kafka" {
     git { url = "github.com/x/kafka" }
   }
 }
 
-module "kafka-ui" {
-  import "../grafana/Alphasfile.grafana" { modules = ["grafana"] }
+component "kafka-ui" {
+  import "../grafana/Alphasfile.grafana" { components = ["grafana"] }
 
   service "go" "ui" {
     git { url = "github.com/x/ui" }
-    vars = { grafana = module.grafana.service.go.grafana.name }
+    vars = { grafana = component.grafana.service.go.grafana.name }
   }
 }
 `,
 		"grafana/Alphasfile.grafana": `
-module "grafana" {
+component "grafana" {
   service "go" "grafana" {
     git { url = "github.com/x/grafana" }
   }
@@ -61,12 +61,12 @@ module "grafana" {
 
 func TestLoadTree_brokenImportInUnusedModuleFails(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": `import "./Alphasfile.f" { modules = ["used"] }`,
+		"Alphasfile": `import "./Alphasfile.f" { components = ["used"] }`,
 		"Alphasfile.f": `
-module "used" {}
+component "used" {}
 
-module "spare" {
-  import "./Alphasfile.missing" { modules = ["x"] }
+component "spare" {
+  import "./Alphasfile.missing" { components = ["x"] }
 }
 `,
 	})
@@ -77,18 +77,18 @@ module "spare" {
 
 func TestLoadTree_rejectsTopLevelImportInFragment(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":   `import "./Alphasfile.a" { modules = ["a"] }`,
-		"Alphasfile.a": "import \"./Alphasfile.b\" { modules = [\"b\"] }\nmodule \"a\" {}\n",
-		"Alphasfile.b": `module "b" {}`,
+		"Alphasfile":   `import "./Alphasfile.a" { components = ["a"] }`,
+		"Alphasfile.a": "import \"./Alphasfile.b\" { components = [\"b\"] }\ncomponent \"a\" {}\n",
+		"Alphasfile.b": `component "b" {}`,
 	})
 	_, err := LoadTree(root)
-	if err == nil || !strings.Contains(err.Error(), "Alphasfile.a:1") || !strings.Contains(err.Error(), `inside the module block that uses it as import "./Alphasfile.b"`) {
+	if err == nil || !strings.Contains(err.Error(), "Alphasfile.a:1") || !strings.Contains(err.Error(), `inside the component block that uses it as import "./Alphasfile.b"`) {
 		t.Fatalf("got %v", err)
 	}
 }
 
 func TestParseTree_rejectsModuleImport(t *testing.T) {
-	_, err := ParseTree("test.hcl", []byte("module \"a\" {\n  import \"./Alphasfile.f\" { modules = [\"m\"] }\n}\n"))
+	_, err := ParseTree("test.hcl", []byte("component \"a\" {\n  import \"./Alphasfile.f\" { components = [\"m\"] }\n}\n"))
 	if err == nil || !strings.Contains(err.Error(), "imports need a file on disk") {
 		t.Fatalf("got %v", err)
 	}
@@ -96,21 +96,21 @@ func TestParseTree_rejectsModuleImport(t *testing.T) {
 
 func TestOpen_moduleImportNotVisibleToSibling(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": `import "./apps/Alphasfile.apps" { modules = ["a", "c"] }`,
+		"Alphasfile": `import "./apps/Alphasfile.apps" { components = ["a", "c"] }`,
 		"apps/Alphasfile.apps": `
-module "a" {
-  import "../b/Alphasfile.b" { modules = ["b"] }
+component "a" {
+  import "../b/Alphasfile.b" { components = ["b"] }
 }
 
-module "c" {
+component "c" {
   service "go" "c" {
     git { url = "github.com/x/c" }
-    vars = { p = module.b.service.go.b.vars.port }
+    vars = { p = component.b.service.go.b.vars.port }
   }
 }
 `,
 		"b/Alphasfile.b": `
-module "b" {
+component "b" {
   service "go" "b" {
     git { url = "github.com/x/b" }
     vars = { port = 7000 }
@@ -120,9 +120,9 @@ module "b" {
 	})
 	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
 	if err == nil {
-		t.Fatal("module a's import must not make module.b visible in module c")
+		t.Fatal("module a's import must not make component.b visible in module c")
 	}
-	for _, want := range []string{`module.b is not visible in module "c"`, `add import "../b/Alphasfile.b" { modules = ["b"] } inside module "c"`} {
+	for _, want := range []string{`component.b is not visible in component "c"`, `add import "../b/Alphasfile.b" { components = ["b"] } inside component "c"`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in %v", want, err)
 		}
@@ -131,16 +131,16 @@ module "b" {
 
 func TestOpen_fragmentSiblingNeedsImport(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": `import "./Alphasfile.f" { modules = ["a"] }`,
+		"Alphasfile": `import "./Alphasfile.f" { components = ["a"] }`,
 		"Alphasfile.f": `
-module "a" {
+component "a" {
   service "go" "a" {
     git { url = "github.com/x/a" }
-    vars = { p = module.s.service.go.s.vars.port }
+    vars = { p = component.s.service.go.s.vars.port }
   }
 }
 
-module "s" {
+component "s" {
   service "go" "s" {
     git { url = "github.com/x/s" }
     vars = { port = 7000 }
@@ -149,25 +149,25 @@ module "s" {
 `,
 	})
 	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
-	if err == nil || !strings.Contains(err.Error(), `add import "./Alphasfile.f" { modules = ["s"] } inside module "a"`) {
+	if err == nil || !strings.Contains(err.Error(), `add import "./Alphasfile.f" { components = ["s"] } inside component "a"`) {
 		t.Fatalf("a sibling in a fragment is imported like any module, got %v", err)
 	}
 }
 
 func TestOpen_fragmentSiblingSelfImport(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": `import "./Alphasfile.f" { modules = ["a"] }`,
+		"Alphasfile": `import "./Alphasfile.f" { components = ["a"] }`,
 		"Alphasfile.f": `
-module "a" {
-  import "./Alphasfile.f" { modules = ["s"] }
+component "a" {
+  import "./Alphasfile.f" { components = ["s"] }
 
   service "go" "a" {
     git { url = "github.com/x/a" }
-    vars = { p = module.s.service.go.s.vars.port }
+    vars = { p = component.s.service.go.s.vars.port }
   }
 }
 
-module "s" {
+component "s" {
   service "go" "s" {
     git { url = "github.com/x/s" }
     vars = { port = 7000 }
@@ -187,17 +187,17 @@ module "s" {
 func TestOpen_entrypointModuleImport(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `
-module "gw" {
-  import "./Alphasfile.b" { modules = ["b"] }
+component "gw" {
+  import "./Alphasfile.b" { components = ["b"] }
 
   service "go" "gw" {
     git { url = "github.com/x/gw" }
-    vars = { upstream = module.b.service.go.b.name }
+    vars = { upstream = component.b.service.go.b.name }
   }
 }
 `,
 		"Alphasfile.b": `
-module "b" {
+component "b" {
   service "go" "b" {
     git { url = "github.com/x/b" }
   }
@@ -213,17 +213,17 @@ module "b" {
 func TestOpen_entrypointModuleImportNotVisibleAtTopLevel(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `
-module "gw" {
-  import "./Alphasfile.b" { modules = ["b"] }
+component "gw" {
+  import "./Alphasfile.b" { components = ["b"] }
 }
 
 service "go" "z" {
   git { url = "github.com/x/z" }
-  vars = { b = module.b.service.go.b.name }
+  vars = { b = component.b.service.go.b.name }
 }
 `,
 		"Alphasfile.b": `
-module "b" {
+component "b" {
   service "go" "b" {
     git { url = "github.com/x/b" }
   }
@@ -231,7 +231,7 @@ module "b" {
 `,
 	})
 	_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
-	if err == nil || !strings.Contains(err.Error(), `add import "./Alphasfile.b" { modules = ["b"] } at the top level`) {
+	if err == nil || !strings.Contains(err.Error(), `add import "./Alphasfile.b" { components = ["b"] } at the top level`) {
 		t.Fatalf("module gw's import must not leak to the top level, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "the top level of "+filepath.Clean(root)) {

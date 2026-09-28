@@ -17,7 +17,7 @@ package "greeter" {
   inputs   = { greeting = { description = "How to greet.", type = string, default = "hello" } }
   features = { extra = { description = "Adds the extra service" } }
 
-  module "greeter" {
+  component "greeter" {
     service "go" "greeter" {
       package = "example.com/greeter@v0.0.0"
       vars    = { greeting = inputs.greeting }
@@ -62,7 +62,7 @@ func TestPlan_mapInputEntriesReachThePackage(t *testing.T) {
 package "proxy" {
   inputs = { sites = { description = "Hosts to route.", type = map(object({ host = string, port = number })), default = {} } }
 
-  module "proxy" {
+  component "proxy" {
     service "go" "proxy" {
       package = "example.com/proxy@v0.0.0"
       file "routes" {
@@ -81,13 +81,13 @@ package "`+name+`" {
       sites = {
         `+name+` = {
           host = "`+name+`.test"
-          port = module.site.service.go.site.vars.port
+          port = component.site.service.go.site.vars.port
         }
       }
     }
   }
 
-  module "site" {
+  component "site" {
     service "go" "site" {
       package = "example.com/site@v0.0.0"
       vars    = { port = `+port+` }
@@ -155,7 +155,7 @@ func TestGet_packageService(t *testing.T) {
 	p := zordontest.NewProject(t)
 	p.WriteFile("Alphasfile", `import "./greeter" { inputs = { greeting = "hi" } }`)
 	p.WriteFile("greeter/Alphasfile", pkgGreeter)
-	res := p.Zordon("get", "package.greeter.module.greeter.service.go.greeter.vars.greeting").Run(t)
+	res := p.Zordon("get", "package.greeter.component.greeter.service.go.greeter.vars.greeting").Run(t)
 	if res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "hi" {
 		t.Fatalf("zordon get: exit %d\n%s\n%s", res.ExitCode, res.Stdout, res.Stderr)
 	}
@@ -177,15 +177,15 @@ func TestPlan_picksAPackageOrAModule(t *testing.T) {
 	p.WriteFile("Alphasfile", "import \"./shop\" {}\nimport \"./billing\" {}\n")
 	p.WriteFile("shop/Alphasfile", `
 package "shop" {
-  module "shop" {
+  component "shop" {
     service "go" "storefront" { package = "example.com/storefront@v0.0.0" }
   }
-  module "admin" {
+  component "admin" {
     service "go" "panel" { package = "example.com/panel@v0.0.0" }
   }
 }
 `)
-	p.WriteFile("billing/Alphasfile", "package \"billing\" {\n  module \"billing\" {\n    service \"go\" \"invoicer\" { package = \"example.com/invoicer@v0.0.0\" }\n  }\n}\n")
+	p.WriteFile("billing/Alphasfile", "package \"billing\" {\n  component \"billing\" {\n    service \"go\" \"invoicer\" { package = \"example.com/invoicer@v0.0.0\" }\n  }\n}\n")
 	cases := map[string]struct{ pick, in, out string }{
 		"package":             {pick: "shop", in: `service "go" "storefront"`, out: `service "go" "invoicer"`},
 		"module of a package": {pick: "shop/admin", in: `service "go" "panel"`, out: `service "go" "storefront"`},

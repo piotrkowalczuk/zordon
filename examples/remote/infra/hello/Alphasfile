@@ -7,7 +7,7 @@ package "hello" {
     }
   }
 
-  module "hello" {
+  component "hello" {
     service "go" "hello" {
       src {
         path = ".."

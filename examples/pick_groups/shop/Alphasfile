@@ -1,5 +1,5 @@
 package "shop" {
-  module "shop" {
+  component "shop" {
     service "go" "worker" {
       src {
         path = "../../.."

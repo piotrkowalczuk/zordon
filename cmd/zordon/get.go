@@ -141,7 +141,7 @@ func buildTree(levels []*level) map[string]any {
 			tc[s.Runtime.Name] = node
 		}
 	}
-	return map[string]any{"service": svcRoot, "module": modRoot, "package": pkgRoot}
+	return map[string]any{"service": svcRoot, "component": modRoot, "package": pkgRoot}
 }
 
 // packageModules returns the `package.<name>.module` map, creating the
@@ -152,15 +152,15 @@ func packageModules(pkgRoot map[string]any, name string) map[string]any {
 		pkg = map[string]any{}
 		pkgRoot[name] = pkg
 	}
-	mods, _ := pkg["module"].(map[string]any)
+	mods, _ := pkg["component"].(map[string]any)
 	if mods == nil {
 		mods = map[string]any{}
-		pkg["module"] = mods
+		pkg["component"] = mods
 	}
 	return mods
 }
 
-// moduleServices returns the `module.<name>.service` map, creating the
+// moduleServices returns the `component.<name>.service` map, creating the
 // module node on first use so paths mirror the HCL nesting.
 func moduleServices(modRoot map[string]any, module string) map[string]any {
 	mod, _ := modRoot[module].(map[string]any)

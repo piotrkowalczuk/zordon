@@ -6,13 +6,13 @@ package "billing" {
       routes = {
         billing = {
           prefix   = "/billing/"
-          upstream = "127.0.0.1:${module.billing.service.go.billing.vars.port}"
+          upstream = "127.0.0.1:${component.billing.service.go.billing.vars.port}"
         }
       }
     }
   }
 
-  module "billing" {
+  component "billing" {
     service "go" "billing" {
       src {
         path = "../../.."

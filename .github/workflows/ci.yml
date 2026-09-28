@@ -188,7 +188,7 @@ jobs:
           # (create/merge/region + the branch template), which is pure git
           # and filesystem work — no network, no toolchain download.
           - workspace_files
-          - modules
+          - components
           - import
           - pick_groups
           # remote fetches a local repository through url.insteadOf: offline.

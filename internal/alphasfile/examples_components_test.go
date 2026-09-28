@@ -9,28 +9,28 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 )
 
-// examples/modules: two modules with colliding service names plus an
+// examples/components: two modules with colliding service names plus an
 // entrypoint-level gateway wired through module.* refs. Pure Compile.
 func TestExampleModulesResolves(t *testing.T) {
-	b, err := os.ReadFile("../../examples/modules/Alphasfile")
+	b, err := os.ReadFile("../../examples/components/Alphasfile")
 	if err != nil {
 		t.Fatal(err)
 	}
 	iv := &invocation.InvocationState{
 		FsHash: "abc0000011112222", TmpDir: "/tmp/zordon-abc0000011112222",
-		Workspace: invocation.MainWorkspace, StateDir: "/repo/examples/modules/workspaces/main",
+		Workspace: invocation.MainWorkspace, StateDir: "/repo/examples/components/workspaces/main",
 	}
-	af, err := Compile("/repo/examples/modules/Alphasfile", b, iv, nil, "", TestConfig{})
+	af, err := Compile("/repo/examples/components/Alphasfile", b, iv, nil, "", TestConfig{})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
 
 	want := map[string]string{
-		"gateway":      "/repo/examples/modules/src/gateway",
-		"payments/db":  "/repo/examples/modules/src/payments_db",
-		"payments/api": "/repo/examples/modules/src/payments_api",
-		"auth/db":      "/repo/examples/modules/src/auth_db",
-		"auth/api":     "/repo/examples/modules/src/auth_api",
+		"gateway":      "/repo/examples/components/src/gateway",
+		"payments/db":  "/repo/examples/components/src/payments_db",
+		"payments/api": "/repo/examples/components/src/payments_api",
+		"auth/db":      "/repo/examples/components/src/auth_db",
+		"auth/api":     "/repo/examples/components/src/auth_api",
 	}
 	if len(af.Services) != len(want) {
 		t.Fatalf("want %d services, got %v", len(want), serviceNames(af))
@@ -54,7 +54,7 @@ func TestExampleModulesResolves(t *testing.T) {
 	if cmd := strings.Join(gw.Runtime.Command, " "); !strings.Contains(cmd, upstream) {
 		t.Errorf("gateway cmd %q lacks %q", cmd, upstream)
 	}
-	if got := gw.Runtime.After; len(got) != 2 || got[0] != "module.payments.service.go.api.runtime@ready" || got[1] != "module.auth.service.go.api.runtime@ready" {
+	if got := gw.Runtime.After; len(got) != 2 || got[0] != "component.payments.service.go.api.runtime@ready" || got[1] != "component.auth.service.go.api.runtime@ready" {
 		t.Errorf("gateway after = %v", got)
 	}
 
@@ -65,7 +65,7 @@ func TestExampleModulesResolves(t *testing.T) {
 		if cmd := strings.Join(api.Runtime.Command, " "); !strings.Contains(cmd, wantUp) {
 			t.Errorf("%s/api cmd %q lacks %q", m, cmd, wantUp)
 		}
-		if got := api.Runtime.After; len(got) != 1 || got[0] != "module."+m+".service.go.db.runtime@ready" {
+		if got := api.Runtime.After; len(got) != 1 || got[0] != "component."+m+".service.go.db.runtime@ready" {
 			t.Errorf("%s/api after = %v", m, got)
 		}
 		if !strings.Contains(strings.Join(db.Runtime.Command, " "), "-name "+m+"/db") {

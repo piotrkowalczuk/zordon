@@ -27,7 +27,7 @@ package "caddy" {
     url = {
       description = "Where Caddy serves."
       type        = string
-      value       = "http://127.0.0.1:${module.caddy.service.go.caddy.vars.http}"
+      value       = "http://127.0.0.1:${component.caddy.service.go.caddy.vars.http}"
     }
   }
 
@@ -36,7 +36,7 @@ package "caddy" {
     inputs  = { zone = inputs.domain }
   }
 
-  module "caddy" {
+  component "caddy" {
     service "go" "caddy" {
       git {
         url = "github.com/caddyserver/caddy"

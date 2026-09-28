@@ -1,16 +1,16 @@
 sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
-# One stack, two teams. Each module owns a `db` and an `api`; the names
-# collide on purpose — the module is what keeps them apart. Inside a module
-# `service.go.db` means that module's db; from outside it is
-# `module.payments.service.go.db`. Display names are `payments/db`,
-# `auth/api`, … (picks, `zordon status`, checkout dirs), and a module
-# service builds into its module bin dir: `${fs::bin()}` there is `<bin>/<module>`.
+# One stack, two teams. Each component owns a `db` and an `api`; the names
+# collide on purpose — the component is what keeps them apart. Inside a component
+# `service.go.db` means that component's db; from outside it is
+# `component.payments.service.go.db`. Display names are `payments/db`,
+# `auth/api`, … (picks, `zordon status`, checkout dirs), and a component
+# service builds into its component bin dir: `${fs::bin()}` there is `<bin>/<component>`.
 
 service "go" "gateway" {
   src {
     path = "../.."
-    exe  = "./examples/modules/src/gateway"
+    exe  = "./examples/components/src/gateway"
   }
 
   vars = { port = net::pickport() }
@@ -20,11 +20,11 @@ service "go" "gateway" {
       "${fs::bin()}/gateway",
       "-addr", "127.0.0.1:${self.vars.port}",
       "-name", self.name,
-      "-upstream", "payments=127.0.0.1:${module.payments.service.go.api.vars.port},auth=127.0.0.1:${module.auth.service.go.api.vars.port}",
+      "-upstream", "payments=127.0.0.1:${component.payments.service.go.api.vars.port},auth=127.0.0.1:${component.auth.service.go.api.vars.port}",
     ]
     after = [
-      module.payments.service.go.api.runtime.ready,
-      module.auth.service.go.api.runtime.ready,
+      component.payments.service.go.api.runtime.ready,
+      component.auth.service.go.api.runtime.ready,
     ]
   }
 
@@ -40,17 +40,17 @@ service "go" "gateway" {
   }
 }
 
-module "payments" {
+component "payments" {
   service "go" "db" {
     src {
       path = "../.."
-      exe  = "./examples/modules/src/payments_db"
+      exe  = "./examples/components/src/payments_db"
     }
 
     vars = { port = net::pickport() }
 
     runtime {
-      cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}", "-name", "${self.module}/${self.name}"]
+      cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}", "-name", "${self.component}/${self.name}"]
     }
 
     readiness {
@@ -66,7 +66,7 @@ module "payments" {
   service "go" "api" {
     src {
       path = "../.."
-      exe  = "./examples/modules/src/payments_api"
+      exe  = "./examples/components/src/payments_api"
     }
 
     vars = { port = net::pickport() }
@@ -75,7 +75,7 @@ module "payments" {
       cmd = [
         "${fs::bin()}/${self.name}",
         "-addr", "127.0.0.1:${self.vars.port}",
-        "-name", "${self.module}/${self.name}",
+        "-name", "${self.component}/${self.name}",
         "-upstream", "db=127.0.0.1:${service.go.db.vars.port}",
       ]
       after = [service.go.db.runtime.ready]
@@ -92,17 +92,17 @@ module "payments" {
   }
 }
 
-module "auth" {
+component "auth" {
   service "go" "db" {
     src {
       path = "../.."
-      exe  = "./examples/modules/src/auth_db"
+      exe  = "./examples/components/src/auth_db"
     }
 
     vars = { port = net::pickport() }
 
     runtime {
-      cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}", "-name", "${self.module}/${self.name}"]
+      cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}", "-name", "${self.component}/${self.name}"]
     }
 
     readiness {
@@ -118,7 +118,7 @@ module "auth" {
   service "go" "api" {
     src {
       path = "../.."
-      exe  = "./examples/modules/src/auth_api"
+      exe  = "./examples/components/src/auth_api"
     }
 
     vars = { port = net::pickport() }
@@ -127,7 +127,7 @@ module "auth" {
       cmd = [
         "${fs::bin()}/${self.name}",
         "-addr", "127.0.0.1:${self.vars.port}",
-        "-name", "${self.module}/${self.name}",
+        "-name", "${self.component}/${self.name}",
         "-upstream", "db=127.0.0.1:${service.go.db.vars.port}",
       ]
       after = [service.go.db.runtime.ready]

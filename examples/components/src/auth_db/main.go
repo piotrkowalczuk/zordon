@@ -1,5 +1,5 @@
-// Command gateway is the entrypoint-level service of examples/modules: it
-// is wired to both modules' apis through module.<m>.service.go.api refs.
+// Command auth_db is one of the component services of examples/components; the
+// component block, not the binary, decides its identity (auth/db).
 package main
 
 import (
@@ -11,7 +11,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
-	name := flag.String("name", "", "display name (module/name)")
+	name := flag.String("name", "", "display name (component/name)")
 	upstream := flag.String("upstream", "", "label=addr pairs this service talks to")
 	flag.Parse()
 

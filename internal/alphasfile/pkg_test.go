@@ -131,7 +131,7 @@ service "pkg" "redis" {
   runtime { cmd = ["redis-server"] }
 }
 
-module "payments" {
+component "payments" {
   service "pkg" "redis" {
     package = "redis@7.4.1"
     runtime { cmd = ["redis-server"] }
@@ -143,7 +143,7 @@ module "payments" {
 		ids = append(ids, s.ID())
 		names = append(names, s.Name())
 	}
-	if !equalStrs(ids, []string{"service.pkg.redis", "module.payments.service.pkg.redis"}) || !equalStrs(names, []string{"redis", "payments/redis"}) {
+	if !equalStrs(ids, []string{"service.pkg.redis", "component.payments.service.pkg.redis"}) || !equalStrs(names, []string{"redis", "payments/redis"}) {
 		t.Errorf("ids = %v, names = %v; a pkg service in a module is known by its module", ids, names)
 	}
 }

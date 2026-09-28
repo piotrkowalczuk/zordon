@@ -9,7 +9,7 @@ import (
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 )
 
-// checkVisibility reports a `module.<m>` reference to a module of this
+// checkVisibility reports a `component.<c>` reference to a module of this
 // manifest that the referencing scope neither declares nor imports. The
 // evaluation context already hides such modules; this pass exists to point
 // at the expression and name the missing import and where it goes.
@@ -36,7 +36,7 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 				return nil
 			}
 			switch st.Traversal.RootName() {
-			case "module":
+			case "component":
 				found = moduleRefError(tree, sb, st.SrcRange, name)
 			case "package":
 				found = packageRefError(tree, sb, st.SrcRange, name)
@@ -58,7 +58,7 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 func moduleRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) error {
 	if p, inPkg := packageOf(sb.module); inPkg {
 		if tree.owners[p+"/"+name] == nil {
-			return fmt.Errorf("%s: package %q has no module %q; inside a package, module.<name> is one of its own modules, and another package's module is package.<package>.module.<name>", at, p, name)
+			return fmt.Errorf("%s: package %q has no component %q; inside a package, component.<name> is one of its own components, and another package's component is package.<package>.component.<name>", at, p, name)
 		}
 		return nil
 	}
@@ -67,7 +67,7 @@ func moduleRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) err
 		return nil
 	}
 	scope, keyword, where := refScope(sb)
-	return fmt.Errorf("%s: module.%s is not visible in %s; add %s %q { modules = [%q] } %s", at, name, scope, keyword, localRel(sb.file.dir, owner.path), name, where)
+	return fmt.Errorf("%s: component.%s is not visible in %s; add %s %q { components = [%q] } %s", at, name, scope, keyword, localRel(sb.file.dir, owner.path), name, where)
 }
 
 func outputRefError(tree *Tree, trav hcl.Traversal, at hcl.Range, p string) error {
@@ -117,7 +117,7 @@ func refScope(sb *serviceBlock) (scope, keyword, where string) {
 		return fmt.Sprintf("package %q (%s)", p, sb.file.path), "import", fmt.Sprintf("inside package %q", p)
 	}
 	if sb.module != DefaultModule {
-		return fmt.Sprintf("module %q (%s)", sb.module, sb.file.path), "import", fmt.Sprintf("inside module %q", sb.module)
+		return fmt.Sprintf("component %q (%s)", sb.module, sb.file.path), "import", fmt.Sprintf("inside component %q", sb.module)
 	}
 	return "the top level of " + sb.file.path, "import", "at the top level"
 }

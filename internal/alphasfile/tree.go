@@ -361,7 +361,7 @@ func (t *Tree) load(path string, importer *treeFile, imp *importBlock, pkg *pkgI
 			return nil, fmt.Errorf("%s: %s %q: %s is a package's file; %s its directory instead", imp.DefRange, imp.keyword, imp.Path, path, imp.keyword)
 		}
 	case pkg != nil:
-		return nil, fmt.Errorf("%s: %s %q: %s has no package block, so it is not a package; wrap its modules in package \"<name>\" {}", imp.DefRange, imp.keyword, imp.Path, path)
+		return nil, fmt.Errorf("%s: %s %q: %s has no package block, so it is not a package; wrap its components in package \"<name>\" {}", imp.DefRange, imp.keyword, imp.Path, path)
 	case importer != nil:
 		if err := checkFragment(root); err != nil {
 			return nil, err
@@ -428,13 +428,13 @@ func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, res re
 	case ib.InputsRange != (hcl.Range{}) || ib.Features != nil:
 		return fmt.Errorf("%s: %s %q: inputs and features are passed to a package directory, not to a fragment file", ib.DefRange, ib.keyword, ib.Path)
 	case f.block != nil:
-		return fmt.Errorf("%s: %s %q: a package depends on other packages, not on a fragment's modules; move the modules into this package or into a package of their own", ib.DefRange, ib.keyword, ib.Path)
+		return fmt.Errorf("%s: %s %q: a package depends on other packages, not on a fragment's components; move the components into this package or into a package of their own", ib.DefRange, ib.keyword, ib.Path)
 	case ib.Modules == nil:
-		return fmt.Errorf("%s: %s %q: \"modules\" is required when importing a fragment; name the modules to take from %s", ib.DefRange, ib.keyword, ib.Path, target)
+		return fmt.Errorf("%s: %s %q: \"components\" is required when importing a fragment; name the components to take from %s", ib.DefRange, ib.keyword, ib.Path, target)
 	case len(ib.Modules) == 0:
-		return fmt.Errorf("%s: %s %q: modules must name at least one module declared in %s", ib.DefRange, ib.keyword, ib.Path, target)
+		return fmt.Errorf("%s: %s %q: components must name at least one component declared in %s", ib.DefRange, ib.keyword, ib.Path, target)
 	case ib.alias != "":
-		return fmt.Errorf("%s: %s %q: an alias names a package; a fragment's modules keep their declared names", ib.DefRange, ib.keyword, ib.Path)
+		return fmt.Errorf("%s: %s %q: an alias names a package; a fragment's components keep their declared names", ib.DefRange, ib.keyword, ib.Path)
 	}
 	tf := t.byPath[target]
 	if tf == nil {
@@ -449,7 +449,7 @@ func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, res re
 	}
 	for _, m := range ib.Modules {
 		if tf.declared[m] == nil {
-			return fmt.Errorf("%s: %s %q: module %q is not declared in %s (declared: %s)", ib.DefRange, ib.keyword, ib.Path, m, tf.path, strings.Join(sortedKeys(tf.declared), ", "))
+			return fmt.Errorf("%s: %s %q: component %q is not declared in %s (declared: %s)", ib.DefRange, ib.keyword, ib.Path, m, tf.path, strings.Join(sortedKeys(tf.declared), ", "))
 		}
 	}
 	t.links[scope] = append(t.links[scope], importLink{file: tf, modules: ib.Modules, block: ib})
@@ -458,7 +458,7 @@ func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, res re
 
 func (t *Tree) followPackage(f *treeFile, scope string, ib *importBlock, res resolved) error {
 	if ib.Modules != nil {
-		return fmt.Errorf("%s: %s %q: a package is imported whole; drop modules", ib.DefRange, ib.keyword, ib.Path)
+		return fmt.Errorf("%s: %s %q: a package is imported whole; drop components", ib.DefRange, ib.keyword, ib.Path)
 	}
 	if ib.alias != "" && !moduleNameRe.MatchString(ib.alias) {
 		return fmt.Errorf("%s: %s %q: %q is not a valid package name", ib.DefRange, ib.keyword, ib.Path, ib.alias)
@@ -512,7 +512,7 @@ func (t *Tree) finish() error {
 	for _, f := range t.files {
 		for _, mb := range f.root.Modules {
 			if prev, dup := t.owners[mb.Name]; dup {
-				return fmt.Errorf("duplicate module %q: declared at %s and %s", mb.Name, prev.declared[mb.Name].DefRange, mb.DefRange)
+				return fmt.Errorf("duplicate component %q: declared at %s and %s", mb.Name, prev.declared[mb.Name].DefRange, mb.DefRange)
 			}
 			t.owners[mb.Name] = f
 		}
@@ -655,7 +655,7 @@ func (t *Tree) checkPackageNames() error {
 			for _, sb := range mb.Services {
 				for _, pm := range p.file.block.Modules {
 					if pm.Name == sb.Name {
-						return fmt.Errorf("%s: package %q has module %q, and module %q declared at %s has service %q; "+fix, p.at, name, pm.Name, name, mb.DefRange, sb.Name, name+"/"+sb.Name)
+						return fmt.Errorf("%s: package %q has component %q, and component %q declared at %s has service %q; "+fix, p.at, name, pm.Name, name, mb.DefRange, sb.Name, name+"/"+sb.Name)
 					}
 				}
 			}
@@ -700,7 +700,7 @@ func (t *Tree) linked(vis *scopeVis, scope string) error {
 				t.off().links[scope][pkgScope(l.pkg.name)] = offRecord{what: "package." + l.pkg.name, at: l.block.EnabledRange}
 			}
 			for _, m := range l.modules {
-				t.off().links[scope][m] = offRecord{what: "module." + m, at: l.block.EnabledRange}
+				t.off().links[scope][m] = offRecord{what: "component." + m, at: l.block.EnabledRange}
 			}
 			continue
 		}
@@ -797,7 +797,7 @@ func (t *Tree) settingsFor(scope string) *scopeSettings {
 	return nil
 }
 
-// resolveModule maps `module.<m>` written in scope to a module id: a
+// resolveModule maps `component.<c>` written in scope to a module id: a
 // sibling "<package>/<m>" inside a package, the bare name elsewhere.
 func resolveModule(scope, m string) string {
 	if p, ok := packageOf(scope); ok {
@@ -883,7 +883,7 @@ func liftAliases(body *hclsyntax.Body, aliases map[int]string) {
 				blk.Labels = blk.Labels[:1]
 				blk.LabelRanges = blk.LabelRanges[:1]
 			}
-		case "module", "package":
+		case "component", "package":
 			liftAliases(blk.Body, aliases)
 		}
 	}
@@ -893,19 +893,19 @@ func liftAliases(body *hclsyntax.Body, aliases map[int]string) {
 // Everything else belongs to the entrypoint or a package, and dependencies
 // belong to the module that needs them.
 func checkFragment(root *rootBlock) error {
-	hint := fmt.Sprintf("is only allowed in the entrypoint %s; a fragment holds module blocks only", invocation.AlphasfileName)
+	hint := fmt.Sprintf("is only allowed in the entrypoint %s; a fragment holds component blocks only", invocation.AlphasfileName)
 	if len(root.Imports) > 0 {
 		imp := root.Imports[0]
-		return fmt.Errorf("%s: import %q at the top of a fragment; move it inside the module block that uses it as import %q { modules = [...] }, so it joins the stack only with that module", imp.DefRange, imp.Path, imp.Path)
+		return fmt.Errorf("%s: import %q at the top of a fragment; move it inside the component block that uses it as import %q { components = [...] }, so it joins the stack only with that component", imp.DefRange, imp.Path, imp.Path)
 	}
 	if root.SysEnvRange != (hcl.Range{}) {
 		return fmt.Errorf("%s: top-level sysenv %s", root.SysEnvRange, hint)
 	}
 	if len(root.Services) > 0 {
-		return fmt.Errorf("%s: top-level service %s; wrap it in a module block", root.Services[0].DefRange, hint)
+		return fmt.Errorf("%s: top-level service %s; wrap it in a component block", root.Services[0].DefRange, hint)
 	}
 	if root.Toolchain != nil {
-		return fmt.Errorf("%s: top-level toolchain %s; pin it inside a module block", root.Toolchain.DefRange, hint)
+		return fmt.Errorf("%s: top-level toolchain %s; pin it inside a component block", root.Toolchain.DefRange, hint)
 	}
 	if root.Workspace != nil {
 		return fmt.Errorf("%s: top-level workspace %s", root.Workspace.DefRange, hint)
@@ -930,7 +930,7 @@ func checkPackageFile(root *rootBlock) error {
 	case len(root.Services) > 0:
 		return fmt.Errorf("%s: service %s", root.Services[0].DefRange, outside)
 	case len(root.Modules) > 0:
-		return fmt.Errorf("%s: module %q %s", root.Modules[0].DefRange, root.Modules[0].Name, outside)
+		return fmt.Errorf("%s: component %q %s", root.Modules[0].DefRange, root.Modules[0].Name, outside)
 	case len(root.Imports) > 0:
 		return fmt.Errorf("%s: import %q %s", root.Imports[0].DefRange, root.Imports[0].Path, outside)
 	case len(root.Requires) > 0:

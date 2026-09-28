@@ -229,7 +229,7 @@ func outputNodeFromTrav(t hcl.Traversal) (string, bool) {
 }
 
 // producerNodeFromTrav maps a `self.<f>...`, `service.<tc>.<svc>.<f>...` or
-// `module.<m>.service.<tc>.<svc>.<f>...` traversal to the producer node id
+// `component.<c>.service.<tc>.<svc>.<f>...` traversal to the producer node id
 // it depends on. A bare `service.` traversal is scoped to selfModule, the
 // module the referencing block lives in. Returns the target service id and
 // node id. Static traversals (barrier states under runtime/build, scalar
@@ -259,7 +259,7 @@ func producerNodeFromTrav(t hcl.Traversal, selfSvcID, selfModule string) (svc, i
 		}
 		svc = ServiceRef(selfModule, tc, nm)
 		rest = t[3:]
-	case "module":
+	case "component":
 		if len(t) < 6 {
 			return "", "", false
 		}
@@ -282,7 +282,7 @@ func producerNodeFromTrav(t hcl.Traversal, selfSvcID, selfModule string) (svc, i
 		kws, ok3 := traverseAttrName(t[4])
 		tc, ok4 := traverseAttrName(t[5])
 		nm, ok5 := traverseAttrName(t[6])
-		if !ok0 || !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || kwm != "module" || kws != "service" {
+		if !ok0 || !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || kwm != "component" || kws != "service" {
 			return "", "", false
 		}
 		svc = ServiceRef(pkg+"/"+mod, tc, nm)

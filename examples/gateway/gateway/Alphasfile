@@ -23,16 +23,16 @@ package "gateway" {
     url = {
       description = "Where the gateway listens."
       type        = string
-      value       = "http://127.0.0.1:${module.gateway.service.go.gateway.vars.port}"
+      value       = "http://127.0.0.1:${component.gateway.service.go.gateway.vars.port}"
     }
     ready = {
       description = "The gateway answers requests."
       type        = string
-      value       = module.gateway.service.go.gateway.runtime.ready
+      value       = component.gateway.service.go.gateway.runtime.ready
     }
   }
 
-  module "gateway" {
+  component "gateway" {
     service "go" "gateway" {
       src {
         path = "../../.."

@@ -53,7 +53,7 @@ func resolvePick(all []pickable, pick string) (selection, error) {
 			add("service "+s.name, false, func(o pickable) bool { return o.name == s.name })
 		}
 	}
-	add("module "+pick, true, func(s pickable) bool { return s.module == pick })
+	add("component "+pick, true, func(s pickable) bool { return s.module == pick })
 	add("package "+pick, true, func(s pickable) bool {
 		p, ok := alphasfile.PackageOf(s.module)
 		return ok && p == pick
@@ -96,7 +96,7 @@ func expandPicks(all []pickable, picks []string) ([]string, error) {
 		}
 	}
 	if len(unknown) > 0 {
-		return nil, fmt.Errorf("unknown service(s), module(s) or package(s): %s (%s)", strings.Join(unknown, ", "), available(all))
+		return nil, fmt.Errorf("unknown service(s), component(s) or package(s): %s (%s)", strings.Join(unknown, ", "), available(all))
 	}
 	var out []string
 	for _, s := range all {
@@ -143,7 +143,7 @@ func available(all []pickable) string {
 	sort.Strings(services)
 	out := "available services: " + strings.Join(services, ", ")
 	if len(modules) > 0 {
-		out += "; modules: " + strings.Join(slices.Sorted(maps.Keys(modules)), ", ")
+		out += "; components: " + strings.Join(slices.Sorted(maps.Keys(modules)), ", ")
 	}
 	if len(packages) > 0 {
 		out += "; packages: " + strings.Join(slices.Sorted(maps.Keys(packages)), ", ")

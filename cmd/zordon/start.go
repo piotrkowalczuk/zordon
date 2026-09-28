@@ -93,9 +93,9 @@ func pickServices(all []*alphasfile.Service, picks []string) ([]*alphasfile.Serv
 // serviceNameFromBarrierRef pulls the display name of the service out of a
 // canonical barrier ref. Grammar (see alpha resolveBarrier):
 //
-//	[module.<m>.]service.<tc>.<name>.build@<state>
-//	[module.<m>.]service.<tc>.<name>.runtime@<state>
-//	[module.<m>.]service.<tc>.<name>.runtime.provision.<p>@<state>
+//	[component.<c>.]service.<tc>.<name>.build@<state>
+//	[component.<c>.]service.<tc>.<name>.runtime@<state>
+//	[component.<c>.]service.<tc>.<name>.runtime.provision.<p>@<state>
 //
 // Toolchain / non-service refs return ("", false).
 func serviceNameFromBarrierRef(ref string) (string, bool) {

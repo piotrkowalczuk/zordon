@@ -8,7 +8,7 @@ func TestServiceRef(t *testing.T) {
 		want             string
 	}{
 		"default module": {"", "go", "api", "service.go.api"},
-		"module":         {"payments", "go", "api", "module.payments.service.go.api"},
+		"module":         {"payments", "go", "api", "component.payments.service.go.api"},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -28,12 +28,12 @@ func TestParseServiceRef(t *testing.T) {
 		"flat":                   {"service.go.api", "", "go", "api", "", true},
 		"flat with rest":         {"service.go.api.runtime.provision.migrate", "", "go", "api", "runtime.provision.migrate", true},
 		"flat with state":        {"service.go.api.runtime@ready", "", "go", "api", "runtime", true},
-		"module":                 {"module.payments.service.go.api", "payments", "go", "api", "", true},
-		"module with rest+state": {"module.payments.service.go.api.build@success", "payments", "go", "api", "build", true},
+		"module":                 {"component.payments.service.go.api", "payments", "go", "api", "", true},
+		"module with rest+state": {"component.payments.service.go.api.build@success", "payments", "go", "api", "build", true},
 		"toolchain":              {"toolchain.go@ready", "", "", "", "", false},
-		"module without service": {"module.payments.toolchain.go", "", "", "", "", false},
+		"module without service": {"component.payments.toolchain.go", "", "", "", "", false},
 		"truncated":              {"service.go", "", "", "", "", false},
-		"empty module":           {"module..service.go.api", "", "", "", "", false},
+		"empty module":           {"component..service.go.api", "", "", "", "", false},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -47,14 +47,14 @@ func TestParseServiceRef(t *testing.T) {
 
 func TestServiceRef_package(t *testing.T) {
 	id := ServiceRef("caddy/edge", "go", "caddy")
-	if id != "package.caddy.module.edge.service.go.caddy" {
+	if id != "package.caddy.component.edge.service.go.caddy" {
 		t.Fatalf("ServiceRef = %q", id)
 	}
 	module, tc, name, rest, ok := ParseServiceRef(id + ".runtime@ready")
 	if !ok || module != "caddy/edge" || tc != "go" || name != "caddy" || rest != "runtime" {
 		t.Errorf("ParseServiceRef = (%q,%q,%q,%q,%v)", module, tc, name, rest, ok)
 	}
-	for _, bad := range []string{"package.caddy.service.go.caddy", "package..module.edge.service.go.caddy", "package.caddy.module..service.go.caddy", "package.caddy.module.edge"} {
+	for _, bad := range []string{"package.caddy.service.go.caddy", "package..module.edge.service.go.caddy", "package.caddy.component..service.go.caddy", "package.caddy.component.edge"} {
 		if _, _, _, _, ok := ParseServiceRef(bad); ok {
 			t.Errorf("ParseServiceRef(%q) accepted it", bad)
 		}
@@ -66,7 +66,7 @@ func TestServiceRef_package(t *testing.T) {
 
 func TestToolchainRef_package(t *testing.T) {
 	ref := ToolchainRef("caddy/edge", "go")
-	if ref != "package.caddy.module.edge.toolchain.go" {
+	if ref != "package.caddy.component.edge.toolchain.go" {
 		t.Fatalf("ToolchainRef = %q", ref)
 	}
 	if key, ok := ParseToolchainRef(ref); !ok || key != "caddy/edge/go" {
@@ -98,11 +98,11 @@ func TestParseToolchainRef(t *testing.T) {
 		ok          bool
 	}{
 		"flat":                {"toolchain.go", "go", true},
-		"module":              {"module.legacy.toolchain.go", "legacy/go", true},
+		"module":              {"component.legacy.toolchain.go", "legacy/go", true},
 		"pkg tool key":        {"toolchain.aqua:etcd-io/etcd", "aqua:etcd-io/etcd", true},
-		"service ref":         {"module.legacy.service.go.api", "", false},
+		"service ref":         {"component.legacy.service.go.api", "", false},
 		"empty flat":          {"toolchain.", "", false},
-		"module without lang": {"module.legacy.toolchain.", "", false},
+		"module without lang": {"component.legacy.toolchain.", "", false},
 		"unrelated root":      {"service.go.api", "", false},
 	}
 	for hint, c := range cases {
@@ -113,7 +113,7 @@ func TestParseToolchainRef(t *testing.T) {
 			}
 		})
 	}
-	if got := ToolchainRef("legacy", "go"); got != "module.legacy.toolchain.go" {
+	if got := ToolchainRef("legacy", "go"); got != "component.legacy.toolchain.go" {
 		t.Errorf("ToolchainRef = %q", got)
 	}
 }

@@ -55,7 +55,7 @@ start_place() {
 }
 hello() {
 	local port
-	port="$(cd "$PLACE" && zordon get package.hello.module.hello.service.go.hello.vars.port)" || fail "zordon get of the port failed"
+	port="$(cd "$PLACE" && zordon get package.hello.component.hello.service.go.hello.vars.port)" || fail "zordon get of the port failed"
 	http_get "http://127.0.0.1:$port/" || fail "hello does not answer on $port"
 }
 

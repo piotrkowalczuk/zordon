@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Claim: `module "<m>" {}` namespaces services. Two modules each own a `db`
+# Claim: `component "<m>" {}` namespaces services. Two components each own a `db`
 # and an `api` with colliding names; the entrypoint's gateway reaches them
-# through module.<m>.service.go.api refs. All five run side by side,
-# `zordon get` addresses them under module.*, `zordon plan` renders the
-# module blocks, and a pick by display name (`auth/api`) brings up only that
-# module's subgraph.
+# through component.<m>.service.go.api refs. All five run side by side,
+# `zordon get` addresses them under component.*, `zordon plan` renders the
+# component blocks, and a pick by display name (`auth/api`) brings up only that
+# component's subgraph.
 cd "$(dirname "$0")"
 source ../_lib.sh
 need curl
@@ -17,14 +17,14 @@ for svc in gateway payments/db payments/api auth/db auth/api; do
 	assert_contains "$body" "service=$svc" "$svc identifies itself"
 done
 
-pay_api="$(zordon get module.payments.service.go.api.vars.port)" || fail "zordon get module.payments.service.go.api.vars.port failed"
+pay_api="$(zordon get component.payments.service.go.api.vars.port)" || fail "zordon get component.payments.service.go.api.vars.port failed"
 gw_port="$(port_of "-name gateway")" || fail "no port for gateway"
 body="$(http_get "http://127.0.0.1:$gw_port/")" || fail "gateway not responding"
-assert_contains "$body" "payments=127.0.0.1:$pay_api" "gateway wired to payments/api through a module.* ref"
+assert_contains "$body" "payments=127.0.0.1:$pay_api" "gateway wired to payments/api through a component.* ref"
 
 plan="$(zordon --agent plan)" || fail "zordon plan failed"
-assert_contains "$plan" 'module "payments" {' "plan renders the payments module block"
-assert_contains "$plan" 'module "auth" {' "plan renders the auth module block"
+assert_contains "$plan" 'component "payments" {' "plan renders the payments component block"
+assert_contains "$plan" 'component "auth" {' "plan renders the auth component block"
 
 # Picks use display names. auth/api pulls in auth/db through its `after`;
 # payments stays down.

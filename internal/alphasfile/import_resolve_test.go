@@ -12,19 +12,19 @@ import (
 func TestOpen_transitiveModuleChain(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile": "import \"./a/Alphasfile.a\" { modules = [\"a\"] }\nimport \"./c/Alphasfile.c\" { modules = [\"c\"] }\n",
+		"Alphasfile": "import \"./a/Alphasfile.a\" { components = [\"a\"] }\nimport \"./c/Alphasfile.c\" { components = [\"c\"] }\n",
 		"a/Alphasfile.a": `
-module "a" {
-  import "../b/Alphasfile.b" { modules = ["b"] }
+component "a" {
+  import "../b/Alphasfile.b" { components = ["b"] }
 
   service "go" "a" {
     git { url = "github.com/x/a" }
-    vars = { upstream = module.b.service.go.b.vars.port }
+    vars = { upstream = component.b.service.go.b.vars.port }
   }
 }
 `,
 		"b/Alphasfile.b": `
-module "b" {
+component "b" {
   service "go" "b" {
     git { url = "github.com/x/b" }
     vars = { port = 7000 }
@@ -32,7 +32,7 @@ module "b" {
 }
 `,
 		"c/Alphasfile.c": `
-module "c" {
+component "c" {
   service "go" "c" {
     git { url = "github.com/x/c" }
   }
@@ -50,32 +50,32 @@ module "c" {
 
 func TestOpen_visibilityViolation(t *testing.T) {
 	cases := map[string]string{
-		"vars":          `vars = { p = module.b.service.go.b.vars.port }`,
-		"env":           `env = { P = "${module.b.service.go.b.vars.port}" }`,
-		"runtime.after": `runtime { after = [module.b.service.go.b.runtime.ready] }`,
-		"provision.cmd": "runtime {\n  provision \"p\" {\n    cmd = module.b.service.go.b.runtime.provision.seed\n  }\n}",
-		"file.body":     "file \"f\" {\n  path = \"/tmp/f\"\n  body = \"${module.b.service.go.b.vars.port}\"\n}",
-		"print":         `print = "b=${module.b.service.go.b.vars.port}"`,
-		"toolchain ref": `runtime { after = [module.b.toolchain.go.ready] }`,
+		"vars":          `vars = { p = component.b.service.go.b.vars.port }`,
+		"env":           `env = { P = "${component.b.service.go.b.vars.port}" }`,
+		"runtime.after": `runtime { after = [component.b.service.go.b.runtime.ready] }`,
+		"provision.cmd": "runtime {\n  provision \"p\" {\n    cmd = component.b.service.go.b.runtime.provision.seed\n  }\n}",
+		"file.body":     "file \"f\" {\n  path = \"/tmp/f\"\n  body = \"${component.b.service.go.b.vars.port}\"\n}",
+		"print":         `print = "b=${component.b.service.go.b.vars.port}"`,
+		"toolchain ref": `runtime { after = [component.b.toolchain.go.ready] }`,
 	}
 	for hint, body := range cases {
 		t.Run(hint, func(t *testing.T) {
 			dir := t.TempDir()
 			root := writeTree(t, dir, map[string]string{
 				"Alphasfile": fmt.Sprintf(`
-import "./a/Alphasfile.a" { modules = ["a"] }
+import "./a/Alphasfile.a" { components = ["a"] }
 service "go" "z" {
   git { url = "github.com/x/z" }
   %s
 }
 `, body),
 				"a/Alphasfile.a": `
-module "a" {
-  import "../b/Alphasfile.b" { modules = ["b"] }
+component "a" {
+  import "../b/Alphasfile.b" { components = ["b"] }
 }
 `,
 				"b/Alphasfile.b": `
-module "b" {
+component "b" {
   toolchain {
     go { version = "1.22.0" }
   }
@@ -94,9 +94,9 @@ module "b" {
 			})
 			_, err := Open(root, testInv(), nil, testCfgHash, TestConfig{})
 			if err == nil {
-				t.Fatal("the entrypoint does not import module b, so module.b must not resolve")
+				t.Fatal("the entrypoint does not import module b, so component.b must not resolve")
 			}
-			for _, want := range []string{root + ":", "module.b is not visible", `add import "./b/Alphasfile.b" { modules = ["b"] }`} {
+			for _, want := range []string{root + ":", "component.b is not visible", `add import "./b/Alphasfile.b" { components = ["b"] }`} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("missing %q in %v", want, err)
 				}
@@ -107,26 +107,26 @@ module "b" {
 
 func TestOpen_visibilityOK_cycle(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": `import "./Alphasfile.a" { modules = ["a"] }`,
+		"Alphasfile": `import "./Alphasfile.a" { components = ["a"] }`,
 		"Alphasfile.a": `
-module "a" {
-  import "./Alphasfile.b" { modules = ["b"] }
+component "a" {
+  import "./Alphasfile.b" { components = ["b"] }
 
   service "go" "a" {
     git { url = "github.com/x/a" }
     vars = { port = 1 }
-    env  = { PEER = "${module.b.service.go.b.vars.port}" }
+    env  = { PEER = "${component.b.service.go.b.vars.port}" }
   }
 }
 `,
 		"Alphasfile.b": `
-module "b" {
-  import "./Alphasfile.a" { modules = ["a"] }
+component "b" {
+  import "./Alphasfile.a" { components = ["a"] }
 
   service "go" "b" {
     git { url = "github.com/x/b" }
     vars = { port = 2 }
-    env  = { PEER = "${module.a.service.go.a.vars.port}" }
+    env  = { PEER = "${component.a.service.go.a.vars.port}" }
   }
 }
 `,
@@ -143,9 +143,9 @@ module "b" {
 func TestOpen_srcPathAnchoredToDeclaringFile(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile": `import "./services/kafka/Alphasfile.kafka" { modules = ["kafka"] }`,
+		"Alphasfile": `import "./services/kafka/Alphasfile.kafka" { components = ["kafka"] }`,
 		"services/kafka/Alphasfile.kafka": `
-module "kafka" {
+component "kafka" {
   service "go" "kafka" {
     src {
       path = "../.."
@@ -167,9 +167,9 @@ module "kafka" {
 
 func TestOpen_moduleToolchainFromFragment(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": "toolchain {\n  go { version = \"1.27.0\" }\n}\nimport \"./Alphasfile.legacy\" { modules = [\"legacy\"] }\n",
+		"Alphasfile": "toolchain {\n  go { version = \"1.27.0\" }\n}\nimport \"./Alphasfile.legacy\" { components = [\"legacy\"] }\n",
 		"Alphasfile.legacy": `
-module "legacy" {
+component "legacy" {
   toolchain {
     go { version = "1.22.0" }
   }
@@ -190,14 +190,14 @@ module "legacy" {
 
 func TestOpen_unusedModuleNotInstantiated(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": `import "./Alphasfile.f" { modules = ["used"] }`,
+		"Alphasfile": `import "./Alphasfile.f" { components = ["used"] }`,
 		"Alphasfile.f": `
-module "used" {
+component "used" {
   service "go" "a" {
     git { url = "github.com/x/a" }
   }
 }
-module "spare" {
+component "spare" {
   service "go" "b" {
     git { url = "github.com/x/b" }
   }
@@ -213,9 +213,9 @@ module "spare" {
 func TestParseServices_followsImports(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile": "service \"go\" \"gw\" {\n  src { path = \".\" }\n}\nimport \"./svc/Alphasfile.svc\" { modules = [\"svc\"] }\n",
+		"Alphasfile": "service \"go\" \"gw\" {\n  src { path = \".\" }\n}\nimport \"./svc/Alphasfile.svc\" { components = [\"svc\"] }\n",
 		"svc/Alphasfile.svc": `
-module "svc" {
+component "svc" {
   service "go" "api" {
     src { path = "." }
   }

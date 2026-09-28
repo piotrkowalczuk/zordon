@@ -55,8 +55,8 @@ func TestExpandPicks_errors(t *testing.T) {
 		want  []string
 	}{
 		"service name twice":         {picks: []string{"worker"}, want: []string{`"worker" names more than one thing`, "service shop/shop/worker", "service billing/billing/worker"}},
-		"unknown after a valid pick": {picks: []string{"shop/worker", "x"}, want: []string{"unknown service(s), module(s) or package(s): x"}},
-		"unknown":                    {picks: []string{"nope", "zz"}, want: []string{"nope, zz", "available services: ", "modules: api, billing/billing", "packages: billing, caddy, shop"}},
+		"unknown after a valid pick": {picks: []string{"shop/worker", "x"}, want: []string{"unknown service(s), component(s) or package(s): x"}},
+		"unknown":                    {picks: []string{"nope", "zz"}, want: []string{"nope, zz", "available services: ", "components: api, billing/billing", "packages: billing, caddy, shop"}},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -97,7 +97,7 @@ func TestResolvePick_moduleAndPackageShareAName(t *testing.T) {
 		{name: "web/web/site", module: "web/web", svc: "site"},
 	}
 	_, err := resolvePick(all, "web")
-	if err == nil || !strings.Contains(err.Error(), "module web: web/api") || !strings.Contains(err.Error(), "package web: web/web/site") {
+	if err == nil || !strings.Contains(err.Error(), "component web: web/api") || !strings.Contains(err.Error(), "package web: web/web/site") {
 		t.Fatalf("got %v", err)
 	}
 	if sel, err := resolvePick(all, "web/web"); err != nil || sel.single || !equalStrings(sel.names, []string{"web/web/site"}) {

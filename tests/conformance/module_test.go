@@ -1,5 +1,5 @@
-// Module conformance: `module "<m>" {}` blocks give services a namespace
-// (`module.<m>.service.<tc>.<n>`, display name `<m>/<n>`) and their own
+// Module conformance: `component "<m>" {}` blocks give services a namespace
+// (`component.<m>.service.<tc>.<n>`, display name `<m>/<n>`) and their own
 // toolchain pin. `zordon plan` is the static oracle here: no alpha, no
 // build, the rendered HCL must nest each module's services and pin under
 // its block with every cross-module reference substituted.
@@ -26,13 +26,13 @@ service "go" "gateway" {
   package = "example.com/gateway@v0.0.0"
   vars = {
     port     = net::pickport()
-    payments = module.payments.service.go.api.vars.port
-    auth     = module.auth.service.go.api.vars.port
+    payments = component.payments.service.go.api.vars.port
+    auth     = component.auth.service.go.api.vars.port
   }
-  runtime { after = [module.payments.service.go.api.runtime.ready] }
+  runtime { after = [component.payments.service.go.api.runtime.ready] }
 }
 
-module "payments" {
+component "payments" {
   toolchain {
     go { version = "1.22.0" }
   }
@@ -51,7 +51,7 @@ module "payments" {
   }
 }
 
-module "auth" {
+component "auth" {
   service "go" "db" {
     package = "example.com/db@v0.0.0"
     vars = { port = net::pickport() }
@@ -73,22 +73,22 @@ module "auth" {
 	}
 	out := res.Stdout
 
-	// Barrier refs keep their canonical `module.<m>.service…@state` form, so
+	// Barrier refs keep their canonical `component.<m>.service…@state` form, so
 	// only value traversals are forbidden here.
-	for _, forbidden := range []string{"${", "self.", "module.payments.service.go.api.vars", "module.auth.service.go.api.vars", ".vars.port", "net::"} {
+	for _, forbidden := range []string{"${", "self.", "component.payments.service.go.api.vars", "component.auth.service.go.api.vars", ".vars.port", "net::"} {
 		if strings.Contains(out, forbidden) {
 			t.Errorf("unresolved token %q in\n%s", forbidden, out)
 		}
 	}
 	for _, want := range []string{
-		`module "payments" {`,
-		`module "auth" {`,
+		`component "payments" {`,
+		`component "auth" {`,
 		`version = "1.27.0"`,
 		`version = "1.22.0"`,
-		`"module.payments.toolchain.go@ready"`,
+		`"component.payments.toolchain.go@ready"`,
 		`"toolchain.go@ready"`,
-		`"module.payments.service.go.db.runtime@ready"`,
-		`"module.payments.service.go.api.runtime@ready"`,
+		`"component.payments.service.go.db.runtime@ready"`,
+		`"component.payments.service.go.api.runtime@ready"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
@@ -111,13 +111,13 @@ func TestPlan_bareServiceRefDoesNotCrossModules(t *testing.T) {
 	p.WriteFile("Alphasfile", `
 sysenv = ["HOME", "USER", "PATH", "TMPDIR"]
 
-module "infra" {
+component "infra" {
   service "go" "db" {
     package = "example.com/db@v0.0.0"
     vars = { port = net::pickport() }
   }
 }
-module "apps" {
+component "apps" {
   service "go" "api" {
     package = "example.com/api@v0.0.0"
     vars = { db = service.go.db.vars.port }

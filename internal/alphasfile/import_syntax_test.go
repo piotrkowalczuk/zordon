@@ -20,8 +20,8 @@ func TestLoadTree_importPathNeedsLocalPrefix(t *testing.T) {
 		t.Run(hint, func(t *testing.T) {
 			dir := t.TempDir()
 			root := writeTree(t, dir+"/x", map[string]string{
-				"Alphasfile":   `import "` + c.path + `" { modules = ["m"] }`,
-				"Alphasfile.f": `module "m" {}`,
+				"Alphasfile":   `import "` + c.path + `" { components = ["m"] }`,
+				"Alphasfile.f": `component "m" {}`,
 			})
 			_, err := LoadTree(root)
 			if c.ok {
@@ -39,7 +39,7 @@ func TestLoadTree_importPathNeedsLocalPrefix(t *testing.T) {
 
 func TestLoadTree_requireInsideModuleIsRejected(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": "module \"a\" {\n  require \"github.com/acme/infra\" { ref = \"main\" }\n}\n",
+		"Alphasfile": "component \"a\" {\n  require \"github.com/acme/infra\" { ref = \"main\" }\n}\n",
 	})
 	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `Blocks of type "require" are not expected here`) {
 		t.Fatalf("got %v", err)

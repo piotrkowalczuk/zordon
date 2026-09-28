@@ -12,8 +12,8 @@ import (
 const DefaultModule = ""
 
 // ServiceRef is the canonical id of a service: `service.<tc>.<name>` in the
-// default module, `module.<m>.service.<tc>.<name>` inside a module, and
-// `package.<p>.module.<m>.service.<tc>.<name>` inside a package's module,
+// default module, `component.<c>.service.<tc>.<name>` inside a module, and
+// `package.<p>.component.<c>.service.<tc>.<name>` inside a package's module,
 // whose module id is "<p>/<m>". It is the barrier entity prefix, the
 // fs::service::bin handle and the MCP provision id root, so every producer
 // of such a string goes through here.
@@ -24,20 +24,20 @@ func ServiceRef(module, toolchain, name string) string {
 	return modulePath(module) + ".service." + toolchain + "." + name
 }
 
-// modulePath is the HCL path of a module id: module.<m>, or
-// package.<p>.module.<m> for a package's module.
+// modulePath is the HCL path of a module id: component.<c>, or
+// package.<p>.component.<c> for a package's module.
 func modulePath(module string) string {
 	if p, m, ok := strings.Cut(module, "/"); ok {
-		return "package." + p + ".module." + m
+		return "package." + p + ".component." + m
 	}
-	return "module." + module
+	return "component." + module
 }
 
 // parseModulePath is the inverse of modulePath on the front of id: it
 // returns the module id and what follows the module path, without its dot.
 func parseModulePath(id string) (module, rest string, ok bool) {
 	if after, found := strings.CutPrefix(id, "package."); found {
-		p, after, found := strings.Cut(after, ".module.")
+		p, after, found := strings.Cut(after, ".component.")
 		if !found || p == "" {
 			return "", "", false
 		}
@@ -47,7 +47,7 @@ func parseModulePath(id string) (module, rest string, ok bool) {
 		}
 		return p + "/" + m, rest, true
 	}
-	if after, found := strings.CutPrefix(id, "module."); found {
+	if after, found := strings.CutPrefix(id, "component."); found {
 		m, rest, found := strings.Cut(after, ".")
 		if !found || m == "" {
 			return "", "", false
@@ -136,7 +136,7 @@ func ToolchainKey(module, lang string) string {
 
 // ToolchainRef is the barrier entity of a toolchain pin, shaped like the
 // HCL path that reaches it: `toolchain.<lang>` for the entrypoint's pin,
-// `module.<m>.toolchain.<lang>` for a module's own pin.
+// `component.<c>.toolchain.<lang>` for a module's own pin.
 func ToolchainRef(module, lang string) string {
 	if module == DefaultModule {
 		return "toolchain." + lang
@@ -172,17 +172,17 @@ func ToolchainLang(key string) string {
 
 // annotateModules stamps every service block with the module it was
 // declared in and validates identity: module names must be traversable
-// HCL identifiers (they appear as `module.<name>` in expressions) declared
+// HCL identifiers (they appear as `component.<name>` in expressions) declared
 // once per file, and service names may not contain '/', the display-name
 // separator between module and service.
 func annotateModules(root *rootBlock) error {
 	seen := map[string]*moduleBlock{}
 	for _, mb := range root.Modules {
 		if !moduleNameRe.MatchString(mb.Name) {
-			return fmt.Errorf("%s: invalid module name %q: use letters, digits, '_' or '-' and start with a letter", mb.DefRange, mb.Name)
+			return fmt.Errorf("%s: invalid component name %q: use letters, digits, '_' or '-' and start with a letter", mb.DefRange, mb.Name)
 		}
 		if prev, dup := seen[mb.Name]; dup {
-			return fmt.Errorf("duplicate module %q: declared at %s and %s", mb.Name, prev.DefRange, mb.DefRange)
+			return fmt.Errorf("duplicate component %q: declared at %s and %s", mb.Name, prev.DefRange, mb.DefRange)
 		}
 		seen[mb.Name] = mb
 		for _, sb := range mb.Services {
@@ -191,7 +191,7 @@ func annotateModules(root *rootBlock) error {
 	}
 	for _, sb := range root.Services {
 		if mb, clash := seen[sb.Name]; clash {
-			return fmt.Errorf("%s: module %q has the same name as the top-level service declared at %s; both would own <state>/{bin,src,etc,var}/%s and the git branch zordon/<ws>/%s, so rename one of them", mb.DefRange, mb.Name, sb.DefRange, sb.Name, sb.Name)
+			return fmt.Errorf("%s: component %q has the same name as the top-level service declared at %s; both would own <state>/{bin,src,etc,var}/%s and the git branch zordon/<ws>/%s, so rename one of them", mb.DefRange, mb.Name, sb.DefRange, sb.Name, sb.Name)
 		}
 	}
 	services := root.allServices()
@@ -202,10 +202,10 @@ func annotateModules(root *rootBlock) error {
 		inPkg := map[string]*moduleBlock{}
 		for _, mb := range pb.Modules {
 			if !moduleNameRe.MatchString(mb.Name) {
-				return fmt.Errorf("%s: invalid module name %q: use letters, digits, '_' or '-' and start with a letter", mb.DefRange, mb.Name)
+				return fmt.Errorf("%s: invalid component name %q: use letters, digits, '_' or '-' and start with a letter", mb.DefRange, mb.Name)
 			}
 			if prev, dup := inPkg[mb.Name]; dup {
-				return fmt.Errorf("duplicate module %q in package %q: declared at %s and %s", mb.Name, pb.Name, prev.DefRange, mb.DefRange)
+				return fmt.Errorf("duplicate component %q in package %q: declared at %s and %s", mb.Name, pb.Name, prev.DefRange, mb.DefRange)
 			}
 			inPkg[mb.Name] = mb
 			for _, sb := range mb.Services {
@@ -216,7 +216,7 @@ func annotateModules(root *rootBlock) error {
 	}
 	for _, sb := range services {
 		if strings.Contains(sb.Name, "/") {
-			return fmt.Errorf("%s: invalid service name %q: '/' separates a module from a service name; declare the service inside a module block instead", sb.DefRange, sb.Name)
+			return fmt.Errorf("%s: invalid service name %q: '/' separates a component from a service name; declare the service inside a component block instead", sb.DefRange, sb.Name)
 		}
 	}
 	return nil

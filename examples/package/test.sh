@@ -34,7 +34,7 @@ start_place() { # <dir>
 	(cd "$1" && zordon start --agent --timeout 900s --alpha-log "$1/alpha.log" 2>&1 | tee "$1/zordon.log")
 }
 
-caddy_http() { (cd "$1" && zordon get package.caddy.module.caddy.service.go.caddy.vars.http); }
+caddy_http() { (cd "$1" && zordon get package.caddy.component.caddy.service.go.caddy.vars.http); }
 
 site() { # <http port> <host>
 	curl -fsS --max-time 5 -H "Host: $2" "http://127.0.0.1:$1/"

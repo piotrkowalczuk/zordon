@@ -14,7 +14,7 @@ const remoteRepo = "github.com/acme/infra"
 
 const pkgDB = `
 package "db" {
-  module "db" {
+  component "db" {
     service "go" "db" {
       git { url = "github.com/x/db" }
     }

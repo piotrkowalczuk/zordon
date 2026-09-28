@@ -17,7 +17,7 @@ import (
 // pkgNeed is an import of a package from anywhere but the entrypoint's top
 // level, with what it passes.
 type pkgNeed struct {
-	by    string // "package caddy" or "module gw"
+	by    string // "package caddy" or "component gw"
 	block *importBlock
 	set   *pkgSettings
 }
@@ -191,7 +191,7 @@ func decodeInputs(pb *packageBlock) (map[string]*inputDecl, error) {
 
 func decodeOutputs(pb *packageBlock) (map[string]*outputDecl, error) {
 	out := map[string]*outputDecl{}
-	err := declItems(pb.Outputs, pb.OutputsRange, "output", `{ url = { description = "Where it listens.", value = "http://127.0.0.1:${module.web.service.go.web.vars.port}" } }`, pb.Name, func(name string, at hcl.Range, fields map[string]hcl.Expression) error {
+	err := declItems(pb.Outputs, pb.OutputsRange, "output", `{ url = { description = "Where it listens.", value = "http://127.0.0.1:${component.web.service.go.web.vars.port}" } }`, pb.Name, func(name string, at hcl.Range, fields map[string]hcl.Expression) error {
 		if err := onlyFields(fields, "output", name, at, "description", "type", "value"); err != nil {
 			return err
 		}
@@ -354,7 +354,7 @@ func (t *Tree) needsOf(p *pkgInstance, plain map[string]bool) ([]pkgNeed, error)
 			if l.pkg != p || l.block == nil {
 				continue
 			}
-			by := "module " + scope
+			by := "component " + scope
 			if inPkg {
 				q := t.packages[owner]
 				if owner == p.name || !q.active {
@@ -808,7 +808,7 @@ func (t *Tree) gatedTarget(trav hcl.Traversal, module, selfRef string) (offRecor
 	case names[0] == "service" && len(names) >= 3:
 		rec, ok := o.services[ServiceRef(module, names[1], names[2])]
 		return rec, ok
-	case names[0] == "module" && len(names) >= 2:
+	case names[0] == "component" && len(names) >= 2:
 		id := resolveModule(module, names[1])
 		if rec, ok := t.offLink(module, id); ok && !t.moduleVisible(module, id) {
 			return rec, true
@@ -821,7 +821,7 @@ func (t *Tree) gatedTarget(trav hcl.Traversal, module, selfRef string) (offRecor
 		if rec, ok := t.offLink(module, pkgScope(names[1])); ok && !t.packageVisible(module, names[1]) {
 			return rec, true
 		}
-		if len(names) >= 7 && names[2] == "module" && names[4] == "service" {
+		if len(names) >= 7 && names[2] == "component" && names[4] == "service" {
 			rec, ok := o.services[ServiceRef(names[1]+"/"+names[3], names[5], names[6])]
 			return rec, ok
 		}

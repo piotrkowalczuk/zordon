@@ -111,7 +111,7 @@ type resolver struct {
 	// Already-evaluated services, keyed by module, then toolchain, then
 	// name. Re-projected into the EvalContext before each eval step: the
 	// current module's services under "service", every module under
-	// "module.<m>.service". May be pre-seeded with parent services for
+	// "component.<c>.service". May be pre-seeded with parent services for
 	// federation.
 	serviceByModule map[string]map[string]map[string]cty.Value
 
@@ -629,7 +629,7 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 		// self.* because that's where they live in HCL too.
 		self := map[string]cty.Value{
 			"name":      cty.StringVal(sb.Name),
-			"module":    cty.StringVal(sb.module),
+			"component": cty.StringVal(sb.module),
 			"toolchain": cty.StringVal(sb.Toolchain),
 			"dir":       cty.StringVal(dir),
 		}
@@ -1760,9 +1760,9 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 	if len(tcs) > 0 {
 		vars["toolchain"] = cty.ObjectVal(copyCtyMap(tcs))
 	}
-	// A module is addressable as module.<m>.{service,toolchain}, and a
-	// package's module as package.<p>.module.<m>, where the scope sees it;
-	// inside a package, module.<m> is a sibling. The default module has no
+	// A module is addressable as component.<c>.{service,toolchain}, and a
+	// package's module as package.<p>.component.<c>, where the scope sees it;
+	// inside a package, component.<c> is a sibling. The default module has no
 	// such handle (it composes, it is not composed).
 	modules := map[string]cty.Value{}
 	packages := map[string]map[string]cty.Value{}
@@ -1795,7 +1795,7 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 		}
 	}
 	if len(modules) > 0 {
-		vars["module"] = cty.ObjectVal(modules)
+		vars["component"] = cty.ObjectVal(modules)
 	}
 	for p, outs := range r.outputs {
 		if len(outs) > 0 && r.tree.packageVisible(dirs.module, p) && packages[p] == nil {
@@ -1805,7 +1805,7 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 	if len(packages) > 0 {
 		pkgs := make(map[string]cty.Value, len(packages))
 		for p, mods := range packages {
-			obj := map[string]cty.Value{"module": cty.ObjectVal(mods)}
+			obj := map[string]cty.Value{"component": cty.ObjectVal(mods)}
 			if outs := r.outputs[p]; len(outs) > 0 {
 				obj["outputs"] = cty.ObjectVal(copyCtyMap(outs))
 			}
@@ -2193,15 +2193,15 @@ func (r *resolver) svcPathFunc(sub string) function.Function {
 }
 
 // serviceRefAttrs reads the identity attributes off a service reference
-// object (`self`, `service.<tc>.<name>` or `module.<m>.service.<tc>.<name>`).
+// object (`self`, `service.<tc>.<name>` or `component.<c>.service.<tc>.<name>`).
 func serviceRefAttrs(v cty.Value, fn string) (module, toolchain, name string, err error) {
 	t := v.Type()
-	if v.IsNull() || !t.IsObjectType() || !t.HasAttribute("name") || !t.HasAttribute("toolchain") || !t.HasAttribute("module") {
-		return "", "", "", fmt.Errorf("%s: expected a service reference (self, service.<tc>.<name> or module.<m>.service.<tc>.<name>), got %s", fn, t.FriendlyName())
+	if v.IsNull() || !t.IsObjectType() || !t.HasAttribute("name") || !t.HasAttribute("toolchain") || !t.HasAttribute("component") {
+		return "", "", "", fmt.Errorf("%s: expected a service reference (self, service.<tc>.<name> or component.<c>.service.<tc>.<name>), got %s", fn, t.FriendlyName())
 	}
-	m, tc, n := v.GetAttr("module"), v.GetAttr("toolchain"), v.GetAttr("name")
+	m, tc, n := v.GetAttr("component"), v.GetAttr("toolchain"), v.GetAttr("name")
 	if m.Type() != cty.String || tc.Type() != cty.String || n.Type() != cty.String {
-		return "", "", "", fmt.Errorf("%s: service reference has a non-string module/toolchain/name", fn)
+		return "", "", "", fmt.Errorf("%s: service reference has a non-string component/toolchain/name", fn)
 	}
 	return m.AsString(), tc.AsString(), n.AsString(), nil
 }

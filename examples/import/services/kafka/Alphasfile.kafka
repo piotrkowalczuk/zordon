@@ -1,7 +1,7 @@
-# A fragment: importable, never an entrypoint. It holds modules only.
+# A fragment: importable, never an entrypoint. It holds components only.
 # Relative paths resolve against THIS file's directory, so the repo root is
 # four levels up.
-module "kafka" {
+component "kafka" {
   service "go" "kafka" {
     src {
       path = "../../../.."
@@ -34,7 +34,7 @@ module "kafka" {
 }
 
 # Declared but never imported: loaded with the file, not instantiated.
-module "kafka-ui" {
+component "kafka-ui" {
   service "go" "ui" {
     src {
       path = "../../../.."

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Claim: zordon start, plan and workspace create pick a service by its own
-# name when that name is unique in the stack, a whole module, a whole
-# package, or one module of a package. A name that selects more than one
+# name when that name is unique in the stack, a whole component, a whole
+# package, or one component of a package. A name that selects more than one
 # thing, like worker in both shop and billing, is refused with every
 # candidate listed.
 EXDIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,20 +14,20 @@ build_bins
 plan() { zordon --agent plan "$@"; }
 
 out="$(plan grpc)" || fail "zordon plan grpc failed"
-assert_contains "$out" 'service "go" "grpc"' "a unique service name picks the service inside its module"
+assert_contains "$out" 'service "go" "grpc"' "a unique service name picks the service inside its component"
 case "$out" in *'service "go" "http"'* | *'service "go" "web"'*) fail "grpc picked more than grpc:\n$out" ;; esac
 
 out="$(plan api)" || fail "zordon plan api failed"
-assert_contains "$out" 'service "go" "http"' "a module picks its first service"
-assert_contains "$out" 'service "go" "grpc"' "a module picks its second service"
-case "$out" in *'service "go" "web"'* | *'package "'*) fail "the module picked more than itself:\n$out" ;; esac
+assert_contains "$out" 'service "go" "http"' "a component picks its first service"
+assert_contains "$out" 'service "go" "grpc"' "a component picks its second service"
+case "$out" in *'service "go" "web"'* | *'package "'*) fail "the component picked more than itself:\n$out" ;; esac
 
 out="$(plan shop)" || fail "zordon plan shop failed"
 assert_contains "$out" 'package "shop"' "a package picks its services"
 case "$out" in *'package "billing"'* | *'service "go" "web"'*) fail "the package picked more than itself:\n$out" ;; esac
 
 out="$(plan billing/billing)" || fail "zordon plan billing/billing failed"
-assert_contains "$out" 'package "billing"' "<package>/<module> picks that module"
+assert_contains "$out" 'package "billing"' "<package>/<component> picks that component"
 case "$out" in *'package "shop"'*) fail "billing/billing picked shop:\n$out" ;; esac
 
 if out="$(plan worker 2>&1)"; then

@@ -18,20 +18,20 @@ const importEntry = `
 sysenv = ["HOME", "USER", "PATH", "TMPDIR"]
 
 import "./services/apps/Alphasfile.apps" {
-  modules = ["app"]
+  components = ["app"]
 }
 `
 
 const importApps = `
-module "app" {
+component "app" {
   import "../db/Alphasfile.db" {
-    modules = ["db"]
+    components = ["db"]
   }
 
   service "go" "app" {
     package = "example.com/app@v0.0.0"
     vars = {
-      db  = "127.0.0.1:${module.db.service.go.db.vars.port}"
+      db  = "127.0.0.1:${component.db.service.go.db.vars.port}"
       cfg = cfg::hash()
     }
   }
@@ -39,7 +39,7 @@ module "app" {
 `
 
 const importDB = `
-module "db" {
+component "db" {
   service "go" "db" {
     package = "example.com/db@v0.0.0"
     vars = { port = net::pickport() }
@@ -61,8 +61,8 @@ func TestPlan_importedModulesRenderUnderLevel(t *testing.T) {
 	for _, want := range []string{
 		"# import " + filepath.Join(dir, "services/apps/Alphasfile.apps") + " [app]",
 		"# import " + filepath.Join(dir, "services/db/Alphasfile.db") + " [db]",
-		`module "app" {`,
-		`module "db" {`,
+		`component "app" {`,
+		`component "db" {`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
@@ -98,14 +98,14 @@ func TestPlan_unimportedModuleRefFails(t *testing.T) {
 	p.WriteFile("Alphasfile", importEntry+`
 service "go" "gw" {
   package = "example.com/gw@v0.0.0"
-  vars = { db = module.db.service.go.db.vars.port }
+  vars = { db = component.db.service.go.db.vars.port }
 }
 `)
 	res := p.Zordon("plan").Run(t)
 	if res.ExitCode == 0 {
 		t.Fatalf("the entrypoint does not import module db; plan must fail\n%s", res.Stdout)
 	}
-	for _, want := range []string{"module.db is not visible", `add import "./services/db/Alphasfile.db" { modules = ["db"] }`} {
+	for _, want := range []string{"component.db is not visible", `add import "./services/db/Alphasfile.db" { components = ["db"] }`} {
 		if !strings.Contains(res.Stderr, want) {
 			t.Errorf("missing %q in stderr:\n%s", want, res.Stderr)
 		}
@@ -114,8 +114,8 @@ service "go" "gw" {
 
 func TestPlan_importOfEntrypointFails(t *testing.T) {
 	p := zordontest.NewProject(t)
-	p.WriteFile("Alphasfile", `import "./svc/Alphasfile" { modules = ["svc"] }`)
-	p.WriteFile("svc/Alphasfile", `module "svc" {}`)
+	p.WriteFile("Alphasfile", `import "./svc/Alphasfile" { components = ["svc"] }`)
+	p.WriteFile("svc/Alphasfile", `component "svc" {}`)
 	res := p.Zordon("plan").Run(t)
 	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "entrypoints and form federation levels") {
 		t.Fatalf("exit %d, stderr:\n%s", res.ExitCode, res.Stderr)

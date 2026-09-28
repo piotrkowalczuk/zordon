@@ -14,7 +14,7 @@ import (
 
 const webPackage = `
 package "web" {
-  module "web" {
+  component "web" {
     service "go" "web" {
       git { url = "github.com/x/web" }
     }

@@ -22,7 +22,7 @@ const maxCmdPreview = 200
 // canonical identity alpha keys provisions by and the value zordon sends in an
 // OpInvoke request.
 type Provision struct {
-	ID        string // [module.<m>.]service.<tc>.<svc>.runtime.provision.<name>
+	ID        string // [component.<c>.]service.<tc>.<svc>.runtime.provision.<name>
 	Toolchain string
 	Module    string // declaring module, "" for a top-level service
 	Service   string // display name (`<module>/<svc>` inside a module)

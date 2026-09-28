@@ -13,10 +13,10 @@ import (
 func TestLoadTree_resolvesImportRelativeToImporter(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile":           `import "./a/Alphasfile.a" { modules = ["a"] }`,
-		"a/Alphasfile.a":       "module \"a\" {\n  import \"../b/Alphasfile.b\" { modules = [\"b\"] }\n}\n",
-		"b/Alphasfile.b":       `module "b" {}`,
-		"b/Alphasfile.ignored": `module "x" {}`,
+		"Alphasfile":           `import "./a/Alphasfile.a" { components = ["a"] }`,
+		"a/Alphasfile.a":       "component \"a\" {\n  import \"../b/Alphasfile.b\" { components = [\"b\"] }\n}\n",
+		"b/Alphasfile.b":       `component "b" {}`,
+		"b/Alphasfile.ignored": `component "x" {}`,
 	})
 	tree, err := LoadTree(root)
 	if err != nil {
@@ -31,10 +31,10 @@ func TestLoadTree_resolvesImportRelativeToImporter(t *testing.T) {
 func TestLoadTree_loadsOnce_diamond(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile":   "import \"./Alphasfile.a\" { modules = [\"a\"] }\nimport \"./Alphasfile.b\" { modules = [\"b\"] }\n",
-		"Alphasfile.a": "module \"a\" {\n  import \"./Alphasfile.c\" { modules = [\"c\"] }\n}\n",
-		"Alphasfile.b": "module \"b\" {\n  import \"./Alphasfile.c\" { modules = [\"c\"] }\n}\n",
-		"Alphasfile.c": `module "c" {}`,
+		"Alphasfile":   "import \"./Alphasfile.a\" { components = [\"a\"] }\nimport \"./Alphasfile.b\" { components = [\"b\"] }\n",
+		"Alphasfile.a": "component \"a\" {\n  import \"./Alphasfile.c\" { components = [\"c\"] }\n}\n",
+		"Alphasfile.b": "component \"b\" {\n  import \"./Alphasfile.c\" { components = [\"c\"] }\n}\n",
+		"Alphasfile.c": `component "c" {}`,
 	})
 	tree, err := LoadTree(root)
 	if err != nil {
@@ -57,9 +57,9 @@ func TestLoadTree_loadsOnce_diamond(t *testing.T) {
 func TestLoadTree_loadsOnce_cycle(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile":   `import "./Alphasfile.a" { modules = ["a"] }`,
-		"Alphasfile.a": "module \"a\" {\n  import \"./Alphasfile.b\" { modules = [\"b\"] }\n}\n",
-		"Alphasfile.b": "module \"b\" {\n  import \"./Alphasfile.a\" { modules = [\"a\"] }\n}\n",
+		"Alphasfile":   `import "./Alphasfile.a" { components = ["a"] }`,
+		"Alphasfile.a": "component \"a\" {\n  import \"./Alphasfile.b\" { components = [\"b\"] }\n}\n",
+		"Alphasfile.b": "component \"b\" {\n  import \"./Alphasfile.a\" { components = [\"a\"] }\n}\n",
 	})
 	tree, err := LoadTree(root)
 	if err != nil {
@@ -73,8 +73,8 @@ func TestLoadTree_loadsOnce_cycle(t *testing.T) {
 func TestLoadTree_rejectsEntrypointImport(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile":     `import "./svc/Alphasfile" { modules = ["svc"] }`,
-		"svc/Alphasfile": `module "svc" {}`,
+		"Alphasfile":     `import "./svc/Alphasfile" { components = ["svc"] }`,
+		"svc/Alphasfile": `component "svc" {}`,
 	})
 	_, err := LoadTree(root)
 	if err == nil || !strings.Contains(err.Error(), "entrypoints and form federation levels") || !strings.Contains(err.Error(), "Alphasfile.<name>") {
@@ -84,7 +84,7 @@ func TestLoadTree_rejectsEntrypointImport(t *testing.T) {
 
 func TestLoadTree_missingImportNamesImporter(t *testing.T) {
 	dir := t.TempDir()
-	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "./nope/Alphasfile.nope" { modules = ["x"] }`})
+	root := writeTree(t, dir, map[string]string{"Alphasfile": `import "./nope/Alphasfile.nope" { components = ["x"] }`})
 	_, err := LoadTree(root)
 	if err == nil || !strings.Contains(err.Error(), root+":1") || !strings.Contains(err.Error(), "nope/Alphasfile.nope") {
 		t.Fatalf("got %v", err)
@@ -95,14 +95,14 @@ func TestLoadTree_importErrors(t *testing.T) {
 	cases := map[string]struct {
 		entry, fragment, want string
 	}{
-		"empty modules":            {`import "./Alphasfile.f" { modules = [] }`, `module "a" {}`, "modules must name at least one module"},
-		"missing modules":          {`import "./Alphasfile.f" {}`, `module "a" {}`, `"modules" is required`},
-		"unknown module":           {`import "./Alphasfile.f" { modules = ["zz"] }`, "module \"a\" {}\nmodule \"b\" {}\n", `module "zz" is not declared in`},
-		"inputs on a fragment":     {"import \"./Alphasfile.f\" {\n  modules = [\"a\"]\n  inputs  = { x = 1 }\n}\n", `module "a" {}`, "inputs and features are passed to a package directory, not to a fragment file"},
-		"features on a fragment":   {"import \"./Alphasfile.f\" {\n  modules  = [\"a\"]\n  features = [\"x\"]\n}\n", `module "a" {}`, "inputs and features are passed to a package directory, not to a fragment file"},
-		"alias on a fragment":      {`import "./Alphasfile.f" "x" { modules = ["a"] }`, `module "a" {}`, "an alias names a package; a fragment's modules keep their declared names"},
-		"package file as fragment": {`import "./Alphasfile.f" { modules = ["a"] }`, `package "p" {}`, "is a package's file; import its directory instead"},
-		"git import":               {"import \"./Alphasfile.f\" {\n  modules = [\"a\"]\n  git { url = \"github.com/x/y\" }\n}\n", `module "a" {}`, "remote imports (git {}) are not supported yet"},
+		"empty modules":            {`import "./Alphasfile.f" { components = [] }`, `component "a" {}`, "components must name at least one component"},
+		"missing modules":          {`import "./Alphasfile.f" {}`, `component "a" {}`, `"components" is required`},
+		"unknown module":           {`import "./Alphasfile.f" { components = ["zz"] }`, "component \"a\" {}\ncomponent \"b\" {}\n", `component "zz" is not declared in`},
+		"inputs on a fragment":     {"import \"./Alphasfile.f\" {\n  components = [\"a\"]\n  inputs  = { x = 1 }\n}\n", `component "a" {}`, "inputs and features are passed to a package directory, not to a fragment file"},
+		"features on a fragment":   {"import \"./Alphasfile.f\" {\n  components  = [\"a\"]\n  features = [\"x\"]\n}\n", `component "a" {}`, "inputs and features are passed to a package directory, not to a fragment file"},
+		"alias on a fragment":      {`import "./Alphasfile.f" "x" { components = ["a"] }`, `component "a" {}`, "an alias names a package; a fragment's components keep their declared names"},
+		"package file as fragment": {`import "./Alphasfile.f" { components = ["a"] }`, `package "p" {}`, "is a package's file; import its directory instead"},
+		"git import":               {"import \"./Alphasfile.f\" {\n  components = [\"a\"]\n  git { url = \"github.com/x/y\" }\n}\n", `component "a" {}`, "remote imports (git {}) are not supported yet"},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -112,7 +112,7 @@ func TestLoadTree_importErrors(t *testing.T) {
 			}
 		})
 	}
-	root := writeTree(t, t.TempDir(), map[string]string{"Alphasfile": `import "./Alphasfile.f" { modules = ["zz"] }`, "Alphasfile.f": "module \"a\" {}\nmodule \"b\" {}\n"})
+	root := writeTree(t, t.TempDir(), map[string]string{"Alphasfile": `import "./Alphasfile.f" { components = ["zz"] }`, "Alphasfile.f": "component \"a\" {}\ncomponent \"b\" {}\n"})
 	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "declared: a, b") {
 		t.Errorf("unknown module error must list what the file declares, got %v", err)
 	}
@@ -121,12 +121,12 @@ func TestLoadTree_importErrors(t *testing.T) {
 func TestLoadTree_duplicateModuleAcrossFilesNamesBoth(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile":   "import \"./Alphasfile.a\" { modules = [\"m\"] }\nimport \"./Alphasfile.b\" { modules = [\"n\"] }\n",
-		"Alphasfile.a": `module "m" {}`,
-		"Alphasfile.b": "module \"m\" {}\nmodule \"n\" {}\n",
+		"Alphasfile":   "import \"./Alphasfile.a\" { components = [\"m\"] }\nimport \"./Alphasfile.b\" { components = [\"n\"] }\n",
+		"Alphasfile.a": `component "m" {}`,
+		"Alphasfile.b": "component \"m\" {}\ncomponent \"n\" {}\n",
 	})
 	_, err := LoadTree(root)
-	if err == nil || !strings.Contains(err.Error(), `duplicate module "m"`) || !strings.Contains(err.Error(), "Alphasfile.a:1") || !strings.Contains(err.Error(), "Alphasfile.b:1") {
+	if err == nil || !strings.Contains(err.Error(), `duplicate component "m"`) || !strings.Contains(err.Error(), "Alphasfile.a:1") || !strings.Contains(err.Error(), "Alphasfile.b:1") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -142,8 +142,8 @@ func TestLoadTree_rejectsTopLevelInFragment(t *testing.T) {
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
 			root := writeTree(t, t.TempDir(), map[string]string{
-				"Alphasfile":   `import "./Alphasfile.f" { modules = ["m"] }`,
-				"Alphasfile.f": c.fragment + "\nmodule \"m\" {}\n",
+				"Alphasfile":   `import "./Alphasfile.f" { components = ["m"] }`,
+				"Alphasfile.f": c.fragment + "\ncomponent \"m\" {}\n",
 			})
 			_, err := LoadTree(root)
 			if err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "Alphasfile.f:") {
@@ -155,8 +155,8 @@ func TestLoadTree_rejectsTopLevelInFragment(t *testing.T) {
 
 func TestLoadTree_rejectsSysenvInFragment(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":   `import "./Alphasfile.f" { modules = ["m"] }`,
-		"Alphasfile.f": "sysenv = [\"TZ\"]\nmodule \"m\" {}\n",
+		"Alphasfile":   `import "./Alphasfile.f" { components = ["m"] }`,
+		"Alphasfile.f": "sysenv = [\"TZ\"]\ncomponent \"m\" {}\n",
 	})
 	_, err := LoadTree(root)
 	if err == nil || !strings.Contains(err.Error(), "Alphasfile.f:1") || !strings.Contains(err.Error(), "top-level sysenv is only allowed in the entrypoint") {
@@ -167,8 +167,8 @@ func TestLoadTree_rejectsSysenvInFragment(t *testing.T) {
 func TestLoadTree_unusedModule(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile":   `import "./Alphasfile.f" { modules = ["used"] }`,
-		"Alphasfile.f": "module \"used\" {}\nmodule \"spare\" {}\n",
+		"Alphasfile":   `import "./Alphasfile.f" { components = ["used"] }`,
+		"Alphasfile.f": "component \"used\" {}\ncomponent \"spare\" {}\n",
 	})
 	tree, err := LoadTree(root)
 	if err != nil {
@@ -205,7 +205,7 @@ func TestLoadTree_bytesChangeWhenPackageChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTree(t, dir, map[string]string{"p/Alphasfile": "package \"p\" {\n  module \"m\" {}\n}\n"})
+	writeTree(t, dir, map[string]string{"p/Alphasfile": "package \"p\" {\n  component \"m\" {}\n}\n"})
 	after, err := LoadTree(root)
 	if err != nil {
 		t.Fatal(err)
@@ -218,14 +218,14 @@ func TestLoadTree_bytesChangeWhenPackageChanges(t *testing.T) {
 func TestLoadTree_bytesChangeWhenFragmentChanges(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile":   `import "./Alphasfile.f" { modules = ["m"] }`,
-		"Alphasfile.f": `module "m" {}`,
+		"Alphasfile":   `import "./Alphasfile.f" { components = ["m"] }`,
+		"Alphasfile.f": `component "m" {}`,
 	})
 	before, err := LoadTree(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTree(t, dir, map[string]string{"Alphasfile.f": "module \"m\" {}\nmodule \"n\" {}\n"})
+	writeTree(t, dir, map[string]string{"Alphasfile.f": "component \"m\" {}\ncomponent \"n\" {}\n"})
 	after, err := LoadTree(root)
 	if err != nil {
 		t.Fatal(err)
@@ -238,8 +238,8 @@ func TestLoadTree_bytesChangeWhenFragmentChanges(t *testing.T) {
 func TestLoadTree_fragmentParseErrorNamesFragment(t *testing.T) {
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{
-		"Alphasfile":   `import "./Alphasfile.f" { modules = ["m"] }`,
-		"Alphasfile.f": "module \"m\" {\n",
+		"Alphasfile":   `import "./Alphasfile.f" { components = ["m"] }`,
+		"Alphasfile.f": "component \"m\" {\n",
 	})
 	_, err := LoadTree(root)
 	if err == nil || !strings.Contains(err.Error(), filepath.Join(dir, "Alphasfile.f")+":") {
@@ -248,7 +248,7 @@ func TestLoadTree_fragmentParseErrorNamesFragment(t *testing.T) {
 }
 
 func TestParseTree_rejectsImport(t *testing.T) {
-	_, err := ParseTree("test.hcl", []byte(`import "./Alphasfile.f" { modules = ["m"] }`))
+	_, err := ParseTree("test.hcl", []byte(`import "./Alphasfile.f" { components = ["m"] }`))
 	if err == nil || !strings.Contains(err.Error(), "imports need a file on disk") {
 		t.Fatalf("got %v", err)
 	}

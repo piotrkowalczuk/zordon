@@ -19,8 +19,8 @@ for svc in gateway/gateway orders/orders billing/billing; do
 	assert_contains "$status" "$svc" "$svc is part of the stack"
 done
 
-port="$(zordon get package.gateway.module.gateway.service.go.gateway.vars.port)" || fail "get gateway port failed"
-routes="$(zordon get package.gateway.module.gateway.service.go.gateway.file.routes.body)" || fail "get routes failed"
+port="$(zordon get package.gateway.component.gateway.service.go.gateway.vars.port)" || fail "get gateway port failed"
+routes="$(zordon get package.gateway.component.gateway.service.go.gateway.file.routes.body)" || fail "get routes failed"
 assert_contains "$routes" '"prefix": "/orders/"' "orders provided its route"
 assert_contains "$routes" '"prefix": "/billing/"' "billing provided its route"
 

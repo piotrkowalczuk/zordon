@@ -467,7 +467,7 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 		return nil, fmt.Errorf("barrier ref %q has no @state suffix", ref)
 	}
 	entityID, state := ref[:at], lifecycle.State(ref[at+1:])
-	// Toolchain ref: `toolchain.<key>` or `module.<m>.toolchain.<lang>`.
+	// Toolchain ref: `toolchain.<key>` or `component.<c>.toolchain.<lang>`.
 	// Checked first: neither form can be a service ref.
 	if key, ok := alphasfile.ParseToolchainRef(entityID); ok {
 		s.mu.RLock()
@@ -534,7 +534,7 @@ func (s *alphaState) resolveBarrier(ref string) (*barrierTarget, error) {
 		}
 		return &barrierTarget{target: t, fail: sc.TerminalFailure()}, nil
 	}
-	return nil, fmt.Errorf("bad barrier entity ID %q (expected toolchain.<key> | [module.<m>.]service.<tc>.<n>.{build,runtime[.provision.<p>]})", entityID)
+	return nil, fmt.Errorf("bad barrier entity ID %q (expected toolchain.<key> | [component.<c>.]service.<tc>.<n>.{build,runtime[.provision.<p>]})", entityID)
 }
 
 // requestShutdown closes shutdownCh once and records why. The reason is
@@ -2465,7 +2465,7 @@ func artifactName(svc *alphasfile.Service) string {
 }
 
 // serviceNameOfRef maps a canonical service id (service.<tc>.<n> or
-// module.<m>.service.<tc>.<n>) to the state.services key, the display name.
+// component.<c>.service.<tc>.<n>) to the state.services key, the display name.
 func serviceNameOfRef(id string) (string, bool) {
 	module, _, name, _, ok := alphasfile.ParseServiceRef(id)
 	if !ok {

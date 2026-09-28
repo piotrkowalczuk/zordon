@@ -14,7 +14,7 @@ package "greeter" {
     name     = { description = "Whom to greet.", type = string }
   }
 
-  module "greeter" {
+  component "greeter" {
     service "go" "greeter" {
       git { url = "github.com/x/greeter" }
       vars = { text = "${inputs.greeting} ${inputs.name}" }
@@ -52,7 +52,7 @@ func TestOpen_inputNullIsAValue(t *testing.T) {
 package "web" {
   inputs = { port = { description = "Port; null picks one.", type = number, default = null } }
 
-  module "web" {
+  component "web" {
     service "go" "web" {
       git { url = "github.com/x/web" }
       vars = { port = inputs.port != null ? inputs.port : 8080 }
@@ -95,9 +95,9 @@ func TestOpen_inputDefaultReadsTheOwnPackage(t *testing.T) {
 		"Alphasfile": `import "./web" {}`,
 		"web/Alphasfile": `
 package "web" {
-  inputs = { url = { description = "Where web listens.", type = string, default = "http://127.0.0.1:${module.web.service.go.web.vars.port}" } }
+  inputs = { url = { description = "Where web listens.", type = string, default = "http://127.0.0.1:${component.web.service.go.web.vars.port}" } }
 
-  module "web" {
+  component "web" {
     service "go" "web" {
       git { url = "github.com/x/web" }
       vars = { port = 8080 }
@@ -237,8 +237,8 @@ func TestOpen_nullWaitsForADefaultThatReadsAService(t *testing.T) {
 		"Alphasfile": `import "./p" { inputs = { port = null } }`,
 		"p/Alphasfile": `
 package "p" {
-  inputs = { port = { description = "Port.", type = number, default = module.m.service.go.s.vars.port } }
-  module "m" {
+  inputs = { port = { description = "Port.", type = number, default = component.m.service.go.s.vars.port } }
+  component "m" {
     service "go" "s" {
       git { url = "github.com/x/s" }
       vars = { port = 1234 }
@@ -287,8 +287,8 @@ func TestOpen_defaultMustFitItsType(t *testing.T) {
 
 func TestOpen_inputExpressionErrors(t *testing.T) {
 	cases := map[string]struct{ entry, greeting string }{
-		"import value": {entry: `import "./greeter" { inputs = { name = module.nope.service.go.x.vars.y } }`, greeting: `"hello"`},
-		"default":      {entry: `import "./greeter" { inputs = { name = "x" } }`, greeting: `module.nope.service.go.x.vars.y`},
+		"import value": {entry: `import "./greeter" { inputs = { name = component.nope.service.go.x.vars.y } }`, greeting: `"hello"`},
+		"default":      {entry: `import "./greeter" { inputs = { name = "x" } }`, greeting: `component.nope.service.go.x.vars.y`},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {

@@ -1,9 +1,9 @@
-# Two modules in one fragment. Each depends on kafka, so each imports it:
-# an import belongs to the module that needs it and joins the stack only
-# with that module. Without it `module.kafka` is not visible in the module.
-module "app" {
+# Two components in one fragment. Each depends on kafka, so each imports it:
+# an import belongs to the component that needs it and joins the stack only
+# with that component. Without it `component.kafka` is not visible in the component.
+component "app" {
   import "../kafka/Alphasfile.kafka" {
-    modules = ["kafka"]
+    components = ["kafka"]
   }
 
   service "go" "app" {
@@ -18,8 +18,8 @@ module "app" {
       cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}"]
 
       provision "topic" {
-        after = [self.runtime.ready, module.kafka.service.go.kafka.runtime.ready]
-        cmd   = module.kafka.service.go.kafka.runtime.provision.create-topic
+        after = [self.runtime.ready, component.kafka.service.go.kafka.runtime.ready]
+        cmd   = component.kafka.service.go.kafka.runtime.provision.create-topic
         env   = { TOPIC = "app-events" }
       }
     }
@@ -35,9 +35,9 @@ module "app" {
   }
 }
 
-module "billing" {
+component "billing" {
   import "../kafka/Alphasfile.kafka" {
-    modules = ["kafka"]
+    components = ["kafka"]
   }
 
   service "go" "billing" {
@@ -52,8 +52,8 @@ module "billing" {
       cmd = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}"]
 
       provision "topic" {
-        after = [self.runtime.ready, module.kafka.service.go.kafka.runtime.ready]
-        cmd   = module.kafka.service.go.kafka.runtime.provision.create-topic
+        after = [self.runtime.ready, component.kafka.service.go.kafka.runtime.ready]
+        cmd   = component.kafka.service.go.kafka.runtime.provision.create-topic
         env   = { TOPIC = "billing-events" }
       }
     }

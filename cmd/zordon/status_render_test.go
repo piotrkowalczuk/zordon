@@ -31,8 +31,8 @@ func TestStatusImports_local(t *testing.T) {
 func TestStatusImports_fragmentAndUnused(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{
-		"Alphasfile":   `import "./Alphasfile.f" { modules = ["a"] }`,
-		"Alphasfile.f": "module \"a\" {}\nmodule \"b\" {}\n",
+		"Alphasfile":   `import "./Alphasfile.f" { components = ["a"] }`,
+		"Alphasfile.f": "component \"a\" {}\ncomponent \"b\" {}\n",
 	})
 	tree, err := alphasfile.LoadTree(filepath.Join(dir, "Alphasfile"))
 	if err != nil {

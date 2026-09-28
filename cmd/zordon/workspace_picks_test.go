@@ -34,7 +34,7 @@ func TestWorkspaceTargets_errors(t *testing.T) {
 	cases := map[string]struct{ pick, want string }{
 		"revision on a group":  {pick: "auth@feat", want: `"auth@feat": a revision names one service's checkout; pick the services of auth one by one`},
 		"group with no source": {pick: "tools", want: `"tools" has no service with a git or dir source; nothing to check out`},
-		"unknown":              {pick: "nope", want: `unknown service, module or package "nope" (available services: auth/api, auth/db, tools/tools/lint, web; modules: auth, tools/tools; packages: tools)`},
+		"unknown":              {pick: "nope", want: `unknown service, component or package "nope" (available services: auth/api, auth/db, tools/tools/lint, web; components: auth, tools/tools; packages: tools)`},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {

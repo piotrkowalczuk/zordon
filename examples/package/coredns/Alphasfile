@@ -21,16 +21,16 @@ package "coredns" {
     zone = {
       description = "The zone CoreDNS answers."
       type        = string
-      value       = module.coredns.service.go.coredns.vars.zone
+      value       = component.coredns.service.go.coredns.vars.zone
     }
     dns = {
       description = "Where CoreDNS answers, as host:port."
       type        = string
-      value       = "127.0.0.1:${module.coredns.service.go.coredns.vars.dns}"
+      value       = "127.0.0.1:${component.coredns.service.go.coredns.vars.dns}"
     }
   }
 
-  module "coredns" {
+  component "coredns" {
     service "go" "coredns" {
       git {
         url = "github.com/coredns/coredns"
