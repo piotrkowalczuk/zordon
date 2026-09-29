@@ -68,7 +68,7 @@ So anything the agents must not share — Postgres, Redis, the broker — belong
 
 ```hcl
 service "pkg" "postgres" {
-  package = "asdf:mise-plugins/mise-postgres@16.4"
+  package = "ubi:theseus-rs/postgresql-binaries[extract_all=true,bin_path=bin]@16.4.0"
 
   vars = { port = net::pickport() }   # a fresh port per workspace
 

@@ -47,15 +47,50 @@ func TestExamplePkgResolves(t *testing.T) {
 	}
 
 	pg := svcByName(af, "postgres")
-	if pg == nil || pg.Pkg == nil || pg.Pkg.Name != "asdf:mise-plugins/mise-postgres" || pg.Pkg.Version != "16.4" {
+	// The ubi tool options ride inside the mise ref; the version is the
+	// exact release tag ubi needs.
+	if pg == nil || pg.Pkg == nil || pg.Pkg.Name != "ubi:theseus-rs/postgresql-binaries[extract_all=true,bin_path=bin]" || pg.Pkg.Version != "16.4.0" {
 		t.Fatalf("postgres.Pkg = %+v", pg.Pkg)
 	}
-	// build { env } flows into BuildEnv → injected into the mise install.
-	if pg.Runtime.BuildEnv["POSTGRES_EXTRA_CONFIGURE_OPTIONS"] != "--without-icu" {
-		t.Errorf("postgres build env not resolved: %v", pg.Runtime.BuildEnv)
+	if len(pg.Runtime.BuildEnv) != 0 {
+		t.Errorf("prebuilt postgres needs no build env: %v", pg.Runtime.BuildEnv)
 	}
 	// initdb runs before the service cmd (runtime.after gates on it).
 	if len(pg.Runtime.After) == 0 || !strings.Contains(pg.Runtime.After[0], "provision.initdb") {
 		t.Errorf("postgres runtime.after must gate on the initdb provision: %v", pg.Runtime.After)
+	}
+}
+
+// A pkg service's build { env } resolves into BuildEnv, the map alpha
+// injects straight into `mise install` (configure flags for a
+// source-compiled backend). Pinned on an inline Alphasfile now that the
+// shipped example uses a prebuilt package and carries none.
+func TestPkgService_buildEnvResolves(t *testing.T) {
+	src := []byte(`
+service "pkg" "postgres" {
+  package = "asdf:mise-plugins/mise-postgres@16.4"
+  build {
+    env = { POSTGRES_EXTRA_CONFIGURE_OPTIONS = "--without-icu" }
+  }
+  vars = { port = net::pickport() }
+  runtime {
+    cmd = ["postgres", "-p", "${self.vars.port}"]
+  }
+}
+`)
+	iv := &invocation.InvocationState{
+		FsHash: "h0", TmpDir: "/tmp/zordon-h0",
+		StateDir: "/repo/workspaces/main",
+	}
+	af, err := Compile("/repo/Alphasfile", src, iv, nil, "", TestConfig{})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	pg := svcByName(af, "postgres")
+	if pg == nil || pg.Runtime == nil {
+		t.Fatal("postgres not resolved")
+	}
+	if pg.Runtime.BuildEnv["POSTGRES_EXTRA_CONFIGURE_OPTIONS"] != "--without-icu" {
+		t.Errorf("build env not resolved: %v", pg.Runtime.BuildEnv)
 	}
 }

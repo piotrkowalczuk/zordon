@@ -58,7 +58,11 @@ string form: `aqua:`, `ubi:`, `asdf:`, `vfox:`, `cargo:`, `npm:`, …
 
 > First start may **build from source** (vfox/asdf backends compile
 > redis/postgres). Prefer a prebuilt backend (`aqua:`, `ubi:`) where one
-> exists to avoid the compile.
+> exists to avoid the compile — and the dependency on the upstream
+> source mirror: postgres below comes from the `theseus-rs/postgresql-binaries`
+> GitHub releases via `ubi:`, with `extract_all=true,bin_path=bin` so the
+> whole tarball is unpacked and its `bin/` lands on `PATH`. ubi needs the
+> exact release tag (`16.4.0`, not `16.4`).
 
 ## Run command
 
@@ -74,7 +78,10 @@ are **not** allowed on a pkg service — there is no source build.
 
 A backend that compiles from source (vfox/asdf for redis/postgres) may
 need configure flags or build vars. A pkg service's `build { env }` is
-injected straight into `mise install`:
+injected straight into `mise install` — here for the asdf postgres
+plugin, if you choose a source build over the prebuilt `ubi:` package
+(the plugin downloads the tarball from ftp.postgresql.org, which has
+been unreachable for long stretches):
 
 ```hcl
 service "pkg" "postgres" {
@@ -116,8 +123,7 @@ the package's setup runs once before the daemon starts:
 
 ```hcl
 service "pkg" "postgres" {
-  package = "asdf:mise-plugins/mise-postgres@16.4"
-  build { env = { POSTGRES_EXTRA_CONFIGURE_OPTIONS = "--without-icu" } }
+  package = "ubi:theseus-rs/postgresql-binaries[extract_all=true,bin_path=bin]@16.4.0"
 
   vars = { port = net::pickport(), data = "${fs::tmp()}/pgdata" }
 
