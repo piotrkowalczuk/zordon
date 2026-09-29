@@ -77,10 +77,15 @@ nav:
       - Install the Claude Code plugin: how-to/install-the-claude-code-plugin.md
       - Install the MCP bundle: how-to/install-the-mcp-bundle.md
       - Run parallel agents with workspaces: how-to/run-parallel-agents-with-workspaces.md
+      - Pin different toolchain versions per component: how-to/pin-different-toolchain-versions.md
+      - Split an Alphasfile across files: how-to/split-an-alphasfile-across-files.md
+      - Use a package from another repository: how-to/use-a-package-from-another-repository.md
+      - Develop a dependency locally: how-to/develop-a-dependency-locally.md
   - Reference:
       - Binaries and layout: reference/binaries.md
       - zordon mcp: reference/mcp.md
       - Log filter DSL: reference/log-filter.md
+      - zordon.work, zordon.mod and zordon.lock: reference/files.md
   - Compare:
       - Overview: compare/index.md
       - vs Docker Compose: compare/docker-compose.md

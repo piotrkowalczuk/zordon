@@ -16,6 +16,7 @@ checkouts, its own `alpha`.
 zordon workspace create feature        # checks out every workspace-able
                                       # service into workspaces/feature
 zordon workspace create feature api    # only `api` (others run from upstream)
+zordon workspace create feature shop   # every service of package or component `shop`
 zordon workspace create feature api@v2 # …pin `api` to revision v2
 cd workspaces/feature
 zordon start                          # walks up, adopts ../../../Alphasfile
@@ -26,11 +27,12 @@ zordon workspace service rm  --workspace=feature --services=api  # drop one
 zordon workspace rm feature
 ```
 
-**`create` vs `start`.** `zordon workspace create <name> [svc[@rev] …]` materializes the editable source: it `git worktree add`s each picked service (or *all* workspace-able services with no args) into `workspaces/<name>/src/<svc>` on a per-service branch `zordon/<name>/<svc>`.
+**`create` vs `start`.** `zordon workspace create <name> [pick[@rev] …]` materializes the editable source: it `git worktree add`s each picked service (or *all* workspace-able services with no args) into `workspaces/<name>/src/<svc>` on a per-service branch `zordon/<name>/<svc>`.
+A pick is a service, a component or a package, as for [`zordon start`](lifecycle.md); a component or package checks out its members that have a git or dir source, and `@rev` only goes with a single service.
 For a `git` primary this bare-clones first; for a `src` primary it adds a worktree from your local repo (registered in *your* repo's `.git`, so your IDE / `git worktree list` sees it).
 `zordon start` then runs the whole stack, reusing those checkouts and lazily materializing anything missing — a worktree for a picked service, a plain clone for an unpicked git-source one (see below).
 
-**Per-service add/rm.** To adjust an existing workspace without recreating it, `zordon workspace service add --workspace=<name> --services=<svc[@rev],…>` materializes more service checkouts (on the same branch and path `start` expects), and `zordon workspace service rm --workspace=<name> --services=<svc,…>` detaches them (the git worktree is removed and its tree deleted).
+**Per-service add/rm.** To adjust an existing workspace without recreating it, `zordon workspace service add --workspace=<name> --services=<svc[@rev],…>` materializes more service checkouts (on the same branch and path `start` expects), and `zordon workspace service rm --workspace=<name> --services=<pick,…>` detaches them (a component or package detaches its checked-out members) (the git worktree is removed and its tree deleted).
 Both reject `--workspace=main`, which has no per-service checkout.
 
 `zordon start` from `workspaces/<name>/` walks up, finds the
@@ -182,7 +184,7 @@ service "go" "example" {
 
 The checkout then holds only that subtree — plus the repo's **top-level
 files** (`go.mod`, `go.sum`, …). That's inherent to git cone mode and
-desirable: `go.mod` at the module root is needed to build anyway. See
+desirable: `go.mod` at the component root is needed to build anyway. See
 [examples/workspace](https://github.com/piotrkowalczuk/zordon/tree/main/examples/workspace).
 
 Main use case: an AI agent gets a sandbox next to the developer's stack;

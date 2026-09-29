@@ -75,6 +75,8 @@ func byName(node map[string]any, srcKey string) map[string]any {
 // bin_dir, print, command, …) plus live status (pid/ready) when running.
 func buildTree(levels []*level) map[string]any {
 	svcRoot := map[string]any{}
+	modRoot := map[string]any{}
+	pkgRoot := map[string]any{}
 	for _, lv := range levels {
 		if lv.state == nil {
 			continue
@@ -117,7 +119,7 @@ func buildTree(levels []*level) map[string]any {
 					}
 				}
 			}
-			if st, ok := running[s.Runtime.Name]; ok {
+			if st, ok := running[s.Name()]; ok {
 				node["pid"] = st.PID
 				node["readiness"] = st.Readiness
 				node["ready"] = st.Readiness == "ready"
@@ -125,15 +127,53 @@ func buildTree(levels []*level) map[string]any {
 			} else {
 				node["running"] = false
 			}
-			tc, _ := svcRoot[s.Toolchain].(map[string]any)
+			byTC := svcRoot
+			if p, m, inPkg := strings.Cut(s.Module, "/"); inPkg {
+				byTC = moduleServices(packageModules(pkgRoot, p), m)
+			} else if s.Module != alphasfile.DefaultModule {
+				byTC = moduleServices(modRoot, s.Module)
+			}
+			tc, _ := byTC[s.Toolchain].(map[string]any)
 			if tc == nil {
 				tc = map[string]any{}
-				svcRoot[s.Toolchain] = tc
+				byTC[s.Toolchain] = tc
 			}
 			tc[s.Runtime.Name] = node
 		}
 	}
-	return map[string]any{"service": svcRoot}
+	return map[string]any{"service": svcRoot, "component": modRoot, "package": pkgRoot}
+}
+
+// packageModules returns the `package.<name>.module` map, creating the
+// package node on first use.
+func packageModules(pkgRoot map[string]any, name string) map[string]any {
+	pkg, _ := pkgRoot[name].(map[string]any)
+	if pkg == nil {
+		pkg = map[string]any{}
+		pkgRoot[name] = pkg
+	}
+	mods, _ := pkg["component"].(map[string]any)
+	if mods == nil {
+		mods = map[string]any{}
+		pkg["component"] = mods
+	}
+	return mods
+}
+
+// moduleServices returns the `component.<name>.service` map, creating the
+// module node on first use so paths mirror the HCL nesting.
+func moduleServices(modRoot map[string]any, module string) map[string]any {
+	mod, _ := modRoot[module].(map[string]any)
+	if mod == nil {
+		mod = map[string]any{}
+		modRoot[module] = mod
+	}
+	svc, _ := mod["service"].(map[string]any)
+	if svc == nil {
+		svc = map[string]any{}
+		mod["service"] = svc
+	}
+	return svc
 }
 
 // resolveExpr evaluates expr against root and returns the rendered value.

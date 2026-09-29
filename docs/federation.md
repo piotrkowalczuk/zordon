@@ -23,11 +23,12 @@ optional global `~/.zordon/Alphasfile`. The chain is brought up
 
 Rules:
 
+- **Only files named exactly `Alphasfile` form levels.** Parts such as `Alphasfile.kafka` join the [`Alphasfile` next to them](alphasfile.md#parts), are invisible to the walk-up, and never form a level of their own.
 - **Only the invocation Alphasfile is restarted unconditionally.** Levels
   above it are *verified*: if a healthy alpha is already serving that
   Alphasfile, it's reused as-is.
 - **Drift auto-restarts a parent.** zordon binds each level's config to a
-  hash of (source bytes + the parent context that fed it). If you edit a
+  hash of (the bytes and identity of every file the level loads — its Alphasfile, its parts and its packages, local or remote — + the parent context that fed it). If you edit a
   parent Alphasfile — or a grandparent restarts with new ports — the hash
   changes and zordon restarts that level (and the cascade continues
   downward). Untouched levels keep running.

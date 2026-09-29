@@ -1,0 +1,29 @@
+package "shop" {
+  component "shop" {
+    service "go" "worker" {
+      src {
+        path = "../../.."
+        exe  = "./examples/pick_groups/src/app"
+      }
+
+      vars = { port = net::pickport() }
+
+      runtime {
+        cmd = ["${fs::bin()}/${self.name}", "-name", "worker", "-addr", "127.0.0.1:${self.vars.port}"]
+      }
+
+      workspace {
+        sparse = ["examples/pick_groups/src/app"]
+      }
+
+      readiness {
+        http {
+          path = "/"
+          port = self.vars.port
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}

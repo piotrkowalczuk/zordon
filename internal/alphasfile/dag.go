@@ -22,7 +22,23 @@ const (
 	kindArguments
 	kindEnv
 	kindFile
+	// kindPart is one value an import passes to an input, evaluated in the
+	// import's scope; a producer without a service.
+	kindPart
+	// kindOutput is one output of a package, read as
+	// package.<p>.outputs.<n>; also a producer without a service.
+	kindOutput
+	// kindInput is one input of a package, read as inputs.<n> in it: its
+	// parts joined, or its default.
+	kindInput
 )
+
+// graphValues are the producers that belong to packages rather than to
+// services.
+type graphValues struct {
+	outputs []*output
+	inputs  []*input
+}
 
 func (k nodeKind) String() string {
 	switch k {
@@ -34,6 +50,12 @@ func (k nodeKind) String() string {
 		return "env"
 	case kindFile:
 		return "file"
+	case kindPart:
+		return "part"
+	case kindOutput:
+		return "output"
+	case kindInput:
+		return "input"
 	}
 	return "?"
 }
@@ -50,6 +72,12 @@ type node struct {
 	kind  nodeKind
 	name  string // file name (kindFile only)
 	exprs []hcl.Expression
+	// scope is where the expressions are evaluated: the service's module,
+	// the package's for an output or a default, or the import's for a part.
+	scope string
+	part  *part
+	out   *output
+	in    *input
 }
 
 // graph holds nodes and forward edges (id → set of ids it depends on —
@@ -70,8 +98,11 @@ func nodeID(svcID string, kind nodeKind, name string) string {
 // newGraph builds the cross-service per-producer DAG. parentKnown lists
 // services already resolved by a federation parent; references to those
 // are valid but never carry an intra-graph edge (the parent was
-// evaluated end-to-end before this graph runs).
-func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph, error) {
+// evaluated end-to-end before this graph runs). Every input of a package
+// is a node too, which inputs.<n> in the package depends on, and so is
+// every value an import passes to it, which the input depends on. So is
+// every package output, which package.<p>.outputs.<n> depends on.
+func newGraph(services []*serviceBlock, vals *graphValues, parentKnown map[string]struct{}) (*graph, error) {
 	g := &graph{
 		byID: map[string]*node{},
 		deps: map[string]map[string]struct{}{},
@@ -81,7 +112,7 @@ func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph
 		if s.Toolchain == "" || s.Name == "" {
 			return nil, fmt.Errorf("service block missing toolchain or name label")
 		}
-		sid := serviceID(s.Toolchain, s.Name)
+		sid := ServiceRef(s.module, s.Toolchain, s.Name)
 		if _, dup := seen[sid]; dup {
 			return nil, fmt.Errorf("duplicate service %s", sid)
 		}
@@ -101,7 +132,7 @@ func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph
 				return
 			}
 			id := nodeID(sid, kind, name)
-			n := &node{id: id, svc: s, svcID: sid, kind: kind, name: name, exprs: exprs}
+			n := &node{id: id, svc: s, svcID: sid, kind: kind, name: name, exprs: exprs, scope: s.module}
 			g.byID[id] = n
 			g.nodes = append(g.nodes, n)
 			g.deps[id] = map[string]struct{}{}
@@ -118,13 +149,52 @@ func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph
 		}
 	}
 
+	addNode := func(n *node) {
+		g.byID[n.id] = n
+		g.nodes = append(g.nodes, n)
+		g.deps[n.id] = map[string]struct{}{}
+	}
+	for _, o := range vals.outputs {
+		addNode(&node{id: o.id(), kind: kindOutput, scope: pkgScope(o.pkg), out: o, exprs: []hcl.Expression{o.decl.value}})
+	}
+	for _, in := range vals.inputs {
+		n := &node{id: in.id(), kind: kindInput, scope: pkgScope(in.pkg), in: in}
+		// The default may be needed even when imports set the input, if they
+		// all pass null, so the input always waits for what it reads.
+		if in.decl.def != nil {
+			n.exprs = []hcl.Expression{in.decl.def}
+		}
+		addNode(n)
+		for _, pt := range in.parts() {
+			addNode(&node{id: in.partID(pt.i), kind: kindPart, scope: pt.arg.scope, part: pt, exprs: []hcl.Expression{pt.arg.expr}})
+			g.deps[n.id][in.partID(pt.i)] = struct{}{}
+		}
+	}
+
 	for _, n := range g.nodes {
 		for _, expr := range n.exprs {
 			if expr == nil {
 				continue
 			}
 			for _, trav := range expr.Variables() {
-				_, depID, ok := producerNodeFromTrav(trav, n.svcID)
+				if trav.RootName() == "inputs" && len(trav) >= 2 {
+					if pkg, inPkg := packageOf(n.scope); inPkg {
+						if name, ok := traverseAttrName(trav[1]); ok {
+							id := (&input{pkg: pkg, name: name}).id()
+							if _, ok := g.byID[id]; ok && id != n.id {
+								g.deps[n.id][id] = struct{}{}
+							}
+						}
+					}
+					continue
+				}
+				if id, ok := outputNodeFromTrav(trav); ok {
+					if _, local := g.byID[id]; local && id != n.id {
+						g.deps[n.id][id] = struct{}{}
+					}
+					continue
+				}
+				_, depID, ok := producerNodeFromTrav(trav, n.svcID, n.scope)
 				if !ok {
 					continue
 				}
@@ -144,13 +214,28 @@ func newGraph(services []*serviceBlock, parentKnown map[string]struct{}) (*graph
 	return g, nil
 }
 
-// producerNodeFromTrav maps a `self.<f>...` or `service.<tc>.<svc>.<f>...`
-// traversal to the producer node id it depends on. Returns the target
-// service id and node id. Static traversals (barrier states under
-// runtime/build, scalar self.{name,toolchain,dir}, parent toolchain
-// refs) and non-service roots (fs::, cfg::, the `never` keyword, …)
-// produce no edge.
-func producerNodeFromTrav(t hcl.Traversal, selfSvcID string) (svc, id string, ok bool) {
+// outputNodeFromTrav maps `package.<p>.outputs.<n>...` to its output node.
+func outputNodeFromTrav(t hcl.Traversal) (string, bool) {
+	if t.RootName() != "package" || len(t) < 4 {
+		return "", false
+	}
+	pkg, ok0 := traverseAttrName(t[1])
+	kw, ok1 := traverseAttrName(t[2])
+	name, ok2 := traverseAttrName(t[3])
+	if !ok0 || !ok1 || !ok2 || kw != "outputs" {
+		return "", false
+	}
+	return (&output{pkg: pkg, name: name}).id(), true
+}
+
+// producerNodeFromTrav maps a `self.<f>...`, `service.<tc>.<svc>.<f>...` or
+// `component.<c>.service.<tc>.<svc>.<f>...` traversal to the producer node id
+// it depends on. A bare `service.` traversal is scoped to selfModule, the
+// module the referencing block lives in. Returns the target service id and
+// node id. Static traversals (barrier states under runtime/build, scalar
+// self.{name,toolchain,dir}, parent toolchain refs) and non-service roots
+// (fs::, cfg::, the `never` keyword, …) produce no edge.
+func producerNodeFromTrav(t hcl.Traversal, selfSvcID, selfModule string) (svc, id string, ok bool) {
 	if len(t) < 2 {
 		return "", "", false
 	}
@@ -172,8 +257,36 @@ func producerNodeFromTrav(t hcl.Traversal, selfSvcID string) (svc, id string, ok
 		if !ok1 || !ok2 {
 			return "", "", false
 		}
-		svc = serviceID(tc, nm)
+		svc = ServiceRef(selfModule, tc, nm)
 		rest = t[3:]
+	case "component":
+		if len(t) < 6 {
+			return "", "", false
+		}
+		mod, ok0 := traverseAttrName(t[1])
+		kw, ok1 := traverseAttrName(t[2])
+		tc, ok2 := traverseAttrName(t[3])
+		nm, ok3 := traverseAttrName(t[4])
+		if !ok0 || !ok1 || !ok2 || !ok3 || kw != "service" {
+			return "", "", false
+		}
+		svc = ServiceRef(resolveModule(selfModule, mod), tc, nm)
+		rest = t[5:]
+	case "package":
+		if len(t) < 8 {
+			return "", "", false
+		}
+		pkg, ok0 := traverseAttrName(t[1])
+		kwm, ok1 := traverseAttrName(t[2])
+		mod, ok2 := traverseAttrName(t[3])
+		kws, ok3 := traverseAttrName(t[4])
+		tc, ok4 := traverseAttrName(t[5])
+		nm, ok5 := traverseAttrName(t[6])
+		if !ok0 || !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || kwm != "component" || kws != "service" {
+			return "", "", false
+		}
+		svc = ServiceRef(pkg+"/"+mod, tc, nm)
+		rest = t[7:]
 	default:
 		return "", "", false
 	}
@@ -270,4 +383,4 @@ func traverseAttrName(s hcl.Traverser) (string, bool) {
 	return a.Name, true
 }
 
-func serviceID(toolchain, name string) string { return "service." + toolchain + "." + name }
+func serviceID(toolchain, name string) string { return ServiceRef(DefaultModule, toolchain, name) }

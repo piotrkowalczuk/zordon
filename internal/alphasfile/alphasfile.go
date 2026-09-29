@@ -17,14 +17,11 @@ import (
 	"time"
 
 	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/gohcl"
-	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
-	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 const (
@@ -166,9 +163,17 @@ type Workspace struct {
 }
 
 type Service struct {
-	Toolchain string         `json:"toolchain"`
-	Runtime   *RuntimeConfig `json:"runtime"`
-	Package   *Package       `json:"package,omitempty"`
+	Toolchain string `json:"toolchain"`
+	// Module is the declaring module block's name; empty for a top-level
+	// service (DefaultModule). Runtime.Name stays the bare label; Name()
+	// and ID() derive the qualified forms.
+	Module string `json:"module,omitempty"`
+	// ToolchainKey is the materialized pin this service runs under: its
+	// module's own `toolchain {}` when declared, else the entrypoint's.
+	// Empty when the language is not pinned at all.
+	ToolchainKey string         `json:"toolchain_key,omitempty"`
+	Runtime      *RuntimeConfig `json:"runtime"`
+	Package      *Package       `json:"package,omitempty"`
 	// Pkg is set instead of Package for `pkg` services: a mise coordinate
 	// with no source build. Mutually exclusive with Package.
 	Pkg      *PkgSpec        `json:"pkg,omitempty"`
@@ -214,7 +219,8 @@ type AgentMCPFeature struct {
 // without resolving the dynamic graph (no Invocation / parent context /
 // pickport needed just to `git worktree add`).
 type ServiceMeta struct {
-	Name      string
+	Name      string // DisplayName: `<module>/<name>` inside a module
+	Module    string
 	Toolchain string
 	Package   *Package
 }
@@ -245,22 +251,20 @@ func (m *ServiceMeta) Workspaceable() bool {
 // (vars / arguments / files / readiness / sudo are ignored). Pure, needs no
 // Invocation — the entry point for `zordon workspace`.
 func ParseServices(path string) ([]*ServiceMeta, error) {
-	b, err := zfs.Read(path)
+	return ParseServicesWith(path, LoadOptions{})
+}
+
+// ParseServicesWith is ParseServices with load options, so imports resolve
+// the same way they do for the rest of a command.
+func ParseServicesWith(path string, opts LoadOptions) ([]*ServiceMeta, error) {
+	tree, err := LoadTreeWith(path, opts)
 	if err != nil {
-		return nil, fmt.Errorf("alphasfile read: %w", err)
+		return nil, err
 	}
-	parser := hclparse.NewParser()
-	file, diags := parser.ParseHCL(b, path)
-	if diags.HasErrors() {
-		return nil, fmt.Errorf("alphasfile parse: %s", diags.Error())
-	}
-	var root rootBlock
-	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
-		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
-	}
-	base := filepath.Dir(path) // relative src/sparse anchor = Alphasfile dir
-	out := make([]*ServiceMeta, 0, len(root.Services))
-	for _, sb := range root.Services {
+	blocks := tree.merged().allServices()
+	out := make([]*ServiceMeta, 0, len(blocks))
+	for _, sb := range blocks {
+		base := sb.file.dir // relative src anchor = the declaring file's dir
 		pkg := &Package{Toolchain: sb.Toolchain}
 		srcPath := ""
 		if sb.Src != nil {
@@ -292,9 +296,45 @@ func ParseServices(path string) ([]*ServiceMeta, error) {
 		if sb.Workspace != nil && len(sb.Workspace.Sparse) > 0 {
 			pkg.Workspace = &Workspace{Sparse: cleanSparse(sb.Workspace.Sparse)}
 		}
-		out = append(out, &ServiceMeta{Name: sb.Name, Toolchain: sb.Toolchain, Package: pkg})
+		out = append(out, &ServiceMeta{Name: DisplayName(sb.module, sb.Name), Module: sb.module, Toolchain: sb.Toolchain, Package: pkg})
 	}
 	return out, nil
+}
+
+// allServices lists every service block, top-level first then module by
+// module in declaration order. This is the one evaluation order.
+func (rb *rootBlock) allServices() []*serviceBlock {
+	out := append([]*serviceBlock(nil), rb.Services...)
+	for _, mb := range rb.Modules {
+		out = append(out, mb.Services...)
+	}
+	return out
+}
+
+// allImports is every import block of the file: the top level's, then each
+// module's.
+func (rb *rootBlock) allImports() []*importBlock {
+	out := append([]*importBlock(nil), rb.Imports...)
+	for _, mb := range rb.Modules {
+		out = append(out, mb.Imports...)
+	}
+	for _, pb := range rb.Packages {
+		out = append(out, pb.Imports...)
+		for _, mb := range pb.Modules {
+			out = append(out, mb.Imports...)
+		}
+	}
+	return out
+}
+
+// fileRequires is the file's own require blocks: the top level's, or the
+// package block's in a package's file.
+func (rb *rootBlock) fileRequires() []*requireBlock {
+	out := append([]*requireBlock(nil), rb.Requires...)
+	for _, pb := range rb.Packages {
+		out = append(out, pb.Requires...)
+	}
+	return out
 }
 
 // resolveSrcDir turns a `src` value into an absolute path: ~ expands to
@@ -331,9 +371,25 @@ func cleanSparse(in []string) []string {
 
 func (s *Service) Name() string {
 	if s.Runtime != nil {
-		return s.Runtime.Name
+		return DisplayName(s.Module, s.Runtime.Name)
 	}
 	return ""
+}
+
+// ShortName is Name shortened as ShortName does.
+func (s *Service) ShortName() string {
+	if s.Runtime != nil {
+		return ShortName(s.Module, s.Runtime.Name)
+	}
+	return ""
+}
+
+// ID is the canonical service id (see ServiceRef).
+func (s *Service) ID() string {
+	if s.Runtime == nil {
+		return ""
+	}
+	return ServiceRef(s.Module, s.Toolchain, s.Runtime.Name)
 }
 
 // Ref returns the default revision for git worktree add: Branch wins, then
@@ -651,6 +707,98 @@ type rootBlock struct {
 	// branch naming) — not to be confused with serviceBlock.Workspace, which
 	// is how to cut one service's checkout.
 	Workspace *workspaceRootBlock `hcl:"workspace,block"`
+	Modules   []*moduleBlock      `hcl:"component,block"`
+	Imports   []*importBlock      `hcl:"import,block"`
+	// Requires pin the repositories remote imports name, for a file that is
+	// its own module; under a zordon.mod they belong there.
+	Requires []*requireBlock `hcl:"require,block"`
+	// Packages is set only in a package's file, which holds exactly one
+	// package block and nothing else.
+	Packages []*packageBlock `hcl:"package,block"`
+
+	// gohcl synthesizes a null expression for an absent optional
+	// attribute, so presence is read off the attribute's range.
+	DotenvRange hcl.Range `hcl:"dotenv,attr_range"`
+	EnvRange    hcl.Range `hcl:"env,attr_range"`
+	SysEnvRange hcl.Range `hcl:"sysenv,attr_range"`
+
+	// parts are the Alphasfile.<name> files joined to this one that set
+	// env, dotenv or sysenv; see levelParts.
+	parts []*rootBlock
+}
+
+// importBlock pulls a package into the
+// stack: `import "<path>" "<alias>"? { ... }`. A remote path carries no
+// version; the require that covers its repository does. An import at the
+// entrypoint's top level is the final word on a package's features; any
+// other import turns features on when the entrypoint does not import the
+// package, and must be satisfied by the entrypoint when it does. Inputs are
+// joined from every import, as ztypes.Merge does.
+type importBlock struct {
+	Path         string         `hcl:"path,label"`
+	Modules      []string       `hcl:"components,optional"`
+	Inputs       hcl.Expression `hcl:"inputs,optional"`
+	InputsRange  hcl.Range      `hcl:"inputs,attr_range"`
+	Features     []string       `hcl:"features,optional"`
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
+	Git          *gitBlock      `hcl:"git,block"`
+	DefRange     hcl.Range      `hcl:",def_range"`
+
+	keyword string
+	// alias is the optional second label; HCL block schemas have a fixed
+	// label count, so decodeFile lifts it off before decoding.
+	alias string
+}
+
+// requireBlock pins a repository that remote imports name:
+// `require "github.com/owner/repo" { ref = "v1.0.0" }`.
+type requireBlock struct {
+	Repo     string    `hcl:"repo,label"`
+	Ref      string    `hcl:"ref"`
+	DefRange hcl.Range `hcl:",def_range"`
+}
+
+// packageBlock is the API boundary between a stack and the modules that
+// implement a package: `package "<name>" { features = {...} inputs = {...}
+// outputs = {...} ... module "<m>" { ... } }`. Each maps a name to
+// { description = "...", ... }. Features are fixed before planning, because
+// they decide which blocks exist; they are read as features.<n>. Inputs are
+// what goes in and outputs what comes out, both evaluated with the services:
+// an input of type map(T) takes entries from every import that sets it, any
+// other input one value from one import; both are read as inputs.<n>. Outputs
+// are read from outside as package.<p>.outputs.<n>. The package's toolchain
+// pins every module that has none of its own.
+type packageBlock struct {
+	Name          string          `hcl:"name,label"`
+	DefRange      hcl.Range       `hcl:",def_range"`
+	Inputs        hcl.Expression  `hcl:"inputs,optional"`
+	InputsRange   hcl.Range       `hcl:"inputs,attr_range"`
+	Features      hcl.Expression  `hcl:"features,optional"`
+	FeaturesRange hcl.Range       `hcl:"features,attr_range"`
+	Outputs       hcl.Expression  `hcl:"outputs,optional"`
+	OutputsRange  hcl.Range       `hcl:"outputs,attr_range"`
+	Imports       []*importBlock  `hcl:"import,block"`
+	Requires      []*requireBlock `hcl:"require,block"`
+	Toolchain     *toolchainBlock `hcl:"toolchain,block"`
+	Modules       []*moduleBlock  `hcl:"component,block"`
+
+	// features, inputs and outputs are Features, Inputs and Outputs decoded.
+	features map[string]string
+	inputs   map[string]*inputDecl
+	outputs  map[string]*outputDecl
+}
+
+// moduleBlock is a named namespace of services with an optional toolchain
+// pin of its own. Its services are addressed as
+// `component.<name>.service.<tc>.<svc>` from outside and as `service.<tc>.<svc>`
+// from inside the block.
+type moduleBlock struct {
+	Name      string          `hcl:"name,label"`
+	DefRange  hcl.Range       `hcl:",def_range"`
+	Imports   []*importBlock  `hcl:"import,block"`
+	Toolchain *toolchainBlock `hcl:"toolchain,block"`
+	Services  []*serviceBlock `hcl:"service,block"`
 }
 
 // toolchainBlock is the optional top-level pin map. Each language gets
@@ -658,6 +806,8 @@ type rootBlock struct {
 // labeled block) means `toolchain { go { ... } nodejs { ... } }`
 // catches typos at decode time, not at runtime in alpha.
 type toolchainBlock struct {
+	DefRange hcl.Range `hcl:",def_range"`
+
 	Go     *langToolchainBlock `hcl:"go,block"`
 	Rust   *langToolchainBlock `hcl:"rust,block"`
 	Ruby   *langToolchainBlock `hcl:"ruby,block"`
@@ -705,8 +855,15 @@ func (t *toolchainBlock) byLabel() map[string]*langToolchainBlock {
 }
 
 type serviceBlock struct {
-	Toolchain string `hcl:"toolchain,label"`
-	Name      string `hcl:"name,label"`
+	Toolchain string    `hcl:"toolchain,label"`
+	Name      string    `hcl:"name,label"`
+	DefRange  hcl.Range `hcl:",def_range"`
+	Body      hcl.Body  `hcl:",body"`
+	module    string
+	file      *treeFile // declaring file: anchors relative src.path, scopes module visibility
+
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
 
 	// static fields
 	Color string    `hcl:"color,optional"`
@@ -807,6 +964,9 @@ type provisionBlock struct {
 	Env         hcl.Expression   `hcl:"env,optional"`
 	After       hcl.Expression   `hcl:"after,optional"`
 	Detached    bool             `hcl:"detached,optional"`
+
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
 }
 
 // argumentBlock declares one typed input of a provision (`argument "<name>" {
@@ -890,6 +1050,9 @@ type sudoBlock struct {
 	Check  hcl.Expression `hcl:"check,optional"`
 	Apply  hcl.Expression `hcl:"apply"`
 	Verify hcl.Expression `hcl:"verify,optional"`
+
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
 }
 
 type logBlock struct {
@@ -966,6 +1129,9 @@ type fileBlock struct {
 	Name string         `hcl:"name,label"`
 	Path hcl.Expression `hcl:"path"`
 	Body hcl.Expression `hcl:"body"`
+
+	Enabled      hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
 }
 
 // workspaceRootBlock is the top-level `workspace {}`: how to PREPARE a
@@ -977,6 +1143,8 @@ type fileBlock struct {
 // its config already in place. That timing is why the evaluation context is
 // static — see RenderWorkspace.
 type workspaceRootBlock struct {
+	DefRange hcl.Range `hcl:",def_range"`
+
 	Branch hcl.Expression        `hcl:"branch,optional"`
 	Files  []*workspaceFileBlock `hcl:"file,block"`
 }
@@ -1021,11 +1189,21 @@ type regionOpBlock struct {
 // pre-seeds the flat service namespace with values resolved by Alphasfiles
 // higher in a federation chain (nil for a standalone file).
 func Open(path string, inv *invocation.InvocationState, parent *ParentContext, cfgHash string, testCfg TestConfig) (*Alphasfile, error) {
-	b, err := zfs.Read(path)
+	tree, err := LoadTree(path)
 	if err != nil {
-		return nil, fmt.Errorf("alphasfile read: %w", err)
+		return nil, err
 	}
-	return Compile(path, b, inv, parent, cfgHash, testCfg)
+	return Resolve(tree, inv, parent, cfgHash, testCfg)
+}
+
+// Resolve is Open for an already loaded Tree, so a caller that hashed the
+// tree's bytes evaluates exactly those bytes.
+func Resolve(tree *Tree, inv *invocation.InvocationState, parent *ParentContext, cfgHash string, testCfg TestConfig) (*Alphasfile, error) {
+	p, err := NewManifestStateFromTree(tree, inv).Plan(parent, cfgHash, testCfg)
+	if err != nil {
+		return nil, err
+	}
+	return p.Compute()
 }
 
 // Compile is Open without filesystem I/O: it resolves the given Alphasfile
@@ -1052,24 +1230,28 @@ func Compile(name string, src []byte, inv *invocation.InvocationState, parent *P
 // — federation parent context enters at Plan, not here.
 type ManifestState struct {
 	name string
+	tree *Tree
 	root *rootBlock
 	inv  *invocation.InvocationState
 }
 
-// NewManifestState parses Alphasfile source into its block tree. This is the
-// only step that fails on HCL syntax; ordering (Plan) and evaluation (Compute)
-// come after.
+// NewManifestState parses a single inline Alphasfile into its block tree.
+// This is the only step that fails on HCL syntax; ordering (Plan) and
+// evaluation (Compute) come after. Imports need a file on disk, see
+// NewManifestStateFromTree.
 func NewManifestState(name string, src []byte, inv *invocation.InvocationState) (*ManifestState, error) {
-	parser := hclparse.NewParser()
-	file, diags := parser.ParseHCL(src, name)
-	if diags.HasErrors() {
-		return nil, fmt.Errorf("alphasfile parse: %s", diags.Error())
+	tree, err := ParseTree(name, src)
+	if err != nil {
+		return nil, err
 	}
-	var root rootBlock
-	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
-		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
-	}
-	return &ManifestState{name: name, root: &root, inv: inv}, nil
+	m := NewManifestStateFromTree(tree, inv)
+	m.name = name
+	return m, nil
+}
+
+// NewManifestStateFromTree places a loaded Tree in its invocation.
+func NewManifestStateFromTree(tree *Tree, inv *invocation.InvocationState) *ManifestState {
+	return &ManifestState{name: tree.Root(), tree: tree, root: tree.merged(), inv: inv}
 }
 
 // ParentContext carries what a federation child needs from its parents:
@@ -1077,7 +1259,7 @@ func NewManifestState(name string, src []byte, inv *invocation.InvocationState) 
 // the cumulative toolchain pins (so the child inherits go/rust/ruby
 // versions from above without having to re-declare).
 type ParentContext struct {
-	byTC      map[string]map[string]cty.Value
+	byModule  map[string]map[string]map[string]cty.Value // module → toolchain → name
 	toolchain map[string]*ToolchainConfig
 	sysenv    []string
 }
@@ -1088,16 +1270,17 @@ type ParentContext struct {
 // { name, toolchain, dir, vars, arguments, file }.
 func NewParentContext(services []*Service) *ParentContext {
 	pc := &ParentContext{
-		byTC:      map[string]map[string]cty.Value{},
+		byModule:  map[string]map[string]map[string]cty.Value{},
 		toolchain: map[string]*ToolchainConfig{},
 	}
 	for _, s := range services {
 		if s == nil || s.Runtime == nil {
 			continue
 		}
-		tc, name := s.Toolchain, s.Name()
+		tc, name := s.Toolchain, s.Runtime.Name
 		obj := map[string]cty.Value{
 			"name":      cty.StringVal(name),
+			"component": cty.StringVal(s.Module),
 			"toolchain": cty.StringVal(tc),
 			"dir":       cty.StringVal(serviceDirOf(s)),
 			"vars":      mapValToCty(s.Runtime.Vars),
@@ -1116,10 +1299,15 @@ func NewParentContext(services []*Service) *ParentContext {
 		} else {
 			obj["file"] = cty.EmptyObjectVal
 		}
-		if pc.byTC[tc] == nil {
-			pc.byTC[tc] = map[string]cty.Value{}
+		byTC := pc.byModule[s.Module]
+		if byTC == nil {
+			byTC = map[string]map[string]cty.Value{}
+			pc.byModule[s.Module] = byTC
 		}
-		pc.byTC[tc][name] = cty.ObjectVal(obj)
+		if byTC[tc] == nil {
+			byTC[tc] = map[string]cty.Value{}
+		}
+		byTC[tc][name] = cty.ObjectVal(obj)
 	}
 	return pc
 }
@@ -1128,11 +1316,16 @@ func NewParentContext(services []*Service) *ParentContext {
 // chain can accumulate top-down. Later levels see everything above them.
 func (pc *ParentContext) Merge(services []*Service) *ParentContext {
 	next := NewParentContext(services)
-	for tc, byName := range next.byTC {
-		if pc.byTC[tc] == nil {
-			pc.byTC[tc] = map[string]cty.Value{}
+	for module, byTC := range next.byModule {
+		if pc.byModule[module] == nil {
+			pc.byModule[module] = map[string]map[string]cty.Value{}
 		}
-		maps.Copy(pc.byTC[tc], byName)
+		for tc, byName := range byTC {
+			if pc.byModule[module][tc] == nil {
+				pc.byModule[module][tc] = map[string]cty.Value{}
+			}
+			maps.Copy(pc.byModule[module][tc], byName)
+		}
 	}
 	return pc
 }

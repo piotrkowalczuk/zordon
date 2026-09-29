@@ -10,8 +10,6 @@ import (
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/gohcl"
-	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
@@ -104,32 +102,23 @@ func RenderWorkspace(path string, inv *invocation.InvocationState) (*WorkspaceSp
 	if inv == nil {
 		panic("alphasfile: RenderWorkspace requires an invocation")
 	}
-	b, err := zfs.Read(path)
+	ws, b, err := unitWorkspace(path)
 	if err != nil {
-		return nil, fmt.Errorf("alphasfile read: %w", err)
-	}
-	parser := hclparse.NewParser()
-	file, diags := parser.ParseHCL(b, path)
-	if diags.HasErrors() {
-		return nil, fmt.Errorf("alphasfile parse: %s", diags.Error())
-	}
-	var root rootBlock
-	if diags := gohcl.DecodeBody(file.Body, nil, &root); diags.HasErrors() {
-		return nil, fmt.Errorf("alphasfile decode: %s", diags.Error())
+		return nil, err
 	}
 
 	spec := &WorkspaceSpec{inv: inv, branchTemplate: DefaultBranchTemplate}
-	if root.Workspace == nil {
+	if ws == nil {
 		return spec, nil
 	}
-	if attrSet(root.Workspace.Branch) {
-		spec.branch = root.Workspace.Branch
-		spec.branchTemplate = templateSource(root.Workspace.Branch, b)
+	if attrSet(ws.Branch) {
+		spec.branch = ws.Branch
+		spec.branchTemplate = templateSource(ws.Branch, b)
 	}
 
 	ctx := workspaceCtx(inv)
-	seen := make(map[string]bool, len(root.Workspace.Files))
-	for _, fb := range root.Workspace.Files {
+	seen := make(map[string]bool, len(ws.Files))
+	for _, fb := range ws.Files {
 		if seen[fb.Name] {
 			return nil, fmt.Errorf("workspace.file %q: declared twice", fb.Name)
 		}
@@ -604,4 +593,26 @@ func validateBranchName(b string) error {
 		}
 	}
 	return nil
+}
+
+// unitWorkspace finds the workspace {} block of the unit path anchors, in
+// the Alphasfile or one of its parts, with the source of the file holding
+// it. A unit declares it once.
+func unitWorkspace(path string) (*workspaceRootBlock, []byte, error) {
+	b, err := zfs.Read(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("alphasfile read: %w", err)
+	}
+	root, err := decodeFile(path, b)
+	if err != nil {
+		return nil, nil, err
+	}
+	f := newTreeFile(path, path, b, root)
+	if err := (&Tree{}).loadParts(f); err != nil {
+		return nil, nil, err
+	}
+	if root.Workspace == nil {
+		return nil, nil, nil
+	}
+	return root.Workspace, f.srcOf(root.Workspace.DefRange.Filename), nil
 }

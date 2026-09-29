@@ -1,0 +1,117 @@
+# Caddy routes every site that registers with it by host name. It knows no
+# site itself: each one adds an entry to the sites map, and two sites
+# claiming the same key or the same host are an error.
+package "caddy" {
+  inputs = {
+    http_port = {
+      description = "Port to serve on; null picks a free one, 80 gives http://shop.test/ in a browser."
+      type        = number
+      default     = null
+    }
+    domain = {
+      description = "The DNS zone of feature dns; passed on to coredns."
+      type        = string
+      default     = "test"
+    }
+    sites = {
+      description = "Hosts to route, by site, such as { shop = { host = \"shop.test\", upstream = \"127.0.0.1:8080\" } }."
+      type        = map(object({ host = string, upstream = string }))
+      default     = {}
+      unique      = ["host"]
+    }
+  }
+  features = {
+    dns = { description = "Adds /dns/healthz, answered by looking up health.<domain> in CoreDNS: proof that the zone resolves." }
+  }
+  outputs = {
+    url = {
+      description = "Where Caddy serves."
+      type        = string
+      value       = "http://127.0.0.1:${component.caddy.service.go.caddy.vars.http}"
+    }
+  }
+
+  import "../coredns" {
+    enabled = features.dns
+    inputs  = { zone = inputs.domain }
+  }
+
+  component "caddy" {
+    service "go" "caddy" {
+      git {
+        url = "github.com/caddyserver/caddy"
+        tag = "v2.11.4"
+      }
+
+      build {
+        cmd = ["go", "build", "-o", "${fs::bin()}/caddy", "./cmd/caddy"]
+      }
+
+      vars = {
+        http  = inputs.http_port != null ? inputs.http_port : net::pickport()
+        admin = net::pickport()
+      }
+
+      print = "http://127.0.0.1:${self.vars.http}/  (caddy)%{for name, s in inputs.sites} http://${s.host}:${self.vars.http}/%{endfor}"
+
+      # Caddy autosaves its config under the user's config dir; keep it in the
+      # service's own state instead.
+      env = {
+        XDG_CONFIG_HOME = "${fs::var()}/config"
+        XDG_DATA_HOME   = "${fs::var()}/data"
+      }
+
+      file "caddyfile" {
+        path = "${fs::etc()}/Caddyfile"
+        body = <<-EOT
+          {
+            admin 127.0.0.1:${self.vars.admin}
+            auto_https off
+          }
+
+          :${self.vars.http} {
+            respond /healthz "ok" 200
+            import ${fs::etc()}/sites/*.caddy
+          }
+        EOT
+      }
+
+      # One host matcher per site.
+      file "site-routes" {
+        path = "${fs::etc()}/sites/10-routes.caddy"
+        body = "# sites registered with caddy\n%{for name, s in inputs.sites}@${name} host ${s.host}\nhandle @${name} {\n  reverse_proxy ${s.upstream}\n}\n%{endfor}"
+      }
+
+      # Resolves health.<zone> through CoreDNS, which answers 127.0.0.1, and
+      # so proxies back to Caddy's own /healthz.
+      file "site-dns" {
+        enabled = features.dns
+        path    = "${fs::etc()}/sites/20-dns.caddy"
+        body    = <<-EOT
+          handle_path /dns/* {
+            reverse_proxy {
+              dynamic a {
+                name health.${package.coredns.outputs.zone}
+                port ${self.vars.http}
+                resolvers ${package.coredns.outputs.dns}
+              }
+            }
+          }
+        EOT
+      }
+
+      runtime {
+        cmd = ["${fs::bin()}/caddy", "run", "--config", self.file.caddyfile.path, "--adapter", "caddyfile"]
+      }
+
+      readiness {
+        http {
+          path = "/healthz"
+          port = self.vars.http
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}

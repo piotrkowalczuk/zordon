@@ -1,0 +1,36 @@
+# The subpackage: its own directory, so its own package. The collector
+# component and the output live here; the store component and the input
+# live in Alphasfile.store, and the package's API is the union of both.
+package "ingest" {
+  outputs = {
+    url = {
+      description = "Where the collector listens."
+      type        = string
+      value       = "http://127.0.0.1:${component.collector.service.go.collector.vars.port}"
+    }
+  }
+
+  component "collector" {
+    service "go" "collector" {
+      src {
+        path = "../../../.."
+        exe  = "./examples/fragments/src/app"
+      }
+
+      vars = { port = net::pickport() }
+
+      runtime {
+        cmd = ["${fs::bin()}/${self.name}", "-name", "collector", "-addr", "127.0.0.1:${self.vars.port}", "-upstream", "http://127.0.0.1:${component.store.service.go.store.vars.port}"]
+      }
+
+      readiness {
+        http {
+          path = "/"
+          port = self.vars.port
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}

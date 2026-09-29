@@ -1,0 +1,34 @@
+# A package in another repository. test.sh copies infra/ into a fresh git
+# repository, which a working place imports by its Go-style path.
+package "hello" {
+  toolchain {
+    go {
+      version = "1.27.0"
+    }
+  }
+
+  component "hello" {
+    service "go" "hello" {
+      src {
+        path = ".."
+        exe  = "./hello"
+      }
+
+      vars  = { port = net::pickport() }
+      print = "http://127.0.0.1:${self.vars.port}/  (hello)"
+
+      runtime {
+        cmd = ["${fs::bin()}/hello", "-addr", "127.0.0.1:${self.vars.port}"]
+      }
+
+      readiness {
+        http {
+          path = "/"
+          port = self.vars.port
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}

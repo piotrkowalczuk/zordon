@@ -1,0 +1,27 @@
+# A part of package "platform": it opens the same package and adds a
+# component. A component of one part sees the components of the others.
+package "platform" {
+  component "jobs" {
+    service "go" "worker" {
+      src {
+        path = "../../.."
+        exe  = "./examples/fragments/src/app"
+      }
+
+      vars = { port = net::pickport() }
+
+      runtime {
+        cmd = ["${fs::bin()}/${self.name}", "-name", "worker", "-addr", "127.0.0.1:${self.vars.port}", "-upstream", "http://127.0.0.1:${component.api.service.go.api.vars.port}"]
+      }
+
+      readiness {
+        http {
+          path = "/"
+          port = self.vars.port
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}

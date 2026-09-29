@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
@@ -30,7 +28,8 @@ func parsePicks(args []string) []string {
 	return out
 }
 
-// pickServices filters `all` down to picks, transitively expanded to
+// pickServices filters `all` down to picks (services, modules or packages,
+// see resolvePick), transitively expanded to
 // include any service referenced from a kept service's `runtime.after`
 // or `provision.after`. Order in the returned slice matches the order
 // in `all` so the wire shape stays deterministic. Unknown picks are an
@@ -46,15 +45,9 @@ func pickServices(all []*alphasfile.Service, picks []string) ([]*alphasfile.Serv
 	for _, s := range all {
 		byName[s.Name()] = s
 	}
-	var unknown []string
-	for _, p := range picks {
-		if _, ok := byName[p]; !ok {
-			unknown = append(unknown, p)
-		}
-	}
-	if len(unknown) > 0 {
-		return nil, fmt.Errorf("unknown service(s): %s (available: %s)",
-			strings.Join(unknown, ", "), strings.Join(sortedNames(all), ", "))
+	picks, err := expandPicks(servicePickables(all), picks)
+	if err != nil {
+		return nil, err
 	}
 
 	keep := map[string]struct{}{}
@@ -97,33 +90,18 @@ func pickServices(all []*alphasfile.Service, picks []string) ([]*alphasfile.Serv
 	return out, nil
 }
 
-// serviceNameFromBarrierRef pulls the service name out of a canonical
-// barrier ref. Grammar (see alpha resolveBarrier):
+// serviceNameFromBarrierRef pulls the display name of the service out of a
+// canonical barrier ref. Grammar (see alpha resolveBarrier):
 //
-//	service.<tc>.<name>.build@<state>
-//	service.<tc>.<name>.runtime@<state>
-//	service.<tc>.<name>.runtime.provision.<p>@<state>
+//	[component.<c>.]service.<tc>.<name>.build@<state>
+//	[component.<c>.]service.<tc>.<name>.runtime@<state>
+//	[component.<c>.]service.<tc>.<name>.runtime.provision.<p>@<state>
 //
 // Toolchain / non-service refs return ("", false).
 func serviceNameFromBarrierRef(ref string) (string, bool) {
-	if !strings.HasPrefix(ref, "service.") {
+	module, _, name, _, ok := alphasfile.ParseServiceRef(ref)
+	if !ok {
 		return "", false
 	}
-	if at := strings.LastIndexByte(ref, '@'); at >= 0 {
-		ref = ref[:at]
-	}
-	parts := strings.SplitN(strings.TrimPrefix(ref, "service."), ".", 3)
-	if len(parts) < 2 || parts[1] == "" {
-		return "", false
-	}
-	return parts[1], true
-}
-
-func sortedNames(all []*alphasfile.Service) []string {
-	out := make([]string, 0, len(all))
-	for _, s := range all {
-		out = append(out, s.Name())
-	}
-	sort.Strings(out)
-	return out
+	return alphasfile.DisplayName(module, name), true
 }

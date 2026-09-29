@@ -1,0 +1,39 @@
+# Billing registers /billing/ with the gateway and calls orders through it:
+# it reads the gateway's url output, not the gateway's service.
+package "billing" {
+  import "../gateway" {
+    inputs = {
+      routes = {
+        billing = {
+          prefix   = "/billing/"
+          upstream = "127.0.0.1:${component.billing.service.go.billing.vars.port}"
+        }
+      }
+    }
+  }
+
+  component "billing" {
+    service "go" "billing" {
+      src {
+        path = "../../.."
+        exe  = "./examples/gateway/src/billing"
+      }
+
+      vars = { port = net::pickport() }
+
+      runtime {
+        cmd   = ["${fs::bin()}/${self.name}", "-addr", "127.0.0.1:${self.vars.port}", "-gateway", package.gateway.outputs.url]
+        after = [package.gateway.outputs.ready]
+      }
+
+      readiness {
+        http {
+          path = "/billing/"
+          port = self.vars.port
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}
