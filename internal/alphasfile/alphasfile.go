@@ -721,9 +721,13 @@ type rootBlock struct {
 	DotenvRange hcl.Range `hcl:"dotenv,attr_range"`
 	EnvRange    hcl.Range `hcl:"env,attr_range"`
 	SysEnvRange hcl.Range `hcl:"sysenv,attr_range"`
+
+	// parts are the Alphasfile.<name> files joined to this one that set
+	// env, dotenv or sysenv; see levelParts.
+	parts []*rootBlock
 }
 
-// importBlock pulls a package, or named modules of a fragment, into the
+// importBlock pulls a package into the
 // stack: `import "<path>" "<alias>"? { ... }`. A remote path carries no
 // version; the require that covers its repository does. An import at the
 // entrypoint's top level is the final word on a package's features; any

@@ -124,9 +124,8 @@ func renderWorkspaceBlock(spec *alphasfile.WorkspaceSpec) []byte {
 	return f.Bytes()
 }
 
-// importLines lists the packages and fragments a level imports, with the
-// modules taken from each fragment, then modules that were loaded but never
-// imported. Empty for a manifest without imports.
+// importLines lists the packages a level imports, then packages that were
+// loaded but are not part of the stack. Empty for a manifest without imports.
 func importLines(prefix string, tree *alphasfile.Tree) string {
 	if tree == nil {
 		return ""

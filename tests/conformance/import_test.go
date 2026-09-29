@@ -1,12 +1,11 @@
-// Import conformance, driven through `zordon plan` (static, no alpha):
-// fragments load and render under their level, an edit to a fragment changes
-// the manifest hash that federation drift compares, a fragment's directory
-// resolves to the entrypoint's instance, and the load-time errors reach the
-// user with the file that caused them.
+// Parts conformance, driven through `zordon plan` (static, no alpha): every
+// Alphasfile.<name> next to an Alphasfile renders under its level, an edit to
+// a part changes the manifest hash that federation drift compares, and
+// importing a file instead of a package's directory reaches the user as an
+// error.
 package conformance_test
 
 import (
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -14,20 +13,12 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
 )
 
-const importEntry = `
+const partsEntry = `
 sysenv = ["HOME", "USER", "PATH", "TMPDIR"]
-
-import "./services/apps/Alphasfile.apps" {
-  components = ["app"]
-}
 `
 
-const importApps = `
+const partsApps = `
 component "app" {
-  import "../db/Alphasfile.db" {
-    components = ["db"]
-  }
-
   service "go" "app" {
     package = "example.com/app@v0.0.0"
     vars = {
@@ -38,7 +29,7 @@ component "app" {
 }
 `
 
-const importDB = `
+const partsDB = `
 component "db" {
   service "go" "db" {
     package = "example.com/db@v0.0.0"
@@ -47,23 +38,14 @@ component "db" {
 }
 `
 
-func TestPlan_importedModulesRenderUnderLevel(t *testing.T) {
-	p := newImportProject(t)
+func TestPlan_partsRenderUnderLevel(t *testing.T) {
+	p := newPartsProject(t)
 	res := p.Zordon("plan").Run(t)
 	if res.ExitCode != 0 {
 		t.Fatalf("zordon plan: exit %d\n%s\n%s", res.ExitCode, res.Stdout, res.Stderr)
 	}
 	out := res.Stdout
-	dir, err := filepath.EvalSymlinks(p.Dir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{
-		"# import " + filepath.Join(dir, "services/apps/Alphasfile.apps") + " [app]",
-		"# import " + filepath.Join(dir, "services/db/Alphasfile.db") + " [db]",
-		`component "app" {`,
-		`component "db" {`,
-	} {
+	for _, want := range []string{`component "app" {`, `component "db" {`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in\n%s", want, out)
 		}
@@ -74,60 +56,32 @@ func TestPlan_importedModulesRenderUnderLevel(t *testing.T) {
 	}
 }
 
-func TestPlan_fragmentEditChangesHash(t *testing.T) {
-	p := newImportProject(t)
+func TestPlan_partEditChangesHash(t *testing.T) {
+	p := newPartsProject(t)
 	before := planCfgHash(t, p)
-	p.WriteFile("services/db/Alphasfile.db", "# edited\n"+importDB)
+	p.WriteFile("Alphasfile.db", "# edited\n"+partsDB)
 	after := planCfgHash(t, p)
 	if before == after {
-		t.Fatalf("editing an imported fragment must change cfg::hash() (both %s)", before)
+		t.Fatalf("editing a part of the Alphasfile must change cfg::hash() (both %s)", before)
 	}
 }
 
-func TestPlan_fragmentDirResolvesToEntrypoint(t *testing.T) {
-	p := newImportProject(t)
-	root := planHeader(t, p.Zordon("plan").Run(t).Stdout)
-	sub := planHeader(t, p.Zordon("plan").WithDir("services/db").Run(t).Stdout)
-	if root == "" || root != sub {
-		t.Fatalf("a fragment's dir must resolve to the entrypoint's instance: root %q, fragment dir %q", root, sub)
-	}
-}
-
-func TestPlan_unimportedModuleRefFails(t *testing.T) {
-	p := newImportProject(t)
-	p.WriteFile("Alphasfile", importEntry+`
-service "go" "gw" {
-  package = "example.com/gw@v0.0.0"
-  vars = { db = component.db.service.go.db.vars.port }
-}
-`)
-	res := p.Zordon("plan").Run(t)
-	if res.ExitCode == 0 {
-		t.Fatalf("the entrypoint does not import module db; plan must fail\n%s", res.Stdout)
-	}
-	for _, want := range []string{"component.db is not visible", `add import "./services/db/Alphasfile.db" { components = ["db"] }`} {
-		if !strings.Contains(res.Stderr, want) {
-			t.Errorf("missing %q in stderr:\n%s", want, res.Stderr)
-		}
-	}
-}
-
-func TestPlan_importOfEntrypointFails(t *testing.T) {
+func TestPlan_importOfAFileFails(t *testing.T) {
 	p := zordontest.NewProject(t)
-	p.WriteFile("Alphasfile", `import "./svc/Alphasfile" { components = ["svc"] }`)
+	p.WriteFile("Alphasfile", `import "./svc/Alphasfile" {}`)
 	p.WriteFile("svc/Alphasfile", `component "svc" {}`)
 	res := p.Zordon("plan").Run(t)
-	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "entrypoints and form federation levels") {
+	if res.ExitCode == 0 || !strings.Contains(res.Stderr, "names a file; an import names a package's directory") {
 		t.Fatalf("exit %d, stderr:\n%s", res.ExitCode, res.Stderr)
 	}
 }
 
-func newImportProject(t *testing.T) *zordontest.Project {
+func newPartsProject(t *testing.T) *zordontest.Project {
 	t.Helper()
 	p := zordontest.NewProject(t)
-	p.WriteFile("Alphasfile", importEntry)
-	p.WriteFile("services/apps/Alphasfile.apps", importApps)
-	p.WriteFile("services/db/Alphasfile.db", importDB)
+	p.WriteFile("Alphasfile", partsEntry)
+	p.WriteFile("Alphasfile.apps", partsApps)
+	p.WriteFile("Alphasfile.db", partsDB)
 	return p
 }
 
@@ -142,13 +96,4 @@ func planCfgHash(t *testing.T, p *zordontest.Project) string {
 		t.Fatalf("no cfg = \"<hash>\" line in\n%s", res.Stdout)
 	}
 	return m[1]
-}
-
-func planHeader(t *testing.T, out string) string {
-	t.Helper()
-	m := regexp.MustCompile(`(?m)^# === \[([0-9a-f]+)\] (\S+)`).FindStringSubmatch(out)
-	if m == nil {
-		return ""
-	}
-	return m[1] + " " + m[2]
 }

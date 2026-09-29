@@ -33,7 +33,7 @@ func statusHeader(lv *level, wd string) string {
 }
 
 // statusImports is the table of what a level imports: one row per package
-// or fragment with where it comes from, who imports it and its features.
+// with where it comes from, who imports it and its features.
 func statusImports(tree *alphasfile.Tree, wd string) string {
 	if tree == nil || len(tree.Imports())+len(tree.Unused()) == 0 {
 		return ""

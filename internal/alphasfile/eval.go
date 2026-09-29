@@ -293,15 +293,31 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 			return nil, fmt.Errorf("%s: %w", sid, err)
 		}
 	}
-	// File-level dotenv: top-level, no `self`; may use fs::/cfg:: funcs.
-	gdot, err := r.evalStrOrList(root.Dotenv, nil, "dotenv", srcDirs{})
-	if err != nil {
-		return nil, err
-	}
-	// File-level inline env: same top-level scope as dotenv (no `self`).
-	genvMap, err := r.evalMap(root.Env, nil, "env", srcDirs{})
-	if err != nil {
-		return nil, err
+	// File-level dotenv and env: top-level, no `self`; may use fs::/cfg::
+	// funcs. The level's parts add theirs: dotenv files in file order, env
+	// keys once across all of them.
+	var gdot []string
+	var genvMap map[string]any
+	envAt := map[string]hcl.Range{}
+	for _, rb := range root.levelParts() {
+		d, err := r.evalStrOrList(rb.Dotenv, nil, "dotenv", srcDirs{})
+		if err != nil {
+			return nil, err
+		}
+		gdot = append(gdot, d...)
+		m, err := r.evalMap(rb.Env, nil, "env", srcDirs{})
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range sortedKeys(m) {
+			if at, dup := envAt[k]; dup {
+				return nil, fmt.Errorf("%s: env %q is already set at %s", rb.EnvRange, k, at)
+			}
+			if genvMap == nil {
+				genvMap = map[string]any{}
+			}
+			genvMap[k], envAt[k] = m[k], rb.EnvRange
+		}
 	}
 	toolchain := p.toolchain
 	if len(toolchain) == 0 {
@@ -309,9 +325,13 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 	}
 	// SysEnv: parent's accumulated whitelist + this level's own.
 	// Order-preserving union (see mergeSysEnv) so cfg::hash() is stable.
-	localSysEnv, err := r.evalStrList(root.SysEnv, nil, "sysenv", srcDirs{})
-	if err != nil {
-		return nil, err
+	var localSysEnv []string
+	for _, rb := range root.levelParts() {
+		s, err := r.evalStrList(rb.SysEnv, nil, "sysenv", srcDirs{})
+		if err != nil {
+			return nil, err
+		}
+		localSysEnv = mergeSysEnv(localSysEnv, s)
 	}
 	var parentSysEnv []string
 	if p.parent != nil {
@@ -2283,7 +2303,7 @@ func osEnvFunc() function.Function {
 
 // resolveDir turns a `dir` primary into an absolute path. ~ expands to
 // $HOME; a relative path resolves against the directory of the file that
-// declares the service (the entrypoint, or the imported fragment), so a
+// declares the service (the entrypoint or a package), so a
 // file means the same thing regardless of where the user ran zordon from
 // and regardless of who imports it. Empty stays empty (no dir primary).
 // Workspace invocations adopt the project-root Alphasfile, so the anchor

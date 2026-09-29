@@ -1,0 +1,32 @@
+# The main package. Its api component lives here, its jobs component in
+# Alphasfile.jobs; both parts open the same package "platform". It imports
+# the ingest subpackage and reads its output.
+package "platform" {
+  import "./ingest" {
+    inputs = { retention = "72h" }
+  }
+
+  component "api" {
+    service "go" "api" {
+      src {
+        path = "../../.."
+        exe  = "./examples/fragments/src/app"
+      }
+
+      vars = { port = net::pickport() }
+
+      runtime {
+        cmd = ["${fs::bin()}/${self.name}", "-name", "api", "-addr", "127.0.0.1:${self.vars.port}", "-upstream", package.ingest.outputs.url]
+      }
+
+      readiness {
+        http {
+          path = "/"
+          port = self.vars.port
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}

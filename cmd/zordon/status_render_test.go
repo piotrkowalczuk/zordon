@@ -28,27 +28,6 @@ func TestStatusImports_local(t *testing.T) {
 	}
 }
 
-func TestStatusImports_fragmentAndUnused(t *testing.T) {
-	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{
-		"Alphasfile":   `import "./Alphasfile.f" { components = ["a"] }`,
-		"Alphasfile.f": "component \"a\" {}\ncomponent \"b\" {}\n",
-	})
-	tree, err := alphasfile.LoadTree(filepath.Join(dir, "Alphasfile"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "imports\n" +
-		"  a  ./Alphasfile.f\n" +
-		"  b  ./Alphasfile.f  unused: not part of the stack\n"
-	if got := statusImports(tree, dir); got != want {
-		t.Errorf("got\n%s\nwant\n%s", got, want)
-	}
-	if got := statusImports(nil, dir); got != "" {
-		t.Errorf("nil tree: got %q", got)
-	}
-}
-
 func TestStatusImports_remote(t *testing.T) {
 	checkout, dir := t.TempDir(), t.TempDir()
 	writeFiles(t, checkout, map[string]string{

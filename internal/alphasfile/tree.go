@@ -17,7 +17,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
-// Tree is an entrypoint Alphasfile plus every fragment and package it
+// Tree is an entrypoint Alphasfile plus every package it
 // transitively imports, each file loaded once. The stack is the entrypoint's
 // modules, what its imports name, and, repeated until nothing changes, what
 // any module or package already in the stack imports.
@@ -171,6 +171,14 @@ func (t *Tree) Bytes() []byte {
 		out = append(out, 0)
 		out = append(out, f.src...)
 	}
+	for _, f := range t.files {
+		for _, p := range f.parts {
+			out = append(out, 0)
+			out = append(out, p.path...)
+			out = append(out, 0)
+			out = append(out, p.src...)
+		}
+	}
 	return out
 }
 
@@ -191,6 +199,8 @@ type treeFile struct {
 	origin  string
 	// remote is ImportEdge.Remote for this file.
 	remote string
+	// parts are the Alphasfile.<name> files joined to this one.
+	parts []filePart
 }
 
 // pkgInstance is a package in the stack, instantiated once under its name:
@@ -281,23 +291,29 @@ func newTreeFile(path, identity string, src []byte, root *rootBlock) *treeFile {
 		identity: identity,
 		src:      src,
 		root:     root,
-		declared: map[string]*moduleBlock{},
 	}
-	for _, mb := range root.Modules {
+	f.adoptBlocks()
+	return f
+}
+
+// adoptBlocks indexes the file's components and points every service at
+// the file, parts included.
+func (f *treeFile) adoptBlocks() {
+	f.declared = map[string]*moduleBlock{}
+	for _, mb := range f.root.Modules {
 		f.declared[mb.Name] = mb
 	}
-	for _, sb := range root.allServices() {
+	for _, sb := range f.root.allServices() {
 		sb.file = f
 	}
-	if len(root.Packages) == 1 {
-		f.block = root.Packages[0]
+	if len(f.root.Packages) == 1 {
+		f.block = f.root.Packages[0]
 		for _, mb := range f.block.Modules {
 			for _, sb := range mb.Services {
 				sb.file = f
 			}
 		}
 	}
-	return f
 }
 
 // adopt registers a loaded file. The entrypoint may be a package's file:
@@ -331,9 +347,6 @@ func (t *Tree) register(f *treeFile) {
 // never join the stack are loaded and checked too, so a broken file fails
 // `zordon plan` before anyone reaches for it.
 func (t *Tree) load(path string, importer *treeFile, imp *importBlock, pkg *pkgInstance, res resolved) (*treeFile, error) {
-	if importer != nil && pkg == nil && filepath.Base(path) == invocation.AlphasfileName {
-		return nil, fmt.Errorf("%s: cannot %s %q: files named %s are entrypoints and form federation levels; %s its directory to use it as a package, or a fragment such as %s.<name>", imp.DefRange, imp.keyword, imp.Path, invocation.AlphasfileName, imp.keyword, invocation.AlphasfileName)
-	}
 	if pkg != nil && t.chain[path] {
 		return nil, fmt.Errorf("%s: cannot %s %q: %s is a federation level of this invocation, so its services would run twice", imp.DefRange, imp.keyword, imp.Path, path)
 	}
@@ -362,14 +375,13 @@ func (t *Tree) load(path string, importer *treeFile, imp *importBlock, pkg *pkgI
 		}
 	case pkg != nil:
 		return nil, fmt.Errorf("%s: %s %q: %s has no package block, so it is not a package; wrap its components in package \"<name>\" {}", imp.DefRange, imp.keyword, imp.Path, path)
-	case importer != nil:
-		if err := checkFragment(root); err != nil {
-			return nil, err
-		}
 	}
 	f := newTreeFile(path, path, b, root)
 	f.confine, f.repoAt, f.origin = res.confine, res.repoAt, res.origin
 	f.remote = remoteDir(importer, imp, pkg != nil, f.dir)
+	if err := t.loadParts(f); err != nil {
+		return nil, err
+	}
 	if err := t.adopt(f, pkg); err != nil {
 		return nil, err
 	}
@@ -415,44 +427,8 @@ func (t *Tree) follow(f *treeFile, scope string, blocks []*importBlock) error {
 			}
 			continue
 		}
-		if err := t.followFragment(f, scope, ib, res); err != nil {
-			return err
-		}
+		return fmt.Errorf("%s: %s %q names a file; an import names a package's directory, and an %s.<name> file is read only as a part of the %s next to it", ib.DefRange, ib.keyword, ib.Path, invocation.AlphasfileName, invocation.AlphasfileName)
 	}
-	return nil
-}
-
-func (t *Tree) followFragment(f *treeFile, scope string, ib *importBlock, res resolved) error {
-	target := res.path
-	switch {
-	case ib.InputsRange != (hcl.Range{}) || ib.Features != nil:
-		return fmt.Errorf("%s: %s %q: inputs and features are passed to a package directory, not to a fragment file", ib.DefRange, ib.keyword, ib.Path)
-	case f.block != nil:
-		return fmt.Errorf("%s: %s %q: a package depends on other packages, not on a fragment's components; move the components into this package or into a package of their own", ib.DefRange, ib.keyword, ib.Path)
-	case ib.Modules == nil:
-		return fmt.Errorf("%s: %s %q: \"components\" is required when importing a fragment; name the components to take from %s", ib.DefRange, ib.keyword, ib.Path, target)
-	case len(ib.Modules) == 0:
-		return fmt.Errorf("%s: %s %q: components must name at least one component declared in %s", ib.DefRange, ib.keyword, ib.Path, target)
-	case ib.alias != "":
-		return fmt.Errorf("%s: %s %q: an alias names a package; a fragment's components keep their declared names", ib.DefRange, ib.keyword, ib.Path)
-	}
-	tf := t.byPath[target]
-	if tf == nil {
-		var err error
-		if tf, err = t.load(target, f, ib, nil, res); err != nil {
-			return err
-		}
-		tf.identity = res.identity
-	}
-	if tf.block != nil {
-		return fmt.Errorf("%s: %s %q: %s is a package's file; %s its directory instead", ib.DefRange, ib.keyword, ib.Path, tf.path, ib.keyword)
-	}
-	for _, m := range ib.Modules {
-		if tf.declared[m] == nil {
-			return fmt.Errorf("%s: %s %q: component %q is not declared in %s (declared: %s)", ib.DefRange, ib.keyword, ib.Path, m, tf.path, strings.Join(sortedKeys(tf.declared), ", "))
-		}
-	}
-	t.links[scope] = append(t.links[scope], importLink{file: tf, modules: ib.Modules, block: ib})
 	return nil
 }
 
@@ -479,7 +455,7 @@ func (t *Tree) followPackage(f *treeFile, scope string, ib *importBlock, res res
 	} else {
 		pkg = tf.pkg
 		if pkg == nil {
-			return fmt.Errorf("%s: %s %q: %s is the entrypoint or a fragment, not a package", ib.DefRange, ib.keyword, ib.Path, afPath)
+			return fmt.Errorf("%s: %s %q: %s is the entrypoint, not a package", ib.DefRange, ib.keyword, ib.Path, afPath)
 		}
 		name := ib.alias
 		if name == "" {
@@ -490,7 +466,7 @@ func (t *Tree) followPackage(f *treeFile, scope string, ib *importBlock, res res
 		}
 	}
 	if scope == DefaultModule {
-		set, err := passedSettings(ib, scope, f.src)
+		set, err := passedSettings(ib, scope, f.srcOf(ib.DefRange.Filename))
 		if err != nil {
 			return err
 		}
@@ -532,8 +508,7 @@ func (t *Tree) finish() error {
 	var err error
 
 	// Every module of the entrypoint is in the stack, so the entrypoint's
-	// scopes see all of them. A fragment module sees itself and what it
-	// imports, a sibling from its own file included. A package's modules
+	// scopes see all of them, whichever part declares them. A package's modules
 	// see each other and whatever the package or the module imports.
 	entry := t.files[0]
 	t.scopes = map[string]*scopeVis{}
@@ -887,36 +862,6 @@ func liftAliases(body *hclsyntax.Body, aliases map[int]string) {
 			liftAliases(blk.Body, aliases)
 		}
 	}
-}
-
-// checkFragment enforces what an imported file may hold: module blocks only.
-// Everything else belongs to the entrypoint or a package, and dependencies
-// belong to the module that needs them.
-func checkFragment(root *rootBlock) error {
-	hint := fmt.Sprintf("is only allowed in the entrypoint %s; a fragment holds component blocks only", invocation.AlphasfileName)
-	if len(root.Imports) > 0 {
-		imp := root.Imports[0]
-		return fmt.Errorf("%s: import %q at the top of a fragment; move it inside the component block that uses it as import %q { components = [...] }, so it joins the stack only with that component", imp.DefRange, imp.Path, imp.Path)
-	}
-	if root.SysEnvRange != (hcl.Range{}) {
-		return fmt.Errorf("%s: top-level sysenv %s", root.SysEnvRange, hint)
-	}
-	if len(root.Services) > 0 {
-		return fmt.Errorf("%s: top-level service %s; wrap it in a component block", root.Services[0].DefRange, hint)
-	}
-	if root.Toolchain != nil {
-		return fmt.Errorf("%s: top-level toolchain %s; pin it inside a component block", root.Toolchain.DefRange, hint)
-	}
-	if root.Workspace != nil {
-		return fmt.Errorf("%s: top-level workspace %s", root.Workspace.DefRange, hint)
-	}
-	if root.EnvRange != (hcl.Range{}) {
-		return fmt.Errorf("%s: top-level env %s", root.EnvRange, hint)
-	}
-	if root.DotenvRange != (hcl.Range{}) {
-		return fmt.Errorf("%s: top-level dotenv %s", root.DotenvRange, hint)
-	}
-	return nil
 }
 
 // checkPackageFile enforces that a package's file is one package block and

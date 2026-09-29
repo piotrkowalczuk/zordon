@@ -403,8 +403,8 @@ func (t *Tree) importersDone(p *pkgInstance, pending map[string]*pkgInstance) bo
 }
 
 // plainActive is the set of scopes outside packages in the stack: the
-// entrypoint's top level and modules, and the fragment modules they import,
-// transitively. None of them can switch an import off.
+// entrypoint's top level and its components. None of them can switch an
+// import off.
 func (t *Tree) plainActive() map[string]bool {
 	seen := map[string]bool{}
 	queue := append([]string{DefaultModule}, sortedKeys(t.files[0].declared)...)

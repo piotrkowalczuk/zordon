@@ -1,23 +1,23 @@
 ---
-description: "Move services out of one large Alphasfile into fragment files, import them by component, and let components import each other."
+description: "Move services out of one large Alphasfile into Alphasfile.<name> parts next to it, and into packages when they belong in another directory."
 ---
 
 <div class="gh-canonical">Canonical version of this page: <a href="https://zordon.io/how-to/split-an-alphasfile-across-files/">https://zordon.io/how-to/split-an-alphasfile-across-files/</a></div>
 
 # Split an Alphasfile across files
 
-A large Alphasfile splits into fragment files that the entrypoint imports by component.
-A component that depends on another imports it, so every component states what it needs.
+A large Alphasfile splits into parts: files named `Alphasfile.<name>` next to it.
+zordon reads every part of a directory together with its `Alphasfile`, so nothing has to import them.
 
-## 1. Move a service into a component in its own file
+## 1. Move a component into a part
 
-Create `services/kafka/Alphasfile.kafka` and wrap the service in a `component` block:
+Create `Alphasfile.kafka` next to the `Alphasfile` and move the component into it:
 
 ```hcl
 component "kafka" {
   service "go" "kafka" {
     src {
-      path = "../.."               # relative to THIS file, not the entrypoint
+      path = "."
       exe  = "./cmd/kafka"
     }
     vars = { port = net::pickport() }
@@ -28,36 +28,16 @@ component "kafka" {
 }
 ```
 
-Name the file anything except `Alphasfile`: a file with that exact name is an entrypoint and cannot be imported.
-Recompute relative `src { path }` values, because they now resolve against the fragment's directory.
+Keep the part in the same directory as the `Alphasfile`: a file in a subdirectory is not a part, and a directory without an `Alphasfile` is never read.
+Relative `src { path }` values stay the same, because a part lives in the same directory.
 
-## 2. Import it where it is used
+## 2. Reference it from any other part
 
-In the entrypoint:
-
-```hcl
-import "./services/kafka/Alphasfile.kafka" {
-  components = ["kafka"]
-}
-```
-
-Reference the moved service as `component.kafka.service.go.kafka`, start it with `zordon start kafka/kafka`, and read it with `zordon get component.kafka.service.go.kafka.vars.port`.
-
-## 3. Import dependencies inside the component that needs them
-
-If a component in `services/apps/Alphasfile.apps` calls kafka, import kafka inside that component:
+Components of all parts see each other, so the `Alphasfile` keeps using `component.kafka.service.go.kafka` with no import:
 
 ```hcl
 component "app" {
-  import "../kafka/Alphasfile.kafka" {
-    components = ["kafka"]
-  }
-
   service "go" "app" {
-    src {
-      path = "../.."
-      exe  = "./cmd/app"
-    }
     runtime {
       after = [component.kafka.service.go.kafka.runtime.ready]
     }
@@ -65,26 +45,37 @@ component "app" {
 }
 ```
 
-The entrypoint then only imports `app`; kafka comes along and still loads once.
-Every other component in the same file that calls kafka imports it too, because an import inside a component belongs to that component and joins the stack only with it.
-To call a component declared in the same fragment, import it by the fragment's own file name, for example `import "./Alphasfile.apps" { components = ["billing"] }`.
-The entrypoint cannot reference `component.kafka` until it imports kafka itself, and `zordon plan` names the missing `import` and where it goes.
+Move `env`, `dotenv` or `sysenv` into a part if it belongs there; the unit adds them up, and a key set in two parts is an error.
 
-## 4. Verify without starting anything
+## 3. Split a package the same way
+
+In a package's directory, every part opens the same package:
+
+```hcl
+# shop/Alphasfile.admin
+package "shop" {
+  component "admin" {
+    service "go" "panel" { … }
+  }
+}
+```
+
+A part may also declare features, inputs and outputs; they join the package's API, and a name declared in two parts is an error.
+
+## 4. Move a shared piece into its own directory as a package
+
+When two stacks need the same components, give them a directory of their own with an `Alphasfile` holding a `package` block, expose what others need as outputs, and import the directory:
+
+```hcl
+import "./services/kafka" {}
+```
+
+## 5. Verify without starting anything
 
 ```sh
 zordon plan
 ```
 
-The header lists every imported file with the components taken from it, plus components that were loaded but not imported:
+Every component of every part renders under the level.
 
-```
-# import /repo/services/apps/Alphasfile.apps [app]
-# import /repo/services/kafka/Alphasfile.kafka [kafka]
-```
-
-!!! note "Running one service on its own"
-    Pick it from the main entrypoint: `zordon start kafka/kafka` starts kafka and the services it waits on, from any directory under the entrypoint.
-    Do not add a second `Alphasfile` under the main entrypoint's directory to run kafka alone: walk-up turns it into a [federation](../federation.md) level, and kafka runs in both levels.
-
-See [Imports](../alphasfile.md#imports) for every rule.
+See [Parts](../alphasfile.md#parts) for every rule and [examples/fragments](https://github.com/piotrkowalczuk/zordon/tree/main/examples/fragments) for a runnable stack.

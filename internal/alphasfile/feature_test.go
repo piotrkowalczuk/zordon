@@ -281,7 +281,7 @@ func TestLoadTree_unknownFeatureInImport(t *testing.T) {
 
 func TestLoadTree_enabledNeedsAPackage(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile": `import "./Alphasfile.f" { components = ["m"] }`,
+		"Alphasfile": ``,
 		"Alphasfile.f": `
 component "m" {
   service "go" "web" {

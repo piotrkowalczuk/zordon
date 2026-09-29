@@ -189,7 +189,7 @@ jobs:
           # and filesystem work — no network, no toolchain download.
           - workspace_files
           - components
-          - import
+          - fragments
           - pick_groups
           # remote fetches a local repository through url.insteadOf: offline.
           - remote

@@ -112,9 +112,9 @@ package "db" {
 
 func TestLoadTree_packageAndModuleNames(t *testing.T) {
 	cases := map[string]struct{ body, want string }{
-		"invalid package name": {"package \"no spaces\" {}\n", `invalid package name "no spaces"`},
-		"invalid component name":  {"package \"p\" {\n  component \"no spaces\" {}\n}\n", `invalid component name "no spaces"`},
-		"duplicate module":     {"package \"p\" {\n  component \"m\" {}\n  component \"m\" {}\n}\n", `duplicate component "m" in package "p"`},
+		"invalid package name":   {"package \"no spaces\" {}\n", `invalid package name "no spaces"`},
+		"invalid component name": {"package \"p\" {\n  component \"no spaces\" {}\n}\n", `invalid component name "no spaces"`},
+		"duplicate module":       {"package \"p\" {\n  component \"m\" {}\n  component \"m\" {}\n}\n", `duplicate component "m" in package "p"`},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -396,17 +396,6 @@ func TestLoadTree_packageImportRejectsModules(t *testing.T) {
 	}
 }
 
-func TestLoadTree_packageCannotRequireFragments(t *testing.T) {
-	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":     `import "./app" {}`,
-		"app/Alphasfile": "package \"app\" {\n  import \"../Alphasfile.f\" { components = [\"m\"] }\n}\n",
-		"Alphasfile.f":   `component "m" {}`,
-	})
-	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "a package depends on other packages, not on a fragment's components") {
-		t.Fatalf("got %v", err)
-	}
-}
-
 func TestOpen_packageToolchainPinsItsModules(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `import "./web" {}`,
@@ -539,7 +528,7 @@ func TestLoadTree_packageCannotImportTheEntrypoint(t *testing.T) {
 		"Alphasfile":   `import "./p" {}`,
 		"p/Alphasfile": "package \"p\" {\n  import \"../\" {}\n}\n",
 	})
-	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "is the entrypoint or a fragment, not a package") {
+	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), "is the entrypoint, not a package") {
 		t.Fatalf("got %v", err)
 	}
 }

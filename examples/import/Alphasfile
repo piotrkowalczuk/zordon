@@ -1,8 +1,0 @@
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
-
-# The entrypoint names only what it composes. kafka arrives because the app
-# and billing components import it; it runs once, but this file cannot reference
-# component.kafka without importing it too.
-import "./services/apps/Alphasfile.apps" {
-  components = ["app", "billing"]
-}

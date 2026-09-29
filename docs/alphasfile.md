@@ -130,59 +130,63 @@ Rules:
 
 See [Pin different toolchain versions per component](how-to/pin-different-toolchain-versions.md) for the recipe and [examples/components](https://github.com/piotrkowalczuk/zordon/tree/main/examples/components) for a runnable stack.
 
-### Imports
+### Parts
 
-An `import` block pulls named components out of another file into the stack.
-At the entrypoint's top level it composes the stack; inside a component it declares what that component depends on.
-A component is the only unit of import; a file is just a container that may hold several components.
+An `Alphasfile` is the index of its directory: every `Alphasfile.<name>` next to it is a part of the same unit, read without an import.
+The unit is the union of the `Alphasfile` and its parts.
 
 ```hcl
-# Alphasfile (entrypoint)
-import "./services/apps/Alphasfile.apps" {
-  components = ["app", "billing"]
+# platform/Alphasfile
+package "platform" {
+  import "./ingest" {}
+  component "api" { service "go" "api" { … } }
 }
 
-# services/apps/Alphasfile.apps (fragment)
-component "app" {
-  import "../kafka/Alphasfile.kafka" {
-    components = ["kafka"]
-  }
-
-  service "go" "app" {
-    runtime {
-      provision "topic" {
-        cmd = component.kafka.service.go.kafka.runtime.provision.create-topic
-      }
+# platform/Alphasfile.jobs (a part of package "platform")
+package "platform" {
+  component "jobs" {
+    service "go" "worker" {
+      vars = { api = component.api.service.go.api.vars.port }
     }
   }
 }
-component "billing" { … }
-
-# services/kafka/Alphasfile.kafka (fragment)
-component "kafka" { service "go" "kafka" { … } }
 ```
 
 | rule | behavior |
 |---|---|
-| syntax | `import "<path>" { components = ["<m>", …] }`, repeatable; `components` is required and non-empty for a fragment |
-| placement | the entrypoint's top level, a `component` block in any file, and a `package` block |
-| path | starts with `./`, `../`, `/` or `~/`; relative paths resolve against the declaring file's directory; any other spelling is a [remote identity](#remote-imports) |
-| entrypoint vs fragment | a file named exactly `Alphasfile` is an entrypoint and cannot be imported as a file; import its directory to use it as a [package](#packages), or a fragment, by convention `Alphasfile.<name>` |
-| fragment content | `component` blocks and `require` blocks only; a top-level `import`, `service`, `toolchain`, `env`, `dotenv`, `sysenv` and `workspace` are errors |
-| loading | every file loads once; diamonds and cycles between files are fine; imports inside components outside the stack are loaded and checked too |
-| stack | the entrypoint's components, the components its imports name, and, repeated until nothing changes, the components imported by any component already in the stack; every other component is left out |
-| visibility at the entrypoint's top level | the entrypoint's components and the components its imports name |
-| visibility inside a component | the component itself and what it imports; in the entrypoint also every other component of the entrypoint, because all of them are in the stack |
-| sibling in a fragment | imported like any other component, by the fragment's own file name: `import "./Alphasfile.apps" { components = ["billing"] }` |
+| part | a file named `Alphasfile.<name>` in the same directory as an `Alphasfile`; subdirectories are not parts |
+| without an `Alphasfile` | an `Alphasfile.<name>` is never read |
+| rules | a part obeys the rules of the `Alphasfile` it joins |
+| part of a package | opens the same package with `package "<name>" {}` and holds nothing outside it; another name or no package block is an error |
+| part of an entrypoint | holds no package block; it may hold anything an entrypoint may |
+| union | services, components, imports and requires add up; a package's features, inputs and outputs add up |
+| collisions | a component, feature, input or output declared in two parts is an error naming both places |
+| `env`, `dotenv`, `sysenv` | add up across parts: dotenv files in file order, sysenv as a union, an env key set in two parts is an error |
+| `toolchain` | the languages of every part add up; a language pinned by two parts is an error, because a unit has one default pin per language; a component's own `toolchain {}` still pins another version for its services |
+| `workspace` | declared once per unit, in any part |
+| visibility | every component of a unit sees every other, whichever part declares it |
+| importing a file | an error: an import names a package's directory, and a part is read only through its `Alphasfile` |
+| `cfg::hash()` and drift | covers every part, so editing a part restarts a level like editing its `Alphasfile` |
+| remote checkouts | a part that links out of the checkout is an error |
+
+See [Split an Alphasfile across files](how-to/split-an-alphasfile-across-files.md) for the recipe and [examples/fragments](https://github.com/piotrkowalczuk/zordon/tree/main/examples/fragments) for a runnable stack.
+
+### Imports
+
+An `import` block pulls a [package](#packages) into the stack by its directory.
+
+| rule | behavior |
+|---|---|
+| syntax | `import "<path>" "<alias>"? { inputs = {…}, features = [...] }`, repeatable |
+| placement | the entrypoint's top level, a `component` block, and a `package` block |
+| path | a directory; starts with `./`, `../`, `/` or `~/` and resolves against the declaring file's directory; any other spelling is a [remote identity](#remote-imports) |
+| loading | every package loads once; imports of packages outside the stack are loaded and checked too |
+| stack | the entrypoint's components and, repeated until nothing changes, the packages imported by anything already in the stack |
+| visibility | a package is visible where it is imported: `package.<p>.outputs.<n>` |
 | visibility error | names the expression and the missing `import` and where it goes |
 | duplicates | a component name is declared once across all loaded files |
 | relative `src { path }` | resolves against the directory of the file that declares the service |
-| `cfg::hash()` and drift | covers the bytes of every loaded file, so editing a fragment restarts a level like editing its Alphasfile |
-| `zordon plan` | prints `# import <file> [components]` per file the stack takes components from and `# unused component <m> in <file>` under the level header |
-
-An import inside a component joins the stack only with that component, so taking one component from a shared file never starts what its neighbours need.
-
-See [Split an Alphasfile across files](how-to/split-an-alphasfile-across-files.md) for the recipe and [examples/import](https://github.com/piotrkowalczuk/zordon/tree/main/examples/import) for a runnable stack.
+| `zordon plan` | prints `# import <dir> as <name>` per package under the level header |
 
 ### Packages
 
@@ -238,7 +242,7 @@ import "./caddy" "edge" {
 | unmet need | a feature the entrypoint leaves off is an error on the entrypoint's import that quotes the feature's description and names the importer |
 | entrypoint imports | several imports of the same package at the entrypoint's top level must pass the same features and the same input expressions, compared as written |
 | cycle | packages that import each other cannot be configured first; importing one of them at the entrypoint's top level breaks the cycle |
-| dependencies | a package depends on packages, never on a fragment's components |
+| parts | every `Alphasfile.<name>` in the package's directory is a part of it; see [Parts](#parts) |
 | toolchain | the package's `toolchain {}` pins every component that has none of its own |
 | visibility | a package's components see each other and whatever the package or the component imports |
 | federation | importing a package that is a federation level of the invocation is an error, because it would run twice |

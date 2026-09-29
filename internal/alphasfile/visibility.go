@@ -60,14 +60,8 @@ func moduleRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) err
 		if tree.owners[p+"/"+name] == nil {
 			return fmt.Errorf("%s: package %q has no component %q; inside a package, component.<name> is one of its own components, and another package's component is package.<package>.component.<name>", at, p, name)
 		}
-		return nil
 	}
-	owner := tree.owners[name]
-	if owner == nil || tree.moduleVisible(sb.module, name) {
-		return nil
-	}
-	scope, keyword, where := refScope(sb)
-	return fmt.Errorf("%s: component.%s is not visible in %s; add %s %q { components = [%q] } %s", at, name, scope, keyword, localRel(sb.file.dir, owner.path), name, where)
+	return nil
 }
 
 func outputRefError(tree *Tree, trav hcl.Traversal, at hcl.Range, p string) error {
