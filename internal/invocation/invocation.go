@@ -13,11 +13,16 @@ package invocation
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
+
+// ErrNoAlphasfile reports a directory tree with no Alphasfile at or above it:
+// not a zordon project, rather than a broken one.
+var ErrNoAlphasfile = errors.New("no " + AlphasfileName)
 
 const MainWorkspace = "main"
 
@@ -222,7 +227,7 @@ func ResolveInvocation(cwd string) (root, workspace, invocationDir string, err e
 		}
 		parent := filepath.Dir(d)
 		if parent == d {
-			return "", "", "", fmt.Errorf("invocation: no %s at or above %s", AlphasfileName, start)
+			return "", "", "", fmt.Errorf("invocation: %w at or above %s", ErrNoAlphasfile, start)
 		}
 		d = parent
 	}

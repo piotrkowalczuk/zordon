@@ -84,6 +84,7 @@ nav:
   - Reference:
       - Binaries and layout: reference/binaries.md
       - zordon mcp: reference/mcp.md
+      - zordon --agent status: reference/status-agent.md
       - Log filter DSL: reference/log-filter.md
       - zordon.work, zordon.mod and zordon.lock: reference/files.md
   - Compare:
