@@ -62,7 +62,7 @@ hello() {
 start_place
 assert_contains "$(hello)" "hello one" "the package runs from the fetched repository"
 assert_present "$ZHOME/mod/$REPO@$first"
-status="$(cd "$PLACE" && zordon status --agent)"
+status="$(cd "$PLACE" && zordon status --agent --format=text)"
 assert_contains "$status" "@${first:0:12}" "status shows the locked commit"
 (cd "$PLACE" && zordon stop --agent >/dev/null 2>&1) || true
 

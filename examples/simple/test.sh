@@ -11,5 +11,5 @@ status="$(zordon status --agent 2>&1)" || fail "status failed"
 for svc in nats-server tansu prometheus ruby-service; do
 	assert_contains "$status" "$svc" "$svc present"
 done
-assert_contains "$status" "prometheus — running" "prometheus running"
-assert_contains "$status" "[ready]"               "a readiness probe passed"
+assert_contains "$status" "service=prometheus state=ready" "prometheus running"
+assert_contains "$status" "state=ready"           "a readiness probe passed"

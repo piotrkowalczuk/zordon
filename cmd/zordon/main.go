@@ -92,7 +92,8 @@ func main() {
 func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	rootFlags := ff.NewFlagSet("zordon")
 	verbose := rootFlags.Bool('v', "verbose", "verbose logging")
-	agent := rootFlags.BoolLong("agent", "machine-friendly output: '<ms-since-start> <src> <LEVEL> <msg>'")
+	agent := rootFlags.BoolLong("agent", "agent mode: machine-friendly logs '<ms-since-start> <src> <LEVEL> <msg>' and --format=agent unless --format is given")
+	format := rootFlags.StringLong("format", "", "output format of commands that report: text, agent or json (default: agent under --agent, else text)")
 	var home, testLog zfs.DirName
 	rootFlags.Value(0, "home", &home, "directory holding zordon's host-wide state (env: ZORDON_HOME; defaults to ~/.zordon)")
 	testHarness := rootFlags.BoolLong("test-harness", "enable test:: HCL functions (env: ZORDON_TEST_HARNESS; conformance harness use only)")
@@ -142,13 +143,17 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	statusCmd := &ff.Command{
 		Name:      "status",
 		Usage:     "zordon status",
-		ShortHelp: "query the running alpha for its state (with --agent: one JSON object, see docs/reference/status-agent.md)",
+		ShortHelp: "query the running alpha for its state (--format text, agent or json; see docs/reference/status-formats.md)",
 		Flags:     statusFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			if *agent {
-				return runStatusAgent(ctx, stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg())
+			f, err := outputFormat(*format, *agent)
+			if err != nil {
+				return err
 			}
-			return runStatus(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg())
+			if f == FormatText {
+				return runStatus(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg())
+			}
+			return runStatusReport(ctx, stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg(), f)
 		},
 	}
 

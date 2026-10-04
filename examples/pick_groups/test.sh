@@ -43,8 +43,8 @@ mkdir -p "$(dirname "$ALPHA_LOG")"
 info "zordon start shop"
 zordon start --agent --timeout 120s --alpha-log "$ALPHA_LOG" shop 2>&1 | tee "$ZORDON_LOG"
 status="$(zordon status --agent)"
-assert_contains "$status" "shop/worker — running" "zordon start shop runs the shop"
-case "$status" in *"billing/worker — running"* | *"web — running"* | *"api/http — running"*) fail "zordon start shop ran more than the shop:\n$status" ;; esac
+assert_contains "$status" "service=shop/worker state=ready" "zordon start shop runs the shop"
+case "$status" in *"service=billing/worker state=ready"* | *"service=web state=ready"* | *"service=api/http state=ready"*) fail "zordon start shop ran more than the shop:\n$status" ;; esac
 pass "nothing outside the shop runs"
 zordon stop --agent >/dev/null 2>&1 || true
 
