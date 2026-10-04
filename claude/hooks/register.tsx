@@ -530,7 +530,7 @@ async function logBox($: EngineInterface, e: RenderEvent) {
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="gray" marginTop={1}>
       <Box justifyContent="space-between" backgroundColor={colors.bar} paddingX={1}>
-        <Text bold>MCP calls · {log.length}</Text>
+        <Text bold>Logs · {log.length}</Text>
         <Button
           key="fold-log"
           plain

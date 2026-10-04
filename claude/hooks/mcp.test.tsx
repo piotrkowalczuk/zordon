@@ -56,7 +56,7 @@ test('zordon MCP calls are logged, and a click opens their output', async ($, on
   expect((await ui.find({ type: 'Code' }))?.props.source).toBe('{"state":"stopped"}')
 
   // The log is a box of its own: folding it leaves the stack alone.
-  expect(await ui.find({ type: 'Text', text: /MCP calls · 1/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Logs · 1/ })).toBeDefined()
   await ui.press({ key: 'fold-log' })
   expect(await ui.find({ key: 'open-call-1' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /Workspace: feature/ })).toBeDefined()
@@ -67,7 +67,7 @@ test('no MCP calls, no log box', async ($, on) => {
   host(on, FEATURE)
   await openStack($)
   const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
-  expect(await ui.find({ type: 'Text', text: /MCP calls/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Logs · / })).toBeUndefined()
   await ui.unmount()
 })
 
