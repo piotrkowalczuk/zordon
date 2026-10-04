@@ -437,7 +437,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
     return <Box flexDirection="column">{header}</Box>
   }
 
-  const ws = s.workspace
+  const ws = s.kind === 'inactive' ? null : s.workspace
   const services = s.kind === 'running' || s.kind === 'stopped' ? s.services : []
   const { scope, runtime } = splitScope(services)
   const name = sessionCwd.split('/').filter(Boolean).pop() ?? sessionCwd
