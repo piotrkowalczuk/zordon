@@ -448,20 +448,14 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
       <Box flexDirection="column">
         {header}
         <Box flexDirection="column" borderStyle="round" borderColor="gray" marginTop={1} paddingX={1}>
-          <Box flexDirection="column" marginY={1}>
-            <Text>
-              <Text color="gray">○ </Text>
-              <Text bold>No zordon project here</Text>
-            </Text>
-            <Text dimColor wrap="wrap">
-              {name} has no Alphasfile at or above it.
-            </Text>
-          </Box>
-          <Box marginBottom={1}>
-            <Text dimColor wrap="wrap">
-              Start Claude in a directory with an Alphasfile to see its stack.
-            </Text>
-          </Box>
+          <Text>
+            <Text color="gray">○ </Text>
+            <Text bold>No Alphasfile</Text>
+          </Text>
+          <Text dimColor wrap="truncate-middle">
+            {name} is not a zordon project
+          </Text>
+          <Link href="https://zordon.io/getting-started/" label="Getting started →" />
         </Box>
       </Box>
     )
