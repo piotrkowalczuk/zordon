@@ -82,3 +82,18 @@ test("the plugin's own zordon server is logged under its plugin-scoped name", as
   expect((await ui.find({ key: 'open-call-2' }))?.props.label).toBe('plan')
   await ui.unmount()
 })
+
+test('with no workspace there is no Logs box, whatever was called', async ($, on) => {
+  host(on, '{"state":"no-alphasfile"}')
+  on('tool.call', { tool: 'mcp__zordon__status' }, () => ({ result: [], text: 'no Alphasfile' }))
+  await openStack($)
+
+  await $.tool.call({ tool: 'mcp__zordon__status', tool_use_id: 'call-3', args: [] })
+
+  const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /No zordon project here/ })).toBeDefined()
+  for (const title of [/^Workspace$/, /^Runtime$/, /^Logs/]) {
+    expect(await ui.find({ type: 'Text', text: title })).toBeUndefined()
+  }
+  await ui.unmount()
+})

@@ -353,7 +353,8 @@ type RenderEvent = Parameters<EngineInterface['ui']['resolve']>[0]
 
 // The pane's column: a Zordon header over three boxes, each folding on its
 // own: the workspace and the services it picked, the rest its run brings up,
-// and the zordon MCP calls Claude made this session.
+// and the zordon MCP calls Claude made this session. With no workspace a
+// single box says so instead.
 async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) {
   const { Box, Text, Link, Markdown, Button, Code } = $.ui.resolve(e)
   const colors = await palette($)
@@ -436,26 +437,38 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
     return <Box flexDirection="column">{header}</Box>
   }
 
-  const ws = s.kind === 'inactive' ? null : s.workspace
+  const ws = s.workspace
   const services = s.kind === 'running' || s.kind === 'stopped' ? s.services : []
   const { scope, runtime } = splitScope(services)
   const name = sessionCwd.split('/').filter(Boolean).pop() ?? sessionCwd
 
-  const stackBody =
-    s.kind === 'inactive' ? (
-      <Box flexDirection="column" marginY={1}>
-        <Text>
-          <Text color="gray">○ </Text>
-          <Text bold>No zordon project here</Text>
-        </Text>
-        <Text dimColor wrap="wrap">
-          {name} has no Alphasfile at or above it.
-        </Text>
-        <Text dimColor wrap="wrap">
-          Start Claude in a directory with an Alphasfile to see its stack.
-        </Text>
+  // No workspace: one box saying so, in place of Workspace, Runtime and Logs.
+  if (s.kind === 'inactive') {
+    return (
+      <Box flexDirection="column">
+        {header}
+        <Box flexDirection="column" borderStyle="round" borderColor="gray" marginTop={1} paddingX={1}>
+          <Box flexDirection="column" marginY={1}>
+            <Text>
+              <Text color="gray">○ </Text>
+              <Text bold>No zordon project here</Text>
+            </Text>
+            <Text dimColor wrap="wrap">
+              {name} has no Alphasfile at or above it.
+            </Text>
+          </Box>
+          <Box marginBottom={1}>
+            <Text dimColor wrap="wrap">
+              Start Claude in a directory with an Alphasfile to see its stack.
+            </Text>
+          </Box>
+        </Box>
       </Box>
-    ) : s.kind === 'error' ? (
+    )
+  }
+
+  const stackBody =
+    s.kind === 'error' ? (
       <Markdown text={['❌ **zordon error**', '', '```', s.message, '```'].join('\n')} />
     ) : scope.length > 0 ? (
       rows(scope)
@@ -512,7 +525,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
         key: 'workspace',
         title: 'Workspace',
         aside: ws ? <Text dimColor>{ws.name}</Text> : null,
-        border: s.kind === 'inactive' ? 'gray' : s.kind === 'error' ? 'red' : border(scope.length > 0 ? scope : services),
+        border: s.kind === 'error' ? 'red' : border(scope.length > 0 ? scope : services),
         isFolded: isStackFolded,
         onToggle: () => update($, isScopeCollapsed, f => !f),
         body: stackBody,
@@ -534,7 +547,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
             onToggle: () => update($, isRuntimeCollapsed, f => !f),
             body: rows(runtime),
           })}
-      {log.length === 0
+      {log.length === 0 || ws === null
         ? null
         : panel({
             key: 'log',
