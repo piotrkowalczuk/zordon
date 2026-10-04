@@ -454,7 +454,9 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
           <Text dimColor wrap="wrap">
             No Alphasfile anywhere in this tree
           </Text>
-          <Link href="https://zordon.io/getting-started/" label="Getting started →" />
+          <Text dimColor>
+            Learn more at <Link href="https://zordon.io/" label="zordon.io" />
+          </Text>
         </Box>
       </Box>
     )
