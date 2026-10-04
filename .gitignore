@@ -30,3 +30,6 @@ alpha.log
 
 # Python bytecode from the MkDocs build hook.
 __pycache__/
+
+# types Claude Code lays beside a plugin it loads from disk
+.claude-plugin/types/
