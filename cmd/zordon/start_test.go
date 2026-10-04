@@ -142,6 +142,23 @@ func TestPickServices_ProvisionAfter(t *testing.T) {
 	}
 }
 
+func TestPickServices_ShortName(t *testing.T) {
+	hugo := svc("hugo")
+	hugo.Module = "shop/shop"
+	api := svc("api")
+	api.Module = "shop/admin"
+	got, err := pickServices([]*alphasfile.Service{hugo, api, svc("other")}, []string{"shop/hugo", "shop/admin/api"})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if want := []string{"shop/shop/hugo", "shop/admin/api"}; !equalStrings(names(got), want) {
+		t.Errorf("got %v, want %v; a package's service is picked by the short name status shows", names(got), want)
+	}
+	if _, err := pickServices([]*alphasfile.Service{api}, []string{"shop/api"}); err == nil {
+		t.Error("only a module named like its package is left out of the short name")
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

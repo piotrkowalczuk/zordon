@@ -62,9 +62,10 @@ Lowest to highest, last wins:
 
 1. `alpha`'s process environment, **filtered by `sysenv`** (closed-world
    whitelist — anything not listed is stripped; defaults to empty)
-2. **toolchain env** — `mise env --json` output for the pinned
-   `toolchain.<lang>.version`, with per-language pin reinforcement
-   (e.g. `GOTOOLCHAIN=local` for Go), then the user's
+2. **toolchain env** — `mise env --json` output for the pin the service
+   runs under (its component's own `toolchain { }`, else its package's
+   `toolchain { }`, else the top-level `toolchain.<lang>.version`), with per-language pin
+   reinforcement (e.g. `GOTOOLCHAIN=local` for Go), then the user's
    `toolchain.<lang>.env` overlay
 3. federation-parent **file-level** `dotenv` (root-first)
 4. this Alphasfile's file-level `dotenv`
@@ -101,14 +102,28 @@ a stable `CARGO_TARGET_DIR` so rebuilds stay incremental.
 
 ## Picking a subset
 
-`zordon start <svc> [...]` filters the **invocation level** down to the
-named services plus the transitive closure of their `runtime.after` and
+`zordon start <pick> [...]` filters the **invocation level** down to the
+picked services plus the transitive closure of their `runtime.after` and
 `provision.after` deps — federation parents are unaffected and always
 come up in full (shared infra). Anything not in the closure is omitted
 from the Configure payload, so on reconfigure `alpha` treats those as
 "removed from the manifest" and stops them. A subsequent
 `zordon start` with no picks brings the rest back up. Unknown picks
-fail before contacting alpha and list the available service names.
+fail before contacting alpha and list the services, components and packages
+that exist.
+
+| pick | selects |
+| --- | --- |
+| `<svc>` | the service named `svc` wherever it lives, when no other service has that name |
+| `<c>` | every service of component `m` |
+| `<p>` | every service of package `p` |
+| `<p>/<c>` | every service of component `m` of package `p` |
+| `m/<svc>`, `p/m/<svc>`, `p/<svc>` | one service by its full or short name |
+
+A pick that selects different services in two of these readings — two
+services named `worker` in two packages, or a package and a service that
+share a name — is refused with every candidate listed; pick by full name
+instead.
 
 `zordon plan <svc> [...]` accepts the same picks and renders exactly
 that subset statically — a preflight of "just what I'm about to start"

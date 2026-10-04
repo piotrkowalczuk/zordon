@@ -1,0 +1,31 @@
+# A part of package "ingest": it declares the retention input, which the
+# collector's Alphasfile does not, and the store component that reads it.
+package "ingest" {
+  inputs = {
+    retention = { description = "How long the store keeps data.", type = string, default = "24h" }
+  }
+
+  component "store" {
+    service "go" "store" {
+      src {
+        path = "../../../.."
+        exe  = "./examples/fragments/src/app"
+      }
+
+      vars = { port = net::pickport() }
+
+      runtime {
+        cmd = ["${fs::bin()}/${self.name}", "-name", "store", "-addr", "127.0.0.1:${self.vars.port}", "-upstream", inputs.retention]
+      }
+
+      readiness {
+        http {
+          path = "/"
+          port = self.vars.port
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}

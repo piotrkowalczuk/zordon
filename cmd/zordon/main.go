@@ -282,7 +282,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "write the declared workspace files into an existing workspace",
 		Flags:     wsApplyFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runWorkspaceApply(zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsApplyWorkspace)
+			return runWorkspaceApply(zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsApplyWorkspace, zfs.ZordonHome(home.Path()))
 		},
 	}
 	wsServiceCmd.Subcommands = []*ff.Command{wsServiceAddCmd, wsServiceRmCmd}
@@ -367,7 +367,37 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		},
 	}
 
-	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wsCmd, getCmd, planCmd, cleanCmd, mcpCmd)
+	// pkg (parent + nested get/update)
+	pkgFlags := ff.NewFlagSet("pkg").SetParent(rootFlags)
+	pkgCmd := &ff.Command{
+		Name:      "pkg",
+		Usage:     "zordon pkg <get|update> [args]",
+		ShortHelp: "manage the versions of the remote repositories the Alphasfile imports",
+		Flags:     pkgFlags,
+	}
+	pkgGetFlags := ff.NewFlagSet("get").SetParent(pkgFlags)
+	pkgGetCmd := &ff.Command{
+		Name:      "get",
+		Usage:     "zordon pkg get <repo>@<ref>",
+		ShortHelp: "require a repository at a branch, tag or commit (in the zordon.mod above the Alphasfile, or in the Alphasfile when there is none) and lock it",
+		Flags:     pkgGetFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runPkgGet(stdio.Stdout, zfs.ZordonHome(home.Path()), args)
+		},
+	}
+	pkgUpdateFlags := ff.NewFlagSet("update").SetParent(pkgFlags)
+	pkgUpdateCmd := &ff.Command{
+		Name:      "update",
+		Usage:     "zordon pkg update [repo ...]",
+		ShortHelp: "re-resolve the required repositories (all, or the named ones) to their newest commits and rewrite zordon.lock",
+		Flags:     pkgUpdateFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			return runUpdate(stdio.Stdout, zfs.ZordonHome(home.Path()), args)
+		},
+	}
+	pkgCmd.Subcommands = []*ff.Command{pkgGetCmd, pkgUpdateCmd}
+
+	rootCmd.Subcommands = append(rootCmd.Subcommands, startCmd, statusCmd, stopCmd, sudoCmd, wsCmd, getCmd, planCmd, cleanCmd, pkgCmd, mcpCmd)
 	return rootCmd, agent
 }
 
@@ -817,48 +847,21 @@ func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome 
 		return err
 	}
 
+	wd, _ := zfs.Getwd()
 	anyRunning := false
 	for i, lv := range levels {
 		if i > 0 {
 			fmt.Fprintln(out)
 		}
-		marker := ""
-		if lv.isInvocation {
-			marker = fmt.Sprintf(" (invocation, workspace=%s)", lv.inv.Workspace)
+		fmt.Fprint(out, statusHeader(lv, wd))
+		if imports := statusImports(lv.tree, wd); imports != "" {
+			fmt.Fprint(out, "\n"+imports)
 		}
-		fmt.Fprintf(out, "# [%s] %s%s\n", lv.inv.FsHash, lv.afPath, marker)
-
 		if lv.state == nil {
-			fmt.Fprintln(out, "  alpha: not running")
 			continue
 		}
 		anyRunning = true
-		st := lv.state
-		fmt.Fprintf(out, "  alpha pid=%d started=%s\n", st.PID, st.StartedAt)
-		if len(st.Services) == 0 {
-			fmt.Fprintln(out, "  services: (none configured yet)")
-			continue
-		}
-		runningByName := make(map[string]protocol.ServiceStatus, len(st.Running))
-		for _, r := range st.Running {
-			runningByName[r.Name] = r
-		}
-		fmt.Fprintf(out, "  services (%d):\n", len(st.Services))
-		for _, s := range st.Services {
-			state := "stopped"
-			if status, ok := runningByName[s.Name()]; ok {
-				state = serviceState(ctx, s, status)
-			}
-			fmt.Fprintf(out, "    - [%s] %s — %s\n", s.Toolchain, s.Name(), state)
-			if s.Runtime != nil && s.Runtime.Print != "" {
-				// Plain text: the value is the composed (interpolated)
-				// string; the terminal linkifies any URL itself.
-				fmt.Fprintf(out, "        %s\n", s.Runtime.Print)
-			}
-			if co := checkoutStatus(ctx, s, lv.inv.Workspace); co != "" {
-				fmt.Fprintf(out, "        %s\n", co)
-			}
-		}
+		fmt.Fprint(out, "\n"+statusServices(ctx, lv.state, lv.inv.Workspace))
 	}
 	if !anyRunning {
 		return errors.New("no alpha running in the federation chain")

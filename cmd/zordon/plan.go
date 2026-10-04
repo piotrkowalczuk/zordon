@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
@@ -29,7 +32,7 @@ import (
 // (they are shared context, not what you're starting).
 func runPlan(_ context.Context, w io.Writer, zordonHome string, picks []string, testCfg alphasfile.TestConfig) error {
 	levels, err := walkChain(zordonHome, func(lv *level) (*protocol.StateInfo, error) {
-		af, err := alphasfile.Open(lv.afPath, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
+		af, err := alphasfile.Resolve(lv.tree, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
 		if err != nil {
 			return nil, err
 		}
@@ -58,6 +61,7 @@ func runPlan(_ context.Context, w io.Writer, zordonHome string, picks []string, 
 			marker = " (invocation)"
 		}
 		fmt.Fprintf(w, "# === [%s] %s%s ===\n", lv.inv.FsHash, lv.afPath, marker)
+		fmt.Fprint(w, importLines("# ", lv.tree))
 		if _, err := w.Write(renderState(lv.state)); err != nil {
 			return err
 		}
@@ -120,6 +124,38 @@ func renderWorkspaceBlock(spec *alphasfile.WorkspaceSpec) []byte {
 	return f.Bytes()
 }
 
+// importLines lists the packages a level imports, then packages that were
+// loaded but are not part of the stack. Empty for a manifest without imports.
+func importLines(prefix string, tree *alphasfile.Tree) string {
+	if tree == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, e := range tree.Imports() {
+		origin := ""
+		if e.Origin != "" {
+			origin = " (" + e.Origin + ")"
+		}
+		if e.Package != "" {
+			features := ""
+			if len(e.Features) > 0 {
+				features = " [features: " + strings.Join(e.Features, ", ") + "]"
+			}
+			by := ""
+			if len(e.ImportedBy) > 0 {
+				by = " (imported by " + strings.Join(e.ImportedBy, ", ") + ")"
+			}
+			fmt.Fprintf(&b, "%simport %s as %s%s%s%s\n", prefix, filepath.Dir(e.Path), e.Package, features, by, origin)
+			continue
+		}
+		fmt.Fprintf(&b, "%simport %s [%s]%s\n", prefix, e.Path, strings.Join(e.Modules, ", "), origin)
+	}
+	for _, u := range tree.Unused() {
+		fmt.Fprintf(&b, "%sunused component %s in %s\n", prefix, u.Module, u.Path)
+	}
+	return b.String()
+}
+
 // renderState writes a resolved StateInfo back as HCL bytes, every
 // interpolation already substituted. Output is for human inspection
 // and golden-file diffs, not round-tripping: block ordering follows
@@ -140,13 +176,73 @@ func renderState(st *protocol.StateInfo) []byte {
 	if len(st.SysEnv) > 0 {
 		body.SetAttributeValue("sysenv", stringListVal(st.SysEnv))
 	}
-	if len(st.Toolchain) > 0 {
-		renderToolchainBlock(body, st.Toolchain)
+	if tc := toolchainOf(st.Toolchain, alphasfile.DefaultModule); len(tc) > 0 {
+		renderToolchainBlock(body, tc)
 	}
 	for _, s := range st.Services {
-		renderService(body, s)
+		if s != nil && s.Module == alphasfile.DefaultModule {
+			renderService(body, s)
+		}
+	}
+	pkgBodies := map[string]*hclwrite.Body{}
+	for _, id := range moduleOrder(st) {
+		parent, name := body, id
+		if p, m, inPkg := strings.Cut(id, "/"); inPkg {
+			if pkgBodies[p] == nil {
+				pkgBodies[p] = body.AppendNewBlock("package", []string{p}).Body()
+			}
+			parent, name = pkgBodies[p], m
+		}
+		mb := parent.AppendNewBlock("component", []string{name}).Body()
+		if tc := toolchainOf(st.Toolchain, id); len(tc) > 0 {
+			renderToolchainBlock(mb, tc)
+		}
+		for _, s := range st.Services {
+			if s != nil && s.Module == id {
+				renderService(mb, s)
+			}
+		}
 	}
 	return f.Bytes()
+}
+
+// toolchainOf narrows the key-addressed pin map to one module's pins,
+// re-keyed by language so the block renderer can place them.
+func toolchainOf(tc map[string]*alphasfile.ToolchainConfig, module string) map[string]*alphasfile.ToolchainConfig {
+	out := map[string]*alphasfile.ToolchainConfig{}
+	for key, cfg := range tc {
+		m, lang := alphasfile.DefaultModule, key
+		if i := strings.LastIndexByte(key, '/'); i >= 0 {
+			m, lang = key[:i], key[i+1:]
+		}
+		if m == module {
+			out[lang] = cfg
+		}
+	}
+	return out
+}
+
+// moduleOrder lists modules by first appearance among services, then any
+// module that only pins a toolchain, sorted.
+func moduleOrder(st *protocol.StateInfo) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range st.Services {
+		if s == nil || s.Module == alphasfile.DefaultModule || seen[s.Module] {
+			continue
+		}
+		seen[s.Module] = true
+		out = append(out, s.Module)
+	}
+	var rest []string
+	for key := range st.Toolchain {
+		if i := strings.LastIndexByte(key, '/'); i >= 0 && !seen[key[:i]] {
+			seen[key[:i]] = true
+			rest = append(rest, key[:i])
+		}
+	}
+	sort.Strings(rest)
+	return append(out, rest...)
 }
 
 func renderToolchainBlock(body *hclwrite.Body, tc map[string]*alphasfile.ToolchainConfig) {

@@ -1,0 +1,7 @@
+# No Alphasfile in this directory, so this file is never read: it is not a
+# part of anything, and a file cannot be imported on its own.
+component "lint" {
+  service "go" "lint" {
+    this block is not even valid
+  }
+}
