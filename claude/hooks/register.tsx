@@ -351,45 +351,50 @@ function formatDuration(ms: number | null): string {
 
 type RenderEvent = Parameters<EngineInterface['ui']['resolve']>[0]
 
-async function stackBox($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) {
+// The pane's column: a Zordon header over three boxes, each folding on its
+// own: the workspace and the services it picked, the rest its run brings up,
+// and the zordon MCP calls Claude made this session.
+async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) {
   const { Box, Text, Link, Markdown, Button, Code } = $.ui.resolve(e)
-  if (s.kind === 'inactive') {
-    const colors = await palette($)
-    const name = sessionCwd.split('/').filter(Boolean).pop() ?? sessionCwd
+  const colors = await palette($)
+  const collapsed = await read($, isCollapsed)
+  const isStackFolded = await read($, isScopeCollapsed)
+  const isRuntimeFolded = await read($, isRuntimeCollapsed)
+  const isLogFolded = await read($, isLogCollapsed)
+  const log = await read($, calls)
+  const opened = await read($, openCall)
 
-    return (
-      <Box flexDirection="column" borderStyle="round" borderColor="gray">
-        <Box justifyContent="space-between" backgroundColor={colors.bar} paddingX={1}>
-          <Text bold>zordon</Text>
-          <Link href="https://zordon.io/" label="zordon.io" />
-        </Box>
-        <Box flexDirection="column" paddingX={1} marginY={1}>
-          <Text>
-            <Text color="gray">○ </Text>
-            <Text bold>No zordon project here</Text>
-          </Text>
-          <Text dimColor wrap="wrap">
-            {name} has no Alphasfile at or above it.
-          </Text>
-        </Box>
-        <Box paddingX={1} marginBottom={1}>
-          <Text dimColor wrap="wrap">
-            Start Claude in a directory with an Alphasfile to see its stack.
-          </Text>
+  const panel = (p: {
+    key: string
+    title: string
+    aside?: RenderChildren
+    border: string
+    isFolded: boolean
+    onToggle: () => void
+    body: RenderChildren
+    footer?: RenderChildren
+  }) => (
+    <Box key={p.key} flexDirection="column" borderStyle="round" borderColor={p.border} marginTop={1}>
+      <Box justifyContent="space-between" backgroundColor={colors.sub} paddingX={1}>
+        <Text bold>{p.title}</Text>
+        <Box gap={1}>
+          {p.aside ?? null}
+          <Button key={`fold-${p.key}`} plain label={p.isFolded ? '+' : '−'} onPress={p.onToggle} />
         </Box>
       </Box>
-    )
-  }
+      {p.isFolded ? null : (
+        <Box flexDirection="column" paddingX={1}>
+          {p.body}
+        </Box>
+      )}
+      {p.footer ? (
+        <Box justifyContent="space-between" backgroundColor={colors.sub} paddingX={1}>
+          {p.footer}
+        </Box>
+      ) : null}
+    </Box>
+  )
 
-  const ws = s.workspace
-  const isBad = s.kind === 'error' || (s.kind === 'running' && s.services.some(x => x.isFailed))
-  const collapsed = await read($, isCollapsed)
-  const services = s.kind === 'error' ? [] : s.services
-  const { scope, runtime } = splitScope(services)
-
-  const colors = await palette($)
-  const isScopeFolded = await read($, isScopeCollapsed)
-  const isRuntimeFolded = await read($, isRuntimeCollapsed)
   const rows = (list: ZordonService[]) => (
     <Box flexDirection="column">
       {list.map(svc => {
@@ -412,87 +417,52 @@ async function stackBox($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) {
       })}
     </Box>
   )
-  const section = (key: string, title: string, isFolded: boolean, onToggle: () => void, body: RenderChildren) => (
-    <Box key={key} flexDirection="column" marginTop={1}>
-      <Box justifyContent="space-between" backgroundColor={colors.sub} paddingX={1}>
-        <Text bold>{title}</Text>
-        <Button key={`fold-${key}`} plain label={isFolded ? '+' : '−'} onPress={onToggle} />
+  const border = (list: ZordonService[]) =>
+    list.some(x => x.isFailed) ? 'red' : list.length > 0 && list.every(x => x.state === 'stopped') ? 'gray' : 'green'
+
+  const header = (
+    <Box justifyContent="space-between" backgroundColor={colors.bar} paddingX={1}>
+      <Text bold>
+        Zordon
+        {collapsed && summary(s) ? <Text dimColor> · {summary(s)?.replace(/^zordon /, '')}</Text> : null}
+      </Text>
+      <Box gap={1}>
+        <Link href="https://zordon.io/" label="zordon.io" />
+        <Button key="collapse" plain label={collapsed ? '+' : '−'} onPress={() => update($, isCollapsed, c => !c)} />
       </Box>
-      {isFolded ? null : <Box paddingX={1}>{body}</Box>}
     </Box>
   )
+  if (collapsed) {
+    return <Box flexDirection="column">{header}</Box>
+  }
 
-  const scopeBody =
-    scope.length > 0 ? (
+  const ws = s.kind === 'inactive' ? null : s.workspace
+  const services = s.kind === 'running' || s.kind === 'stopped' ? s.services : []
+  const { scope, runtime } = splitScope(services)
+  const name = sessionCwd.split('/').filter(Boolean).pop() ?? sessionCwd
+
+  const stackBody =
+    s.kind === 'inactive' ? (
+      <Box flexDirection="column" marginY={1}>
+        <Text>
+          <Text color="gray">○ </Text>
+          <Text bold>No zordon project here</Text>
+        </Text>
+        <Text dimColor wrap="wrap">
+          {name} has no Alphasfile at or above it.
+        </Text>
+        <Text dimColor wrap="wrap">
+          Start Claude in a directory with an Alphasfile to see its stack.
+        </Text>
+      </Box>
+    ) : s.kind === 'error' ? (
+      <Markdown text={['❌ **zordon error**', '', '```', s.message, '```'].join('\n')} />
+    ) : scope.length > 0 ? (
       rows(scope)
     ) : (
       <Text dimColor>{ws?.name === 'main' ? 'main picks nothing: all runs from the live tree' : 'nothing picked'}</Text>
     )
 
-  return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      borderColor={isBad ? 'red' : s.kind === 'stopped' ? 'gray' : 'green'}
-    >
-      <Box justifyContent="space-between" backgroundColor={colors.bar} paddingX={1}>
-        <Text bold>Workspace: {ws?.name ?? '?'}</Text>
-        <Box gap={1}>
-          <Link href="https://zordon.io/" label="zordon.io" />
-          <Button
-            key="collapse"
-            plain
-            label={collapsed ? '+' : '−'}
-            onPress={() => update($, isCollapsed, c => !c)}
-          />
-        </Box>
-      </Box>
-      {collapsed ? null : (
-        <Box flexDirection="column">
-          {s.kind === 'error' ? (
-            <Box marginTop={1} paddingX={1}>
-              <Markdown text={['❌ **zordon error**', '', '```', s.message, '```'].join('\n')} />
-            </Box>
-          ) : null}
-          {s.kind === 'error'
-            ? null
-            : section('scope', 'Scope', isScopeFolded, () => update($, isScopeCollapsed, f => !f), scopeBody)}
-          {s.kind === 'error' || runtime.length === 0
-            ? null
-            : section('runtime', 'Runtime', isRuntimeFolded, () => update($, isRuntimeCollapsed, f => !f), rows(runtime))}
-
-        </Box>
-      )}
-      <Box justifyContent="space-between" marginTop={1} backgroundColor={colors.bar} paddingX={1}>
-        <Text dimColor>{ws?.sizeKB != null ? formatSize(ws.sizeKB) : '…'}</Text>
-        {/* Link takes https: alone; a file: link is Markdown's to draw. */}
-        {ws ? <Markdown text={`[Alphasfile](file://${encodeURI(ws.alphasfile)})`} /> : null}
-      </Box>
-    </Box>
-  )
-}
-
-// The pane's column: the stack, and under it, in a box of its own, the
-// zordon MCP calls Claude made this session.
-async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) {
-  const { Box } = $.ui.resolve(e)
-  const log = await logBox($, e)
-
-  return (
-    <Box flexDirection="column">
-      {await stackBox($, e, s)}
-      {log}
-    </Box>
-  )
-}
-
-async function logBox($: EngineInterface, e: RenderEvent) {
-  const { Box, Text, Button, Code } = $.ui.resolve(e)
-  const log = await read($, calls)
-  if (log.length === 0) return null
-  const colors = await palette($)
-  const opened = await read($, openCall)
-  const isLogFolded = await read($, isLogCollapsed)
   const callRows = (
     <Box flexDirection="column">
       {log.map(c => {
@@ -518,7 +488,15 @@ async function logBox($: EngineInterface, e: RenderEvent) {
                   {new Date(c.startedAt).toLocaleTimeString()} · zordon {c.command}
                   {c.args ? ` ${c.args}` : ''}
                 </Text>
-                {c.output ? <Code source={c.output} language={c.output.trimStart().startsWith('{') ? 'json' : 'text'} wrap="wrap" /> : <Text dimColor>no output yet</Text>}
+                {c.output ? (
+                  <Code
+                    source={c.output}
+                    language={c.output.trimStart().startsWith('{') ? 'json' : 'text'}
+                    wrap="wrap"
+                  />
+                ) : (
+                  <Text dimColor>no output yet</Text>
+                )}
               </Box>
             ) : null}
           </Box>
@@ -528,17 +506,44 @@ async function logBox($: EngineInterface, e: RenderEvent) {
   )
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="gray" marginTop={1}>
-      <Box justifyContent="space-between" backgroundColor={colors.bar} paddingX={1}>
-        <Text bold>Logs · {log.length}</Text>
-        <Button
-          key="fold-log"
-          plain
-          label={isLogFolded ? '+' : '−'}
-          onPress={() => update($, isLogCollapsed, f => !f)}
-        />
-      </Box>
-      {isLogFolded ? null : <Box paddingX={1}>{callRows}</Box>}
+    <Box flexDirection="column">
+      {header}
+      {panel({
+        key: 'workspace',
+        title: 'Workspace',
+        aside: ws ? <Text dimColor>{ws.name}</Text> : null,
+        border: s.kind === 'inactive' ? 'gray' : s.kind === 'error' ? 'red' : border(scope.length > 0 ? scope : services),
+        isFolded: isStackFolded,
+        onToggle: () => update($, isScopeCollapsed, f => !f),
+        body: stackBody,
+        footer: ws ? (
+          <>
+            <Text dimColor>{ws.sizeKB != null ? formatSize(ws.sizeKB) : '…'}</Text>
+            {/* Link takes https: alone; a file: link is Markdown's to draw. */}
+            <Markdown text={`[Alphasfile](file://${encodeURI(ws.alphasfile)})`} />
+          </>
+        ) : undefined,
+      })}
+      {runtime.length === 0
+        ? null
+        : panel({
+            key: 'runtime',
+            title: 'Runtime',
+            border: border(runtime),
+            isFolded: isRuntimeFolded,
+            onToggle: () => update($, isRuntimeCollapsed, f => !f),
+            body: rows(runtime),
+          })}
+      {log.length === 0
+        ? null
+        : panel({
+            key: 'log',
+            title: `Logs · ${log.length}`,
+            border: 'gray',
+            isFolded: isLogFolded,
+            onToggle: () => update($, isLogCollapsed, f => !f),
+            body: callRows,
+          })}
     </Box>
   )
 }

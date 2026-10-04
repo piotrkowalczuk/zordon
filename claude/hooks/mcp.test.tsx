@@ -59,7 +59,7 @@ test('zordon MCP calls are logged, and a click opens their output', async ($, on
   expect(await ui.find({ type: 'Text', text: /Logs · 1/ })).toBeDefined()
   await ui.press({ key: 'fold-log' })
   expect(await ui.find({ key: 'open-call-1' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /Workspace: feature/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^feature$/ })).toBeDefined()
   await ui.unmount()
 })
 
