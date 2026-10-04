@@ -440,7 +440,6 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
   const ws = s.kind === 'inactive' ? null : s.workspace
   const services = s.kind === 'running' || s.kind === 'stopped' ? s.services : []
   const { scope, runtime } = splitScope(services)
-  const name = sessionCwd.split('/').filter(Boolean).pop() ?? sessionCwd
 
   // No workspace: one box saying so, in place of Workspace, Runtime and Logs.
   if (s.kind === 'inactive') {
@@ -450,10 +449,10 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
         <Box flexDirection="column" borderStyle="round" borderColor="gray" marginTop={1} paddingX={1}>
           <Text>
             <Text color="gray">○ </Text>
-            <Text bold>No Alphasfile</Text>
+            <Text bold>Not a workspace</Text>
           </Text>
-          <Text dimColor wrap="truncate-middle">
-            {name} is not a zordon project
+          <Text dimColor wrap="wrap">
+            No Alphasfile anywhere in this tree
           </Text>
           <Link href="https://zordon.io/getting-started/" label="Getting started →" />
         </Box>

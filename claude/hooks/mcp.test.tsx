@@ -91,7 +91,7 @@ test('with no workspace there is no Logs box, whatever was called', async ($, on
   await $.tool.call({ tool: 'mcp__zordon__status', tool_use_id: 'call-3', args: [] })
 
   const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
-  expect(await ui.find({ type: 'Text', text: /No Alphasfile/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Not a workspace/ })).toBeDefined()
   for (const title of [/^Workspace$/, /^Runtime$/, /^Logs/]) {
     expect(await ui.find({ type: 'Text', text: title })).toBeUndefined()
   }
