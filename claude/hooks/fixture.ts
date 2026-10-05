@@ -2,7 +2,7 @@ import { mock } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-// A running `feature` workspace as `zordon --agent status` reports it.
+// A running `feature` workspace as `zordon status --format=json` reports it.
 export const FEATURE = JSON.stringify({
   workspace: 'feature',
   alphasfile: '/proj/Alphasfile',

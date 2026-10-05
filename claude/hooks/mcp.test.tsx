@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { FEATURE, PANE, host, openStack } from './fixture'
 import { parseAgentStatus } from './register'
 
-// Captured from `zordon --agent status` on a running examples/workspace stack.
+// Captured from `zordon status --format=json` on a running examples/workspace stack.
 const AGENT = JSON.stringify({
   workspace: 'agentdemo',
   alphasfile: '/z/examples/workspace/Alphasfile',
@@ -17,7 +17,7 @@ const AGENT = JSON.stringify({
 })
 
 
-test('reads zordon --agent status', () => {
+test('reads zordon status --format=json', () => {
   const s = parseAgentStatus(AGENT)
   expect(s?.kind).toBe('running')
   if (s?.kind !== 'running') return
