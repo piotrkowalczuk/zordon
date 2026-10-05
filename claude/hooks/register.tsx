@@ -164,7 +164,7 @@ type AgentStatus = {
   services?: AgentService[]
 }
 
-// `zordon --agent status`: one JSON object; null when this zordon predates it
+// `zordon status --format=json`: one JSON object; null when this zordon predates it
 // and printed its text report instead.
 export function parseAgentStatus(stdout: string): ZordonSnapshot | null {
   let st: AgentStatus
@@ -264,8 +264,8 @@ type SizeCache = Map<string, { kb: number | null; at: number }>
 async function refresh($: EngineInterface, sizes: SizeCache): Promise<ZordonSnapshot> {
   let next: ZordonSnapshot
   try {
-    const agent = await $.process.run(['zordon', '--agent', 'status'], { timeoutMs: 10_000 })
-    const parsed = parseAgentStatus(agent.stdout)
+    const report = await $.process.run(['zordon', 'status', '--format=json'], { timeoutMs: 10_000 })
+    const parsed = parseAgentStatus(report.stdout)
     if (parsed !== null) {
       next = parsed
     } else {
