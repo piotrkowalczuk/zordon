@@ -23,7 +23,8 @@ When `sysenv` does not declare it, installs run with the base system directories
 Whatever `PATH` mise sees ends up in the toolchain's environment and so in every service, which is why the shipped examples leave `PATH` out of `sysenv` and pin every toolchain they use instead.
 
 mise's own GitHub credential is the one value that crosses the boundary: `MISE_GITHUB_TOKEN` (or `GITHUB_TOKEN`) from the environment zordon was started in is handed to `mise install` and `mise env`, because ruby, rust and aqua releases are resolved through the GitHub API and its anonymous limit is exhausted within minutes on shared CI runners.
-It never reaches `mise exec` — the path that runs third-party code such as gem and npm install scripts — and never a service; zordon installs each toolchain up front so `exec` has nothing left to download.
+It goes only to installs that are plain release downloads — mise's core languages and the `aqua`, `ubi` and `github` backends — and never to code from third parties: not to `mise exec`, which runs gem and npm install scripts, not to `asdf`/`vfox` plugins or the `cargo`/`npm` backends, which execute their own build code, and never to a service.
+zordon installs each toolchain up front so `exec` has nothing left to download.
 
 ## Relocating what lives in HOME
 

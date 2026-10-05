@@ -157,6 +157,35 @@ func TestMiseCommand_githubTokenOnlyForMiseItself(t *testing.T) {
 	}
 }
 
+// Installs that run third-party code never see the token: asdf/vfox plugins
+// execute their own install scripts, cargo/npm build the package's code,
+// and a bare package name like redis resolves to such a plugin. Release
+// downloads (core languages, aqua, ubi) keep it.
+func TestMiseCommand_githubTokenWithheldFromPluginInstalls(t *testing.T) {
+	t.Setenv("MISE_GITHUB_TOKEN", "ghp_dev")
+	cases := map[string]struct {
+		spec string
+		want bool
+	}{
+		"core language": {"rust@1.83.0", true},
+		"aqua release":  {"aqua:etcd-io/etcd@3.5.17", true},
+		"ubi release":   {"ubi:theseus-rs/postgresql-binaries[extract_all=true]@16.4.0", true},
+		"asdf plugin":   {"asdf:mise-plugins/mise-postgres@16.4", false},
+		"vfox plugin":   {"vfox:mise-plugins/vfox-redis@7.4.1", false},
+		"cargo build":   {"cargo:ripgrep@14.1.0", false},
+		"npm package":   {"npm:prettier@3.3.3", false},
+		"bare pkg name": {"redis@7.4.1", false},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			_, got := envMap(miseCommand("/z/bin/mise", "/z/toolchain", nil, "install", c.spec).Env)["MISE_GITHUB_TOKEN"]
+			if got != c.want {
+				t.Errorf("install %s: token present = %v, want %v", c.spec, got, c.want)
+			}
+		})
+	}
+}
+
 // `gem install` skips ~/.gemrc: a `gem: --user-install` line there would
 // divert the declared bundler into ~/.gem/ruby/<abi>, outside the pinned
 // ruby, and the runtime GEM_PATH pin would then never see it.

@@ -174,6 +174,36 @@ func isolatedEnv(host zenv.EnvironmentVariables, dataDir, miseBin string) []stri
 	return env.Slice()
 }
 
+// tokenAllowed reports whether a mise invocation may carry the GitHub token:
+// only `install`/`env` of tools whose install is a download — mise's core
+// languages and the aqua/ubi/github release backends.
+func tokenAllowed(args []string) bool {
+	if len(args) == 0 || (args[0] != "install" && args[0] != "env") {
+		return false
+	}
+	for _, a := range args[1:] {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		name, _, _ := strings.Cut(a, "@")
+		if backend, _, ok := strings.Cut(name, ":"); ok {
+			if !downloadBackends[backend] {
+				return false
+			}
+			continue
+		}
+		if !coreTools[name] {
+			return false
+		}
+	}
+	return true
+}
+
+var (
+	downloadBackends = map[string]bool{"aqua": true, "ubi": true, "github": true, "core": true}
+	coreTools        = map[string]bool{"go": true, "node": true, "ruby": true, "rust": true, "java": true, "python": true}
+)
+
 func githubToken() string {
 	for _, k := range []string{"MISE_GITHUB_TOKEN", "GITHUB_TOKEN"} {
 		if v, ok := zenv.Lookup(k); ok && v != "" {
@@ -193,18 +223,20 @@ func githubToken() string {
 // world from isolatedEnv(host, ...). Callers set Stdout/Stderr and may
 // append to cmd.Env.
 //
-// Every subcommand except `exec` also gets MISE_GITHUB_TOKEN (from alpha's
-// own MISE_GITHUB_TOKEN or GITHUB_TOKEN): mise resolves ruby/rust/aqua
-// releases through the GitHub API, whose anonymous limit shared CI runners
-// exhaust in minutes. `exec` runs third-party code — gem/npm install
-// scripts, the interpreter itself — so it never sees the token; callers
-// `mise install` a tool first (EnsureToolchain) so exec has nothing left to
-// download.
+// `mise install` and `mise env` of a tool mise fetches as a plain release
+// download also get MISE_GITHUB_TOKEN (from alpha's own MISE_GITHUB_TOKEN or
+// GITHUB_TOKEN): mise resolves ruby/rust/aqua releases through the GitHub
+// API, whose anonymous limit shared CI runners exhaust in minutes. Nothing
+// that runs third-party code sees it — `exec` (gem/npm install scripts, the
+// interpreter itself), nor installs through asdf/vfox plugins or the
+// cargo/npm/go/pipx backends, which execute the plugin's or package's own
+// build code; callers `mise install` a tool first (EnsureToolchain) so exec
+// has nothing left to download.
 func miseCommand(binPath, dataDir string, host zenv.EnvironmentVariables, args ...string) *exec.Cmd {
 	full := append([]string{"--no-config"}, args...)
 	cmd := exec.Command(binPath, full...)
 	cmd.Env = isolatedEnv(host, dataDir, binPath)
-	if len(args) > 0 && args[0] != "exec" {
+	if tokenAllowed(args) {
 		if token := githubToken(); token != "" {
 			cmd.Env = append(cmd.Env, "MISE_GITHUB_TOKEN="+token)
 		}
