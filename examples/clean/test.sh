@@ -25,7 +25,7 @@ assert_present "$registered"
 # Wait for the stack to be fully down before cleaning — clean operates on
 # a stopped stack and refuses a running one.
 for _ in $(seq 1 100); do
-	zordon status --agent 2>/dev/null | grep -q "not running" && break
+	zordon status --agent 2>/dev/null | grep -q "^workspace=[^ ]* state=stopped" && break
 	/bin/sleep 0.1 2>/dev/null || /bin/sleep 1
 done
 

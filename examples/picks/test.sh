@@ -16,10 +16,10 @@ info "zordon start web   (expect: api pulled in by after, worker stays down)"
 zordon start --agent --timeout 90s --alpha-log "$ALPHA_LOG" web
 
 status="$(zordon status --agent 2>&1)" || fail "status failed"
-assert_contains "$status" "web — running"  "web running"
-assert_contains "$status" "api — running"  "api pulled in via after"
+assert_contains "$status" "service=web state=ready"  "web running"
+assert_contains "$status" "service=api state=ready"  "api pulled in via after"
 case "$status" in
-	*"worker — running"*) fail "worker should not be running (it wasn't picked)";;
+	*"service=worker state=ready"*) fail "worker should not be running (it wasn't picked)";;
 	*) pass "worker omitted";;
 esac
 
@@ -27,7 +27,7 @@ esac
 info "zordon start             (no picks: bring the rest up)"
 zordon start --agent --timeout 90s --alpha-log "$ALPHA_LOG"
 status="$(zordon status --agent 2>&1)" || fail "status failed"
-assert_contains "$status" "worker — running" "worker now running"
+assert_contains "$status" "service=worker state=ready" "worker now running"
 
 # Unknown pick is a clean error, no alpha contact needed.
 info "zordon start nope        (expect: error listing available services)"

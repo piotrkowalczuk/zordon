@@ -20,7 +20,7 @@ pass "a part without an Alphasfile is never read"
 start
 status="$(zordon status --agent)"
 for svc in platform/api/api platform/jobs/worker ingest/collector/collector ingest/store/store; do
-	assert_contains "$status" "$svc — running" "$svc runs"
+	assert_contains "$status" "service=$svc state=ready" "$svc runs"
 done
 
 port() { zordon get "package.$1.component.$2.service.go.$3.vars.port"; }

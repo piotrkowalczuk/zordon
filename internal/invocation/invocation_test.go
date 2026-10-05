@@ -1,6 +1,7 @@
 package invocation
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -123,8 +124,8 @@ func TestResolveInvocation_noAlphasfile(t *testing.T) {
 	if err := zfs.EnsureDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := ResolveInvocation(dir); err == nil {
-		t.Fatal("want error when no Alphasfile exists at or above cwd")
+	if _, _, _, err := ResolveInvocation(dir); !errors.Is(err, ErrNoAlphasfile) {
+		t.Fatalf("ResolveInvocation() error = %v, want ErrNoAlphasfile", err)
 	}
 }
 

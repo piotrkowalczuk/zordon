@@ -92,7 +92,8 @@ func main() {
 func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	rootFlags := ff.NewFlagSet("zordon")
 	verbose := rootFlags.Bool('v', "verbose", "verbose logging")
-	agent := rootFlags.BoolLong("agent", "machine-friendly output: '<ms-since-start> <src> <LEVEL> <msg>'")
+	agent := rootFlags.BoolLong("agent", "agent mode: machine-friendly logs '<ms-since-start> <src> <LEVEL> <msg>' and --format=agent unless --format is given")
+	format := rootFlags.StringLong("format", "", "output format of commands that report: text, agent or json (default: agent under --agent, else text)")
 	var home, testLog zfs.DirName
 	rootFlags.Value(0, "home", &home, "directory holding zordon's host-wide state (env: ZORDON_HOME; defaults to ~/.zordon)")
 	testHarness := rootFlags.BoolLong("test-harness", "enable test:: HCL functions (env: ZORDON_TEST_HARNESS; conformance harness use only)")
@@ -142,10 +143,17 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	statusCmd := &ff.Command{
 		Name:      "status",
 		Usage:     "zordon status",
-		ShortHelp: "query the running alpha for its state",
+		ShortHelp: "query the running alpha for its state (--format text, agent or json; see docs/reference/status-formats.md)",
 		Flags:     statusFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runStatus(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg())
+			f, err := outputFormat(*format, *agent)
+			if err != nil {
+				return err
+			}
+			if f == FormatText {
+				return runStatus(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg())
+			}
+			return runStatusReport(ctx, stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg(), f)
 		},
 	}
 
@@ -876,41 +884,64 @@ func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome 
 // zordon reuses-with-a-warning rather than overwriting. Returns "" for services
 // with no source checkout (use-only / pkg) or whose checkout isn't a git tree.
 func checkoutStatus(ctx context.Context, s *alphasfile.Service, workspace string) string {
-	if s.Runtime == nil || s.Package == nil {
+	co, ok := checkoutOf(ctx, s, workspace)
+	switch {
+	case !ok:
 		return ""
+	case co.Ref == "":
+		return fmt.Sprintf("checkout: %s (detached @ %s)", co.Path, co.SHA)
+	case co.isDrifted():
+		return fmt.Sprintf("checkout: %s (branch %s ⚠ not %s — building your branch)", co.Path, co.Ref, co.Want)
+	}
+	return fmt.Sprintf("checkout: %s (branch %s)", co.Path, co.Ref)
+}
+
+// checkout is where a service's source sits and which revision it is on.
+type checkout struct {
+	Path string // relative to the working directory when beneath it
+	Ref  string // branch; "" when detached
+	SHA  string // short revision of a detached HEAD
+	Want string // canonical branch of an editable worktree; "" otherwise
+}
+
+func (c checkout) isDrifted() bool {
+	return c.Want != "" && c.Ref != "" && c.Ref != c.Want
+}
+
+func checkoutOf(ctx context.Context, s *alphasfile.Service, workspace string) (checkout, bool) {
+	if s.Runtime == nil || s.Package == nil {
+		return checkout{}, false
 	}
 	co := s.Runtime.Checkout
 	if co == "" || !zfs.Exists(filepath.Join(co, ".git")) {
-		return ""
+		return checkout{}, false
 	}
 	head, err := exec.CommandContext(ctx, "git", "-C", co, "rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {
-		return ""
+		return checkout{}, false
 	}
-	rel := co
+	out := checkout{Path: co}
 	if wd, e := zfs.Getwd(); e == nil {
 		if r, e := filepath.Rel(wd, co); e == nil && !strings.HasPrefix(r, "..") {
-			rel = r
+			out.Path = r
 		}
 	}
 	ref := strings.TrimSpace(string(head))
 	if ref == "HEAD" { // detached (a clone or a user checkout of a tag/commit)
 		sha, _ := exec.CommandContext(ctx, "git", "-C", co, "rev-parse", "--short", "HEAD").Output()
-		return fmt.Sprintf("checkout: %s (detached @ %s)", rel, strings.TrimSpace(string(sha)))
+		out.SHA = strings.TrimSpace(string(sha))
+		return out, true
 	}
-	// An editable worktree is expected on its resolved workspace branch; flag a
-	// mismatch so the user sees they are building their own branch, not the
-	// canonical one.
+	out.Ref = ref
+	// An editable worktree is expected on its resolved workspace branch; a
+	// mismatch means the user is building their own branch, not the canonical one.
 	if s.Package.Editable {
-		want := s.Package.WorkspaceBranch
-		if want == "" {
-			want = alphasfile.DefaultBranchFor(workspace, s.Name())
-		}
-		if ref != want {
-			return fmt.Sprintf("checkout: %s (branch %s ⚠ not %s — building your branch)", rel, ref, want)
+		out.Want = s.Package.WorkspaceBranch
+		if out.Want == "" {
+			out.Want = alphasfile.DefaultBranchFor(workspace, s.Name())
 		}
 	}
-	return fmt.Sprintf("checkout: %s (branch %s)", rel, ref)
+	return out, true
 }
 
 // serviceState renders one service's state cell for `zordon status` out of
@@ -938,15 +969,19 @@ func serviceState(ctx context.Context, s *alphasfile.Service, status protocol.Se
 // readiness has nothing to check — alpha called it ready on stabilization
 // alone — so it takes alpha's word for it.
 func liveHealth(ctx context.Context, s *alphasfile.Service) string {
-	if s.Runtime == nil || s.Runtime.Readiness == nil {
-		return " [ready]"
-	}
-	pctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-	defer cancel()
-	if err := s.Runtime.Readiness.Check(pctx); err != nil {
+	if err := healthErr(ctx, s); err != nil {
 		return fmt.Sprintf(" [unhealthy: %v]", err)
 	}
 	return " [ready]"
+}
+
+func healthErr(ctx context.Context, s *alphasfile.Service) error {
+	if s.Runtime == nil || s.Runtime.Readiness == nil {
+		return nil
+	}
+	pctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	return s.Runtime.Readiness.Check(pctx)
 }
 
 func runStop(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg alphasfile.TestConfig) error {
