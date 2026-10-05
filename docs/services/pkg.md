@@ -38,9 +38,9 @@ Two forms:
 | form | example |
 |------|---------|
 | object | `package = { name = "redis", version = "7.4.1" }` |
-| object + backend | `package = { name = "etcd-io/etcd", backend = "aqua", version = "3.5.17" }` |
+| object + backend | `package = { name = "etcd-io/etcd[exe=etcd]", backend = "ubi", version = "3.6.15" }` |
 | string | `package = "redis@7.4.1"` |
-| string + backend | `package = "aqua:etcd-io/etcd@3.5.17"` |
+| string + backend | `package = "ubi:etcd-io/etcd[exe=etcd]@3.6.15"` |
 
 `name` is explicit (it is **not** derived from the service label, so a
 service `"cache"` can run package `redis`).

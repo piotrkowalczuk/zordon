@@ -13,14 +13,16 @@ import (
 )
 
 // TestPkgService_etcd_tcpReadiness brings up a real native package via
-// mise (etcd from the aqua backend — a prebuilt single binary, so no
-// source compile), runs it as a supervised process, and asserts it
-// reaches ready via the TCP probe and actually serves. End-to-end proof
-// that pkg services install + run + supervise like any other service.
+// mise (etcd's own GitHub release through the ubi backend — a prebuilt
+// single binary, so no source compile), runs it as a supervised process,
+// and asserts it reaches ready via the TCP probe and actually serves.
+// End-to-end proof that pkg services install + run + supervise like any
+// other service.
 //
-// Cost: first run downloads etcd via mise/aqua (network). Subsequent
-// runs reuse <repo>/.zordon. etcd is chosen over redis/postgres because
-// aqua ships a prebuilt binary — no C toolchain or multi-minute compile.
+// Cost: first run downloads etcd via mise/ubi (network). Subsequent runs
+// reuse <repo>/.zordon. ubi rather than aqua: aqua's etcd registry entry
+// pins darwin to the amd64 build (rosetta2), which a Mac without Rosetta
+// cannot exec, while ubi picks the release's native darwin-arm64 asset.
 func TestPkgService_etcd_tcpReadiness(t *testing.T) {
 	p := zordontest.NewProject(t)
 
@@ -28,7 +30,7 @@ func TestPkgService_etcd_tcpReadiness(t *testing.T) {
 sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
 
 service "pkg" "etcd" {
-  package = { name = "etcd-io/etcd", backend = "aqua", version = "3.5.17" }
+  package = { name = "etcd-io/etcd[exe=etcd]", backend = "ubi", version = "3.6.15" }
 
   vars = {
     client = net::pickport()
