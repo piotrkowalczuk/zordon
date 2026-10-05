@@ -18,7 +18,7 @@ service "go" "serviceA" {
     ]
   }
 
-  print = "http://127.0.0.1:${self.vars.port}/  (serviceA, workspace ${fs::hash()})"
+  print = "http://127.0.0.1:${self.vars.port}/"
 
   workspace {
     sparse = ["examples/workspace/src/serviceA"]
@@ -52,7 +52,7 @@ service "go" "serviceB" {
     ]
   }
 
-  print = "http://127.0.0.1:${self.vars.port}/  (serviceB, workspace ${fs::hash()})"
+  print = "http://127.0.0.1:${self.vars.port}/"
 
   workspace {
     sparse = ["examples/workspace/src/serviceB"]
@@ -86,7 +86,7 @@ service "go" "serviceC" {
     ]
   }
 
-  print = "http://127.0.0.1:${self.vars.port}/  (serviceC, workspace ${fs::hash()})"
+  print = "http://127.0.0.1:${self.vars.port}/"
 
   workspace {
     sparse = ["examples/workspace/src/serviceC"]
