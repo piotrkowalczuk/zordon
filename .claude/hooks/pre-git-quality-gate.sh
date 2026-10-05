@@ -18,12 +18,10 @@
 # compound command (e.g. `make build && git push`).
 set -u
 
-# Repo root. Claude sets CLAUDE_PROJECT_DIR for hooks; fall back to this
-# script's own location (.claude/hooks/ -> two levels up).
-repo="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-
-cmd="$(jq -r '.tool_input.command // empty' 2>/dev/null)"
+input="$(cat)"
+cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 [ -n "$cmd" ] || exit 0
+cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
 
 # True if $cmd invokes `git <sub>`, tolerating `-C dir` / `-c k=v`
 # global options between `git` and the subcommand.
@@ -37,6 +35,25 @@ git_sub push && op=push
 
 # Not a push -> not our business, let it through.
 [ -n "$op" ] || exit 0
+
+# Gate the checkout being pushed, not the project dir: a push from a git
+# worktree (.claude/worktrees/<name>) must test that worktree's code, while
+# CLAUDE_PROJECT_DIR is the main checkout and may sit on another branch.
+# Order: `git -C <dir>` in the command, then the hook's cwd, then
+# CLAUDE_PROJECT_DIR / this script's own repo as the last resort.
+push_dir() {
+	local dir
+	dir="$(printf '%s' "$cmd" | sed -nE 's/.*(^|[^[:alnum:]_./-])git[[:space:]]+-C[[:space:]]+("[^"]+"|'"'"'[^'"'"']+'"'"'|[^[:space:]]+).*/\2/p' | head -1)"
+	dir="${dir#[\"\']}"
+	dir="${dir%[\"\']}"
+	if [ -n "$dir" ] && [ "${dir#/}" = "$dir" ] && [ -n "$cwd" ]; then
+		dir="$cwd/$dir"
+	fi
+	printf '%s' "${dir:-$cwd}"
+}
+repo="$(git -C "$(push_dir)" rev-parse --show-toplevel 2>/dev/null)"
+[ -n "$repo" ] || repo="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+printf '\npre-git gate: checking %s\n' "$repo" >&2
 
 # Docs-only pushes can't break `make lint`/`make test` (no Go compiled),
 # so skip the gate for them. Err toward running: skip ONLY when every
