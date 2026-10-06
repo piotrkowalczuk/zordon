@@ -55,6 +55,7 @@ export function host(on: On, stack: string, pane: { isShown: boolean } = { isSho
 
     return { value: { exitCode: 127, stdout: '', stderr: `${e.argv[0]}: not found`, isStdoutTruncated: false, isStderrTruncated: false } }
   })
+  on('session.cwd', () => ({ value: '/proj/workspaces/feature' }))
   const open = new Set<string>()
   on('ui.open', ($, e) => {
     open.add(e.id)

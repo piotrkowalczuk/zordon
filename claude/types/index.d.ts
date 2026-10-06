@@ -52,6 +52,7 @@ export type McpCall = {
 }
 
 export type ZordonSnapshot =
+  | { kind: 'loading' }
   | { kind: 'inactive' }
   | { kind: 'error'; message: string; workspace: ZordonWorkspace | null }
   | { kind: 'stopped'; services: ZordonService[]; workspace: ZordonWorkspace | null }
