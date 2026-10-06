@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, UiOpenResult } from 'claude-code'
 
 import { registerDiff } from './diff'
-import type { McpCall, ZordonService, ZordonSnapshot, ZordonWorkspace } from '../types'
+import type { Checkout, McpCall, ZordonService, ZordonSnapshot, ZordonWorkspace } from '../types'
 
 const POLL_MS = 5000
 const SIZE_EVERY_MS = 60_000
@@ -16,6 +16,7 @@ const isScopeCollapsed = atom({ plugin: 'zordon', key: 'isScopeCollapsed' } as c
 const isRuntimeCollapsed = atom({ plugin: 'zordon', key: 'isRuntimeCollapsed' } as const, false)
 const isLogCollapsed = atom({ plugin: 'zordon', key: 'isLogCollapsed' } as const, false)
 const calls = atom({ plugin: 'zordon', key: 'calls' } as const, [] as McpCall[])
+const checkouts = atom({ plugin: 'zordon', key: 'checkouts' } as const, [] as Checkout[])
 const openCall = atom({ plugin: 'zordon', key: 'openCall' } as const, null as string | null)
 
 let sessionCwd = '.'
@@ -231,6 +232,21 @@ function summary(s: ZordonSnapshot): string | undefined {
 
 // One glyph per state, colored where drawn: the list stays quiet when all is
 // well and a word appears only for what is not ready.
+// Runtime's order: what needs a look first (failed or unhealthy), then what
+// is coming up, then what runs, then what is stopped; by name within each.
+// Read off the same flags as the dots, so a text report's states sort too.
+function stateRank(x: ZordonService): number {
+  if (x.isFailed) return 0
+  if (x.isUp) return 2
+  if (x.state === 'stopped') return 3
+
+  return 1
+}
+
+export function byStateThenName(a: ZordonService, b: ZordonService): number {
+  return stateRank(a) - stateRank(b) || a.name.localeCompare(b.name)
+}
+
 export function serviceMark(svc: ZordonService): { glyph: string; color: string; note: string | null } {
   if (svc.isFailed) return { glyph: '●', color: 'red', note: svc.state.includes('unhealthy') ? 'unhealthy' : 'failed' }
   if (svc.isUp) return { glyph: '●', color: 'green', note: null }
@@ -261,8 +277,57 @@ async function diskUsageKB($: EngineInterface, dir: string): Promise<number | nu
 }
 
 type SizeCache = Map<string, { kb: number | null; at: number }>
+type PrCache = Map<string, { pr: Checkout['pr']; at: number }>
 
-async function refresh($: EngineInterface, sizes: SizeCache): Promise<ZordonSnapshot> {
+const PR_EVERY_MS = 60_000
+
+// The workspace's own checkouts: each git tree under <state_dir>/src, the
+// branch it is on, and that branch's latest pull request.
+async function scanCheckouts($: EngineInterface, stateDir: string, prs: PrCache): Promise<Checkout[]> {
+  const src = `${stateDir}/src`
+  if (!(await $.fs.exists(src))) return []
+  const names = (await $.fs.list(src))
+    .filter(d => d.kind === 'dir')
+    .map(d => d.name)
+    .sort()
+  const out: Checkout[] = []
+  for (const name of names) {
+    const dir = `${src}/${name}`
+    if (!(await $.fs.exists(`${dir}/.git`))) continue
+    const head = await $.process.run(['git', '-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeoutMs: 5_000 })
+    const ref = head.exitCode === 0 ? head.stdout.trim() : ''
+    const branch = ref !== '' && ref !== 'HEAD' ? ref : null
+    out.push({ name, branch, pr: branch === null ? null : await pullRequest($, dir, branch, prs) })
+  }
+
+  return out
+}
+
+// gh answers for the checkout's own remote; without gh, or with no PR for
+// the branch, there is none. Asked once a minute per branch.
+async function pullRequest($: EngineInterface, dir: string, branch: string, prs: PrCache): Promise<Checkout['pr']> {
+  const now = await $.clock.now()
+  const key = `${dir}\0${branch}`
+  const hit = prs.get(key)
+  if (hit && now - hit.at < PR_EVERY_MS) return hit.pr
+
+  let pr: Checkout['pr'] = null
+  try {
+    const ran = await $.process.run(
+      ['gh', 'pr', 'list', '--head', branch, '--state', 'all', '--json', 'url,number', '--limit', '1'],
+      { cwd: dir, timeoutMs: 15_000 },
+    )
+    const found = ran.exitCode === 0 ? (JSON.parse(ran.stdout) as { url: string; number: number }[])[0] : undefined
+    if (found && found.url.startsWith('https://')) pr = { url: new URL(found.url).href, number: found.number }
+  } catch {
+    // no gh, or not a GitHub remote
+  }
+  prs.set(key, { pr, at: now })
+
+  return pr
+}
+
+async function refresh($: EngineInterface, sizes: SizeCache, prs: PrCache): Promise<ZordonSnapshot> {
   let next: ZordonSnapshot
   try {
     const report = await $.process.run(['zordon', 'status', '--format=json'], { timeoutMs: 10_000 })
@@ -287,6 +352,11 @@ async function refresh($: EngineInterface, sizes: SizeCache): Promise<ZordonSnap
       sizes.set(dir, cached)
     }
     next = { ...next, workspace: { ...next.workspace, sizeKB: cached.kb } }
+
+    const found = await scanCheckouts($, dir, prs)
+    if (JSON.stringify(found) !== JSON.stringify(await read($, checkouts))) {
+      await update($, checkouts, () => found)
+    }
   }
 
   const prev = await read($, snapshot)
@@ -353,7 +423,7 @@ function formatDuration(ms: number | null): string {
 type RenderEvent = Parameters<EngineInterface['ui']['resolve']>[0]
 
 // The pane's column: a Zordon header over three boxes, each folding on its
-// own: the workspace and the services it picked, the rest its run brings up,
+// own: the workspace and the git checkouts under its src/, every service its run brings up,
 // and the zordon MCP calls Claude made this session. With no workspace a
 // single box says so instead.
 async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) {
@@ -440,7 +510,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
 
   const ws = s.kind === 'inactive' ? null : s.workspace
   const services = s.kind === 'running' || s.kind === 'stopped' ? s.services : []
-  const { scope, runtime } = splitScope(services)
+  const checkedOut = await read($, checkouts)
 
   // No workspace: one box saying so, in place of Workspace, Runtime and Logs.
   if (s.kind === 'inactive') {
@@ -463,13 +533,30 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
     )
   }
 
+  const checkoutRows = (
+    <Box flexDirection="column">
+      {checkedOut.map(c => (
+        <Box key={`co-${c.name}`} gap={1}>
+          <Text>{c.name}</Text>
+          {c.pr ? (
+            <Link href={c.pr.url} label={c.branch ?? ''} />
+          ) : (
+            <Text dimColor>{c.branch ?? 'detached'}</Text>
+          )}
+          {c.pr ? <Text dimColor>#{c.pr.number}</Text> : null}
+        </Box>
+      ))}
+    </Box>
+  )
   const stackBody =
     s.kind === 'error' ? (
       <Markdown text={['❌ **zordon error**', '', '```', s.message, '```'].join('\n')} />
-    ) : scope.length > 0 ? (
-      rows(scope)
+    ) : checkedOut.length > 0 ? (
+      checkoutRows
     ) : (
-      <Text dimColor>{ws?.name === 'main' ? 'main picks nothing: all runs from the live tree' : 'nothing picked'}</Text>
+      <Text dimColor>
+        {ws?.name === 'main' ? 'main checks nothing out: services build from the live tree' : 'nothing checked out in src/'}
+      </Text>
     )
 
   const callRows = (
@@ -521,27 +608,31 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
         key: 'workspace',
         title: 'Workspace',
         aside: ws ? <Text dimColor>{ws.name}</Text> : null,
-        border: s.kind === 'error' ? 'red' : border(scope.length > 0 ? scope : services),
+        border: s.kind === 'error' ? 'red' : checkedOut.length > 0 ? 'green' : 'gray',
         isFolded: isStackFolded,
         onToggle: () => update($, isScopeCollapsed, f => !f),
         body: stackBody,
         footer: ws ? (
           <>
             <Text dimColor>{ws.sizeKB != null ? formatSize(ws.sizeKB) : '…'}</Text>
-            {/* Link takes https: alone; a file: link is Markdown's to draw. */}
-            <Markdown text={`[Alphasfile](file://${encodeURI(ws.alphasfile)})`} />
+            {/* Link takes https: alone, so a file: link is Markdown's to draw; a
+                Markdown block takes the row's width unless its box is held to
+                the label's, which keeps it in the corner beside the size. */}
+            <Box width={'Alphasfile'.length} flexShrink={0}>
+              <Markdown text={`[Alphasfile](file://${encodeURI(ws.alphasfile)})`} />
+            </Box>
           </>
         ) : undefined,
       })}
-      {runtime.length === 0
+      {services.length === 0
         ? null
         : panel({
             key: 'runtime',
             title: 'Runtime',
-            border: border(runtime),
+            border: border(services),
             isFolded: isRuntimeFolded,
             onToggle: () => update($, isRuntimeCollapsed, f => !f),
-            body: rows(runtime),
+            body: rows([...services].sort(byStateThenName)),
           })}
       {log.length === 0 || ws === null
         ? null
@@ -559,6 +650,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
 
 export const register: Register = on => {
   const sizes: SizeCache = new Map()
+  const prs: PrCache = new Map()
 
   registerDiff(on)
 
@@ -603,7 +695,7 @@ export const register: Register = on => {
       if (isPolling) return
       isPolling = true
       try {
-        await refresh($, sizes)
+        await refresh($, sizes, prs)
       } finally {
         isPolling = false
       }
@@ -627,7 +719,7 @@ export const register: Register = on => {
       return { text: 'zordon dashboard hidden' }
     }
 
-    await refresh($, sizes)
+    await refresh($, sizes, prs)
     const s = await current($)
     const opened = await openPane($, true)
     const where = opened.isPlaced ? 'shown' : `waits: ${opened.reason}`

@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { FEATURE, PANE, host, openStack } from './fixture'
+import { FEATURE, PANE, PR, host, openStack } from './fixture'
 
 
 test('the stack pane draws header, services and footer on every surface', async ($, on) => {
@@ -53,10 +53,10 @@ test('workspace and runtime boxes fold on their own', async ($, on) => {
   host(on, FEATURE)
   await openStack($)
   const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
-  expect(await ui.find({ type: 'Text', text: /api/ })).toBeDefined()
+  expect(await ui.find({ type: 'Link', text: 'zordon/feature/api' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /postgres/ })).toBeDefined()
   await ui.press({ key: 'fold-workspace' })
-  expect(await ui.find({ type: 'Text', text: /api/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Link', text: 'zordon/feature/api' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /postgres/ })).toBeDefined()
   await ui.press({ key: 'fold-runtime' })
   expect(await ui.find({ type: 'Text', text: /postgres/ })).toBeUndefined()
@@ -86,4 +86,19 @@ test('/zordon:dashboard seats a pane that waits unshown instead of hiding it', a
   host(on, FEATURE, { isShown: false })
 
   expect(await openStack($)).toMatch(/^zordon dashboard shown/)
+})
+
+test('the workspace lists its src/ checkouts, each branch linked to its pull request', async ($, on) => {
+  host(on, FEATURE)
+  await openStack($)
+  const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
+
+  expect((await ui.find({ type: 'Link', text: 'zordon/feature/api' }))?.props.href).toBe(PR.url)
+  expect(await ui.find({ type: 'Text', text: /^#7$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^zordon\/feature\/worker$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Link', text: 'zordon/feature/worker' })).toBeUndefined()
+  // every service of the run is in Runtime, the checked out ones too
+  const runtime = (await ui.findAll({ type: 'Text', text: /^[●◐○] / })).map(t => t.text)
+  expect(runtime).toEqual(['◐ worker probing', '● api', '● gateway', '● kafka shared', '● postgres shared'])
+  await ui.unmount()
 })
