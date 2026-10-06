@@ -30,7 +30,7 @@ The zordon MCP tools are the declared interface to the stack; the `zordon`/`alph
 | Goal | Tool |
 | --- | --- |
 | Bring the stack up (or a subset — pass service names) | `start` |
-| See what's running across the chain, and on which ports | `status` |
+| See what's running across the chain, and on which ports | `status` (agent lines; `["--format=json"]` for JSON) |
 | Read one resolved value (a port, `ready`, the command) | `get <expr>`, e.g. `service.go.api.vars.port` |
 | Preview the resolved config with no side effects | `plan` |
 | Run a declared one-off (migrate, seed, create topic, teardown) | the matching `provision__<toolchain>_<service>__<step>` tool |
@@ -41,6 +41,28 @@ The zordon MCP tools are the declared interface to the stack; the `zordon`/`alph
 | Pin a remote package's repository, or move the pins in `zordon.lock` | `pkg` with `["get", "<repo>@<ref>"]` or `["update"]` |
 
 For a command tool's flags and arguments, pass `["-h"]`; for a provision, read the tool's own description (it carries the resolved `cmd` and env keys).
+
+## Reading `status`
+
+Through MCP, `status` answers in the agent format: logfmt lines, the stack first and then one line per service.
+
+```text
+workspace=feature state=running alphasfile=/proj/Alphasfile state_dir=/proj/workspaces/feature
+service=api state=ready picked=true print="http://127.0.0.1:8080/"
+service=postgres state=probing shared=true
+```
+
+- `state` of the stack: `running`, `stopped`, `error` (read `error`) or `no-alphasfile` — not a zordon project, so this skill does not apply.
+- `state` of a service: `ready`, `unhealthy` (read `health`), `probing`, `starting`, `failed` or `stopped`; wait on `probing` and `starting` rather than restarting.
+- `picked=true`: the workspace checked the service out as its own worktree; edit its code there, not in the project root.
+- `shared=true`: a federation parent runs it for every workspace; `stop` here does not touch it.
+- `print`: the address or line the service declared; use it instead of guessing ports.
+- `checkout` appears when a worktree is off its canonical branch; `revision` is a detached checkout's commit.
+
+Pass `["--format=json"]` for one JSON object with the same fields, or `["--format=text"]` for the report people read, which also lists imports.
+Reference: <https://zordon.io/reference/status-formats/>.
+
+In Claude Code the zordon plugin also shows the stack in a pane (`/zordon:dashboard` shows and hides it) and splits `/diff` per `src/<app>` checkout (`/diff <app>`); point the person there rather than pasting a status report into the conversation.
 
 ## Ordering rules that trip agents up
 
@@ -58,5 +80,6 @@ If a task needs a step — reset the DB, seed fixtures — and no `provision__*`
 
 - Lifecycle and states — <https://zordon.io/lifecycle/>
 - Provisions — <https://zordon.io/reference/mcp/>, <https://zordon.io/how-to/run-a-provision-via-mcp/>
+- Status formats — <https://zordon.io/reference/status-formats/>
 - Workspaces — <https://zordon.io/workspaces/>
 - Federation and sudo — <https://zordon.io/federation/>

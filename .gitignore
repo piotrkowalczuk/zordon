@@ -33,3 +33,4 @@ __pycache__/
 
 # types Claude Code lays beside a plugin it loads from disk
 .claude-plugin/types/
+/tsconfig.json

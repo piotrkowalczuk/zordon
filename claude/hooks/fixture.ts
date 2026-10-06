@@ -33,7 +33,7 @@ export const PANE = {
 // Stands for the host beneath the plugin: zordon answering `status` with
 // `stack`, du sizing the workspace, a surface seating the pane. Register it
 // before the test first calls $.
-export function host(on: On, stack: string) {
+export function host(on: On, stack: string, pane: { isShown: boolean } = { isShown: true }) {
   const clock = mock.clock(on, { now: 1_000 })
   on('process.run', ($, e) => {
     if (e.argv[0] === 'zordon') return { value: { exitCode: 0, stdout: `${stack}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -41,17 +41,32 @@ export function host(on: On, stack: string) {
 
     return { value: { exitCode: 127, stdout: '', stderr: `${e.argv[0]}: not found`, isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  const open = new Set<string>()
+  on('ui.open', ($, e) => {
+    open.add(e.id)
+
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', ($, e) => {
+    open.delete(e.id)
+
+    return { value: undefined }
+  })
+  on('ui.panes', () => ({
+    value: [...open].map(id => ({ id, title: id, isShown: pane.isShown, isFocused: false, isPlaced: pane.isShown, plugin: 'zordon' })),
+  }))
 
   return clock
 }
 
-// /zordon as a person types it: refreshes the stack and opens the pane.
-export async function openStack($: Engine): Promise<void> {
-  await $.command.run({
-    command: 'zordon',
+// /zordon:dashboard as a person types it: shows the pane, or hides an open one.
+export async function openStack($: Engine): Promise<string | undefined> {
+  const ran = await $.command.run({
+    command: 'zordon:dashboard',
     args: '',
     origin: { kind: 'composer' },
     presentation: { isFullscreen: true, columns: 160 },
   })
+
+  return ran.text
 }

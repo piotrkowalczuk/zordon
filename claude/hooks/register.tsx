@@ -27,6 +27,7 @@ const MAX_CALLS = 30
 const MAX_OUTPUT = 4000
 
 const PANE = 'zordon'
+const DASHBOARD = 'zordon:dashboard'
 
 async function current($: EngineInterface): Promise<ZordonSnapshot> {
   return read($, snapshot)
@@ -597,11 +598,6 @@ export const register: Register = on => {
     const started = await next(e)
     sessionCwd = e.cwd
 
-    await $.command.register({
-      name: 'zordon',
-      description: 'Open the zordon stack pane.',
-    })
-
     let isPolling = false
     const tick = async () => {
       if (isPolling) return
@@ -620,20 +616,29 @@ export const register: Register = on => {
     return started
   })
 
-  on('command.run', { command: 'zordon' }, async $ => {
-    await refresh($, sizes)
+  // /zordon:dashboard is the plugin's commands/dashboard.md; answering it here
+  // toggles the pane instead of sending that file's fallback prompt.
+  on('command.run', { command: DASHBOARD }, async $ => {
+    // Opened unasked on a narrow terminal the pane is open but not shown: the
+    // person asking for it wants it seated, not closed.
+    if ((await $.ui.panes()).some(p => p.id === PANE && p.isShown)) {
+      await $.ui.close({ id: PANE })
 
+      return { text: 'zordon dashboard hidden' }
+    }
+
+    await refresh($, sizes)
     const s = await current($)
     const opened = await openPane($, true)
-    const where = opened.isPlaced ? 'pane opened' : `pane waits: ${opened.reason}`
+    const where = opened.isPlaced ? 'shown' : `waits: ${opened.reason}`
 
-    return { text: `${summary(s) ?? `zordon: no Alphasfile at or above ${sessionCwd}`} (${where})` }
+    return { text: `zordon dashboard ${where}: ${summary(s) ?? `no Alphasfile at or above ${sessionCwd}`}` }
   })
 
-  // The same view inline, as the /zordon row in the transcript: what a
+  // The same view inline, as the /zordon:dashboard row in the transcript: what a
   // surface that seats no panes (a phone over Remote Control) still shows.
-  on('ui.render', { component: 'CommandOutput', props: { command: 'zordon' } }, async ($, e, next) => {
-    if (e.props.isErrored) return next(e)
+  on('ui.render', { component: 'CommandOutput', props: { command: DASHBOARD } }, async ($, e, next) => {
+    if (e.props.isErrored || e.props.text.endsWith('hidden')) return next(e)
 
     return stackView($, e, await current($))
   })

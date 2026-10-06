@@ -19,7 +19,7 @@ test('the stack pane draws header, services and footer on every surface', async 
   }
 })
 
-test('the /zordon transcript row draws the same view, phone included', async ($, on) => {
+test('the /zordon:dashboard transcript row draws the same view, phone included', async ($, on) => {
   host(on, FEATURE)
   await openStack($)
   for (const surface of ['terminal', 'mobile'] as const) {
@@ -28,7 +28,7 @@ test('the /zordon transcript row draws the same view, phone included', async ($,
       surface,
       component: 'CommandOutput',
       requestId: 'row-1',
-      props: { command: 'zordon', args: '', text: 'zordon 3/4 up', isErrored: false },
+      props: { command: 'zordon:dashboard', args: '', text: 'zordon dashboard shown: zordon 4/5 up', isErrored: false },
     })
     expect(await ui.find({ type: 'Text', text: /^feature$/ })).toBeDefined()
     await ui.unmount()
@@ -72,4 +72,18 @@ test('the column is a Zordon header over Workspace, Runtime and Logs boxes', asy
   }
   expect(await ui.find({ type: 'Text', text: /^Logs/ })).toBeUndefined()
   await ui.unmount()
+})
+
+test('/zordon:dashboard shows the pane, and hides it when shown', async ($, on) => {
+  host(on, FEATURE)
+
+  expect(await openStack($)).toMatch(/^zordon dashboard shown/)
+  expect(await openStack($)).toBe('zordon dashboard hidden')
+  expect(await openStack($)).toMatch(/^zordon dashboard shown/)
+})
+
+test('/zordon:dashboard seats a pane that waits unshown instead of hiding it', async ($, on) => {
+  host(on, FEATURE, { isShown: false })
+
+  expect(await openStack($)).toMatch(/^zordon dashboard shown/)
 })
