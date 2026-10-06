@@ -9,7 +9,7 @@ const SIZE_EVERY_MS = 60_000
 
 const snapshot = atom(
   { plugin: 'zordon', key: 'snapshot' } as const,
-  { kind: 'inactive' } as ZordonSnapshot,
+  { kind: 'loading' } as ZordonSnapshot,
 )
 const isCollapsed = atom({ plugin: 'zordon', key: 'isCollapsed' } as const, false)
 const isScopeCollapsed = atom({ plugin: 'zordon', key: 'isScopeCollapsed' } as const, false)
@@ -215,6 +215,7 @@ export function formatSize(kb: number): string {
 
 function summary(s: ZordonSnapshot): string | undefined {
   switch (s.kind) {
+    case 'loading':
     case 'inactive':
       return undefined
     case 'error':
@@ -259,6 +260,22 @@ export function serviceMark(svc: ZordonService): { glyph: string; color: string;
 // brings up: unpicked services and the federation's shared levels.
 export function splitScope(services: ZordonService[]): { scope: ZordonService[]; runtime: ZordonService[] } {
   return { scope: services.filter(x => x.isPicked), runtime: services.filter(x => !x.isPicked) }
+}
+
+// Opens a file in the desktop's default app: open on macOS, xdg-open elsewhere.
+async function openFile($: EngineInterface, path: string): Promise<void> {
+  for (const opener of ['open', 'xdg-open']) {
+    try {
+      if ((await $.process.run([opener, path], { timeoutMs: 5_000 })).exitCode === 0) return
+    } catch {
+      // not this platform's opener
+    }
+  }
+  $.ui.toast(`zordon: cannot open ${path}`)
+}
+
+function workspaceOf(s: ZordonSnapshot): ZordonWorkspace | null {
+  return s.kind === 'loading' || s.kind === 'inactive' ? null : s.workspace
 }
 
 function failedNames(s: ZordonSnapshot): Set<string> {
@@ -330,28 +347,33 @@ async function pullRequest($: EngineInterface, dir: string, branch: string, prs:
 async function refresh($: EngineInterface, sizes: SizeCache, prs: PrCache): Promise<ZordonSnapshot> {
   let next: ZordonSnapshot
   try {
-    const report = await $.process.run(['zordon', 'status', '--format=json'], { timeoutMs: 10_000 })
+    // The session's directory now, so a /cd moves what the pane watches.
+    const cwd = await $.session.cwd()
+    sessionCwd = cwd
+    const report = await $.process.run(['zordon', 'status', '--format=json'], { cwd, timeoutMs: 10_000 })
     const parsed = parseAgentStatus(report.stdout)
     if (parsed !== null) {
       next = parsed
     } else {
-      const ran = await $.process.run(['zordon', 'status'], { timeoutMs: 10_000 })
+      const ran = await $.process.run(['zordon', 'status'], { cwd, timeoutMs: 10_000 })
       next = parseStatus(ran.exitCode, ran.stdout, ran.stderr)
     }
   } catch (err) {
-    $.ui.log(`zordon: cannot run zordon: ${String(err)}`, { to: 'debug' })
-    next = { kind: 'inactive' }
+    // Not running zordon is no answer about the tree: an error, never "Not a
+    // workspace".
+    next = { kind: 'error', message: `cannot run zordon: ${String(err)}`, workspace: null }
   }
 
-  if (next.kind !== 'inactive' && next.workspace) {
-    const dir = next.workspace.stateDir
+  const ws0 = workspaceOf(next)
+  if (ws0 && next.kind !== 'loading' && next.kind !== 'inactive') {
+    const dir = ws0.stateDir
     const now = await $.clock.now()
     let cached = sizes.get(dir)
     if (!cached || now - cached.at > SIZE_EVERY_MS) {
       cached = { kb: await diskUsageKB($, dir), at: now }
       sizes.set(dir, cached)
     }
-    next = { ...next, workspace: { ...next.workspace, sizeKB: cached.kb } }
+    next = { ...next, workspace: { ...ws0, sizeKB: cached.kb } }
 
     const found = await scanCheckouts($, dir, prs)
     if (JSON.stringify(found) !== JSON.stringify(await read($, checkouts))) {
@@ -475,15 +497,16 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
 
         return (
           <Box key={`svc-${svc.name}`} flexDirection="column">
-            <Text>
+            <Text wrap="truncate-end">
               <Text color={mark.color}>{mark.glyph}</Text> {svc.name}
               {tags ? <Text dimColor> {tags}</Text> : null}
             </Text>
-            {svc.print.length > 0 ? (
-              <Box paddingLeft={2}>
-                <Markdown dimColor text={svc.print.join('\n')} />
-              </Box>
-            ) : null}
+            {svc.print.map((line, i) => (
+              <Text key={`print-${svc.name}-${String(i)}`} dimColor wrap="truncate-end">
+                {'  '}
+                {line}
+              </Text>
+            ))}
           </Box>
         )
       })}
@@ -508,11 +531,23 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
     return <Box flexDirection="column">{header}</Box>
   }
 
-  const ws = s.kind === 'inactive' ? null : s.workspace
+  const ws = workspaceOf(s)
   const services = s.kind === 'running' || s.kind === 'stopped' ? s.services : []
   const checkedOut = await read($, checkouts)
 
   // No workspace: one box saying so, in place of Workspace, Runtime and Logs.
+  // Before zordon first answered: no verdict on the tree yet.
+  if (s.kind === 'loading') {
+    return (
+      <Box flexDirection="column">
+        {header}
+        <Box borderStyle="round" borderColor="gray" marginTop={1} paddingX={1}>
+          <Text dimColor>Reading the stack…</Text>
+        </Box>
+      </Box>
+    )
+  }
+
   if (s.kind === 'inactive') {
     return (
       <Box flexDirection="column">
@@ -588,7 +623,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
                   <Code
                     source={c.output}
                     language={c.output.trimStart().startsWith('{') ? 'json' : 'text'}
-                    wrap="wrap"
+                    wrap="truncate-end"
                   />
                 ) : (
                   <Text dimColor>no output yet</Text>
@@ -615,12 +650,9 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
         footer: ws ? (
           <>
             <Text dimColor>{ws.sizeKB != null ? formatSize(ws.sizeKB) : '…'}</Text>
-            {/* Link takes https: alone, so a file: link is Markdown's to draw; a
-                Markdown block takes the row's width unless its box is held to
-                the label's, which keeps it in the corner beside the size. */}
-            <Box width={'Alphasfile'.length} flexShrink={0}>
-              <Markdown text={`[Alphasfile](file://${encodeURI(ws.alphasfile)})`} />
-            </Box>
+            {/* Inline, so it keeps the right corner beside the size: a Link
+                takes https: alone and a Markdown link is a block of its own. */}
+            <Button key="open-alphasfile" plain label="Alphasfile" onPress={() => openFile($, ws.alphasfile)} />
           </>
         ) : undefined,
       })}
@@ -701,7 +733,7 @@ export const register: Register = on => {
       }
     }
     void tick().then(async () => {
-      if ((await current($)).kind !== 'inactive') await openPane($, false)
+      if (workspaceOf(await current($)) !== null) await openPane($, false)
     })
     $.clock.every(POLL_MS, tick)
 

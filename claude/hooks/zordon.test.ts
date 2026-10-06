@@ -45,7 +45,7 @@ test('a zordon failure surfaces its ERROR lines', () => {
 
 test('the invocation header gives the workspace and its state dir', () => {
   const s = parseStatus(0, RUNNING, '')
-  expect(s.kind !== 'inactive' && s.workspace).toEqual({
+  expect(s.kind !== 'inactive' && s.kind !== 'loading' && s.workspace).toEqual({
     name: 'main',
     alphasfile: '/x/Alphasfile',
     stateDir: '/x/workspaces/main',

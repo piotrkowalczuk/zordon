@@ -102,3 +102,28 @@ test('the workspace lists its src/ checkouts, each branch linked to its pull req
   expect(runtime).toEqual(['◐ worker probing', '● api', '● gateway', '● kafka shared', '● postgres shared'])
   await ui.unmount()
 })
+
+test('before zordon first answers the pane reads the stack, it does not call the tree empty', async $ => {
+  const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /Reading the stack/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Not a workspace/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the footer keeps size and Alphasfile on one row: both inline, the file opened on press', async ($, on) => {
+  const opened: string[] = []
+  on('process.run', { argv: ['open'] } as never, ($, e) => {
+    opened.push(e.argv[1] ?? '')
+
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  host(on, FEATURE)
+  await openStack($)
+  const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
+
+  expect(await ui.find({ type: 'Markdown', text: /Alphasfile/ })).toBeUndefined()
+  expect((await ui.find({ key: 'open-alphasfile' }))?.props.label).toBe('Alphasfile')
+  await ui.press({ key: 'open-alphasfile' })
+  expect(opened).toEqual(['/proj/Alphasfile'])
+  await ui.unmount()
+})
