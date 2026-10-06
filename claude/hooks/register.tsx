@@ -61,7 +61,7 @@ function parseWorkspace(stdout: string): ZordonWorkspace | null {
 }
 
 const LEVEL_LINE = /^# \[[0-9a-f]+\] /
-const CHECKOUT_LINE = /^checkout: (.+?) \((?:branch .+|detached @ .+)\)$/
+const CHECKOUT_LINE = /^checkout: (.+?) \((?:branch (\S+)[^)]*|detached @ [^)]+)\)$/
 
 // A service is picked (in the workspace's scope) when its checkout is the
 // workspace's own worktree, workspaces/<ws>/src/<svc>; main picks nothing.
@@ -101,6 +101,8 @@ function parseServices(stdout: string): { services: ZordonService[]; isAlphaUp: 
         isUp: state.startsWith('running') && state.includes('[ready]'),
         print: [],
         checkout: null,
+        branch: null,
+        sourceDir: null,
         isShared: !isLeaf,
         isPicked: false,
       })
@@ -110,9 +112,10 @@ function parseServices(stdout: string): { services: ZordonService[]; isAlphaUp: 
     const text = DETAIL_LINE.exec(line)?.[1]
     const last = services[services.length - 1]
     if (text === undefined || !last) continue
-    const checkout = CHECKOUT_LINE.exec(text)?.[1]
-    if (checkout !== undefined) {
-      last.checkout = checkout
+    const co = CHECKOUT_LINE.exec(text)
+    if (co) {
+      last.checkout = co[1] ?? null
+      last.branch = co[2] ?? null
     } else if (!text.startsWith('checkout:')) {
       last.print.push(text)
     }
@@ -121,7 +124,7 @@ function parseServices(stdout: string): { services: ZordonService[]; isAlphaUp: 
   return { services, isAlphaUp }
 }
 
-export function parseStatus(exitCode: number, stdout: string, stderr: string): ZordonSnapshot {
+export function parseStatus(exitCode: number, stdout: string, stderr: string, cwd = '/'): ZordonSnapshot {
   const all = `${stdout}\n${stderr}`
   if (all.includes('no Alphasfile')) {
     return { kind: 'inactive' }
@@ -130,8 +133,11 @@ export function parseStatus(exitCode: number, stdout: string, stderr: string): Z
   const workspace = parseWorkspace(stdout)
   const parsed = parseServices(stdout)
   const isAlphaUp = parsed.isAlphaUp
+  // The text report writes a checkout beneath the working directory relative to it.
+  const absolute = (path: string | null) => (path === null || path.startsWith('/') ? path : `${cwd.replace(/\/$/, '')}/${path}`)
   const services = parsed.services.map(svc => ({
     ...svc,
+    checkout: absolute(svc.checkout),
     isPicked: !svc.isShared && isPickedCheckout(svc.checkout, svc.name, workspace?.name ?? 'main'),
   }))
   if (exitCode !== 0 && !all.includes('no alpha running')) {
@@ -155,6 +161,9 @@ type AgentService = {
   shared?: boolean
   print?: string
   checkout?: string
+  checkout_path?: string
+  branch?: string
+  source_dir?: string
 }
 
 type AgentStatus = {
@@ -192,7 +201,9 @@ export function parseAgentStatus(stdout: string): ZordonSnapshot | null {
       isUp: x.state === 'ready',
       isFailed: x.state === 'failed' || x.state === 'unhealthy',
       print: x.print ? [x.print] : [],
-      checkout: x.checkout ?? null,
+      checkout: x.checkout_path ?? null,
+      branch: x.branch ?? null,
+      sourceDir: x.source_dir ?? null,
       isShared: x.shared === true,
       isPicked: x.picked === true,
     }),
@@ -298,23 +309,32 @@ type PrCache = Map<string, { pr: Checkout['pr']; at: number }>
 
 const PR_EVERY_MS = 60_000
 
-// The workspace's own checkouts: each git tree under <state_dir>/src, the
-// branch it is on, and that branch's latest pull request.
-async function scanCheckouts($: EngineInterface, stateDir: string, prs: PrCache): Promise<Checkout[]> {
-  const src = `${stateDir}/src`
-  if (!(await $.fs.exists(src))) return []
-  const names = (await $.fs.list(src))
-    .filter(d => d.kind === 'dir')
-    .map(d => d.name)
-    .sort()
+// The workspace's code as zordon reports it: the services of this level
+// grouped by the git tree they build from, each tree with its branch and that
+// branch's latest pull request, each service with its directory in the tree.
+// A tree inside the workspace reads relative to it, any other by its name.
+export function groupCheckouts(services: ZordonService[], root: string): Omit<Checkout, 'pr'>[] {
+  const byPath = new Map<string, Omit<Checkout, 'pr'>>()
+  for (const svc of services) {
+    if (svc.isShared || svc.checkout === null) continue
+    const path = svc.checkout
+    let group = byPath.get(path)
+    if (!group) {
+      const label = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : (path.split('/').pop() ?? path)
+      group = { path, label, branch: svc.branch, apps: [] }
+      byPath.set(path, group)
+    }
+    const dir = svc.sourceDir !== null && svc.sourceDir.startsWith(`${path}/`) ? svc.sourceDir.slice(path.length + 1) : null
+    group.apps.push({ name: svc.name, dir })
+  }
+
+  return [...byPath.values()].sort((a, b) => a.label.localeCompare(b.label))
+}
+
+async function withPullRequests($: EngineInterface, groups: Omit<Checkout, 'pr'>[], prs: PrCache): Promise<Checkout[]> {
   const out: Checkout[] = []
-  for (const name of names) {
-    const dir = `${src}/${name}`
-    if (!(await $.fs.exists(`${dir}/.git`))) continue
-    const head = await $.process.run(['git', '-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeoutMs: 5_000 })
-    const ref = head.exitCode === 0 ? head.stdout.trim() : ''
-    const branch = ref !== '' && ref !== 'HEAD' ? ref : null
-    out.push({ name, branch, pr: branch === null ? null : await pullRequest($, dir, branch, prs) })
+  for (const g of groups) {
+    out.push({ ...g, pr: g.branch === null ? null : await pullRequest($, g.path, g.branch, prs) })
   }
 
   return out
@@ -356,7 +376,7 @@ async function refresh($: EngineInterface, sizes: SizeCache, prs: PrCache): Prom
       next = parsed
     } else {
       const ran = await $.process.run(['zordon', 'status'], { cwd, timeoutMs: 10_000 })
-      next = parseStatus(ran.exitCode, ran.stdout, ran.stderr)
+      next = parseStatus(ran.exitCode, ran.stdout, ran.stderr, cwd)
     }
   } catch (err) {
     // Not running zordon is no answer about the tree: an error, never "Not a
@@ -375,7 +395,9 @@ async function refresh($: EngineInterface, sizes: SizeCache, prs: PrCache): Prom
     }
     next = { ...next, workspace: { ...ws0, sizeKB: cached.kb } }
 
-    const found = await scanCheckouts($, dir, prs)
+    const services = next.kind === 'running' || next.kind === 'stopped' ? next.services : []
+    const root = ws0.name === 'main' ? dirname(ws0.alphasfile) : dir
+    const found = await withPullRequests($, groupCheckouts(services, root), prs)
     if (JSON.stringify(found) !== JSON.stringify(await read($, checkouts))) {
       await update($, checkouts, () => found)
     }
@@ -466,7 +488,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
     isFolded: boolean
     onToggle: () => void
     body: RenderChildren
-    footer?: RenderChildren
+    footer?: { left: RenderChildren; right: RenderChildren }
   }) => (
     <Box key={p.key} flexDirection="column" borderStyle="round" borderColor={p.border} marginTop={1}>
       <Box justifyContent="space-between" backgroundColor={colors.sub} paddingX={1}>
@@ -481,9 +503,12 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
           {p.body}
         </Box>
       )}
+      {/* Left and right as the row's own two children: handed over as one
+          fragment they were laid out as one, one under the other. */}
       {p.footer ? (
         <Box justifyContent="space-between" backgroundColor={colors.sub} paddingX={1}>
-          {p.footer}
+          {p.footer.left}
+          {p.footer.right}
         </Box>
       ) : null}
     </Box>
@@ -571,14 +596,27 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
   const checkoutRows = (
     <Box flexDirection="column">
       {checkedOut.map(c => (
-        <Box key={`co-${c.name}`} gap={1}>
-          <Text>{c.name}</Text>
-          {c.pr ? (
-            <Link href={c.pr.url} label={c.branch ?? ''} />
-          ) : (
-            <Text dimColor>{c.branch ?? 'detached'}</Text>
-          )}
-          {c.pr ? <Text dimColor>#{c.pr.number}</Text> : null}
+        <Box key={`co-${c.path}`} flexDirection="column">
+          <Box gap={1}>
+            <Text bold wrap="truncate-end">
+              {c.label}
+            </Text>
+            {c.pr ? (
+              <Link href={c.pr.url} label={c.branch ?? ''} />
+            ) : (
+              <Text dimColor wrap="truncate-end">
+                {c.branch ?? 'detached'}
+              </Text>
+            )}
+            {c.pr ? <Text dimColor>#{c.pr.number}</Text> : null}
+          </Box>
+          {c.apps.map(a => (
+            <Text key={`app-${c.path}-${a.name}`} wrap="truncate-end">
+              {'  '}
+              {a.name}
+              {a.dir ? <Text dimColor> {a.dir}</Text> : null}
+            </Text>
+          ))}
         </Box>
       ))}
     </Box>
@@ -590,7 +628,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
       checkoutRows
     ) : (
       <Text dimColor>
-        {ws?.name === 'main' ? 'main checks nothing out: services build from the live tree' : 'nothing checked out in src/'}
+        no service builds from a git checkout
       </Text>
     )
 
@@ -647,14 +685,12 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
         isFolded: isStackFolded,
         onToggle: () => update($, isScopeCollapsed, f => !f),
         body: stackBody,
-        footer: ws ? (
-          <>
-            <Text dimColor>{ws.sizeKB != null ? formatSize(ws.sizeKB) : '…'}</Text>
-            {/* Inline, so it keeps the right corner beside the size: a Link
-                takes https: alone and a Markdown link is a block of its own. */}
-            <Button key="open-alphasfile" plain label="Alphasfile" onPress={() => openFile($, ws.alphasfile)} />
-          </>
-        ) : undefined,
+        footer: ws
+          ? {
+              left: <Text dimColor>{ws.sizeKB != null ? formatSize(ws.sizeKB) : '…'}</Text>,
+              right: <Button key="open-alphasfile" plain label="Alphasfile" onPress={() => openFile($, ws.alphasfile)} />,
+            }
+          : undefined,
       })}
       {services.length === 0
         ? null

@@ -6,6 +6,8 @@ export type ZordonService = {
   isFailed: boolean
   print: string[]
   checkout: string | null
+  branch: string | null
+  sourceDir: string | null
   isShared: boolean
   isPicked: boolean
 }
@@ -36,9 +38,11 @@ export type DiffView = {
 }
 
 export type Checkout = {
-  name: string
+  path: string
+  label: string
   branch: string | null
   pr: { url: string; number: number } | null
+  apps: { name: string; dir: string | null }[]
 }
 
 export type McpCall = {

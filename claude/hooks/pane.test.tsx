@@ -88,7 +88,7 @@ test('/zordon:dashboard seats a pane that waits unshown instead of hiding it', a
   expect(await openStack($)).toMatch(/^zordon dashboard shown/)
 })
 
-test('the workspace lists its src/ checkouts, each branch linked to its pull request', async ($, on) => {
+test('the workspace groups its services by checkout, each branch linked to its pull request', async ($, on) => {
   host(on, FEATURE)
   await openStack($)
   const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
@@ -97,7 +97,12 @@ test('the workspace lists its src/ checkouts, each branch linked to its pull req
   expect(await ui.find({ type: 'Text', text: /^#7$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^zordon\/feature\/worker$/ })).toBeDefined()
   expect(await ui.find({ type: 'Link', text: 'zordon/feature/worker' })).toBeUndefined()
-  // every service of the run is in Runtime, the checked out ones too
+  // a tree inside the workspace by its path there, the project's own by its name
+  for (const label of [/^src\/api$/, /^src\/worker$/, /^proj$/]) {
+    expect(await ui.find({ type: 'Text', text: label })).toBeDefined()
+  }
+  expect(await ui.find({ type: 'Text', text: /api cmd\/api/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /gateway gateway/ })).toBeDefined()
   const runtime = (await ui.findAll({ type: 'Text', text: /^[●◐○] / })).map(t => t.text)
   expect(runtime).toEqual(['◐ worker probing', '● api', '● gateway', '● kafka shared', '● postgres shared'])
   await ui.unmount()

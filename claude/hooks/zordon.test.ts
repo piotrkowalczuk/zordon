@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { byStateThenName, formatSize, parseStatus, splitScope } from './register'
+import { byStateThenName, formatSize, groupCheckouts, parseStatus, splitScope } from './register'
 
 const RUNNING = `# [3aec45fbd85ea76f] /x/Alphasfile (invocation, workspace=main)
   alpha pid=4242 started=2026-10-04T17:00:00Z
@@ -103,4 +103,25 @@ test('runtime sorts failed, then coming up, then running, then stopped, by name 
 `, '')
   if (s.kind !== 'running') throw new Error(s.kind)
   expect([...s.services].sort(byStateThenName).map(x => x.name)).toEqual(['cache', 'queue', 'api', 'db', 'web'])
+})
+
+test('a text report\'s checkout lines give each service its tree and branch, relative ones resolved', () => {
+  const s = parseStatus(
+    0,
+    `# [aaaa1111aaaa1111] /p/Alphasfile (invocation, workspace=demo)
+  alpha pid=1 started=x
+  services (2):
+    - [go] serviceA — running pid=2 [ready]
+        checkout: src/serviceA (branch zordon/demo/serviceA)
+    - [go] serviceB — running pid=3 [ready]
+        checkout: /p (branch main ⚠ not zordon/demo/serviceB — building your branch)
+`,
+    '',
+    '/p/workspaces/demo',
+  )
+  if (s.kind !== 'running') throw new Error(s.kind)
+  expect(groupCheckouts(s.services, '/p/workspaces/demo')).toEqual([
+    { path: '/p', label: 'p', branch: 'main', apps: [{ name: 'serviceB', dir: null }] },
+    { path: '/p/workspaces/demo/src/serviceA', label: 'src/serviceA', branch: 'zordon/demo/serviceA', apps: [{ name: 'serviceA', dir: null }] },
+  ])
 })
