@@ -120,8 +120,18 @@ test('a text report\'s checkout lines give each service its tree and branch, rel
     '/p/workspaces/demo',
   )
   if (s.kind !== 'running') throw new Error(s.kind)
+  // serviceB builds from the project root, outside the workspace's src/
   expect(groupCheckouts(s.services, '/p/workspaces/demo')).toEqual([
-    { path: '/p', label: 'p', branch: 'main', apps: [{ name: 'serviceB', dir: null }] },
     { path: '/p/workspaces/demo/src/serviceA', label: 'src/serviceA', branch: 'zordon/demo/serviceA', apps: [{ name: 'serviceA', dir: null }] },
+  ])
+})
+
+test('in main, services whose code is in the project\'s src/ show under their monorepo', () => {
+  const svc = (name: string, sourceDir: string) => ({
+    name, toolchain: 'go', state: 'stopped', isUp: false, isFailed: false, print: [],
+    checkout: '/repo', branch: 'main', sourceDir, isShared: false, isPicked: false,
+  })
+  expect(groupCheckouts([svc('a', '/repo/proj/src/a'), svc('tool', '/repo/tools/x')], '/repo/proj')).toEqual([
+    { path: '/repo', label: 'repo', branch: 'main', apps: [{ name: 'a', dir: 'proj/src/a' }] },
   ])
 })

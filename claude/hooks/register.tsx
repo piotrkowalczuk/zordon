@@ -313,13 +313,19 @@ type PrCache = Map<string, { pr: Checkout['pr']; at: number }>
 const PR_EVERY_MS = 60_000
 
 // The workspace's code as zordon reports it: the services of this level
-// grouped by the git tree they build from, each tree with its branch and that
-// branch's latest pull request, each service with its directory in the tree.
-// A tree inside the workspace reads relative to it, any other by its name.
+// whose code is in its src/, grouped by the git tree they build from, each
+// tree with its branch and that branch's latest pull request, each service
+// with its directory in the tree. A tree inside the workspace reads relative
+// to it, a monorepo enclosing it by its name.
 export function groupCheckouts(services: ZordonService[], root: string): Omit<Checkout, 'pr'>[] {
+  // Only what lives in the workspace's src/: its own checkouts, or in main
+  // the project's src/; a service built from elsewhere belongs to Runtime.
+  const src = `${root}/src/`
+  const inSrc = (p: string | null) => p !== null && p.startsWith(src)
   const byPath = new Map<string, Omit<Checkout, 'pr'>>()
   for (const svc of services) {
     if (svc.isShared || svc.checkout === null) continue
+    if (!inSrc(svc.checkout) && !inSrc(svc.sourceDir)) continue
     const path = svc.checkout
     let group = byPath.get(path)
     if (!group) {
@@ -659,7 +665,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
       checkoutRows
     ) : (
       <Text dimColor>
-        no service builds from a git checkout
+        {ws ? `nothing in ${ws.name === 'main' ? dirname(ws.alphasfile) : ws.stateDir}/src` : 'no src/'}
       </Text>
     )
 
