@@ -17,6 +17,13 @@ export const FEATURE = JSON.stringify({
   ],
 })
 
+// The feature workspace's src/: api and worker checked out as git trees.
+const TREE: Record<string, string[]> = {
+  '/proj/workspaces/feature/src': ['/proj/workspaces/feature/src/api', '/proj/workspaces/feature/src/worker'],
+}
+
+export const PR = { url: 'https://github.com/acme/api/pull/7', number: 7 }
+
 export const PANE = {
   component: 'Pane',
   requestId: 'zordon',
@@ -35,7 +42,14 @@ export const PANE = {
 // before the test first calls $.
 export function host(on: On, stack: string, pane: { isShown: boolean } = { isShown: true }) {
   const clock = mock.clock(on, { now: 1_000 })
+  const done = (stdout: string, exitCode = 0) => ({
+    value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  })
+  on('fs.exists', ($, e) => ({ value: e.path in TREE || Object.values(TREE).some(dirs => dirs.some(d => `${d}/.git` === e.path)) }))
+  on('fs.list', ($, e) => ({ value: (TREE[e.path] ?? []).map(d => ({ name: d.split('/').pop() ?? d, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })) }))
   on('process.run', ($, e) => {
+    if (e.argv[0] === 'git') return done(`zordon/feature/${e.argv[2]?.split('/').pop()}\n`)
+    if (e.argv[0] === 'gh') return done(e.init?.cwd?.endsWith('/api') ? JSON.stringify([PR]) : '[]')
     if (e.argv[0] === 'zordon') return { value: { exitCode: 0, stdout: `${stack}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     if (e.argv[0] === 'du') return { value: { exitCode: 0, stdout: `1363148\t${e.argv[2]}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
 

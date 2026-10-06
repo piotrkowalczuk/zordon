@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { formatSize, parseStatus, splitScope } from './register'
+import { byStateThenName, formatSize, parseStatus, splitScope } from './register'
 
 const RUNNING = `# [3aec45fbd85ea76f] /x/Alphasfile (invocation, workspace=main)
   alpha pid=4242 started=2026-10-04T17:00:00Z
@@ -89,4 +89,18 @@ test('scope is what the workspace picked, runtime the rest and the shared levels
 test('a stopped leaf is stopped even while a shared parent runs', () => {
   const s = parseStatus(0, FEDERATED.replace('alpha pid=1000', 'alpha pid=0'), '')
   expect(s.kind).toBe('stopped')
+})
+
+test('runtime sorts failed, then coming up, then running, then stopped, by name within', () => {
+  const s = parseStatus(0, `# [aaaa1111aaaa1111] /p/Alphasfile (invocation, workspace=main)
+  alpha pid=1 started=x
+  services (5):
+    - [go] web — stopped
+    - [go] db — running pid=3 [ready]
+    - [go] api — running pid=2 [ready]
+    - [go] queue — running pid=4 [probing]
+    - [go] cache — failed
+`, '')
+  if (s.kind !== 'running') throw new Error(s.kind)
+  expect([...s.services].sort(byStateThenName).map(x => x.name)).toEqual(['cache', 'queue', 'api', 'db', 'web'])
 })
