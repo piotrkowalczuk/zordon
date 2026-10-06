@@ -8,6 +8,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 func TestOutputFormat(t *testing.T) {
@@ -123,6 +124,26 @@ func TestReportServices_federationParent(t *testing.T) {
 	assertStatusServices(t, got, []StatusService{{Name: "postgres", State: ServiceProbing, Shared: true}})
 }
 
+func TestReportServices_checkout(t *testing.T) {
+	ztest.AssertSystem(t)
+	repo := t.TempDir()
+	gitIn(t, repo, "init", "-q", "-b", "feature")
+	gitIn(t, repo, "-c", "user.email=a@b", "-c", "user.name=z", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init")
+	svc := reportTestService("shop/api", "")
+	svc.Runtime.Checkout = repo
+	svc.Runtime.Dir = repo + "/shop/api"
+	svc.Package = &alphasfile.Package{Toolchain: "go"}
+	lv := &level{
+		isInvocation: true,
+		inv:          &invocation.InvocationState{Workspace: invocation.MainWorkspace},
+		state:        &protocol.StateInfo{PID: 42, Services: []*alphasfile.Service{svc}},
+	}
+
+	got := reportServices(t.Context(), lv)
+
+	assertStatusServices(t, got, []StatusService{{Name: "shop/api", State: ServiceStopped, CheckoutPath: repo, Branch: "feature", SourceDir: repo + "/shop/api"}})
+}
+
 func TestStatusReport_logfmt(t *testing.T) {
 	r := StatusReport{
 		Workspace:  "feature",
@@ -131,12 +152,14 @@ func TestStatusReport_logfmt(t *testing.T) {
 		Services: []StatusService{
 			{Name: "shop/worker", State: ServiceReady, Picked: true, Print: "http://127.0.0.1:8080/  (shop)"},
 			{Name: "db", State: ServiceUnhealthy, Shared: true, Health: `dial "x": refused`, Revision: "0123456789ab"},
+			{Name: "web", State: ServiceStopped, CheckoutPath: "/proj/workspaces/feature/src/web", Branch: "zordon/feature/web"},
 		},
 	}
 
 	want := `workspace=feature state=running alphasfile=/proj/Alphasfile
 service=shop/worker state=ready picked=true print="http://127.0.0.1:8080/  (shop)"
 service=db state=unhealthy health="dial \"x\": refused" shared=true revision=0123456789ab
+service=web state=stopped checkout_path=/proj/workspaces/feature/src/web branch=zordon/feature/web
 `
 	if got := r.logfmt(); got != want {
 		t.Fatalf("logfmt() =\n%s\nwant\n%s", got, want)
