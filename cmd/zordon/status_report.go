@@ -54,14 +54,17 @@ type StatusReport struct {
 
 // StatusService is one service of a StatusReport.
 type StatusService struct {
-	Name     string `json:"name"`
-	State    string `json:"state"`
-	Health   string `json:"health,omitempty"`   // why an unhealthy service failed its probe
-	Picked   bool   `json:"picked,omitempty"`   // the workspace's own worktree
-	Shared   bool   `json:"shared,omitempty"`   // run by a federation parent, not this invocation
-	Print    string `json:"print,omitempty"`    // the service's composed print line
-	Checkout string `json:"checkout,omitempty"` // set only when off its canonical branch
-	Revision string `json:"revision,omitempty"` // a detached checkout's short commit
+	Name         string `json:"name"`
+	State        string `json:"state"`
+	Health       string `json:"health,omitempty"`        // why an unhealthy service failed its probe
+	Picked       bool   `json:"picked,omitempty"`        // the workspace's own worktree
+	Shared       bool   `json:"shared,omitempty"`        // run by a federation parent, not this invocation
+	Print        string `json:"print,omitempty"`         // the service's composed print line
+	Checkout     string `json:"checkout,omitempty"`      // set only when off its canonical branch
+	Revision     string `json:"revision,omitempty"`      // a detached checkout's short commit
+	CheckoutPath string `json:"checkout_path,omitempty"` // the git tree the service builds from, absolute
+	Branch       string `json:"branch,omitempty"`        // the branch that tree is on
+	SourceDir    string `json:"source_dir,omitempty"`    // the service's own directory in that tree, absolute
 }
 
 // outputFormat resolves --format against --agent, which defaults it.
@@ -107,6 +110,9 @@ func (r StatusReport) logfmt() string {
 			"print", s.Print,
 			"checkout", s.Checkout,
 			"revision", s.Revision,
+			"checkout_path", s.CheckoutPath,
+			"branch", s.Branch,
+			"source_dir", s.SourceDir,
 		)
 	}
 	return b.String()
@@ -163,6 +169,9 @@ func reportServices(ctx context.Context, lv *level) []StatusService {
 			svc.Print = s.Runtime.Print
 		}
 		if co, ok := checkoutOf(ctx, s, lv.inv.Workspace); ok {
+			svc.CheckoutPath = s.Runtime.Checkout
+			svc.SourceDir = s.Runtime.Dir
+			svc.Branch = co.Ref
 			svc.Revision = co.SHA
 			if co.isDrifted() {
 				svc.Checkout = fmt.Sprintf("on branch %s, not %s", co.Ref, co.Want)

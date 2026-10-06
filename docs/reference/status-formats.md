@@ -64,6 +64,9 @@ A value holding a space, a quote, an equals sign or a control character is quote
 | `print` | string | The service's composed `print` line; only while its level's alpha runs, as a stopped level's ports were picked for the report alone. |
 | `checkout` | string | Set only when an editable worktree is off its canonical branch, e.g. `on branch my-fix, not zordon/feature/api`. |
 | `revision` | string | The short commit of a detached checkout. |
+| `checkout_path` | string | The git tree the service builds from, absolute: its own repository, a workspace's worktree, or the directory of a package or module nested in either. |
+| `branch` | string | The branch `checkout_path` is on; absent when detached. |
+| `source_dir` | string | The service's own directory inside `checkout_path`, absolute (`fs::exe`); in a monorepo, services share `checkout_path` and differ here. |
 
 `unhealthy` is a service alpha called ready whose readiness probe fails now; the probe runs once per `status`, with a 500 ms timeout.
 The `text` format also lists each level's imports; the `agent` and `json` formats do not.
