@@ -97,12 +97,13 @@ test('the workspace groups its services by checkout, each branch linked to its p
   expect(await ui.find({ type: 'Text', text: /^#7$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^zordon\/feature\/worker$/ })).toBeDefined()
   expect(await ui.find({ type: 'Link', text: 'zordon/feature/worker' })).toBeUndefined()
-  // a tree inside the workspace by its path there, the project's own by its name
-  for (const label of [/^src\/api$/, /^src\/worker$/, /^proj$/]) {
+  // only what is in the workspace's src/; gateway builds from the project root
+  for (const label of [/^src\/api$/, /^src\/worker$/]) {
     expect(await ui.find({ type: 'Text', text: label })).toBeDefined()
   }
+  expect(await ui.find({ type: 'Text', text: /^proj$/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /api cmd\/api/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /gateway gateway/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /gateway gateway/ })).toBeUndefined()
   const runtime = (await ui.findAll({ type: 'Button', text: /^▸ / })).map(t => t.props.label)
   expect(runtime).toEqual(['▸ worker', '▸ api', '▸ gateway', '▸ kafka', '▸ postgres'])
   await ui.unmount()
