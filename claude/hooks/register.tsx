@@ -17,6 +17,9 @@ const isRuntimeCollapsed = atom({ plugin: 'zordon', key: 'isRuntimeCollapsed' } 
 const isLogCollapsed = atom({ plugin: 'zordon', key: 'isLogCollapsed' } as const, false)
 const calls = atom({ plugin: 'zordon', key: 'calls' } as const, [] as McpCall[])
 const checkouts = atom({ plugin: 'zordon', key: 'checkouts' } as const, [] as Checkout[])
+// The Runtime row opened to its details: lines are cut to the box's width,
+// and a service's details show its print and the rest whole, wrapped.
+const openService = atom({ plugin: 'zordon', key: 'openService' } as const, null as string | null)
 const openCall = atom({ plugin: 'zordon', key: 'openCall' } as const, null as string | null)
 
 let sessionCwd = '.'
@@ -514,24 +517,52 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
     </Box>
   )
 
+  const openedService = await read($, openService)
   const rows = (list: ZordonService[]) => (
     <Box flexDirection="column">
       {list.map(svc => {
         const mark = serviceMark(svc)
         const tags = [mark.note, svc.isShared ? 'shared' : null].filter(Boolean).join(' · ')
+        const isOpen = openedService === svc.name
+        const details: [string, string | null][] = [
+          ['state', svc.state],
+          ['print', svc.print.join('\n') || null],
+          ['checkout', svc.checkout],
+          ['branch', svc.branch],
+          ['source', svc.sourceDir],
+        ]
 
         return (
           <Box key={`svc-${svc.name}`} flexDirection="column">
-            <Text wrap="truncate-end">
-              <Text color={mark.color}>{mark.glyph}</Text> {svc.name}
-              {tags ? <Text dimColor> {tags}</Text> : null}
-            </Text>
-            {svc.print.map((line, i) => (
-              <Text key={`print-${svc.name}-${String(i)}`} dimColor wrap="truncate-end">
-                {'  '}
-                {line}
-              </Text>
-            ))}
+            <Box>
+              <Text color={mark.color}>{mark.glyph} </Text>
+              <Button
+                key={`details-${svc.name}`}
+                plain
+                label={`${isOpen ? '▾' : '▸'} ${svc.name}`}
+                onPress={() => update($, openService, o => (o === svc.name ? null : svc.name))}
+              />
+              {tags ? <Text dimColor wrap="truncate-end"> {tags}</Text> : null}
+            </Box>
+            {isOpen ? (
+              <Box flexDirection="column" paddingLeft={2}>
+                {details
+                  .filter((d): d is [string, string] => d[1] !== null)
+                  .map(([k, v]) => (
+                    <Text key={`detail-${svc.name}-${k}`} wrap="wrap">
+                      <Text dimColor>{k} </Text>
+                      {v}
+                    </Text>
+                  ))}
+              </Box>
+            ) : (
+              svc.print.map((line, i) => (
+                <Text key={`print-${svc.name}-${String(i)}`} dimColor wrap="truncate-end">
+                  {'  '}
+                  {line}
+                </Text>
+              ))
+            )}
           </Box>
         )
       })}

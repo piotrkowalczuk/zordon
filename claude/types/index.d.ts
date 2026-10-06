@@ -64,6 +64,6 @@ export type ZordonSnapshot =
 
 declare module 'claude-code' {
   interface PluginState {
-    'zordon': { snapshot: ZordonSnapshot; diff: DiffView; isCollapsed: boolean; isScopeCollapsed: boolean; isRuntimeCollapsed: boolean; isLogCollapsed: boolean; calls: McpCall[]; openCall: string | null; checkouts: Checkout[] }
+    'zordon': { snapshot: ZordonSnapshot; diff: DiffView; isCollapsed: boolean; isScopeCollapsed: boolean; isRuntimeCollapsed: boolean; isLogCollapsed: boolean; calls: McpCall[]; openCall: string | null; checkouts: Checkout[]; openService: string | null }
   }
 }

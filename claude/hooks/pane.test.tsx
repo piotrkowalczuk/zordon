@@ -54,12 +54,12 @@ test('workspace and runtime boxes fold on their own', async ($, on) => {
   await openStack($)
   const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
   expect(await ui.find({ type: 'Link', text: 'zordon/feature/api' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /postgres/ })).toBeDefined()
+  expect(await ui.find({ key: 'details-postgres' })).toBeDefined()
   await ui.press({ key: 'fold-workspace' })
   expect(await ui.find({ type: 'Link', text: 'zordon/feature/api' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /postgres/ })).toBeDefined()
+  expect(await ui.find({ key: 'details-postgres' })).toBeDefined()
   await ui.press({ key: 'fold-runtime' })
-  expect(await ui.find({ type: 'Text', text: /postgres/ })).toBeUndefined()
+  expect(await ui.find({ key: 'details-postgres' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -103,8 +103,8 @@ test('the workspace groups its services by checkout, each branch linked to its p
   }
   expect(await ui.find({ type: 'Text', text: /api cmd\/api/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /gateway gateway/ })).toBeDefined()
-  const runtime = (await ui.findAll({ type: 'Text', text: /^[●◐○] / })).map(t => t.text)
-  expect(runtime).toEqual(['◐ worker probing', '● api', '● gateway', '● kafka shared', '● postgres shared'])
+  const runtime = (await ui.findAll({ type: 'Button', text: /^▸ / })).map(t => t.props.label)
+  expect(runtime).toEqual(['▸ worker', '▸ api', '▸ gateway', '▸ kafka', '▸ postgres'])
   await ui.unmount()
 })
 
@@ -130,5 +130,22 @@ test('the footer keeps size and Alphasfile on one row: both inline, the file ope
   expect((await ui.find({ key: 'open-alphasfile' }))?.props.label).toBe('Alphasfile')
   await ui.press({ key: 'open-alphasfile' })
   expect(opened).toEqual(['/proj/Alphasfile'])
+  await ui.unmount()
+})
+
+test('a service opens to its details: the whole print, wrapped, and where its code is', async ($, on) => {
+  host(on, FEATURE)
+  await openStack($)
+  const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /source \/proj\/workspaces/ })).toBeUndefined()
+
+  await ui.press({ key: 'details-api' })
+  expect(await ui.find({ type: 'Text', text: 'print http://localhost:8080' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'branch zordon/feature/api' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'source /proj/workspaces/feature/src/api/cmd/api' })).toBeDefined()
+  expect((await ui.find({ key: 'details-api' }))?.props.label).toBe('▾ api')
+
+  await ui.press({ key: 'details-api' })
+  expect(await ui.find({ type: 'Text', text: /^source / })).toBeUndefined()
   await ui.unmount()
 })
