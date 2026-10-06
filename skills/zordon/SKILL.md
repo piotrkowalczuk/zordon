@@ -62,7 +62,7 @@ service=postgres state=probing shared=true
 Pass `["--format=json"]` for one JSON object with the same fields, or `["--format=text"]` for the report people read, which also lists imports.
 Reference: <https://zordon.io/reference/status-formats/>.
 
-In Claude Code the zordon plugin also shows the stack in a pane (`/zordon`) and splits `/diff` per `src/<app>` checkout (`/diff <app>`); point the person there rather than pasting a status report into the conversation.
+In Claude Code the zordon plugin also shows the stack in a pane (`/zordon:dashboard` shows and hides it) and splits `/diff` per `src/<app>` checkout (`/diff <app>`); point the person there rather than pasting a status report into the conversation.
 
 ## Ordering rules that trip agents up
 
