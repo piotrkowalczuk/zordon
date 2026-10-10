@@ -9,7 +9,7 @@
 # barriers and process groups); a failed invoke is reported but never shuts
 # alpha down. The latent `seed-data` is the headline case: it never auto-runs,
 # an agent invokes it with its own KEY.
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 toolchain {
   go {

@@ -1,4 +1,10 @@
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  go {
+    version = "1.27.0"
+  }
+}
 
 # One stack, two teams. Each component owns a `db` and an `api`; the names
 # collide on purpose — the component is what keeps them apart. Inside a component
