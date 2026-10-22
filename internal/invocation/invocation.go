@@ -109,7 +109,7 @@ type InvocationState struct {
 
 	// OwnedServices is the set of services this (named) workspace took at
 	// `zordon workspace create <ws> [svc ...]`. Populated by build() from a
-	// scan of <StateDir>/src/**/.git (presence of .git = a real `git worktree
+	// scan of <StateDir>/src/**/.git (a .git file = a real `git worktree
 	// add` was performed). Services NOT in this set fall back to the anchor
 	// Alphasfile's resolved dir (same as the main workspace's InPlace) so
 	// they share the user's live tree instead of getting a forked, empty
@@ -302,7 +302,7 @@ func build(dir, root, ws string) *InvocationState {
 	}
 }
 
-// scanOwnedServices reads <stateDir>/src/**/.git markers (one per service
+// scanOwnedServices reads <stateDir>/src/**/.git gitlinks (one per service
 // that got a real `git worktree add`), keyed by the checkout's path under src/,
 // which is the service's display name: <svc>, <module>/<svc> or
 // <package>/<component>/<svc>. Returns nil for the main workspace (irrelevant —
@@ -324,8 +324,9 @@ func scanOwnedServices(stateDir, ws string) map[string]bool {
 // <package>/<component>/<svc>.
 const maxDisplayNameDepth = 3
 
-// scanCheckouts records every directory under dir holding a .git marker, at
-// most depth levels down, and does not descend into a checkout it found.
+// scanCheckouts records every directory under dir whose .git is a file — the
+// gitlink of a worktree — at most depth levels down. A .git directory is the
+// plain clone of an unpicked git source: not owned, and not descended into.
 func scanCheckouts(dir, rel string, depth int, owned map[string]bool) {
 	entries, err := zfs.ReadDir(dir)
 	if err != nil {
@@ -339,8 +340,10 @@ func scanCheckouts(dir, rel string, depth int, owned map[string]bool) {
 		if rel != "" {
 			name = rel + "/" + name
 		}
-		if _, err := zfs.Stat(filepath.Join(path, ".git")); err == nil {
-			owned[name] = true
+		if info, err := zfs.Stat(filepath.Join(path, ".git")); err == nil {
+			if info.Mode().IsRegular() {
+				owned[name] = true
+			}
 			continue
 		}
 		if depth > 1 {

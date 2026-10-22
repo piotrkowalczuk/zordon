@@ -1,6 +1,7 @@
 package invocation
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -13,9 +14,7 @@ func TestInvocationState_OwnsService_nestedModuleCheckout(t *testing.T) {
 	root := t.TempDir()
 	ws := filepath.Join(root, "workspaces", "feature")
 	for _, rel := range []string{"api", "payments/db"} {
-		if err := zfs.EnsureDir(filepath.Join(ws, "src", rel, ".git")); err != nil {
-			t.Fatal(err)
-		}
+		writeGitlink(t, filepath.Join(ws, "src", rel))
 	}
 	if err := zfs.EnsureDir(filepath.Join(ws, "src", "payments", "api")); err != nil {
 		t.Fatal(err)
@@ -49,7 +48,9 @@ func TestInvocationState_OwnsService_nestedModuleCheckout(t *testing.T) {
 func TestInvocationState_OwnsService_componentCheckout(t *testing.T) {
 	root := t.TempDir()
 	ws := filepath.Join(root, "workspaces", "feature")
-	if err := zfs.EnsureDir(filepath.Join(ws, "src", "billing", "app", "billing", ".git")); err != nil {
+	writeGitlink(t, filepath.Join(ws, "src", "billing", "app", "billing"))
+	// An unpicked git source is a plain clone, whose .git is a directory.
+	if err := zfs.EnsureDir(filepath.Join(ws, "src", "web", "app", "web", ".git")); err != nil {
 		t.Fatal(err)
 	}
 	inv := build(ws, root, "feature")
@@ -62,6 +63,7 @@ func TestInvocationState_OwnsService_componentCheckout(t *testing.T) {
 		"unpicked-service":               {"ledger/app/ledger", false},
 		"component-dir-is-not-a-service": {"billing/app", false},
 		"package-dir-is-not-a-service":   {"billing", false},
+		"plain-clone-is-not-picked":      {"web/app/web", false},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -69,5 +71,17 @@ func TestInvocationState_OwnsService_componentCheckout(t *testing.T) {
 				t.Errorf("OwnsService(%q) = %v, want %v", c.svc, got, c.want)
 			}
 		})
+	}
+}
+
+// writeGitlink makes dir look like a `git worktree add` checkout: its .git is a
+// file pointing at the admin dir.
+func writeGitlink(t *testing.T, dir string) {
+	t.Helper()
+	if err := zfs.EnsureDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: irrelevant\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
