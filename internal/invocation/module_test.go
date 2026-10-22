@@ -42,3 +42,32 @@ func TestInvocationState_OwnsService_nestedModuleCheckout(t *testing.T) {
 		t.Errorf("CheckoutPath = %q", got)
 	}
 }
+
+// A package's services check out at src/<package>/<component>/<svc>. When that
+// is the only layout on disk, the scan must still find them: missing them leaves
+// ownership unknown, which owns every service and forks a checkout of each.
+func TestInvocationState_OwnsService_componentCheckout(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "workspaces", "feature")
+	if err := zfs.EnsureDir(filepath.Join(ws, "src", "billing", "app", "billing", ".git")); err != nil {
+		t.Fatal(err)
+	}
+	inv := build(ws, root, "feature")
+
+	cases := map[string]struct {
+		svc  string
+		want bool
+	}{
+		"component-checkout":             {"billing/app/billing", true},
+		"unpicked-service":               {"ledger/app/ledger", false},
+		"component-dir-is-not-a-service": {"billing/app", false},
+		"package-dir-is-not-a-service":   {"billing", false},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			if got := inv.OwnsService(c.svc); got != c.want {
+				t.Errorf("OwnsService(%q) = %v, want %v", c.svc, got, c.want)
+			}
+		})
+	}
+}

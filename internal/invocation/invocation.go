@@ -109,7 +109,7 @@ type InvocationState struct {
 
 	// OwnedServices is the set of services this (named) workspace took at
 	// `zordon workspace create <ws> [svc ...]`. Populated by build() from a
-	// scan of <StateDir>/src/*/.git (presence of .git = a real `git worktree
+	// scan of <StateDir>/src/**/.git (presence of .git = a real `git worktree
 	// add` was performed). Services NOT in this set fall back to the anchor
 	// Alphasfile's resolved dir (same as the main workspace's InPlace) so
 	// they share the user's live tree instead of getting a forked, empty
@@ -302,44 +302,49 @@ func build(dir, root, ws string) *InvocationState {
 	}
 }
 
-// scanOwnedServices reads <stateDir>/src/*/.git markers (one per service
-// that got a real `git worktree add`). Returns nil for the main workspace
-// (irrelevant — main never forks) and for a fresh workspace with no
-// materialized services (== "ownership unknown", legacy default).
+// scanOwnedServices reads <stateDir>/src/**/.git markers (one per service
+// that got a real `git worktree add`), keyed by the checkout's path under src/,
+// which is the service's display name: <svc>, <module>/<svc> or
+// <package>/<component>/<svc>. Returns nil for the main workspace (irrelevant —
+// main never forks) and for a fresh workspace with no materialized services
+// (== "ownership unknown", legacy default).
 func scanOwnedServices(stateDir, ws string) map[string]bool {
 	if ws == "" || ws == MainWorkspace {
 		return nil
 	}
-	srcDir := filepath.Join(stateDir, "src")
-	entries, err := zfs.ReadDir(srcDir)
-	if err != nil {
-		return nil
-	}
 	owned := map[string]bool{}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if _, err := zfs.Stat(filepath.Join(srcDir, e.Name(), ".git")); err == nil {
-			owned[e.Name()] = true
-			continue
-		}
-		// A module's services check out one level deeper: src/<module>/<svc>.
-		nested, err := zfs.ReadDir(filepath.Join(srcDir, e.Name()))
-		if err != nil {
-			continue
-		}
-		for _, n := range nested {
-			if !n.IsDir() {
-				continue
-			}
-			if _, err := zfs.Stat(filepath.Join(srcDir, e.Name(), n.Name(), ".git")); err == nil {
-				owned[e.Name()+"/"+n.Name()] = true
-			}
-		}
-	}
+	scanCheckouts(filepath.Join(stateDir, "src"), "", maxDisplayNameDepth, owned)
 	if len(owned) == 0 {
 		return nil
 	}
 	return owned
+}
+
+// maxDisplayNameDepth is the most segments a service's display name has:
+// <package>/<component>/<svc>.
+const maxDisplayNameDepth = 3
+
+// scanCheckouts records every directory under dir holding a .git marker, at
+// most depth levels down, and does not descend into a checkout it found.
+func scanCheckouts(dir, rel string, depth int, owned map[string]bool) {
+	entries, err := zfs.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		path, name := filepath.Join(dir, e.Name()), e.Name()
+		if rel != "" {
+			name = rel + "/" + name
+		}
+		if _, err := zfs.Stat(filepath.Join(path, ".git")); err == nil {
+			owned[name] = true
+			continue
+		}
+		if depth > 1 {
+			scanCheckouts(path, name, depth-1, owned)
+		}
+	}
 }
