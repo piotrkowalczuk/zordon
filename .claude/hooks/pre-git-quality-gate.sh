@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# Pre-git quality gate for Claude Code (PreToolUse / Bash matcher).
+# Pre-git quality gate for Claude Code (PreToolUse / Bash matcher) and
+# Antigravity (PreToolUse / run_command matcher).
 #
 # Before a push reaches git, run the project's checks and abort the
-# push (exit 2) the moment one fails:
+# push the moment one fails:
 #
 #   git push  ->  make lint + make test
 #
@@ -13,15 +14,20 @@
 # Formatting is handled separately, on every Go edit
 # (post-edit-gofmt.sh), so it is not repeated here.
 #
-# Claude passes the Bash command it is about to run as JSON on stdin;
+# The agent passes the shell command it is about to run as JSON on stdin;
 # this script self-filters, so it also fires for git buried in a
 # compound command (e.g. `make build && git push`).
 set -u
 
-input="$(cat)"
-cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
-[ -n "$cmd" ] || exit 0
-cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd "$here/../.." && pwd)"
+# shellcheck source=../../hooks/adapter.sh
+source "$root/hooks/adapter.sh"
+
+hook_read_stdin
+cmd="$(hook_command)"
+[ -n "$cmd" ] || hook_pre_allow
+cwd="$(hook_cwd)"
 
 # True if $cmd invokes `git <sub>`, tolerating `-C dir` / `-c k=v`
 # global options between `git` and the subcommand.
@@ -34,7 +40,7 @@ op=
 git_sub push && op=push
 
 # Not a push -> not our business, let it through.
-[ -n "$op" ] || exit 0
+[ -n "$op" ] || hook_pre_allow
 
 # Gate the checkout being pushed, not the project dir: a push from a git
 # worktree (.claude/worktrees/<name>) must test that worktree's code, while
@@ -52,7 +58,7 @@ push_dir() {
 	printf '%s' "${dir:-$cwd}"
 }
 repo="$(git -C "$(push_dir)" rev-parse --show-toplevel 2>/dev/null)"
-[ -n "$repo" ] || repo="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+[ -n "$repo" ] || repo="${CLAUDE_PROJECT_DIR:-$root}"
 printf '\npre-git gate: checking %s\n' "$repo" >&2
 
 # Docs-only pushes can't break `make lint`/`make test` (no Go compiled),
@@ -86,16 +92,14 @@ is_docs_only() {
 
 if is_docs_only; then
 	printf '\npre-git gate: docs-only push -- skipping make lint/test.\n' >&2
-	exit 0
+	hook_pre_allow
 fi
 
-# Run one make target; on failure, explain to Claude (stderr is fed
-# back on exit 2) and abort the git command.
+# Run one make target; on failure, explain to the agent and abort the git command.
 gate() {
 	printf '\n=== pre-git gate: make %s ===\n' "$1" >&2
 	if ! make -C "$repo" "$1" >&2; then
-		printf "\npre-git gate: 'make %s' FAILED -- aborting git %s.\n" "$1" "$op" >&2
-		exit 2
+		hook_pre_deny "pre-git gate: 'make $1' FAILED -- aborting git $op."
 	fi
 }
 
@@ -104,4 +108,4 @@ gate lint
 gate test
 
 printf '\npre-git gate: all checks passed -- allowing git %s.\n' "$op" >&2
-exit 0
+hook_pre_allow

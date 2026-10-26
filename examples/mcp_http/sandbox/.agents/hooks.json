@@ -1,0 +1,11 @@
+{
+  "zordon-preflight": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "../.claude/hooks/zordon-preflight.sh",
+        "timeout": 15
+      }
+    ]
+  }
+}

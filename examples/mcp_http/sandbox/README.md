@@ -23,9 +23,11 @@ That is exactly why it must run on the host: nothing inside a container can star
 | --- | --- |
 | `.devcontainer/devcontainer.json` | Stock image + the Claude Code feature, the host alias, the config volume, and the host-side `initializeCommand`. |
 | `.devcontainer/host-zordon-mcp.sh` | Starts `zordon mcp` on the host if it is not already serving. Idempotent, so a rebuild does not stack up servers. |
-| `.mcp.json` | The zordon server as a project-scoped `http` entry. No `command`, so nothing is launched in the box. |
+| `.mcp.json` | The zordon server as a project-scoped `http` entry for Claude Code. No `command`, so nothing is launched in the box. |
+| `mcp_config.json` | The same `http` MCP entry in Antigravity's format. |
 | `.claude/settings.json` | `enabledMcpjsonServers` pre-approves it, so the first session does not stop to ask. |
-| `.claude/hooks/zordon-preflight.sh` | `SessionStart` check that turns "no zordon tools, no idea why" into the command to run on the host. |
+| `.agents/hooks.json` | Wires the shared `SessionStart` preflight check for Antigravity. |
+| `.claude/hooks/zordon-preflight.sh` | `SessionStart` check (shared by Claude Code and Antigravity) that turns "no zordon tools, no idea why" into the command to run on the host. |
 
 ## Use it
 
