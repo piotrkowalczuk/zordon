@@ -54,6 +54,19 @@ workspace {
       }
     }
   }
+
+  file "agy_mcp" {
+    path = "mcp_config.json"
+    merge {
+      data = {
+        mcpServers = {
+          zordon = {
+            url = "http://host.docker.internal:${workspace.port}/mcp"
+          }
+        }
+      }
+    }
+  }
 }
 ```
 

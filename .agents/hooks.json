@@ -1,0 +1,30 @@
+{
+  "post-edit-gofmt": {
+    "PostToolUse": [
+      {
+        "matcher": "edit_file|write_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "../.claude/hooks/post-edit-gofmt.sh",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  },
+  "pre-git-quality-gate": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "../.claude/hooks/pre-git-quality-gate.sh",
+            "timeout": 900
+          }
+        ]
+      }
+    ]
+  }
+}

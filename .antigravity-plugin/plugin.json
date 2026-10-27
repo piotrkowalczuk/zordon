@@ -1,0 +1,11 @@
+{
+  "name": "zordon",
+  "displayName": "Zordon",
+  "version": "0.22.3",
+  "description": "Local dev-stack supervisor (databases, brokers, services) declared in an Alphasfile, run as host processes — auto-registers the `zordon mcp` server so agents can start/stop the stack, inspect it, and run declared provisions without shelling out, and shows the stack in a live sidecar dashboard pane.",
+  "suggestedPrompts": [
+    "Show the status of this project's zordon stack",
+    "Create an isolated zordon workspace and start the stack",
+    "Run the declared provisions for this stack via zordon MCP"
+  ]
+}

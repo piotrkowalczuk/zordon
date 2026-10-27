@@ -46,7 +46,7 @@ If you drive your stack from an agent, install the Claude Code plugin — it reg
 ```
 
 The plugin does not bundle the binary, so you still need `zordon` on your `$PATH` from the install step above.
-See the [install how-to](how-to/install-the-claude-code-plugin.md) for the full walkthrough.
+See the [Claude Code plugin how-to](how-to/install-the-claude-code-plugin.md) or the [Antigravity plugin how-to](how-to/install-the-antigravity-plugin.md) for the full walkthrough.
 
 ## A first stack
 

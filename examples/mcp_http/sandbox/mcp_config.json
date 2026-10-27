@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "zordon": {
+      "url": "http://host.docker.internal:7391/mcp"
+    }
+  }
+}

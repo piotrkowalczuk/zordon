@@ -1,0 +1,35 @@
+{
+  "zordon-session": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "./hooks/zordon-hook.sh session-start",
+        "timeout": 10
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "call_mcp_tool|mcp_.*zordon.*|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./hooks/zordon-hook.sh pre-tool",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "call_mcp_tool|mcp_.*zordon.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./hooks/zordon-hook.sh post-tool",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
