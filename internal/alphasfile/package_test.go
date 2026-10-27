@@ -262,12 +262,25 @@ func TestLoadTree_entrypointLeavesANeededFeatureOffBehindAFeature(t *testing.T) 
 	}
 }
 
-func TestLoadTree_packagesImportingEachOther(t *testing.T) {
+func TestOpen_packagesImportingEachOther(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":       `import "./stack" {}`,
+		"stack/Alphasfile": "package \"stack\" {\n  import \"../a\" {}\n  import \"../b\" {}\n}\n",
+		"a/Alphasfile":     "package \"a\" {\n  import \"../b\" {}\n}\n",
+		"b/Alphasfile":     "package \"b\" {\n  import \"../a\" {}\n  import \"../db\" { features = [\"replica\"] }\n}\n",
+		"db/Alphasfile":    pkgDBReplica,
+	})
+	if got := serviceNames(openTree(t, root)); !equalStrs(got, []string{"db/db/primary", "db/db/replica"}) {
+		t.Errorf("services = %v", got)
+	}
+}
+
+func TestLoadTree_packagesImportingEachOtherBehindAFeature(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile":   `import "./a" {}`,
 		"a/Alphasfile": "package \"a\" {\n  import \"../b\" {}\n}\n",
-		"b/Alphasfile": "package \"b\" {\n  import \"../c\" {}\n}\n",
-		"c/Alphasfile": "package \"c\" {\n  import \"../b\" {}\n}\n",
+		"b/Alphasfile": "package \"b\" {\n  features = { c = { description = \"Brings c\" } }\n  import \"../c\" { enabled = features.c }\n}\n",
+		"c/Alphasfile": "package \"c\" {\n  import \"../b\" { features = [\"c\"] }\n}\n",
 	})
 	_, err := LoadTree(root)
 	if err == nil || !strings.Contains(err.Error(), "packages b, c import each other, so none of them can be configured first; import one of them at the top of the entrypoint") {
