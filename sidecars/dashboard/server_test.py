@@ -245,6 +245,109 @@ class TestSidecarAndHooks(unittest.TestCase):
                 else:
                     os.environ["ZORDON_AGY_STATE"] = old_state
 
+    def test_plugin_manifests_and_shell_entrypoints(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+
+        # 1. Validate .antigravity-plugin/plugin.json
+        plugin_manifest = json.loads((repo_root / ".antigravity-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        for key in ("name", "displayName", "version", "description", "suggestedPrompts"):
+            self.assertIn(key, plugin_manifest)
+        self.assertEqual(plugin_manifest["name"], "zordon")
+        self.assertTrue(plugin_manifest["suggestedPrompts"])
+
+        # 2. Validate root mcp_config.json and sandbox mcp_config.json
+        mcp_cfg = json.loads((repo_root / "mcp_config.json").read_text(encoding="utf-8"))
+        self.assertEqual(mcp_cfg["mcpServers"]["zordon"]["command"], "zordon")
+        self.assertEqual(mcp_cfg["mcpServers"]["zordon"]["args"], ["mcp"])
+
+        sandbox_mcp = json.loads(
+            (repo_root / "examples" / "mcp_http" / "sandbox" / "mcp_config.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("url", sandbox_mcp["mcpServers"]["zordon"])
+
+        # 3. Validate sidecars/dashboard/sidecar.json
+        sidecar_dir = repo_root / "sidecars" / "dashboard"
+        sidecar_cfg = json.loads((sidecar_dir / "sidecar.json").read_text(encoding="utf-8"))
+        self.assertEqual(sidecar_cfg["command"], "python3")
+        self.assertTrue(sidecar_cfg["has_web_ui"])
+        self.assertEqual(
+            sidecar_cfg["ui_config"]["views"][0]["entrypoint"],
+            "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        )
+        sidecar_bin = (sidecar_dir / sidecar_cfg["args"][0]).resolve()
+        self.assertTrue(sidecar_bin.is_file(), f"missing sidecar entrypoint: {sidecar_bin}")
+        self.assertTrue(os.access(sidecar_bin, os.X_OK), f"sidecar entrypoint not executable: {sidecar_bin}")
+
+        # 4. Validate all Antigravity hooks.json files and referenced scripts
+        hook_configs = [
+            repo_root / "hooks.json",
+            repo_root / ".agents" / "hooks.json",
+            repo_root / "examples" / "mcp_http" / "sandbox" / ".agents" / "hooks.json",
+        ]
+        for cfg_path in hook_configs:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            self.assertTrue(cfg, f"empty hooks config: {cfg_path}")
+            for hook_group in cfg.values():
+                for event_name, entries in hook_group.items():
+                    if event_name == "enabled":
+                        continue
+                    for entry in entries:
+                        handlers = entry.get("hooks", [entry])
+                        for handler in handlers:
+                            cmd_tokens = handler["command"].split()
+                            script_path = (cfg_path.parent / cmd_tokens[0]).resolve()
+                            self.assertTrue(script_path.is_file(), f"{cfg_path}: missing script {script_path}")
+                            self.assertTrue(
+                                os.access(script_path, os.X_OK), f"{cfg_path}: script not executable {script_path}"
+                            )
+
+        # 5. Execute hooks/zordon-hook.sh and sandbox zordon-preflight.sh as subprocesses
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            env = dict(os.environ, ZORDON_AGY_STATE=str(state_path))
+            hook_sh = repo_root / "hooks" / "zordon-hook.sh"
+            res = subprocess.run(
+                [str(hook_sh), "pre-tool"],
+                input=json.dumps(
+                    {
+                        "conversationId": "c2",
+                        "workspacePaths": [tmp],
+                        "stepIdx": 1,
+                        "toolCall": {
+                            "name": "call_mcp_tool",
+                            "args": {"ServerName": "zordon_zordon", "ToolName": "status", "Arguments": {}},
+                        },
+                    }
+                ),
+                text=True,
+                capture_output=True,
+                env=env,
+                check=True,
+            )
+            self.assertEqual(json.loads(res.stdout), {"decision": "allow"})
+
+            preflight_sh = repo_root / "examples" / "mcp_http" / "sandbox" / ".claude" / "hooks" / "zordon-preflight.sh"
+            preflight_env = dict(env, ZORDON_MCP_URL="http://127.0.0.1:1/mcp")
+            res_agy = subprocess.run(
+                [str(preflight_sh)],
+                input=json.dumps({"conversationId": "c2", "workspacePaths": [tmp]}),
+                text=True,
+                capture_output=True,
+                env=preflight_env,
+                check=True,
+            )
+            self.assertIn("injectSteps", json.loads(res_agy.stdout))
+
+            res_claude = subprocess.run(
+                [str(preflight_sh)],
+                input=json.dumps({"session_id": "s1", "cwd": tmp}),
+                text=True,
+                capture_output=True,
+                env=preflight_env,
+                check=True,
+            )
+            self.assertIn("zordon MCP is NOT reachable", res_claude.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
