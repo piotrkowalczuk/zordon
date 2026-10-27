@@ -122,8 +122,12 @@ func TestWatchBringupProgress_reportsPendingPhasesInSynctest(t *testing.T) {
 		done := make(chan struct{})
 		go watchBringupProgress(done, time.Now(), services, ctxs, provs, state, stream, log)
 
-		// At +6s virtual time: db is building, api and seed are waiting for dependencies.
-		time.Sleep(6 * time.Second)
+		select {
+		case <-time.After(5 * time.Second):
+		case <-t.Context().Done():
+			t.Fatal(t.Context().Err())
+		}
+		synctest.Wait()
 		dbCtx.build.Reach("success")
 		dbCtx.lifecycle.Reach("ready")
 		apiCtx.build.Reach("success")
@@ -131,8 +135,12 @@ func TestWatchBringupProgress_reportsPendingPhasesInSynctest(t *testing.T) {
 		seed.lifecycle.Reach("running")
 		synctest.Wait()
 
-		// At +11s virtual time: db is done, api is probing readiness, seed is running.
-		time.Sleep(5 * time.Second)
+		select {
+		case <-time.After(5 * time.Second):
+		case <-t.Context().Done():
+			t.Fatal(t.Context().Err())
+		}
+		synctest.Wait()
 		close(done)
 		apiCtx.lifecycle.Reach("ready")
 		seed.lifecycle.Reach("success")

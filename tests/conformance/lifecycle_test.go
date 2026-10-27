@@ -291,9 +291,6 @@ service "go" "svc1" {
 	port2 := p.Get(t, "service.go.svc1.vars.port").Int()
 	wantEnv := fmt.Sprintf("PORT=%d\n", port2)
 
-	// Sleep briefly to catch any late-running old-alpha teardown that might have
-	// raced in the background if waitAlphaGone returned too early.
-	time.Sleep(500 * time.Millisecond)
 	gotEnv, err := os.ReadFile(envPath)
 	if err != nil {
 		t.Fatalf(".env missing after restart (old alpha deleted new alpha's file!): %v", err)

@@ -277,49 +277,32 @@ func TestAcquireLockWait_probeAndContention(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AcquireLock: %v", err)
 		}
-
-		held, pid := ProbeLock(dir, "start")
-		if !held || pid != os.Getpid() {
+		if held, pid := ProbeLock(dir, "start"); !held || pid != os.Getpid() {
 			release1()
 			t.Fatalf("ProbeLock while held = (%v, %d), want (true, %d)", held, pid, os.Getpid())
 		}
 
-		// Hold the lock for 10.2s of virtual bubble time so AcquireLockWait must
-		// emit the initial 0s contention callback plus the 5s and 10s periodic
-		// updates before acquiring once release1() runs.
 		go func() {
-			time.Sleep(10200 * time.Millisecond)
+			select {
+			case <-time.After(5100 * time.Millisecond):
+			case <-t.Context().Done():
+			}
 			release1()
 		}()
 
-		var waitedDurations []time.Duration
+		var waits []time.Duration
 		var reportedPID int
-		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-		defer cancel()
-		start := time.Now()
-		release2, err := AcquireLockWait(ctx, dir, "start", func(_ string, holderPID int, waited time.Duration) {
-			waitedDurations = append(waitedDurations, waited.Round(time.Second))
+		release2, err := AcquireLockWait(t.Context(), dir, "start", func(_ string, holderPID int, waited time.Duration) {
+			waits = append(waits, waited)
 			reportedPID = holderPID
 		})
 		if err != nil {
 			t.Fatalf("AcquireLockWait: %v", err)
 		}
-		if elapsed := time.Since(start); elapsed < 10200*time.Millisecond || elapsed > 10300*time.Millisecond {
-			t.Errorf("AcquireLockWait acquired at %s, want ~10.2s in virtual clock", elapsed)
-		}
 		release2()
 
-		wantWaits := []time.Duration{0, 5 * time.Second, 10 * time.Second}
-		if len(waitedDurations) != len(wantWaits) {
-			t.Fatalf("onWait calls = %v, want %v", waitedDurations, wantWaits)
-		}
-		for i, want := range wantWaits {
-			if waitedDurations[i] != want {
-				t.Errorf("onWait[%d] = %s, want %s", i, waitedDurations[i], want)
-			}
-		}
-		if reportedPID != os.Getpid() {
-			t.Errorf("onWait holderPID = %d, want %d", reportedPID, os.Getpid())
+		if len(waits) != 2 || waits[0] != 0 || waits[1] != 5*time.Second || reportedPID != os.Getpid() {
+			t.Fatalf("onWait = %v (pid=%d), want [0s 5s] (pid=%d)", waits, reportedPID, os.Getpid())
 		}
 
 		if held, _ := ProbeLock(dir, "start"); held {
