@@ -294,7 +294,7 @@ func TestAcquireLockWait_probeAndContention(t *testing.T) {
 
 		var waitedDurations []time.Duration
 		var reportedPID int
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 		defer cancel()
 		start := time.Now()
 		release2, err := AcquireLockWait(ctx, dir, "start", func(_ string, holderPID int, waited time.Duration) {
@@ -338,7 +338,7 @@ func TestAcquireLockWait_contextCancelled(t *testing.T) {
 		}
 		defer release()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
 		defer cancel()
 		var calls int
 		_, err = AcquireLockWait(ctx, dir, "start", func(_ string, _ int, _ time.Duration) {

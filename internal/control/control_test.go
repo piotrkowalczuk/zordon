@@ -19,7 +19,7 @@ func TestLockAlpha_probeLifecycle(t *testing.T) {
 		t.Fatalf("ProbeAlpha before lock = (%v, %d), want (false, 0)", held, pid)
 	}
 
-	unlock, err := LockAlpha(context.Background(), sock, nil)
+	unlock, err := LockAlpha(t.Context(), sock, nil)
 	if err != nil {
 		t.Fatalf("LockAlpha: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestRoundtrip_stuckServerTimesOutAndIsNotClassifiedAsNotRunning(t *testing.
 		<-done
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 	_, err = Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpState})
 	if err == nil {
@@ -75,7 +75,7 @@ func TestRoundtrip_stuckServerTimesOutAndIsNotClassifiedAsNotRunning(t *testing.
 	}
 
 	// Dialing a missing socket must still be classified as IsNotRunning.
-	_, missingErr := Roundtrip(context.Background(), filepath.Join(dir, "missing.sock"), &protocol.Request{Op: protocol.OpState})
+	_, missingErr := Roundtrip(t.Context(), filepath.Join(dir, "missing.sock"), &protocol.Request{Op: protocol.OpState})
 	if !IsNotRunning(missingErr) {
 		t.Fatalf("IsNotRunning(%v) = false on missing socket; want true", missingErr)
 	}
@@ -85,7 +85,7 @@ func TestWaitAlphaGone_waitsForAlphaLockReleaseAndReportsWait(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "alpha.sock")
 
 	synctest.Test(t, func(t *testing.T) {
-		unlock, err := LockAlpha(context.Background(), sock, nil)
+		unlock, err := LockAlpha(t.Context(), sock, nil)
 		if err != nil {
 			t.Fatalf("LockAlpha: %v", err)
 		}
@@ -101,7 +101,7 @@ func TestWaitAlphaGone_waitsForAlphaLockReleaseAndReportsWait(t *testing.T) {
 		var waitedDurations []time.Duration
 		var waitPID int
 		start := time.Now()
-		err = WaitAlphaGone(context.Background(), sock, 0, 15*time.Second, func(holderPID int, waited time.Duration) {
+		err = WaitAlphaGone(t.Context(), sock, 0, 15*time.Second, func(holderPID int, waited time.Duration) {
 			waitedDurations = append(waitedDurations, waited.Round(100*time.Millisecond))
 			waitPID = holderPID
 		}, nil)
@@ -138,7 +138,7 @@ func TestWaitAlphaGone_escalatesToSIGKILL(t *testing.T) {
 	})
 
 	var forceKilledPID int
-	err := WaitAlphaGone(context.Background(), sock, pid, 200*time.Millisecond, nil, func(killedPID int) {
+	err := WaitAlphaGone(t.Context(), sock, pid, 200*time.Millisecond, nil, func(killedPID int) {
 		forceKilledPID = killedPID
 	})
 	if err != nil {
