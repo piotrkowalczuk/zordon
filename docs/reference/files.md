@@ -65,6 +65,11 @@ repo "github.com/acme/infra" {
   ref    = "main"
   commit = "3fa7dbb8c2f3d539f6581087d94c9be899c88e1d"
 }
+
+source "github.com/acme/ui" {
+  ref    = "HEAD"
+  commit = "9b1e0f4c27d6a8e35f0c4b2d7a91e6c3f58d2b40"
+}
 ```
 
 | rule | behavior |
@@ -74,8 +79,14 @@ repo "github.com/acme/infra" {
 | changed ref | a require that names another ref than the entry resolves again and replaces the entry |
 | same ref | the locked commit is used even if the branch moved; its checkout is reused without the network |
 | `zordon pkg update` | re-resolves every repository the stack imports, or only the named ones, to the newest commit of its ref, and prints what moved or that the lock is up to date |
+| `zordon start --pull=pkg` | does what `zordon pkg update` does for the invocation's Alphasfile, then starts |
 | which lock | only the entrypoint's lock is read; locks inside imported repositories are ignored |
-| rewrite | when an entry is added or moved, zordon rewrites the lock with only the entries this load used, sorted by repository |
+| rewrite | when an entry is added or moved, zordon rewrites the lock with only the `repo` entries this load used, sorted by repository; `source` entries are kept |
+| `source` | one block per repository and ref that a started service's `git {}` follows: one with a `branch`, or none and so the default branch, written `HEAD`; a source pinned by `tag` or `rev` needs no entry |
+| missing `source` entry | `zordon start` resolves the ref and adds the entry |
+| locked source | a service that was not picked into a workspace is cloned at the locked commit, so its code changes only when the lock does; services that build from one repository and ref share the entry; a picked or `src {}` checkout is yours and is never moved |
+| `zordon start --pull=srv` | moves the `source` entry of every service it starts to the newest commit of its ref; `--pull=all`, or a bare `--pull`, does that and `--pull=pkg` |
+| behind | `zordon start` counts, for every `repo` and `source` pin of each level it starts, the commits the ref has that the pin does not, and `zordon status` shows `behind <ref> by <n>` next to the pin; the count is as of that start and a pin it could not fetch for is left out |
 
 Checkouts live in `$ZORDON_HOME/mod/<host>/<owner>/<repo>@<commit>`.
 

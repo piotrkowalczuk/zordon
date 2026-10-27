@@ -52,8 +52,10 @@ type FederationState struct {
 
 // NewFederationState discovers the chain root→leaf from the cwd, reads each
 // Alphasfile, and builds its InvocationState (leaf from cwd; parents rooted at
-// their own dir).
-func NewFederationState(zordonHome string, kc zlock.GlobalKeychain) (*FederationState, error) {
+// their own dir). updateLeaf re-resolves the repositories the invocation's
+// Alphasfile requires to their newest commit and locks them there, as zordon
+// pkg update does.
+func NewFederationState(zordonHome string, kc zlock.GlobalKeychain, updateLeaf bool) (*FederationState, error) {
 	chain, invFile, err := discoverChain(zordonHome)
 	if err != nil {
 		return nil, err
@@ -64,11 +66,16 @@ func NewFederationState(zordonHome string, kc zlock.GlobalKeychain) (*Federation
 	}
 	levels := make([]ChainLevel, 0, len(chain))
 	for _, afPath := range chain {
-		tree, err := loadTree(zordonHome, kc, afPath, chain)
+		isLeaf := afPath == invFile
+		opts, err := loadOptions(zordonHome, kc, afPath, chain)
 		if err != nil {
 			return nil, err
 		}
-		isLeaf := afPath == invFile
+		opts.UpdateAll = isLeaf && updateLeaf
+		tree, err := alphasfile.LoadTreeWith(afPath, opts)
+		if err != nil {
+			return nil, err
+		}
 		var inv *invocation.InvocationState
 		if isLeaf {
 			inv, err = invocation.NewInvocationState(cwd)

@@ -204,3 +204,31 @@ func revParse(t *testing.T, repo, ref string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+func TestCountBehind(t *testing.T) {
+	repo := taggedRepo(t)
+	v1 := revParse(t, repo, "v1")
+	head := revParse(t, repo, "main")
+	cases := map[string]struct {
+		ref, commit string
+		want        int
+	}{
+		"behind":  {"main", v1, 1},
+		"current": {"main", head, 0},
+		"HEAD":    {"HEAD", v1, 1},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			got, err := countBehind(t.Context(), repo, c.ref, c.commit)
+			if err != nil || got != c.want {
+				t.Fatalf("countBehind(%s, %s) = %d, %v; want %d", c.ref, c.commit, got, err, c.want)
+			}
+		})
+	}
+}
+
+func TestModFetcher_Behind_rejectsAnAbbreviatedCommit(t *testing.T) {
+	if _, err := (ModFetcher{Home: t.TempDir()}).Behind("github.com/acme/ui", "main", "abc123"); err == nil || !strings.Contains(err.Error(), "is not a commit hash") {
+		t.Fatalf("got %v", err)
+	}
+}

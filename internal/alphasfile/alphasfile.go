@@ -125,6 +125,12 @@ type Package struct {
 	Branch    string `json:"branch,omitempty"`
 	Tag       string `json:"tag,omitempty"`
 	Rev       string `json:"rev,omitempty"`
+	// Locked is the commit zordon.lock holds for a git source that follows
+	// a branch, or the default branch when it names none. A checkout that
+	// was not picked is cloned at it rather than at the moving ref, so the
+	// code changes only when the lock does. Empty for a source pinned by tag
+	// or rev, and for every other primary.
+	Locked string `json:"locked,omitempty"`
 	// Use-only: install a dependency instead of giving it a workspace.
 	// Install is the resolved coordinate — Go: `pkg@version` for
 	// `go install`; Rust: the crate name for `cargo install`. Features is

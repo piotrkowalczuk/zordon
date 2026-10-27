@@ -53,6 +53,8 @@ zordon pkg update
 
 It prints each repository that moved and rewrites the lock.
 Name repositories to update only some of them: `zordon pkg update github.com/piotrkowalczuk/zordon`.
+`zordon start --pull=pkg` does the same right before a start.
+`zordon status` shows how far each pin is behind its ref, as of the last start.
 To switch to another branch or tag, run `zordon pkg get` again with the new ref.
 
 ## Run a whole stack from a two-line Alphasfile

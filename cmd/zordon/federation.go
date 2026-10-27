@@ -17,6 +17,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/source"
 	"github.com/piotrkowalczuk/zordon/internal/summary"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
@@ -178,7 +179,7 @@ func stateFromAlphasfile(af *alphasfile.Alphasfile) *protocol.StateInfo {
 // vs. strict-static); a returned (nil, nil) means "no state for this
 // level" — deeper levels won't see its services as parent context.
 func walkChain(zordonHome string, kc zlock.GlobalKeychain, resolve func(*level) (*protocol.StateInfo, error)) ([]*level, error) {
-	fed, err := NewFederationState(zordonHome, kc)
+	fed, err := NewFederationState(zordonHome, kc, false)
 	if err != nil {
 		return nil, err
 	}
@@ -211,12 +212,17 @@ func walkChain(zordonHome string, kc zlock.GlobalKeychain, resolve func(*level) 
 	return out, nil
 }
 
-func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, wantSummary bool, picks []string, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) error {
+func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, wantSummary bool, pull pullFlag, picks []string, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) error {
 	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
 
-	fed, err := NewFederationState(zordonHome, kc)
+	fed, err := NewFederationState(zordonHome, kc, pull.pkg)
 	if err != nil {
 		return err
+	}
+	for _, lvl := range fed.Levels() {
+		if lvl.IsLeaf() {
+			logLockChanges(log, lvl.Tree().LockChanges())
+		}
 	}
 	if len(fed.Levels()) > 1 {
 		log.Info("zordon", "federation chain (%d):", len(fed.Levels()))
@@ -296,6 +302,10 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
 
+		if err := pinLevel(lvl, af, zordonHome, kc, lvl.IsLeaf() && pull.srv, log); err != nil {
+			return fmt.Errorf("%s: %w", lvl.Path(), err)
+		}
+
 		sum, err := reconcileAlpha(ctx, lvl, af, old, parentDotenv, parentEnv, cfg, log)
 		if err != nil {
 			return err
@@ -317,6 +327,33 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 	return nil
 }
 
+// pinLevel pins the git sources of the level's services to the lock, moving
+// them to the newest commit with pull, and records how far every pin of the
+// level, sources and required repositories alike, is behind its ref.
+func pinLevel(lvl ChainLevel, af *alphasfile.Alphasfile, zordonHome string, kc zlock.GlobalKeychain, pull bool, log *zlog.Logger) error {
+	opts, err := loadOptions(zordonHome, kc, lvl.Path(), nil)
+	if err != nil {
+		return err
+	}
+	changes, pins, err := alphasfile.PinSources(af, opts, pull)
+	if err != nil {
+		return err
+	}
+	logLockChanges(log, changes)
+	recordUpstream(lvl.Invocation().StateDir, append(lvl.Tree().Pins(), pins...), source.ModFetcher{Home: zordonHome, Keychain: kc}, log)
+	return nil
+}
+
+func logLockChanges(log *zlog.Logger, changes []alphasfile.LockChange) {
+	for _, c := range changes {
+		old := c.Old
+		if old == "" {
+			old = "(new)"
+		}
+		log.Info("zordon", "%s %s@%s: %s -> %s", alphasfile.LockFileName, c.Repo, c.Ref, shortSHA(old), shortSHA(c.New))
+	}
+}
+
 // runClean runs each provision's `clean` teardown snippet for the
 // invocation (leaf) level. Like `zordon stop`, shared parents are left
 // untouched; we still walk the chain to accumulate the leaf's parent context
@@ -330,7 +367,7 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 // alpha is waited out rather than rejected; otherwise a running stack is an
 // error directing the user to stop first.
 func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, verbose, agent, waitStopped bool, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) error {
-	fed, err := NewFederationState(zordonHome, kc)
+	fed, err := NewFederationState(zordonHome, kc, false)
 	if err != nil {
 		return err
 	}

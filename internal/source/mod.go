@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
@@ -100,6 +101,47 @@ func (f ModFetcher) Resolve(repo, ref string) (string, error) {
 		return "", fmt.Errorf("fetch %s: %w", repo, err)
 	}
 	return p.ResolveCommit(ctx, ref)
+}
+
+// Behind fetches repo and counts the commits ref has that commit does not:
+// how far a pin is behind the ref it was taken from.
+func (f ModFetcher) Behind(repo, ref, commit string) (int, error) {
+	if !IsCommit(commit) {
+		return 0, fmt.Errorf("count %s behind %s: %q is not a commit hash", repo, ref, commit)
+	}
+	release, err := f.Keychain.LockRepo(context.Background(), repo)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	ctx := context.Background()
+	p, err := NewPrimary(f.Home, repo, "", ref, nil)
+	if err != nil {
+		return 0, err
+	}
+	if err := p.Ensure(ctx, captureRunner); err != nil {
+		return 0, fmt.Errorf("fetch %s: %w", repo, err)
+	}
+	return countBehind(ctx, p.primaryPath(), ref, commit)
+}
+
+// countBehind counts the commits ref has that commit does not, in gitDir.
+func countBehind(ctx context.Context, gitDir, ref, commit string) (int, error) {
+	if err := CheckRef(ref); err != nil {
+		return 0, err
+	}
+	out, err := exec.CommandContext(ctx, "git", "-C", gitDir, "rev-list", "--count", commit+".."+ref).Output()
+	if err != nil {
+		return 0, fmt.Errorf("count %s..%s in %s: %w", shortRef(commit), ref, gitDir, err)
+	}
+	return strconv.Atoi(strings.TrimSpace(string(out)))
+}
+
+func shortRef(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
 }
 
 // Materialize checks repo out at commit into dest. A finished checkout of the

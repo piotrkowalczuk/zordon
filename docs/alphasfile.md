@@ -419,6 +419,8 @@ import "github.com/piotrkowalczuk/zordon/examples/package/caddy" {}
 | `zordon plan` | appends `(<repo>@<first 12 characters of the commit>)` or `(search <dir>)` to every remote import |
 | `zordon pkg get <repo>@<ref>` | writes the require to the `zordon.mod` above the Alphasfile, or into the Alphasfile (inside its package block if it has one), and locks the repository once the stack imports it |
 | `zordon pkg update [repo ...]` | moves the pins in `zordon.lock` to the newest commits of their refs |
+| `zordon start --pull=pkg` | moves every pin of the invocation's Alphasfile, then starts |
+| `zordon status` | shows `behind <ref> by <n>` next to a pin whose ref moved on, as counted by the last `zordon start` |
 
 See [zordon.work, zordon.mod and zordon.lock](reference/files.md) for the three files, [Use a package from another repository](how-to/use-a-package-from-another-repository.md), [Develop a dependency locally](how-to/develop-a-dependency-locally.md), and [examples/package](https://github.com/piotrkowalczuk/zordon/tree/main/examples/package) for a runnable stack.
 
@@ -430,6 +432,11 @@ defaults — keep the manifest small.
 - **`git { url = "host/owner/repo" }`** — remote source. zordon
   bare-clones once into `~/.zordon/src/...`; each invocation gets a
   fresh `git worktree`. `branch` / `tag` / `rev` pin the revision.
+  A source that follows a branch, or the default branch when it names
+  none, is locked: `zordon.lock` records the commit the first start
+  found, every later start builds that commit, and
+  `zordon start --pull=srv` moves it to the newest one. See
+  [zordon.lock](reference/files.md#zordonlock).
 - **`src { path = "/path" }`** — local checkout used in place (no
   clone, edit→start loop). Relative paths resolve against the
   **Alphasfile's directory**. `path` is interpolated, so it can be

@@ -130,6 +130,8 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	startFailfast := startFlags.BoolLongDefault("failfast", true, "abort bringup and shut down alpha on first service failure")
 	startServices := startFlags.StringLong("services", "", "services to bring up, comma/space-separated (env: ZORDON_SERVICES); merged with any positional [service ...] args")
 	startSummary := startFlags.BoolLong("summary", "after a successful start, print a per-service/per-provision timing summary (also shown by -v)")
+	var startPull pullFlag
+	startFlags.ValueLong("pull", &startPull, "move to the newest commit of their ref, and lock there: srv the git sources of the services started, pkg the repositories the Alphasfile requires, all both; bare --pull is all (write --pull=srv, not --pull srv)")
 	startCmd := &ff.Command{
 		Name:      "start",
 		Usage:     "zordon start [FLAGS] [service ...]",
@@ -138,7 +140,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		Exec: func(ctx context.Context, args []string) error {
 			zordonHome, kc := homeAndKeychain()
 			return runStart(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent, *startSummary,
-				parsePicks(append(strings.Fields(*startServices), args...)),
+				startPull, parsePicks(append(strings.Fields(*startServices), args...)),
 				zordonHome, kc,
 				testCfg())
 		},
@@ -866,7 +868,6 @@ func readHandshake(r *os.File, readyCh chan<- struct{}, errCh chan<- error, logf
 }
 
 func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) error {
-	_ = log // status output is structured stdout, not log-style
 
 	// Status reports the whole federation chain, not just the invocation.
 	levels, err := resolveChain(ctx, zordonHome, kc, testCfg)
@@ -881,14 +882,18 @@ func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome 
 			fmt.Fprintln(out)
 		}
 		fmt.Fprint(out, statusHeader(lv, wd))
-		if imports := statusImports(lv.tree, wd); imports != "" {
+		up, err := readUpstream(lv.inv.StateDir)
+		if err != nil {
+			log.Warn("zordon", "%s: %v", lv.afPath, err)
+		}
+		if imports := statusImports(lv.tree, wd, up); imports != "" {
 			fmt.Fprint(out, "\n"+imports)
 		}
 		if lv.state == nil {
 			continue
 		}
 		anyRunning = true
-		fmt.Fprint(out, "\n"+statusServices(ctx, lv.state, lv.inv.Workspace))
+		fmt.Fprint(out, "\n"+statusServices(ctx, lv.state, lv.inv.Workspace, up))
 	}
 	if !anyRunning {
 		return errors.New("no alpha running in the federation chain")
