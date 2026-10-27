@@ -264,7 +264,7 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 		}
 		cfgHash := invocation.ConfigHash(lvl.Bytes(), parentJSON)
 
-		unlock, err := control.Lock(inv.StateDir)
+		unlock, err := lockLevel(ctx, inv.StateDir, lvl.Path(), timeout, log)
 		if err != nil {
 			return err
 		}
@@ -373,12 +373,19 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			if !waitStopped {
 				return fmt.Errorf("%s: alpha is running (pid=%d); run `zordon stop` first, or `zordon stop --clean`", lvl.Path(), old.PID)
 			}
-			if err := waitSocketGone(ctx, inv.SocketPath(), timeout); err != nil {
+			if err := waitAlphaGone(ctx, inv.SocketPath(), old.PID, timeout, log); err != nil {
+				return fmt.Errorf("%s: waiting for alpha to stop before clean: %w", lvl.Path(), err)
+			}
+		} else if held, holderPID := control.ProbeAlpha(inv.SocketPath()); held {
+			if !waitStopped {
+				return fmt.Errorf("%s: alpha (pid=%d) is still tearing down; wait or run `zordon stop --clean`", lvl.Path(), holderPID)
+			}
+			if err := waitAlphaGone(ctx, inv.SocketPath(), holderPID, timeout, log); err != nil {
 				return fmt.Errorf("%s: waiting for alpha to stop before clean: %w", lvl.Path(), err)
 			}
 		}
 
-		unlock, err := control.Lock(inv.StateDir)
+		unlock, err := lockLevel(ctx, inv.StateDir, lvl.Path(), timeout, log)
 		if err != nil {
 			return err
 		}
@@ -414,10 +421,12 @@ func cleanLeaf(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, p
 	}
 
 	cleanErr := pushClean(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.agent)
-	// Always shut the transient alpha down, success or failure.
+	// Always shut the transient alpha down, success or failure, and wait for
+	// its teardown before returning so a subsequent `zordon start` doesn't race it.
 	if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
 		log.Error("zordon", "shutdown transient alpha: %v", e)
 	}
+	_ = waitAlphaGone(ctx, sock, 0, cfg.timeout, log)
 	if cleanErr != nil {
 		return fmt.Errorf("%s: %w", lvl.afPath, cleanErr)
 	}
@@ -503,27 +512,47 @@ func runSudoSteps(services []*alphasfile.Service, log *zlog.Logger) {
 	}
 }
 
-// waitSocketGone blocks until nothing answers on sock (old alpha exited) or
-// the timeout elapses.
-func waitSocketGone(ctx context.Context, sock string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	delay := 20 * time.Millisecond
-	for {
-		c, err := control.Dial(sock, 100*time.Millisecond)
-		if err != nil {
-			return nil
-		}
-		c.Close()
-		if time.Now().After(deadline) {
-			return errors.New("old alpha still listening")
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-		}
-		if delay < 250*time.Millisecond {
-			delay *= 2
-		}
+// lockLevel acquires <stateDir>/start.lock with timeout and contention logging
+// so a second `zordon start` / `zordon clean` informs the user which PID holds
+// the lock instead of hanging silently.
+func lockLevel(ctx context.Context, stateDir, afPath string, timeout time.Duration, log *zlog.Logger) (func(), error) {
+	lockCtx := ctx
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		lockCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
+	return control.LockWait(lockCtx, stateDir, func(lockPath string, holderPID int, waited time.Duration) {
+		if log == nil {
+			return
+		}
+		if holderPID > 0 {
+			if waited == 0 {
+				log.Warn("zordon", "%s: another zordon (pid=%d) holds %s; waiting for it to finish", afPath, holderPID, lockPath)
+			} else {
+				log.Warn("zordon", "%s: still waiting for zordon (pid=%d) on %s (%s elapsed)", afPath, holderPID, lockPath, waited.Round(time.Second))
+			}
+			return
+		}
+		log.Warn("zordon", "%s: waiting for lock %s (%s elapsed)", afPath, lockPath, waited.Round(time.Second))
+	})
+}
+
+// waitAlphaGone delegates to control.WaitAlphaGone while logging progress if
+// teardown takes longer than 1s or requires SIGKILL escalation.
+func waitAlphaGone(ctx context.Context, sock string, pid int, timeout time.Duration, log *zlog.Logger) error {
+	return control.WaitAlphaGone(ctx, sock, pid, timeout, func(holderPID int, waited time.Duration) {
+		if log == nil {
+			return
+		}
+		if holderPID > 0 {
+			log.Info("zordon", "waiting for old alpha (pid=%d) to finish teardown (%s elapsed)", holderPID, waited.Round(100*time.Millisecond))
+		} else {
+			log.Info("zordon", "waiting for old alpha to finish teardown (%s elapsed)", waited.Round(100*time.Millisecond))
+		}
+	}, func(holderPID int) {
+		if log != nil {
+			log.Warn("zordon", "old alpha (pid=%d) did not exit within %s; sending SIGKILL", holderPID, timeout)
+		}
+	})
 }

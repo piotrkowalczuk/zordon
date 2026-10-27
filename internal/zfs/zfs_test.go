@@ -1,10 +1,13 @@
 package zfs
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 )
 
 func TestZordonHome_overrideWins(t *testing.T) {
@@ -260,4 +263,95 @@ func TestCheckSpawnCwd(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAcquireLockWait_probeAndContention(t *testing.T) {
+	dir := t.TempDir()
+
+	synctest.Test(t, func(t *testing.T) {
+		if held, pid := ProbeLock(dir, "start"); held || pid != 0 {
+			t.Fatalf("ProbeLock before acquire = (%v, %d), want (false, 0)", held, pid)
+		}
+
+		release1, err := AcquireLock(dir, "start")
+		if err != nil {
+			t.Fatalf("AcquireLock: %v", err)
+		}
+
+		held, pid := ProbeLock(dir, "start")
+		if !held || pid != os.Getpid() {
+			release1()
+			t.Fatalf("ProbeLock while held = (%v, %d), want (true, %d)", held, pid, os.Getpid())
+		}
+
+		// Hold the lock for 10.2s of virtual bubble time so AcquireLockWait must
+		// emit the initial 0s contention callback plus the 5s and 10s periodic
+		// updates before acquiring once release1() runs.
+		go func() {
+			time.Sleep(10200 * time.Millisecond)
+			release1()
+		}()
+
+		var waitedDurations []time.Duration
+		var reportedPID int
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		start := time.Now()
+		release2, err := AcquireLockWait(ctx, dir, "start", func(_ string, holderPID int, waited time.Duration) {
+			waitedDurations = append(waitedDurations, waited.Round(time.Second))
+			reportedPID = holderPID
+		})
+		if err != nil {
+			t.Fatalf("AcquireLockWait: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed < 10200*time.Millisecond || elapsed > 10300*time.Millisecond {
+			t.Errorf("AcquireLockWait acquired at %s, want ~10.2s in virtual clock", elapsed)
+		}
+		release2()
+
+		wantWaits := []time.Duration{0, 5 * time.Second, 10 * time.Second}
+		if len(waitedDurations) != len(wantWaits) {
+			t.Fatalf("onWait calls = %v, want %v", waitedDurations, wantWaits)
+		}
+		for i, want := range wantWaits {
+			if waitedDurations[i] != want {
+				t.Errorf("onWait[%d] = %s, want %s", i, waitedDurations[i], want)
+			}
+		}
+		if reportedPID != os.Getpid() {
+			t.Errorf("onWait holderPID = %d, want %d", reportedPID, os.Getpid())
+		}
+
+		if held, _ := ProbeLock(dir, "start"); held {
+			t.Error("ProbeLock after release = true, want false")
+		}
+	})
+}
+
+func TestAcquireLockWait_contextCancelled(t *testing.T) {
+	dir := t.TempDir()
+
+	synctest.Test(t, func(t *testing.T) {
+		release, err := AcquireLock(dir, "start")
+		if err != nil {
+			t.Fatalf("AcquireLock: %v", err)
+		}
+		defer release()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		var calls int
+		_, err = AcquireLockWait(ctx, dir, "start", func(_ string, _ int, _ time.Duration) {
+			calls++
+		})
+		if err == nil {
+			t.Fatal("AcquireLockWait while lock held returned nil; want timeout error")
+		}
+		if !strings.Contains(err.Error(), "held by pid=") {
+			t.Errorf("error %q should include holder PID", err.Error())
+		}
+		if calls != 2 {
+			t.Errorf("onWait calls before 6s timeout = %d, want 2 (at 0s and 5s)", calls)
+		}
+	})
 }

@@ -1,10 +1,44 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"syscall"
 	"time"
 )
+
+// Alive reports whether a process with pid exists on the host.
+func Alive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// Terminate sends SIGTERM to pid. A non-positive pid or an already-exited
+// process (ESRCH) is a no-op.
+func Terminate(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("SIGTERM pid %d: %w", pid, err)
+	}
+	return nil
+}
+
+// Kill sends SIGKILL to pid. A non-positive pid or an already-exited
+// process (ESRCH) is a no-op.
+func Kill(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("SIGKILL pid %d: %w", pid, err)
+	}
+	return nil
+}
 
 // ReapGroup drives a process group to exit: SIGTERM(-pgid), wait up to grace for
 // exited to close, then SIGKILL(-pgid). Returns nil once the group is gone.

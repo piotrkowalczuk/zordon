@@ -74,8 +74,11 @@ func (b *Barrier) FiredAt() (time.Time, bool) {
 func Any(target *Barrier, sources ...*Barrier) {
 	for _, s := range sources {
 		go func(s *Barrier) {
-			<-s.Wait()
-			target.Trigger()
+			select {
+			case <-s.Wait():
+				target.Trigger()
+			case <-target.Wait():
+			}
 		}(s)
 	}
 }

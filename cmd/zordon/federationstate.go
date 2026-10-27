@@ -155,9 +155,25 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 		}
 		log.Info("zordon", "%s [%s]: %s, restarting alpha pid=%d", lvl.afPath, inv.FsHash, reason, old.PID)
 		if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
-			log.Error("zordon", "shutdown %s: %v", lvl.afPath, e)
+			if !control.IsNotRunning(e) && old.PID > 0 {
+				log.Warn("zordon", "shutdown %s (pid=%d): %v; sending SIGTERM", lvl.afPath, old.PID, e)
+				_ = control.TerminateAlpha(old.PID)
+			} else {
+				log.Error("zordon", "shutdown %s: %v", lvl.afPath, e)
+			}
 		}
-		if err := waitSocketGone(ctx, sock, cfg.timeout); err != nil {
+		if err := waitAlphaGone(ctx, sock, old.PID, cfg.timeout, log); err != nil {
+			return nil, fmt.Errorf("%s: waiting for old alpha to exit: %w", lvl.afPath, err)
+		}
+	} else if held, holderPID := control.ProbeAlpha(sock); held {
+		if c, dialErr := control.Dial(sock, 100*time.Millisecond); dialErr == nil {
+			_ = c.Close()
+			log.Warn("zordon", "%s [%s]: alpha (pid=%d) is not responding on %s; sending SIGTERM", lvl.afPath, inv.FsHash, holderPID, sock)
+			_ = control.TerminateAlpha(holderPID)
+		} else {
+			log.Info("zordon", "%s [%s]: waiting for previous alpha (pid=%d) to finish teardown", lvl.afPath, inv.FsHash, holderPID)
+		}
+		if err := waitAlphaGone(ctx, sock, holderPID, cfg.timeout, log); err != nil {
 			return nil, fmt.Errorf("%s: waiting for old alpha to exit: %w", lvl.afPath, err)
 		}
 	}

@@ -24,12 +24,14 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
@@ -58,7 +60,11 @@ func EnsureMise(zordonHome string, logOut io.Writer) (string, error) {
 	// Serialize cargo install so two alphas starting at the same time
 	// don't try to write the same binary. Re-check existence under the
 	// lock — the other waiter just did it for us.
-	release, err := zfs.AcquireLock(filepath.Join(zordonHome, "locks"), "mise")
+	release, err := zfs.AcquireLockWait(context.Background(), filepath.Join(zordonHome, "locks"), "mise", func(lockPath string, holderPID int, waited time.Duration) {
+		if logOut != nil {
+			_, _ = fmt.Fprintf(logOut, "waiting for mise install lock %s (held by pid=%d, %s elapsed)\n", lockPath, holderPID, waited.Round(time.Second))
+		}
+	})
 	if err != nil {
 		return "", err
 	}
@@ -353,7 +359,12 @@ func toolInstallCmd(binPath, dataDir, toolchain, version, name, ver string) (*ex
 // Acquire so the same locked critical section covers both installing
 // tools and reading env (which itself may auto-install the version).
 func Acquire(dataDir, tool, version string) (release func(), err error) {
-	return zfs.AcquireLock(filepath.Join(dataDir, "locks"), sanitizeForPath(tool)+"-"+version)
+	return AcquireWait(dataDir, tool, version, nil)
+}
+
+// AcquireWait is Acquire with contention reporting via onWait.
+func AcquireWait(dataDir, tool, version string, onWait func(lockPath string, holderPID int, waited time.Duration)) (release func(), err error) {
+	return zfs.AcquireLockWait(context.Background(), filepath.Join(dataDir, "locks"), sanitizeForPath(tool)+"-"+version, onWait)
 }
 
 // sanitizeForPath makes a mise tool ref safe as a single filesystem path

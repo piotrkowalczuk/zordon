@@ -22,6 +22,7 @@
 package zfs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // File is a type alias so callers can hold a *zfs.File without
@@ -169,6 +171,15 @@ func EnsureSharedDir(path string) error {
 // registry, and tools all funnel through here so the lock file mode,
 // open flags, and unlock-on-release behaviour stay uniform.
 func AcquireLock(stateDir, name string) (release func(), err error) {
+	return AcquireLockWait(context.Background(), stateDir, name, nil)
+}
+
+// AcquireLockWait is AcquireLock with context cancellation and contention
+// reporting. It tries a non-blocking LOCK_EX first; if another process holds
+// the lock, onWait (when non-nil) is invoked immediately with the lock path,
+// the holder's PID (0 if unknown), and 0 elapsed time, and then periodically
+// while polling until the lock is acquired or ctx is cancelled.
+func AcquireLockWait(ctx context.Context, stateDir, name string, onWait func(lockPath string, holderPID int, waited time.Duration)) (release func(), err error) {
 	if err := EnsureDir(stateDir); err != nil {
 		return nil, err
 	}
@@ -177,14 +188,79 @@ func AcquireLock(stateDir, name string) (release func(), err error) {
 	if err != nil {
 		return nil, fmt.Errorf("zfs: open lock %s: %w", lockPath, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == nil {
+		writeLockPID(f)
+		return unlockClosure(f), nil
+	}
+	if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 		_ = f.Close()
 		return nil, fmt.Errorf("zfs: flock %s: %w", lockPath, err)
 	}
-	return func() {
+
+	start := time.Now()
+	holderPID := readLockPID(f)
+	if holderPID == 0 {
+		time.Sleep(10 * time.Millisecond)
+		holderPID = readLockPID(f)
+	}
+	if onWait != nil {
+		onWait(lockPath, holderPID, 0)
+	}
+	lastReport := start
+	for {
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			if holderPID > 0 {
+				return nil, fmt.Errorf("zfs: waiting for lock %s (held by pid=%d): %w", lockPath, holderPID, ctx.Err())
+			}
+			return nil, fmt.Errorf("zfs: waiting for lock %s: %w", lockPath, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			writeLockPID(f)
+			return unlockClosure(f), nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			_ = f.Close()
+			return nil, fmt.Errorf("zfs: flock %s: %w", lockPath, err)
+		}
+		if onWait != nil && time.Since(lastReport) >= 5*time.Second {
+			if pid := readLockPID(f); pid > 0 {
+				holderPID = pid
+			}
+			onWait(lockPath, holderPID, time.Since(start))
+			lastReport = time.Now()
+		}
+	}
+}
+
+// ProbeLock reports whether an exclusive lock on <stateDir>/<name>.lock is
+// currently held by any open file description, along with the holder's PID
+// when recorded in the lock file.
+func ProbeLock(stateDir, name string) (held bool, holderPID int) {
+	lockPath := filepath.Join(stateDir, name+".lock")
+	f, err := os.Open(lockPath)
+	if err != nil {
+		return false, 0
+	}
+	defer f.Close()
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+	if err == nil {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
-	}, nil
+		return false, 0
+	}
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		pid := readLockPID(f)
+		if pid == 0 {
+			time.Sleep(10 * time.Millisecond)
+			pid = readLockPID(f)
+		}
+		return true, pid
+	}
+	return false, 0
 }
 
 // AtomicWrite replaces path's contents with data via temp+sync+rename
@@ -608,4 +684,29 @@ func Copy(src, dst string) error {
 		return fmt.Errorf("zfs: close %s: %w", dst, err)
 	}
 	return nil
+}
+
+func unlockClosure(f *os.File) func() {
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}
+}
+
+func writeLockPID(f *os.File) {
+	_ = f.Truncate(0)
+	_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+}
+
+func readLockPID(f *os.File) int {
+	var buf [32]byte
+	n, _ := f.ReadAt(buf[:], 0)
+	if n <= 0 {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
 }

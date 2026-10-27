@@ -11,6 +11,7 @@ package conformance_test
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -113,37 +114,6 @@ service "go" "svc1" {
 	}
 }
 
-// waitGone polls a predicate until it returns true or the deadline
-// hits. Cheap wrapper to keep tests readable.
-func waitGone(pred func() bool, within time.Duration) error {
-	deadline := time.Now().Add(within)
-	for time.Now().Before(deadline) {
-		if pred() {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("predicate false after %s", within)
-}
-
-// parseSocketPath extracts the resolved control socket path from
-// alpha's startup log line ("listening on <path>").
-func parseSocketPath(t *testing.T, logPath string) string {
-	t.Helper()
-	b, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read alpha log: %v", err)
-	}
-	m := reAlphaListen.FindSubmatch(b)
-	if m == nil {
-		t.Fatalf("could not parse socket path from %s:\n%s", logPath, b)
-	}
-	return string(m[1])
-}
-
-// reAlphaListen matches alpha's listening line in the log.
-var reAlphaListen = regexp.MustCompile(`listening on (\S+)`)
-
 // TestLifecycle_failureSummaryShowsCulprit pins zordon's user-facing
 // diagnostic on bringup failure. The mechanism it exercises:
 //
@@ -241,3 +211,134 @@ service "go" "svc" {
 		}
 	}
 }
+
+// TestLifecycle_restartDoesNotDeleteGeneratedFiles reproduces issue #122:
+// when a running stack is restarted (`zordon start` over an already-running
+// alpha) and a service takes ~1.3s to exit after SIGTERM, the old alpha's
+// shutdownAll must finish BEFORE the new alpha starts and writes generated
+// `file` blocks — otherwise the old alpha's deferred file cleanup deletes the
+// `.env` the new alpha just wrote. Also verifies user-visible progress logging
+// when teardown takes >1s and `[pid]` attribution in the shared alpha.log.
+func TestLifecycle_restartDoesNotDeleteGeneratedFiles(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/svc1")
+
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
+
+  vars = { port = net::pickport() }
+
+  file "dotenv" {
+    path = "${fs::src()}/.env"
+    body = "PORT=${self.vars.port}\n"
+  }
+
+  runtime {
+    cmd = ["sh", "-c", "trap 'sleep 1.3; exit 0' TERM; ${fs::bin()}/svc1 -addr 127.0.0.1:${self.vars.port} & wait $!"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 100
+  }
+}
+`)
+
+	start1 := p.Zordon("start",
+		"--timeout", "120s",
+		"--alpha-log", p.AlphaLogPath(),
+	).WithTimeout(125 * time.Second).Run(t)
+	if start1.ExitCode != 0 {
+		t.Fatalf("first zordon start: exit %d\nstdout: %s\nstderr: %s", start1.ExitCode, start1.Stdout, start1.Stderr)
+	}
+	alphaPID1, _ := pidsFromAlphaLog(t, p.AlphaLogPath(), "svc1")
+
+	envPath := filepath.Join(p.Dir(), "src", "svc1", ".env")
+	if _, err := os.Stat(envPath); err != nil {
+		t.Fatalf(".env missing after first start: %v", err)
+	}
+
+	start2 := p.Zordon("start",
+		"--timeout", "120s",
+		"--alpha-log", p.AlphaLogPath(),
+	).WithTimeout(125 * time.Second).Run(t)
+	if start2.ExitCode != 0 {
+		t.Fatalf("second zordon start (restart): exit %d\nstdout: %s\nstderr: %s", start2.ExitCode, start2.Stdout, start2.Stderr)
+	}
+
+	if !strings.Contains(start2.Stderr, "waiting for old alpha") {
+		t.Errorf("expected restart stderr to report waiting for old alpha teardown, got:\n%s", start2.Stderr)
+	}
+	if pidAlive(alphaPID1) {
+		t.Errorf("first alpha pid %d still alive after restart completed", alphaPID1)
+	}
+
+	port2 := p.Get(t, "service.go.svc1.vars.port").Int()
+	wantEnv := fmt.Sprintf("PORT=%d\n", port2)
+
+	// Sleep briefly to catch any late-running old-alpha teardown that might have
+	// raced in the background if waitAlphaGone returned too early.
+	time.Sleep(500 * time.Millisecond)
+	gotEnv, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf(".env missing after restart (old alpha deleted new alpha's file!): %v", err)
+	}
+	if string(gotEnv) != wantEnv {
+		t.Errorf(".env after restart = %q, want %q", string(gotEnv), wantEnv)
+	}
+
+	logBytes, err := os.ReadFile(p.AlphaLogPath())
+	if err != nil {
+		t.Fatalf("read alpha log: %v", err)
+	}
+	wantTag := fmt.Sprintf("alpha[%d]", alphaPID1)
+	if !strings.Contains(string(logBytes), wantTag) {
+		t.Errorf("alpha.log missing PID-attributed tag %q:\n%s", wantTag, string(logBytes))
+	}
+}
+
+// waitGone polls a predicate until it returns true or the deadline
+// hits. Cheap wrapper to keep tests readable.
+func waitGone(pred func() bool, within time.Duration) error {
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if pred() {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("predicate false after %s", within)
+}
+
+// parseSocketPath extracts the resolved control socket path from
+// alpha's startup log line ("listening on <path>").
+func parseSocketPath(t *testing.T, logPath string) string {
+	t.Helper()
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read alpha log: %v", err)
+	}
+	m := reAlphaListen.FindSubmatch(b)
+	if m == nil {
+		t.Fatalf("could not parse socket path from %s:\n%s", logPath, b)
+	}
+	return string(m[1])
+}
+
+// reAlphaListen matches alpha's listening line in the log.
+var reAlphaListen = regexp.MustCompile(`listening on (\S+)`)

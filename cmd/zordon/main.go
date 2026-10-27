@@ -1001,8 +1001,16 @@ func runStop(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg a
 	if leaf == nil {
 		return errors.New("no invocation level in chain")
 	}
-	resp, err := control.Roundtrip(ctx, leaf.inv.SocketPath(), &protocol.Request{Op: protocol.OpShutdown})
+	sock := leaf.inv.SocketPath()
+	resp, err := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown})
 	if err != nil {
+		if !control.IsNotRunning(err) {
+			if held, holderPID := control.ProbeAlpha(sock); held && holderPID > 0 {
+				log.Warn("zordon", "alpha (pid=%d) did not respond to shutdown (%v); sending SIGTERM", holderPID, err)
+				_ = control.TerminateAlpha(holderPID)
+				return waitAlphaGone(ctx, sock, holderPID, 10*time.Second, log)
+			}
+		}
 		if control.IsNotRunning(err) {
 			log.Info("zordon", "alpha is not running")
 			return nil

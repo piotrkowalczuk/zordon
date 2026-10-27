@@ -699,7 +699,9 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
 	// materialize toolchains BEFORE services run).
 	defaultDataDir := filepath.Join(zordonHome, "toolchain")
 	dataDir := tools.ResolveDataDir(zordonHome, defaultDataDir, tc.lang, tc.version)
-	release, err := tools.Acquire(dataDir, tc.lang, tc.version)
+	release, err := tools.AcquireWait(dataDir, tc.lang, tc.version, func(lockPath string, holderPID int, waited time.Duration) {
+		log.Warn("alpha", "toolchain %s@%s: waiting for lock %s (held by pid=%d, %s elapsed)", tc.lang, tc.version, lockPath, holderPID, waited.Round(time.Second))
+	})
 	if err != nil {
 		log.Error("alpha", "toolchain %s: acquire: %v", tc.lang, err)
 		tc.lifecycle.Reach("failed")
@@ -766,7 +768,9 @@ func bringupPkgTools(tc *toolchainCtx, bin, zordonHome string, log *zlog.Logger)
 	var pooled []string
 	for ref, version := range tc.pkgTools {
 		dataDir := tools.ResolveDataDir(zordonHome, defaultDataDir, ref, version)
-		release, err := tools.Acquire(dataDir, ref, version)
+		release, err := tools.AcquireWait(dataDir, ref, version, func(lockPath string, holderPID int, waited time.Duration) {
+			log.Warn("alpha", "toolchain pkg: waiting for lock %s for %s@%s (held by pid=%d, %s elapsed)", lockPath, ref, version, holderPID, waited.Round(time.Second))
+		})
 		if err != nil {
 			log.Error("alpha", "toolchain pkg: acquire %s@%s: %v", ref, version, err)
 			tc.lifecycle.Reach("failed")
@@ -1678,8 +1682,16 @@ func serveAlpha(ctx context.Context, rc runConfig, life *daemon.Lifeline) error 
 	}
 	defer logF.Close()
 
-	log := zlog.New(logF, false)
+	log := zlog.New(logF, false).WithPID(os.Getpid())
 	log.Info("alpha", "starting pid=%d socket=%s", os.Getpid(), sockPath)
+
+	unlockAlpha, err := control.LockAlpha(ctx, sockPath, func(lockPath string, holderPID int, waited time.Duration) {
+		log.Warn("alpha", "waiting for previous alpha (pid=%d) to release %s (%s elapsed)", holderPID, lockPath, waited.Round(100*time.Millisecond))
+	})
+	if err != nil {
+		return fmt.Errorf("alpha lock: %w", err)
+	}
+	defer unlockAlpha()
 
 	// Reap orphans from a previous alpha for THIS fs_hash before binding the
 	// control socket: a service binary from the prior run holding a TCP port
@@ -2296,6 +2308,10 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		go runProvision(b, p.pc, p.parent)
 	}
 
+	bringupDone := make(chan struct{})
+	defer close(bringupDone)
+	go watchBringupProgress(bringupDone, bringupStart, toBringup, serviceCtxs, provs, state, stream, log)
+
 	// Wait for every service to settle (ready ∪ failed). doneBar is the
 	// composed "outcome decided" barrier — fires regardless of which
 	// terminal state was reached.
@@ -2354,6 +2370,66 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		Summary: buildStartSummary(toBringup, serviceCtxs, provs, bringupStart, time.Now()),
 	})
 	log.Info("alpha", "bringup complete")
+}
+
+// watchBringupProgress periodically logs what handleConfigure is still waiting
+// on so a long or stuck build, readiness probe, toolchain install, or provision
+// never leaves the user facing a silent terminal.
+func watchBringupProgress(done <-chan struct{}, bringupStart time.Time, services []*alphasfile.Service, serviceCtxs map[string]*serviceCtx, provs []provEntry, state *alphaState, stream *safeEncoder, log *zlog.Logger) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-state.shutdownCh:
+			return
+		case <-ticker.C:
+			pending := describeBringupWait(services, serviceCtxs, provs)
+			if len(pending) == 0 {
+				continue
+			}
+			msg := fmt.Sprintf("still bringing up (%s elapsed): waiting on %s",
+				time.Since(bringupStart).Round(time.Second), strings.Join(pending, ", "))
+			log.Info("alpha", "%s", msg)
+			stream.Send(&protocol.Event{Kind: protocol.EventLog, Service: "alpha", Stream: "stderr", Line: msg})
+		}
+	}
+}
+
+func describeBringupWait(services []*alphasfile.Service, serviceCtxs map[string]*serviceCtx, provs []provEntry) []string {
+	var pending []string
+	for _, svc := range services {
+		sc := serviceCtxs[svc.Name()]
+		if sc == nil || sc.doneBar.Triggered() {
+			continue
+		}
+		switch {
+		case !sc.build.Reached("running"):
+			pending = append(pending, svc.Name()+" (waiting for dependencies)")
+		case !sc.buildDoneBar.Triggered():
+			pending = append(pending, svc.Name()+" (building)")
+		case sc.lifecycle.Reached("running"):
+			pending = append(pending, svc.Name()+" (probing readiness)")
+		default:
+			pending = append(pending, svc.Name()+" (starting)")
+		}
+	}
+	for _, p := range provs {
+		if p.detached || p.pc.doneBar.Triggered() {
+			continue
+		}
+		label := p.pc.step.Name
+		if p.parent != nil {
+			label = p.parent.name + "/" + label
+		}
+		if p.pc.lifecycle.Reached("running") {
+			pending = append(pending, "provision "+label+" (running)")
+		} else {
+			pending = append(pending, "provision "+label+" (waiting for dependencies)")
+		}
+	}
+	return pending
 }
 
 // provEntry pairs a provision with its parent service so the bringup

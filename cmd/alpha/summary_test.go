@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
+	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
 
 // buildStartSummary is the adapter between the live serviceCtx/provisionCtx
@@ -87,4 +92,61 @@ func TestBuildStartSummary(t *testing.T) {
 	if p := got.Provisions[0]; p.Name != "seed" || p.Service != "api" || p.Detached {
 		t.Errorf("provision = {name %q service %q detached %v}, want {seed api false}", p.Name, p.Service, p.Detached)
 	}
+}
+
+func TestWatchBringupProgress_reportsPendingPhasesInSynctest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc := func(name string) *alphasfile.Service {
+			return &alphasfile.Service{
+				Toolchain: "go",
+				Runtime:   &alphasfile.RuntimeConfig{Name: name},
+			}
+		}
+		db := svc("db")
+		api := svc("api")
+
+		dbCtx := newServiceCtx("db", "go")
+		dbCtx.build.Reach("running")
+		apiCtx := newServiceCtx("api", "go")
+		seed := newProvisionCtx("service.go.api", &alphasfile.ProvisionStep{Name: "seed"})
+
+		services := []*alphasfile.Service{db, api}
+		ctxs := map[string]*serviceCtx{"db": dbCtx, "api": apiCtx}
+		provs := []provEntry{{pc: seed, parent: apiCtx, detached: false}}
+
+		var logBuf, streamBuf bytes.Buffer
+		log := zlog.New(&logBuf, true)
+		stream := newSafeEncoder(protocol.NewEncoder(&streamBuf))
+		state := &alphaState{shutdownCh: make(chan struct{})}
+
+		done := make(chan struct{})
+		go watchBringupProgress(done, time.Now(), services, ctxs, provs, state, stream, log)
+
+		// At +6s virtual time: db is building, api and seed are waiting for dependencies.
+		time.Sleep(6 * time.Second)
+		dbCtx.build.Reach("success")
+		dbCtx.lifecycle.Reach("ready")
+		apiCtx.build.Reach("success")
+		apiCtx.lifecycle.Reach("running")
+		seed.lifecycle.Reach("running")
+		synctest.Wait()
+
+		// At +11s virtual time: db is done, api is probing readiness, seed is running.
+		time.Sleep(5 * time.Second)
+		close(done)
+		apiCtx.lifecycle.Reach("ready")
+		seed.lifecycle.Reach("success")
+		synctest.Wait()
+
+		gotLog := logBuf.String()
+		if !strings.Contains(gotLog, "still bringing up (5s elapsed): waiting on db (building), api (waiting for dependencies), provision api/seed (waiting for dependencies)") {
+			t.Fatalf("log missing 5s progress report:\n%s", gotLog)
+		}
+		if !strings.Contains(gotLog, "still bringing up (10s elapsed): waiting on api (probing readiness), provision api/seed (running)") {
+			t.Fatalf("log missing 10s progress report:\n%s", gotLog)
+		}
+		if !strings.Contains(streamBuf.String(), "still bringing up (10s elapsed)") {
+			t.Fatalf("stream missing streamed EventLog progress:\n%s", streamBuf.String())
+		}
+	})
 }
