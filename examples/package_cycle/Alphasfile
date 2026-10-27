@@ -1,0 +1,10 @@
+# Three packages that need each other: a, b and c each import the other two
+# for their ports. The imports pass no features and no inputs and carry no
+# enabled, so the order they are configured in cannot change the result.
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  go { version = "1.27.0" }
+}
+
+import "./stack" {}

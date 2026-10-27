@@ -1,0 +1,37 @@
+package "a" {
+  outputs = {
+    port = { description = "Port a serves on.", type = number, value = component.app.service.go.a.vars.port }
+  }
+
+  import "../b" {}
+  import "../c" {}
+
+  component "app" {
+    service "go" "a" {
+      src {
+        path = "../../.."
+        exe  = "./examples/go/src/app"
+      }
+
+      vars = { port = net::pickport() }
+
+      env = {
+        PEER_B = "http://127.0.0.1:${package.b.outputs.port}"
+        PEER_C = "http://127.0.0.1:${package.c.outputs.port}"
+      }
+
+      runtime {
+        cmd = ["${fs::bin()}/a", "-addr", "127.0.0.1:${self.vars.port}"]
+      }
+
+      readiness {
+        http {
+          path = "/"
+          port = self.vars.port
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}

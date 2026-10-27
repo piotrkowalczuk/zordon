@@ -264,18 +264,20 @@ func sameSettings(a, b *pkgSettings) bool {
 // satisfied by that. Any other package gets the union of the features its
 // importers in the stack pass, and each input from the one importer that
 // sets it; importers are resolved first, because their features decide which
-// of their imports count.
+// of their imports count. An import with no enabled counts whatever those
+// features are, so packages that import each other that way need no order.
 func (t *Tree) resolvePackages() error {
 	plain := t.plainActive()
+	sure := t.surelyActive(plain)
 	pending := maps.Clone(t.packages)
 	for len(pending) > 0 {
 		progressed := false
 		for _, name := range sortedKeys(pending) {
 			p := pending[name]
-			if !p.entry && !t.importersDone(p, pending) {
+			if !p.entry && !t.importersDone(p, pending, sure) {
 				continue
 			}
-			if err := t.resolvePackage(p, plain); err != nil {
+			if err := t.resolvePackage(p, plain, sure); err != nil {
 				return err
 			}
 			delete(pending, name)
@@ -290,7 +292,7 @@ func (t *Tree) resolvePackages() error {
 		if !p.entry {
 			continue
 		}
-		needs, err := t.needsOf(p, plain)
+		needs, err := t.needsOf(p, plain, sure)
 		if err != nil {
 			return err
 		}
@@ -312,7 +314,7 @@ func (t *Tree) resolvePackages() error {
 	return nil
 }
 
-func (t *Tree) resolvePackage(p *pkgInstance, plain map[string]bool) error {
+func (t *Tree) resolvePackage(p *pkgInstance, plain, sure map[string]bool) error {
 	pb, who := p.file.block, "package "+p.name
 	if p.entry {
 		var err error
@@ -320,7 +322,7 @@ func (t *Tree) resolvePackage(p *pkgInstance, plain map[string]bool) error {
 		p.settings, err = resolveSettings(p, pb, p.set, who)
 		return err
 	}
-	needs, err := t.needsOf(p, plain)
+	needs, err := t.needsOf(p, plain, sure)
 	if err != nil {
 		return err
 	}
@@ -341,8 +343,10 @@ func (t *Tree) resolvePackage(p *pkgInstance, plain map[string]bool) error {
 
 // needsOf lists the imports of p that are part of the stack, other than the
 // entrypoint's top level: from scopes outside packages the entrypoint
-// reaches, and from packages in the stack whose enabled keeps the import.
-func (t *Tree) needsOf(p *pkgInstance, plain map[string]bool) ([]pkgNeed, error) {
+// reaches, and from packages in the stack whose enabled keeps the import. A
+// package in sure counts before it is resolved: only an enabled reads its
+// settings, and an import from a package still pending has none.
+func (t *Tree) needsOf(p *pkgInstance, plain, sure map[string]bool) ([]pkgNeed, error) {
 	who := "package " + p.name
 	var needs []pkgNeed
 	for _, scope := range sortedKeys(t.links) {
@@ -357,7 +361,7 @@ func (t *Tree) needsOf(p *pkgInstance, plain map[string]bool) ([]pkgNeed, error)
 			by := "component " + scope
 			if inPkg {
 				q := t.packages[owner]
-				if owner == p.name || !q.active {
+				if owner == p.name || !q.active && !sure[owner] {
 					continue
 				}
 				if l.block.EnabledRange != (hcl.Range{}) {
@@ -386,20 +390,52 @@ func (t *Tree) needsOf(p *pkgInstance, plain map[string]bool) ([]pkgNeed, error)
 	return needs, nil
 }
 
-// importersDone reports whether every package that imports p is resolved.
-func (t *Tree) importersDone(p *pkgInstance, pending map[string]*pkgInstance) bool {
+// importersDone reports whether every package whose import of p depends on
+// its settings is resolved. An import with no enabled from a package in sure
+// counts whatever that package's features are, so it does not wait.
+func (t *Tree) importersDone(p *pkgInstance, pending map[string]*pkgInstance, sure map[string]bool) bool {
 	for scope, links := range t.links {
 		owner, ok := packageOf(scope)
 		if !ok || owner == p.name || pending[owner] == nil {
 			continue
 		}
 		for _, l := range links {
-			if l.pkg == p {
-				return false
+			if l.pkg != p || sure[owner] && unconditional(l) {
+				continue
 			}
+			return false
 		}
 	}
 	return true
+}
+
+// surelyActive is the set of packages the stack reaches through imports that
+// carry no enabled: they are part of it whatever features resolve to.
+func (t *Tree) surelyActive(plain map[string]bool) map[string]bool {
+	sure := map[string]bool{}
+	for _, p := range t.packages {
+		if p.entry {
+			sure[p.name] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for scope, links := range t.links {
+			if owner, inPkg := packageOf(scope); inPkg && !sure[owner] || !inPkg && !plain[scope] {
+				continue
+			}
+			for _, l := range links {
+				if l.pkg != nil && unconditional(l) && !sure[l.pkg.name] {
+					sure[l.pkg.name], changed = true, true
+				}
+			}
+		}
+	}
+	return sure
+}
+
+func unconditional(l importLink) bool {
+	return l.block != nil && l.block.EnabledRange == (hcl.Range{})
 }
 
 // plainActive is the set of scopes outside packages in the stack: the

@@ -241,7 +241,7 @@ import "./caddy" "edge" {
 | an input from several imports | see [Inputs](#inputs): a map takes entries from all of them, any other type is an error |
 | unmet need | a feature the entrypoint leaves off is an error on the entrypoint's import that quotes the feature's description and names the importer |
 | entrypoint imports | several imports of the same package at the entrypoint's top level must pass the same features and the same input expressions, compared as written |
-| cycle | packages that import each other cannot be configured first; importing one of them at the entrypoint's top level breaks the cycle |
+| cycle | packages that import each other resolve in any order when none of those imports has `enabled`, since such an import counts whatever its importer's features are; a cycle through an import with `enabled` cannot be configured first, and importing one of its packages at the entrypoint's top level breaks it |
 | parts | every `Alphasfile.<name>` in the package's directory is a part of it; see [Parts](#parts) |
 | toolchain | the package's `toolchain {}` pins every component that has none of its own |
 | visibility | a package's components see each other and whatever the package or the component imports |
