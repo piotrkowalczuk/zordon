@@ -373,7 +373,7 @@ func TestLoadTreeWith_packageThatIsFederationLevel(t *testing.T) {
 		"Alphasfile":     `import "./web" {}`,
 		"web/Alphasfile": pkgWeb,
 	})
-	_, err := LoadTreeWith(root, LoadOptions{Chain: []string{filepath.Join(dir, "web", "Alphasfile"), root}})
+	_, err := LoadTreeWith(t.Context(), root, LoadOptions{Chain: []string{filepath.Join(dir, "web", "Alphasfile"), root}})
 	if err == nil || !strings.Contains(err.Error(), "is a federation level of this invocation") {
 		t.Fatalf("got %v", err)
 	}

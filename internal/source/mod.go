@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
@@ -81,18 +80,17 @@ func (p Primary) ResolveCommit(ctx context.Context, ref string) (string, error) 
 // ModFetcher fetches repositories that Alphasfiles import by identity. It
 // keeps the bare clones under the zordon home, like service sources.
 type ModFetcher struct {
-	Home string
+	Home zfs.StateDir
 }
 
 // Resolve fetches repo and returns the commit ref points at now.
-func (f ModFetcher) Resolve(repo, ref string) (string, error) {
-	release, err := f.lock(repo)
+func (f ModFetcher) Resolve(ctx context.Context, repo, ref string) (string, error) {
+	release, err := f.lock(ctx, repo)
 	if err != nil {
 		return "", err
 	}
 	defer release()
-	ctx := context.Background()
-	p, err := NewPrimary(f.Home, repo, "", ref, nil)
+	p, err := NewPrimary(f.Home.Path(), repo, "", ref, nil)
 	if err != nil {
 		return "", err
 	}
@@ -104,20 +102,20 @@ func (f ModFetcher) Resolve(repo, ref string) (string, error) {
 
 // Materialize checks repo out at commit into dest. A finished checkout of the
 // same commit is reused without touching the network.
-func (f ModFetcher) Materialize(repo, commit, dest string) error {
+func (f ModFetcher) Materialize(ctx context.Context, repo, commit, dest string) error {
 	if !IsCommit(commit) {
 		return fmt.Errorf("check out %s: %q is not a commit hash", repo, commit)
 	}
-	release, err := f.lock(repo)
+	release, err := f.lock(ctx, repo)
 	if err != nil {
 		return err
 	}
 	defer release()
-	p, err := NewPrimary(f.Home, repo, "", commit, nil)
+	p, err := NewPrimary(f.Home.Path(), repo, "", commit, nil)
 	if err != nil {
 		return err
 	}
-	if err := p.Clone(context.Background(), dest, commit, captureRunner); err != nil {
+	if err := p.Clone(ctx, dest, commit, captureRunner); err != nil {
 		return fmt.Errorf("check out %s@%s: %w", repo, commit, err)
 	}
 	return nil
@@ -125,8 +123,8 @@ func (f ModFetcher) Materialize(repo, commit, dest string) error {
 
 // lock serializes fetches and checkouts of repo across zordon processes,
 // which share its bare clone and checkouts under the home.
-func (f ModFetcher) lock(repo string) (func(), error) {
-	return zfs.AcquireLock(filepath.Join(f.Home, "locks"), "mod-"+strings.ReplaceAll(repo, "/", "_"))
+func (f ModFetcher) lock(ctx context.Context, repo string) (func(), error) {
+	return f.Home.Sub("locks").AcquireLock(ctx, "mod-"+strings.ReplaceAll(repo, "/", "_"), nil)
 }
 
 // captureRunner runs git quietly and folds its output into the error, so a

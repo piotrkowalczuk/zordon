@@ -31,6 +31,51 @@ func (l ChainLevel) Path() string                            { return l.afPath }
 func (l ChainLevel) Bytes() []byte                           { return l.tree.Bytes() }
 func (l ChainLevel) Tree() *alphasfile.Tree                  { return l.tree }
 func (l ChainLevel) Invocation() *invocation.InvocationState { return l.inv }
+func (l ChainLevel) Socket() control.AlphaSocketPath {
+	return control.AlphaSocketPath(l.inv.SocketPath())
+}
+func (l ChainLevel) State() zfs.StateDir { return l.inv.StateDir }
+
+// AcquireLock acquires <stateDir>/start.lock with timeout and contention logging
+// so a second `zordon start` / `zordon clean` informs the user which PID holds
+// the lock instead of hanging silently.
+func (l ChainLevel) AcquireLock(ctx context.Context, timeout time.Duration, log *zlog.Logger) (func(), error) {
+	lockCtx := ctx
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		lockCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	return l.State().AcquireLock(lockCtx, "start", func(lockPath string, holderPID int, waited time.Duration) {
+		if log == nil {
+			return
+		}
+		if holderPID > 0 {
+			if waited == 0 {
+				log.Warn("zordon", "%s: another zordon (pid=%d) holds %s; waiting for it to finish", l.afPath, holderPID, lockPath)
+			} else {
+				log.Warn("zordon", "%s: still waiting for zordon (pid=%d) on %s (%s elapsed)", l.afPath, holderPID, lockPath, waited.Round(time.Second))
+			}
+			return
+		}
+		log.Warn("zordon", "%s: waiting for lock %s (%s elapsed)", l.afPath, lockPath, waited.Round(time.Second))
+	})
+}
+
+// WaitAlphaGone blocks until this level's alpha socket and lifecycle lock are
+// released, logging progress if teardown takes longer than 1s.
+func (l ChainLevel) WaitAlphaGone(ctx context.Context, pid int, timeout time.Duration, log *zlog.Logger) error {
+	return l.Socket().WaitGone(ctx, pid, timeout, func(holderPID int, waited time.Duration) {
+		if log == nil {
+			return
+		}
+		if holderPID > 0 {
+			log.Info("zordon", "waiting for old alpha (pid=%d) to finish teardown (%s elapsed)", holderPID, waited.Round(100*time.Millisecond))
+		} else {
+			log.Info("zordon", "waiting for old alpha to finish teardown (%s elapsed)", waited.Round(100*time.Millisecond))
+		}
+	})
+}
 
 // IsLeaf reports whether this is the invocation (leaf) level — the one the
 // user ran `zordon start` in. Leaf-ness is a chain-position fact, NOT a
@@ -50,7 +95,7 @@ type FederationState struct {
 // NewFederationState discovers the chain root→leaf from the cwd, reads each
 // Alphasfile, and builds its InvocationState (leaf from cwd; parents rooted at
 // their own dir).
-func NewFederationState(zordonHome string) (*FederationState, error) {
+func NewFederationState(ctx context.Context, zordonHome string) (*FederationState, error) {
 	chain, invFile, err := discoverChain(zordonHome)
 	if err != nil {
 		return nil, err
@@ -61,7 +106,7 @@ func NewFederationState(zordonHome string) (*FederationState, error) {
 	}
 	levels := make([]ChainLevel, 0, len(chain))
 	for _, afPath := range chain {
-		tree, err := loadTree(zordonHome, afPath, chain)
+		tree, err := loadTree(ctx, zordonHome, afPath, chain)
 		if err != nil {
 			return nil, err
 		}
@@ -120,7 +165,7 @@ func canReuse(isLeaf bool, old *protocol.StateInfo, cfgHash string) bool {
 //	reused=false → af is freshly resolved; old (if non-nil) is a running alpha
 //	               the caller must stop before spawning the replacement.
 func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx *alphasfile.ParentContext, testCfg alphasfile.TestConfig) (af *alphasfile.Alphasfile, old *protocol.StateInfo, reused bool, err error) {
-	if resp, e := control.Roundtrip(ctx, lvl.inv.SocketPath(), &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
+	if resp, e := lvl.Socket().Roundtrip(ctx, &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
 		old = resp.State
 	}
 	if canReuse(lvl.IsLeaf(), old, cfgHash) {
@@ -146,7 +191,7 @@ func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx
 // won't even parse never tears down the old, healthy alpha.
 func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, old *protocol.StateInfo, parentDotenv []string, parentEnv map[string]string, cfg startConfig, log *zlog.Logger) (*summary.StartSummary, error) {
 	inv := lvl.inv
-	sock := inv.SocketPath()
+	sock := lvl.Socket()
 
 	if old != nil {
 		reason := "restart requested"
@@ -154,26 +199,15 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 			reason = "drift detected (config changed since alpha started)"
 		}
 		log.Info("zordon", "%s [%s]: %s, restarting alpha pid=%d", lvl.afPath, inv.FsHash, reason, old.PID)
-		if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
-			if !control.IsNotRunning(e) && old.PID > 0 {
-				log.Warn("zordon", "shutdown %s (pid=%d): %v; sending SIGTERM", lvl.afPath, old.PID, e)
-				_ = control.TerminateAlpha(old.PID)
-			} else {
-				log.Error("zordon", "shutdown %s: %v", lvl.afPath, e)
-			}
+		if _, e := sock.Roundtrip(ctx, &protocol.Request{Op: protocol.OpShutdown}); e != nil && !control.IsNotRunning(e) {
+			log.Error("zordon", "shutdown %s: %v", lvl.afPath, e)
 		}
-		if err := waitAlphaGone(ctx, sock, old.PID, cfg.timeout, log); err != nil {
+		if err := lvl.WaitAlphaGone(ctx, old.PID, cfg.timeout, log); err != nil {
 			return nil, fmt.Errorf("%s: waiting for old alpha to exit: %w", lvl.afPath, err)
 		}
-	} else if held, holderPID := control.ProbeAlpha(sock); held {
-		if c, dialErr := control.Dial(sock, 100*time.Millisecond); dialErr == nil {
-			_ = c.Close()
-			log.Warn("zordon", "%s [%s]: alpha (pid=%d) is not responding on %s; sending SIGTERM", lvl.afPath, inv.FsHash, holderPID, sock)
-			_ = control.TerminateAlpha(holderPID)
-		} else {
-			log.Info("zordon", "%s [%s]: waiting for previous alpha (pid=%d) to finish teardown", lvl.afPath, inv.FsHash, holderPID)
-		}
-		if err := waitAlphaGone(ctx, sock, holderPID, cfg.timeout, log); err != nil {
+	} else if held, holderPID := sock.ProbeLock(); held {
+		log.Info("zordon", "%s [%s]: waiting for previous alpha (pid=%d) to finish teardown", lvl.afPath, inv.FsHash, holderPID)
+		if err := lvl.WaitAlphaGone(ctx, holderPID, cfg.timeout, log); err != nil {
 			return nil, fmt.Errorf("%s: waiting for old alpha to exit: %w", lvl.afPath, err)
 		}
 	}
@@ -196,7 +230,7 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 	if err := spawnAlpha(cfg.alphaBin, levelLog, sock, cfg.timeout, cfg.verbose, log, inv.Env); err != nil {
 		return nil, fmt.Errorf("%s: %w", lvl.afPath, err)
 	}
-	if err := control.WaitListening(ctxLevel, sock); err != nil {
+	if err := sock.WaitListening(ctxLevel); err != nil {
 		return nil, fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
 	sum, err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent)

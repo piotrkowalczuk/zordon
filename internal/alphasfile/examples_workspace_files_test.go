@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 // Regression oracle for examples/workspace_files: the top-level workspace
@@ -20,7 +21,7 @@ func TestExampleWorkspaceFilesResolves(t *testing.T) {
 	}
 	wsDir := filepath.Join(root, "workspaces", "feature")
 	spec, err := RenderWorkspace(filepath.Join(root, "Alphasfile"), &invocation.InvocationState{
-		Dir: wsDir, Workspace: "feature", StateDir: wsDir,
+		Dir: wsDir, Workspace: "feature", StateDir: zfs.StateDir(wsDir),
 		FsHash: "abcd1234ef567890", TmpDir: "/tmp/zordon-abcd1234ef567890",
 	})
 	if err != nil {

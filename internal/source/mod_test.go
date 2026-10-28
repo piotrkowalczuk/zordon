@@ -100,8 +100,8 @@ func TestModFetcher(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(gitHome, ".config"))
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 
-	f := ModFetcher{Home: t.TempDir()}
-	commit, err := f.Resolve("github.com/acme/infra", "v1")
+	f := ModFetcher{Home: zfs.StateDir(t.TempDir())}
+	commit, err := f.Resolve(t.Context(), "github.com/acme/infra", "v1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestModFetcher(t *testing.T) {
 		t.Fatalf("Resolve = %q, want %q", commit, want)
 	}
 	dest := filepath.Join(t.TempDir(), "checkout")
-	if err := f.Materialize("github.com/acme/infra", commit, dest); err != nil {
+	if err := f.Materialize(t.Context(), "github.com/acme/infra", commit, dest); err != nil {
 		t.Fatal(err)
 	}
 	if got := revParse(t, dest, "HEAD"); got != commit {
@@ -118,10 +118,10 @@ func TestModFetcher(t *testing.T) {
 	if body, err := zfs.Read(filepath.Join(dest, "README.md")); err != nil || strings.TrimSpace(string(body)) != "one" {
 		t.Errorf("README.md = %q, %v; want the v1 content", body, err)
 	}
-	if err := f.Materialize("github.com/acme/infra", "v1", filepath.Join(t.TempDir(), "x")); err == nil || !strings.Contains(err.Error(), "is not a commit hash") {
+	if err := f.Materialize(t.Context(), "github.com/acme/infra", "v1", filepath.Join(t.TempDir(), "x")); err == nil || !strings.Contains(err.Error(), "is not a commit hash") {
 		t.Errorf("Materialize with a ref: %v", err)
 	}
-	if _, err := f.Resolve("github.com/acme/infra", "nope"); err == nil || !strings.Contains(err.Error(), `no branch, tag or commit "nope"`) {
+	if _, err := f.Resolve(t.Context(), "github.com/acme/infra", "nope"); err == nil || !strings.Contains(err.Error(), `no branch, tag or commit "nope"`) {
 		t.Errorf("Resolve of an unknown ref: %v", err)
 	}
 }
@@ -137,18 +137,18 @@ func TestModFetcher_concurrent(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(gitHome, ".config"))
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 
-	f := ModFetcher{Home: t.TempDir()}
+	f := ModFetcher{Home: zfs.StateDir(t.TempDir())}
 	dest := filepath.Join(t.TempDir(), "checkout")
 	want := revParse(t, upstream, "v1")
 	errs := make(chan error, 6)
 	for range 6 {
 		go func() {
-			commit, err := f.Resolve("github.com/acme/infra", "v1")
+			commit, err := f.Resolve(t.Context(), "github.com/acme/infra", "v1")
 			if err == nil && commit != want {
 				err = fmt.Errorf("Resolve = %q, want %q", commit, want)
 			}
 			if err == nil {
-				err = f.Materialize("github.com/acme/infra", commit, dest)
+				err = f.Materialize(t.Context(), "github.com/acme/infra", commit, dest)
 			}
 			errs <- err
 		}()

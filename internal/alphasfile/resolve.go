@@ -1,6 +1,7 @@
 package alphasfile
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -27,10 +28,10 @@ const (
 // Fetcher gets the repositories that imports name by identity.
 type Fetcher interface {
 	// Resolve returns the commit ref points at now, fetching as needed.
-	Resolve(repo, ref string) (commit string, err error)
+	Resolve(ctx context.Context, repo, ref string) (commit string, err error)
 	// Materialize checks repo out at commit into dest, reusing a finished
 	// checkout of the same commit.
-	Materialize(repo, commit, dest string) error
+	Materialize(ctx context.Context, repo, commit, dest string) error
 }
 
 // LoadOptions tunes how LoadTreeWith follows imports.
@@ -83,6 +84,7 @@ type importSource interface {
 }
 
 type identitySource struct {
+	ctx     context.Context
 	opts    LoadOptions
 	lock    *lockFile
 	refs    map[string]refUse
@@ -111,12 +113,13 @@ type reqScope struct {
 	reqs  map[string]*requireBlock
 }
 
-func newIdentitySource(opts LoadOptions) (*identitySource, error) {
+func newIdentitySource(ctx context.Context, opts LoadOptions) (*identitySource, error) {
 	lock, err := readLock(opts.LockPath)
 	if err != nil {
 		return nil, err
 	}
 	return &identitySource{
+		ctx:    ctx,
 		opts:   opts,
 		lock:   lock,
 		refs:   map[string]refUse{},
@@ -205,7 +208,7 @@ func (s *identitySource) resolve(importer *treeFile, imp *importBlock) (resolved
 		if !zfs.Exists(dest) {
 			return resolved{}, fmt.Errorf("%s: %s %q: %s@%s is not checked out and fetching is off", imp.DefRange, imp.keyword, imp.Path, repo, shortCommit(commit))
 		}
-	} else if err := s.opts.Fetcher.Materialize(repo, commit, dest); err != nil {
+	} else if err := s.opts.Fetcher.Materialize(s.ctx, repo, commit, dest); err != nil {
 		return resolved{}, fmt.Errorf("%s: %s %q: %w", imp.DefRange, imp.keyword, imp.Path, err)
 	}
 	repoAt := repo + "@" + commit
@@ -388,7 +391,7 @@ func (s *identitySource) commitFor(repo, ref string, imp *importBlock) (string, 
 	if s.opts.Fetcher == nil {
 		return "", fmt.Errorf("%s: %s %q: %s@%s is not in %s and fetching is off", imp.DefRange, imp.keyword, imp.Path, repo, ref, LockFileName)
 	}
-	commit, err := s.opts.Fetcher.Resolve(repo, ref)
+	commit, err := s.opts.Fetcher.Resolve(s.ctx, repo, ref)
 	if err != nil {
 		return "", fmt.Errorf("%s: %s %q: %w", imp.DefRange, imp.keyword, imp.Path, err)
 	}

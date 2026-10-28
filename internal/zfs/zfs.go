@@ -162,48 +162,75 @@ func EnsureSharedDir(path string) error {
 	return nil
 }
 
-// AcquireLock takes a process-wide exclusive flock on
-// <stateDir>/<name>.lock. The state dir is created if missing
-// (EnsureDir semantics). The returned release function drops the
-// lock and closes the FD; callers `defer release()`.
-//
-// This is the only way to take a file lock in zordon — control,
-// registry, and tools all funnel through here so the lock file mode,
-// open flags, and unlock-on-release behaviour stay uniform.
-func AcquireLock(stateDir, name string) (release func(), err error) {
-	return AcquireLockWait(context.Background(), stateDir, name, nil)
+// StateDir is a directory holding lock and state files. Injecting it once
+// binds lock operations (AcquireLock, TryAcquireLock, ProbeLock) and child
+// path resolution (Join, Sub) to that directory via methods instead of
+// threading raw path strings through every call.
+type StateDir string
+
+// Path returns the state directory path as a string.
+func (d StateDir) Path() string { return string(d) }
+
+// String returns the state directory path.
+func (d StateDir) String() string { return string(d) }
+
+// IsSet reports whether the state directory path is non-empty.
+func (d StateDir) IsSet() bool { return d != "" }
+
+// Join joins path elements onto d and returns the resulting path string.
+func (d StateDir) Join(elem ...string) string {
+	return filepath.Join(append([]string{string(d)}, elem...)...)
 }
 
-// AcquireLockWait is AcquireLock with context cancellation and contention
-// reporting. It tries a non-blocking LOCK_EX first; if another process holds
-// the lock, onWait (when non-nil) is invoked immediately with the lock path,
-// the holder's PID (0 if unknown), and 0 elapsed time, and then periodically
-// while polling until the lock is acquired or ctx is cancelled.
-func AcquireLockWait(ctx context.Context, stateDir, name string, onWait func(lockPath string, holderPID int, waited time.Duration)) (release func(), err error) {
-	if err := EnsureDir(stateDir); err != nil {
-		return nil, err
+// Sub returns a child StateDir rooted under d.
+func (d StateDir) Sub(elem ...string) StateDir {
+	return StateDir(d.Join(elem...))
+}
+
+// TryAcquireLock attempts a non-blocking exclusive flock on <d>/<name>.lock.
+// The state dir is created if missing (EnsureDir semantics). When acquired,
+// ok is true and the caller must invoke release() to drop the lock. When held
+// by another process, ok is false and holderPID is the lock holder's recorded
+// PID (0 if unknown).
+func (d StateDir) TryAcquireLock(name string) (release func(), holderPID int, ok bool, err error) {
+	if err := EnsureDir(d.Path()); err != nil {
+		return nil, 0, false, err
 	}
-	lockPath := filepath.Join(stateDir, name+".lock")
+	lockPath := filepath.Join(d.Path(), name+".lock")
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, filePerm)
 	if err != nil {
-		return nil, fmt.Errorf("zfs: open lock %s: %w", lockPath, err)
+		return nil, 0, false, fmt.Errorf("zfs: open lock %s: %w", lockPath, err)
 	}
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if err == nil {
 		writeLockPID(f)
-		return unlockClosure(f), nil
+		return unlockClosure(f), 0, true, nil
 	}
 	if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 		_ = f.Close()
-		return nil, fmt.Errorf("zfs: flock %s: %w", lockPath, err)
+		return nil, 0, false, fmt.Errorf("zfs: flock %s: %w", lockPath, err)
+	}
+	pid := readLockPID(f)
+	if pid == 0 {
+		time.Sleep(10 * time.Millisecond)
+		pid = readLockPID(f)
+	}
+	_ = f.Close()
+	return nil, pid, false, nil
+}
+
+// AcquireLock takes a process-wide exclusive flock on <d>/<name>.lock,
+// blocking until the lock is acquired or ctx is cancelled. It tries
+// TryAcquireLock first; if another process holds the lock, onWait (when
+// non-nil) is invoked immediately with 0 elapsed time and then every 5s.
+func (d StateDir) AcquireLock(ctx context.Context, name string, onWait func(lockPath string, holderPID int, waited time.Duration)) (release func(), err error) {
+	release, holderPID, ok, err := d.TryAcquireLock(name)
+	if err != nil || ok {
+		return release, err
 	}
 
+	lockPath := filepath.Join(d.Path(), name+".lock")
 	start := time.Now()
-	holderPID := readLockPID(f)
-	if holderPID == 0 {
-		time.Sleep(10 * time.Millisecond)
-		holderPID = readLockPID(f)
-	}
 	if onWait != nil {
 		onWait(lockPath, holderPID, 0)
 	}
@@ -211,37 +238,32 @@ func AcquireLockWait(ctx context.Context, stateDir, name string, onWait func(loc
 	for {
 		select {
 		case <-ctx.Done():
-			_ = f.Close()
 			if holderPID > 0 {
 				return nil, fmt.Errorf("zfs: waiting for lock %s (held by pid=%d): %w", lockPath, holderPID, ctx.Err())
 			}
 			return nil, fmt.Errorf("zfs: waiting for lock %s: %w", lockPath, ctx.Err())
 		case <-time.After(50 * time.Millisecond):
 		}
-		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			writeLockPID(f)
-			return unlockClosure(f), nil
+		var tryPID int
+		release, tryPID, ok, err = d.TryAcquireLock(name)
+		if err != nil || ok {
+			return release, err
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			_ = f.Close()
-			return nil, fmt.Errorf("zfs: flock %s: %w", lockPath, err)
+		if tryPID > 0 {
+			holderPID = tryPID
 		}
 		if onWait != nil && time.Since(lastReport) >= 5*time.Second {
-			if pid := readLockPID(f); pid > 0 {
-				holderPID = pid
-			}
 			onWait(lockPath, holderPID, time.Since(start))
 			lastReport = time.Now()
 		}
 	}
 }
 
-// ProbeLock reports whether an exclusive lock on <stateDir>/<name>.lock is
-// currently held by any open file description, along with the holder's PID
-// when recorded in the lock file.
-func ProbeLock(stateDir, name string) (held bool, holderPID int) {
-	lockPath := filepath.Join(stateDir, name+".lock")
+// ProbeLock reports whether an exclusive lock on <d>/<name>.lock is currently
+// held by any open file description, along with the holder's PID when recorded
+// in the lock file.
+func (d StateDir) ProbeLock(name string) (held bool, holderPID int) {
+	lockPath := filepath.Join(d.Path(), name+".lock")
 	f, err := os.Open(lockPath)
 	if err != nil {
 		return false, 0

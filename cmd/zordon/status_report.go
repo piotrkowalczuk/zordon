@@ -132,7 +132,7 @@ func statusReport(ctx context.Context, zordonHome string, testCfg alphasfile.Tes
 		if lv.isInvocation {
 			r.Workspace = lv.inv.Workspace
 			r.Alphasfile = lv.afPath
-			r.StateDir = lv.inv.StateDir
+			r.StateDir = lv.inv.StateDir.Path()
 			r.State = StackStopped
 			if live(lv.state) {
 				r.State = StackRunning

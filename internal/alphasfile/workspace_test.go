@@ -503,7 +503,7 @@ func renderWorkspace(t *testing.T, src string, extra map[string]string) (*Worksp
 	return RenderWorkspace(af, &invocation.InvocationState{
 		Dir:       filepath.Join(root, "workspaces", "feature"),
 		Workspace: "feature",
-		StateDir:  filepath.Join(root, "workspaces", "feature"),
+		StateDir:  zfs.StateDir(filepath.Join(root, "workspaces", "feature")),
 		FsHash:    "abcd1234ef567890",
 		TmpDir:    "/tmp/zordon-abcd1234ef567890",
 	})

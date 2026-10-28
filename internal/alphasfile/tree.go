@@ -1,6 +1,7 @@
 package alphasfile
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -81,16 +82,16 @@ type UnusedModule struct {
 
 // LoadTree reads the entrypoint at path and follows its imports from disk.
 func LoadTree(path string) (*Tree, error) {
-	return LoadTreeWith(path, LoadOptions{})
+	return LoadTreeWith(context.Background(), path, LoadOptions{})
 }
 
 // LoadTreeWith is LoadTree with options.
-func LoadTreeWith(path string, opts LoadOptions) (*Tree, error) {
+func LoadTreeWith(ctx context.Context, path string, opts LoadOptions) (*Tree, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
-	src, err := newIdentitySource(opts)
+	src, err := newIdentitySource(ctx, opts)
 	if err != nil {
 		return nil, err
 	}

@@ -1,18 +1,19 @@
 package main
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 func TestWithBaseline_nothingFromTheHost(t *testing.T) {
-	home := "/z"
+	home := zfs.StateDir("/z")
 	got := envMap(withBaseline(nil, home))
 	want := map[string]string{
-		"GOPATH":     filepath.Join(home, "go"),
-		"GOMODCACHE": filepath.Join(home, "go", "pkg", "mod"),
-		"GOCACHE":    filepath.Join(home, "go", "cache"),
+		"GOPATH":     home.Join("go"),
+		"GOMODCACHE": home.Join("go", "pkg", "mod"),
+		"GOCACHE":    home.Join("go", "cache"),
 	}
 	for k, v := range want {
 		if got[k] != v {
@@ -38,7 +39,7 @@ func TestWithBaseline_hostValuesWin(t *testing.T) {
 
 func TestWithBaseline_explicitGoCacheWins(t *testing.T) {
 	got := envMap(withBaseline([]string{"GOCACHE=/mine"}, "/z"))
-	if got["GOCACHE"] != "/mine" || got["GOPATH"] != filepath.Join("/z", "go") {
+	if got["GOCACHE"] != "/mine" || got["GOPATH"] != zfs.StateDir("/z").Join("go") {
 		t.Errorf("env = %v", got)
 	}
 }

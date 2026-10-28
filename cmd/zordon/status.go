@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
-	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/source"
 )
@@ -29,8 +28,9 @@ func statusHeader(lv *level, wd string) string {
 			fmt.Fprintf(&b, " since %s", st.StartedAt)
 		}
 	} else if lv.inv != nil && lv.inv.TmpDir != "" {
-		if held, holderPID := control.ProbeAlpha(lv.inv.SocketPath()); held {
-			if c, err := control.Dial(lv.inv.SocketPath(), 100*time.Millisecond); err == nil {
+		sock := lv.Socket()
+		if held, holderPID := sock.ProbeLock(); held {
+			if c, err := sock.Dial(100 * time.Millisecond); err == nil {
 				_ = c.Close()
 				fmt.Fprintf(&b, "alpha: unresponsive pid=%d", holderPID)
 			} else {

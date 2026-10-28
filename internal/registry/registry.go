@@ -28,15 +28,31 @@
 package registry
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
+
+// Registry is the host-wide port → (fs_hash, service) directory backed by
+// <dir>/registry.json and synchronized across processes via <dir>/registry.lock.
+type Registry struct {
+	dir zfs.StateDir
+}
+
+// New binds a Registry to the given zordon home state directory.
+func New(dir zfs.StateDir) Registry {
+	return Registry{dir: dir}
+}
+
+// IsSet reports whether the registry has a configured state directory.
+func (r Registry) IsSet() bool {
+	return r.dir.IsSet()
+}
 
 // Entry is one row in the registry. The (FsHash, Service) pair is the
 // natural key — port can collide across fs_hashes legitimately when
@@ -62,11 +78,11 @@ type Logger interface {
 // Register adds an entry under flock. Existing entries for the same
 // (FsHash, Service) are replaced — a service restart shouldn't leave
 // two stale rows.
-func Register(zordonHome string, e Entry) error {
+func (r Registry) Register(ctx context.Context, e Entry) error {
 	if e.TS.IsZero() {
 		e.TS = time.Now().UTC()
 	}
-	return withFile(zordonHome, func(entries []Entry) ([]Entry, error) {
+	return r.withFile(ctx, func(entries []Entry) ([]Entry, error) {
 		entries = dropByService(entries, e.FsHash, e.Service)
 		return append(entries, e), nil
 	})
@@ -75,8 +91,8 @@ func Register(zordonHome string, e Entry) error {
 // Remove deletes the (FsHash, Service) entry. No-op if absent — a
 // service that never registered (no port) calling Remove on shutdown
 // is harmless.
-func Remove(zordonHome, fsHash, service string) error {
-	return withFile(zordonHome, func(entries []Entry) ([]Entry, error) {
+func (r Registry) Remove(ctx context.Context, fsHash, service string) error {
+	return r.withFile(ctx, func(entries []Entry) ([]Entry, error) {
 		return dropByService(entries, fsHash, service), nil
 	})
 }
@@ -84,10 +100,10 @@ func Remove(zordonHome, fsHash, service string) error {
 // LookupPort returns the first entry binding the given port. Useful
 // for `zordon ports` style debugging: a user staring at "bind: address
 // already in use" wants to know WHICH alpha holds 51010.
-func LookupPort(zordonHome string, port int) (Entry, bool, error) {
+func (r Registry) LookupPort(ctx context.Context, port int) (Entry, bool, error) {
 	var found Entry
 	var ok bool
-	err := withFileReadOnly(zordonHome, func(entries []Entry) {
+	err := r.withFileReadOnly(ctx, func(entries []Entry) {
 		for _, e := range entries {
 			if e.Port == port {
 				found, ok = e, true
@@ -101,9 +117,9 @@ func LookupPort(zordonHome string, port int) (Entry, bool, error) {
 // ListByFsHash returns every entry registered under the given fs_hash.
 // Used by alpha at startup to identify orphans from a previous run
 // of the same Alphasfile instance.
-func ListByFsHash(zordonHome, fsHash string) ([]Entry, error) {
+func (r Registry) ListByFsHash(ctx context.Context, fsHash string) ([]Entry, error) {
 	var out []Entry
-	err := withFileReadOnly(zordonHome, func(entries []Entry) {
+	err := r.withFileReadOnly(ctx, func(entries []Entry) {
 		for _, e := range entries {
 			if e.FsHash == fsHash {
 				out = append(out, e)
@@ -122,8 +138,8 @@ func ListByFsHash(zordonHome, fsHash string) ([]Entry, error) {
 // Entries whose pgid is already gone (process exited cleanly between
 // registration and now) are removed without signal — there's nothing
 // to reap.
-func ReapByFsHash(zordonHome, fsHash string, grace time.Duration, log Logger) error {
-	return withFile(zordonHome, func(entries []Entry) ([]Entry, error) {
+func (r Registry) ReapByFsHash(ctx context.Context, fsHash string, grace time.Duration, log Logger) error {
+	return r.withFile(ctx, func(entries []Entry) ([]Entry, error) {
 		var ours, others []Entry
 		for _, e := range entries {
 			if e.FsHash == fsHash {
@@ -181,8 +197,8 @@ func dropByService(entries []Entry, fsHash, service string) []Entry {
 // adjacent .lock file, reads the registry JSON, hands it to f for
 // mutation, writes the result back atomically (temp + rename so a
 // crash mid-write leaves the previous good state intact).
-func withFile(zordonHome string, f func([]Entry) ([]Entry, error)) error {
-	regPath, release, err := openLocked(zordonHome)
+func (r Registry) withFile(ctx context.Context, f func([]Entry) ([]Entry, error)) error {
+	regPath, release, err := r.openLocked(ctx)
 	if err != nil {
 		return err
 	}
@@ -202,8 +218,8 @@ func withFile(zordonHome string, f func([]Entry) ([]Entry, error)) error {
 // withFileReadOnly avoids the rewrite cost — still takes LOCK_EX so
 // the snapshot it reads is consistent with whatever a parallel writer
 // is doing (no half-written file ever observed).
-func withFileReadOnly(zordonHome string, f func([]Entry)) error {
-	regPath, release, err := openLocked(zordonHome)
+func (r Registry) withFileReadOnly(ctx context.Context, f func([]Entry)) error {
+	regPath, release, err := r.openLocked(ctx)
 	if err != nil {
 		return err
 	}
@@ -217,19 +233,19 @@ func withFileReadOnly(zordonHome string, f func([]Entry)) error {
 	return nil
 }
 
-// openLocked makes sure <zordonHome> exists, takes LOCK_EX on
-// <zordonHome>/registry.lock, and returns the registry's data path
+// openLocked makes sure <r.dir> exists, takes LOCK_EX on
+// <r.dir>/registry.lock, and returns the registry's data path
 // plus a release function. The lock is held for as long as the
 // caller keeps the release closure unrun.
-func openLocked(zordonHome string) (string, func(), error) {
-	if zordonHome == "" {
+func (r Registry) openLocked(ctx context.Context) (string, func(), error) {
+	if !r.dir.IsSet() {
 		return "", nil, errors.New("registry: empty zordon home")
 	}
-	release, err := zfs.AcquireLock(zordonHome, "registry")
+	release, err := r.dir.AcquireLock(ctx, "registry", nil)
 	if err != nil {
 		return "", nil, fmt.Errorf("registry: %w", err)
 	}
-	return filepath.Join(zordonHome, "registry.json"), release, nil
+	return r.dir.Join("registry.json"), release, nil
 }
 
 func readEntries(path string) ([]Entry, error) {

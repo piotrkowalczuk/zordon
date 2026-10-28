@@ -34,7 +34,7 @@ func TestExampleCleanResolves(t *testing.T) {
 
 	// fs::state() bakes the invocation's StateDir to an absolute path at
 	// eval time, so clean snippets carry no runtime env dependency.
-	state := iv.StateDir
+	state := iv.StateDir.Path()
 	for _, tc := range []struct {
 		prov      string
 		wantClean string

@@ -26,10 +26,7 @@ func StartIn(relPath string) StartOption {
 
 // StartTimeout overrides the bringup budget. It feeds both `--timeout`
 // and — one minute higher, so a slow-but-valid start is never falsely
-// killed — the harness process kill. The process kill is what actually
-// bounds a bringup: `--timeout` covers only alpha's spawn -> READY ->
-// listen handshake, because pushConfigure clears the socket deadline
-// once configure is on the wire. Default is 15m — enough for a cold
+// killed — the harness process kill. Default is 15m — enough for a cold
 // toolchain install on first run.
 func StartTimeout(bringup time.Duration) StartOption {
 	return func(o *startOpts) { o.bringup = bringup }

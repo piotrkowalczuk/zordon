@@ -1,6 +1,7 @@
 package zordontest
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,6 +42,7 @@ func (p *Project) AssertNoLeftovers(t *testing.T) {
 		// unconditionally and shouldn't blow up empty projects).
 		return
 	}
+	ctx := context.WithoutCancel(t.Context())
 
 	// `zordon stop` returns as soon as alpha ACKs OpShutdown — NOT when
 	// teardown finishes. The supervisor's registry.Remove runs only
@@ -54,7 +56,7 @@ func (p *Project) AssertNoLeftovers(t *testing.T) {
 	deadline := time.Now().Add(8 * time.Second)
 	for {
 		var err error
-		entries, err = registry.ListByFsHash(p.home, fs)
+		entries, err = p.registry.ListByFsHash(ctx, fs)
 		if err != nil {
 			t.Errorf("AssertNoLeftovers: registry read failed: %v", err)
 			return
@@ -67,7 +69,7 @@ func (p *Project) AssertNoLeftovers(t *testing.T) {
 	if len(entries) > 0 {
 		// Reap so the next test gets a clean registry, then report
 		// what we cleaned up.
-		_ = registry.ReapByFsHash(p.home, fs, 0, nil)
+		_ = p.registry.ReapByFsHash(ctx, fs, 0, nil)
 		names := make([]string, 0, len(entries))
 		for _, e := range entries {
 			names = append(names, e.Service)
@@ -99,7 +101,7 @@ func (p *Project) Nuke() {
 	if fs == "" {
 		return
 	}
-	_ = registry.ReapByFsHash(p.home, fs, 2*time.Second, nil)
+	_ = p.registry.ReapByFsHash(context.WithoutCancel(p.t.Context()), fs, 2*time.Second, nil)
 }
 
 // fsHash resolves this project's identity the same way alpha does:

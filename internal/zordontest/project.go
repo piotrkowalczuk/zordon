@@ -27,6 +27,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/piotrkowalczuk/zordon/internal/registry"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
@@ -34,12 +36,13 @@ import (
 // Lifetime is bounded by t.Cleanup — when the test ends, the harness
 // stops alpha gracefully and removes the temp tree.
 type Project struct {
-	t       *testing.T
-	root    string // absolute path to the project tmpdir
-	home    string // ZORDON_HOME for this project (shared cache by default)
-	binZ    string // path to the `zordon` binary
-	testLog string // ZORDON_TEST_LOG — where test:: HCL fns append observations
-	cfg     config // resolved options
+	t        *testing.T
+	root     string            // absolute path to the project tmpdir
+	home     string            // ZORDON_HOME for this project (shared cache by default)
+	registry registry.Registry // host-wide registry bound to home
+	binZ     string            // path to the `zordon` binary
+	testLog  string            // ZORDON_TEST_LOG — where test:: HCL fns append observations
+	cfg      config            // resolved options
 }
 
 // NewProject creates a fresh project tmpdir and registers cleanup.
@@ -67,12 +70,13 @@ func NewProject(t *testing.T, opts ...Option) *Project {
 	home := resolveHome(t, cfg)
 
 	p := &Project{
-		t:       t,
-		root:    root,
-		home:    home,
-		binZ:    binZ,
-		testLog: filepath.Join(root, "_test.log"),
-		cfg:     cfg,
+		t:        t,
+		root:     root,
+		home:     home,
+		registry: registry.New(zfs.StateDir(home)),
+		binZ:     binZ,
+		testLog:  filepath.Join(root, "_test.log"),
+		cfg:      cfg,
 	}
 	t.Cleanup(p.cleanup)
 	return p

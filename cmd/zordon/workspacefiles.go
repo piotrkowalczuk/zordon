@@ -191,12 +191,12 @@ func workspaceFilePath(inv *invocation.InvocationState, protected []string, rel 
 		}
 	}
 	for _, sub := range reservedStateDirs {
-		if zfs.Within(realPath(filepath.Join(inv.StateDir, sub)), abs) {
+		if zfs.Within(realPath(inv.StateDir.Join(sub)), abs) {
 			return "", fmt.Errorf("path %q writes into %s/, which zordon and its services own; declare a file{} block inside the service instead", rel, sub)
 		}
 	}
 	for _, name := range reservedStateFiles {
-		if abs == realPath(filepath.Join(inv.StateDir, name)) {
+		if abs == realPath(inv.StateDir.Join(name)) {
 			return "", fmt.Errorf("path %q is zordon's own %s", rel, name)
 		}
 	}

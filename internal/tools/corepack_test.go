@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
 	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
@@ -25,38 +26,38 @@ func TestCorepackMatrix(t *testing.T) {
 	pms := []string{"pnpm", "yarn"}
 
 	ztest.AssertSystem(t)
-	zordonHome := zordontest.DefaultHome(t)
-	dataDir := filepath.Join(zordonHome, "toolchain")
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	zordonHome := zfs.StateDir(zordontest.DefaultHome(t))
+	dataDir := zordonHome.Sub("toolchain")
+	if err := os.MkdirAll(dataDir.Path(), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	bin, err := EnsureMise(zordonHome, os.Stderr)
+	bin, err := EnsureMise(t.Context(), zordonHome, os.Stderr)
 	if err != nil {
 		t.Fatalf("EnsureMise: %v", err)
 	}
 
 	for _, nv := range nodeVersions {
 		t.Run("node-"+nv, func(t *testing.T) {
-			release, err := Acquire(dataDir, "node", nv)
+			release, err := Acquire(t.Context(), dataDir, "node", nv)
 			if err != nil {
 				t.Fatalf("Acquire: %v", err)
 			}
 			defer release()
 
-			env, err := MiseEnv(bin, dataDir, "node", nv, os.Stderr)
+			env, err := MiseEnv(bin, dataDir.Path(), "node", nv, os.Stderr)
 			if err != nil {
 				t.Fatalf("MiseEnv node@%s: %v", nv, err)
 			}
-			if err := EnsureNodeCorepack(bin, dataDir, nv, env, os.Stderr); err != nil {
+			if err := EnsureNodeCorepack(bin, dataDir.Path(), nv, env, os.Stderr); err != nil {
 				t.Fatalf("EnsureNodeCorepack node@%s: %v", nv, err)
 			}
-			if home := env["COREPACK_HOME"]; !strings.HasPrefix(home, filepath.Join(dataDir, "node-corepack", nv)+string(filepath.Separator)) {
+			if home := env["COREPACK_HOME"]; !strings.HasPrefix(home, dataDir.Join("node-corepack", nv)+string(filepath.Separator)) {
 				t.Errorf("COREPACK_HOME = %q, want a dir private to node %s under %s", home, nv, dataDir)
 			}
 			cwd := t.TempDir()
 			for _, pm := range pms {
 				cmd := exec.Command(bin, "exec", "node@"+nv, "--", pm, "--version")
-				cmd.Env = overlayEnv(isolatedEnv(dataDir, bin), env)
+				cmd.Env = overlayEnv(isolatedEnv(dataDir.Path(), bin), env)
 				cmd.Dir = cwd
 				out, err := cmd.CombinedOutput()
 				if err != nil {

@@ -290,7 +290,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "write the declared workspace files into an existing workspace",
 		Flags:     wsApplyFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runWorkspaceApply(zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsApplyWorkspace, zfs.ZordonHome(home.Path()))
+			return runWorkspaceApply(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsApplyWorkspace, zfs.ZordonHome(home.Path()))
 		},
 	}
 	wsServiceCmd.Subcommands = []*ff.Command{wsServiceAddCmd, wsServiceRmCmd}
@@ -390,7 +390,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "require a repository at a branch, tag or commit (in the zordon.mod above the Alphasfile, or in the Alphasfile when there is none) and lock it",
 		Flags:     pkgGetFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runPkgGet(stdio.Stdout, zfs.ZordonHome(home.Path()), args)
+			return runPkgGet(ctx, stdio.Stdout, zfs.ZordonHome(home.Path()), args)
 		},
 	}
 	pkgUpdateFlags := ff.NewFlagSet("update").SetParent(pkgFlags)
@@ -400,7 +400,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "re-resolve the required repositories (all, or the named ones) to their newest commits and rewrite zordon.lock",
 		Flags:     pkgUpdateFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runUpdate(stdio.Stdout, zfs.ZordonHome(home.Path()), args)
+			return runUpdate(ctx, stdio.Stdout, zfs.ZordonHome(home.Path()), args)
 		},
 	}
 	pkgCmd.Subcommands = []*ff.Command{pkgGetCmd, pkgUpdateCmd}
@@ -433,10 +433,10 @@ func walkUp() (string, error) {
 // NOT render the summary: rendering waits until the whole log stream is done
 // (see runStart), so the summary lands as a clean block after the logs, not
 // mid-stream.
-func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent bool) (*summary.StartSummary, error) {
+func pushConfigure(ctx context.Context, log *zlog.Logger, sock control.AlphaSocketPath, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent bool) (*summary.StartSummary, error) {
 	log.Info("alpha", "Understood, Zordon!")
 
-	conn, err := control.Dial(sock, 1*time.Second)
+	conn, err := sock.Dial(1 * time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}
@@ -444,6 +444,15 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.SetDeadline(time.Now())
+		case <-stop:
+		}
+	}()
 
 	enc := protocol.NewEncoder(conn)
 	dec := protocol.NewDecoder(conn)
@@ -463,9 +472,6 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 	}); err != nil {
 		return nil, fmt.Errorf("send configure: %w", err)
 	}
-
-	// Clear the deadline for the streaming phase (bringup can take minutes)
-	_ = conn.SetDeadline(time.Time{})
 
 	log.Info("zordon", "config pushed (%d services, failfast=%v), streaming bringup logs", len(af.All()), failfast)
 
@@ -510,6 +516,9 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 	for {
 		var ev protocol.Event
 		if err := dec.Read(&ev); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, finish(fmt.Errorf("bringup timed out: %w", ctxErr))
+			}
 			// Stream died without an explicit verdict (EOF or read
 			// error from alpha disappearing). Run the summary on
 			// whatever failures we've already recorded — the first
@@ -548,8 +557,8 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 // its teardown output. Simpler than pushConfigure: clean never starts
 // services, so there are no per-service ready/fail events or failure
 // summary — just log lines until EventDone (success) or EventError.
-func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, agent bool) error {
-	conn, err := control.Dial(sock, 1*time.Second)
+func pushClean(ctx context.Context, log *zlog.Logger, sock control.AlphaSocketPath, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, agent bool) error {
+	conn, err := sock.Dial(1 * time.Second)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -557,6 +566,15 @@ func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgH
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.SetDeadline(time.Now())
+		case <-stop:
+		}
+	}()
 
 	enc := protocol.NewEncoder(conn)
 	dec := protocol.NewDecoder(conn)
@@ -575,12 +593,14 @@ func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgH
 	}); err != nil {
 		return fmt.Errorf("send clean: %w", err)
 	}
-	_ = conn.SetDeadline(time.Time{})
 	log.Info("zordon", "clean requested (%d services), streaming", len(af.All()))
 
 	for {
 		var ev protocol.Event
 		if err := dec.Read(&ev); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("clean timed out: %w", ctxErr)
+			}
 			return fmt.Errorf("recv event: %w", err)
 		}
 		switch ev.Kind {
@@ -724,7 +744,7 @@ var pinnedFiles []*os.File
 
 func keepAlive(f *os.File) { pinnedFiles = append(pinnedFiles, f) }
 
-func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose bool, log *zlog.Logger, extraEnv map[string]string) error {
+func spawnAlpha(alphaBin, alphaLog string, sock control.AlphaSocketPath, timeout time.Duration, verbose bool, log *zlog.Logger, extraEnv map[string]string) error {
 	logf := func(format string, a ...any) { log.Info("zordon", format, a...) }
 	readyR, readyW, err := os.Pipe()
 	if err != nil {
@@ -744,7 +764,7 @@ func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose 
 		return fmt.Errorf("parent pipe: %w", err)
 	}
 
-	cmd := exec.Command(alphaBin, "run", "--socket", sock, "--log-file", alphaLog)
+	cmd := exec.Command(alphaBin, "run", "--socket", sock.Path(), "--log-file", alphaLog)
 	cmd.ExtraFiles = []*os.File{readyW}
 	cmd.Env = append(os.Environ(), "ZORDON_READY_FD="+strconv.Itoa(2+len(cmd.ExtraFiles)))
 	parentwatch.Attach(cmd, parentR, "ZORDON_PARENT_FD")
@@ -1001,19 +1021,15 @@ func runStop(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg a
 	if leaf == nil {
 		return errors.New("no invocation level in chain")
 	}
-	sock := leaf.inv.SocketPath()
-	resp, err := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown})
+	sock := leaf.Socket()
+	resp, err := sock.Roundtrip(ctx, &protocol.Request{Op: protocol.OpShutdown})
 	if err != nil {
-		if !control.IsNotRunning(err) {
-			if held, holderPID := control.ProbeAlpha(sock); held && holderPID > 0 {
-				log.Warn("zordon", "alpha (pid=%d) did not respond to shutdown (%v); sending SIGTERM", holderPID, err)
-				_ = control.TerminateAlpha(holderPID)
-				return waitAlphaGone(ctx, sock, holderPID, 10*time.Second, log)
-			}
-		}
 		if control.IsNotRunning(err) {
 			log.Info("zordon", "alpha is not running")
 			return nil
+		}
+		if held, holderPID := sock.ProbeLock(); held && holderPID > 0 {
+			return fmt.Errorf("alpha (pid=%d) did not respond to shutdown: %w", holderPID, err)
 		}
 		return err
 	}

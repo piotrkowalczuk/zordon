@@ -44,8 +44,8 @@ import (
 //
 // stderr from cargo install is piped to logOut so the user sees
 // progress on a slow first run.
-func EnsureMise(zordonHome string, logOut io.Writer) (string, error) {
-	bin := filepath.Join(zordonHome, "bin", "mise")
+func EnsureMise(ctx context.Context, zordonHome zfs.StateDir, logOut io.Writer) (string, error) {
+	bin := zordonHome.Join("bin", "mise")
 	if zfs.Exists(bin) {
 		return bin, nil
 	}
@@ -54,13 +54,13 @@ func EnsureMise(zordonHome string, logOut io.Writer) (string, error) {
 			"install cargo so zordon can `cargo install` it to %s, "+
 			"or pre-place a mise binary there yourself", bin)
 	}
-	if err := zfs.EnsureDir(filepath.Join(zordonHome, "bin")); err != nil {
+	if err := zfs.EnsureDir(zordonHome.Join("bin")); err != nil {
 		return "", err
 	}
 	// Serialize cargo install so two alphas starting at the same time
 	// don't try to write the same binary. Re-check existence under the
 	// lock — the other waiter just did it for us.
-	release, err := zfs.AcquireLockWait(context.Background(), filepath.Join(zordonHome, "locks"), "mise", func(lockPath string, holderPID int, waited time.Duration) {
+	release, err := zordonHome.Sub("locks").AcquireLock(ctx, "mise", func(lockPath string, holderPID int, waited time.Duration) {
 		if logOut != nil {
 			_, _ = fmt.Fprintf(logOut, "waiting for mise install lock %s (held by pid=%d, %s elapsed)\n", lockPath, holderPID, waited.Round(time.Second))
 		}
@@ -72,7 +72,7 @@ func EnsureMise(zordonHome string, logOut io.Writer) (string, error) {
 	if zfs.Exists(bin) {
 		return bin, nil
 	}
-	cmd := exec.Command("cargo", "install", "--root", zordonHome, "--locked", "mise")
+	cmd := exec.CommandContext(ctx, "cargo", "install", "--root", zordonHome.Path(), "--locked", "mise")
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
 	if err := cmd.Run(); err != nil {
@@ -114,21 +114,21 @@ func miseToolName(lang string) string {
 // `defaultDataDir` is what production wants as "<zordonHome>/toolchain"
 // and what tests want as "<testCache>/toolchain"; we don't synthesize
 // the path so the caller controls the convention.
-func ResolveDataDir(from, defaultDataDir, tool, version string) string {
+func ResolveDataDir(from, defaultDataDir, tool, version string) zfs.StateDir {
 	tool = miseToolName(tool)
 	bound := filepath.Dir(defaultDataDir)
 	dir := from
 	for {
 		candidate := filepath.Join(dir, ".zordon", "toolchain")
 		if zfs.Exists(filepath.Join(candidate, "installs", tool, version)) {
-			return candidate
+			return zfs.StateDir(candidate)
 		}
 		if dir == bound {
-			return defaultDataDir
+			return zfs.StateDir(defaultDataDir)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return defaultDataDir
+			return zfs.StateDir(defaultDataDir)
 		}
 		dir = parent
 	}
@@ -358,13 +358,13 @@ func toolInstallCmd(binPath, dataDir, toolchain, version, name, ver string) (*ex
 // implicitly). Callers wrap EnsureTools and MiseEnv together inside one
 // Acquire so the same locked critical section covers both installing
 // tools and reading env (which itself may auto-install the version).
-func Acquire(dataDir, tool, version string) (release func(), err error) {
-	return AcquireWait(dataDir, tool, version, nil)
+func Acquire(ctx context.Context, dataDir zfs.StateDir, tool, version string) (release func(), err error) {
+	return AcquireWait(ctx, dataDir, tool, version, nil)
 }
 
 // AcquireWait is Acquire with contention reporting via onWait.
-func AcquireWait(dataDir, tool, version string, onWait func(lockPath string, holderPID int, waited time.Duration)) (release func(), err error) {
-	return zfs.AcquireLockWait(context.Background(), filepath.Join(dataDir, "locks"), sanitizeForPath(tool)+"-"+version, onWait)
+func AcquireWait(ctx context.Context, dataDir zfs.StateDir, tool, version string, onWait func(lockPath string, holderPID int, waited time.Duration)) (release func(), err error) {
+	return dataDir.Sub("locks").AcquireLock(ctx, sanitizeForPath(tool)+"-"+version, onWait)
 }
 
 // sanitizeForPath makes a mise tool ref safe as a single filesystem path

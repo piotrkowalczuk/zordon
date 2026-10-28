@@ -349,7 +349,7 @@ func workspaceCtx(inv *invocation.InvocationState) *hcl.EvalContext {
 	fns := map[string]function.Function{
 		"os::env":   osEnvFunc(),
 		"fs::tmp":   staticStrFunc(inv.TmpDir),
-		"fs::state": staticStrFunc(inv.StateDir),
+		"fs::state": staticStrFunc(inv.StateDir.Path()),
 		"fs::bin":   staticStrFunc(inv.BinDir()),
 		"fs::hash":  staticStrFunc(inv.FsHash),
 	}
@@ -379,8 +379,8 @@ func workspaceName(inv *invocation.InvocationState) string {
 	if inv.Workspace != "" {
 		return inv.Workspace
 	}
-	if inv.StateDir != "" {
-		return filepath.Base(inv.StateDir)
+	if inv.StateDir.IsSet() {
+		return filepath.Base(inv.StateDir.Path())
 	}
 	return invocation.MainWorkspace
 }

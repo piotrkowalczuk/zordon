@@ -265,19 +265,23 @@ func TestCheckSpawnCwd(t *testing.T) {
 	}
 }
 
-func TestAcquireLockWait_probeAndContention(t *testing.T) {
-	dir := t.TempDir()
+func TestStateDir_AcquireLock_probeAndContention(t *testing.T) {
+	dir := StateDir(t.TempDir())
 
 	synctest.Test(t, func(t *testing.T) {
-		if held, pid := ProbeLock(dir, "start"); held || pid != 0 {
+		if held, pid := dir.ProbeLock("start"); held || pid != 0 {
 			t.Fatalf("ProbeLock before acquire = (%v, %d), want (false, 0)", held, pid)
 		}
 
-		release1, err := AcquireLock(dir, "start")
-		if err != nil {
-			t.Fatalf("AcquireLock: %v", err)
+		release1, holderPID, ok, err := dir.TryAcquireLock("start")
+		if err != nil || !ok || holderPID != 0 {
+			t.Fatalf("TryAcquireLock = (%v, %d, %v), want (true, 0, nil)", ok, holderPID, err)
 		}
-		if held, pid := ProbeLock(dir, "start"); !held || pid != os.Getpid() {
+		if _, busyPID, busyOK, busyErr := dir.TryAcquireLock("start"); busyErr != nil || busyOK || busyPID != os.Getpid() {
+			release1()
+			t.Fatalf("TryAcquireLock while held = (%v, %d, %v), want (false, %d, nil)", busyOK, busyPID, busyErr, os.Getpid())
+		}
+		if held, pid := dir.ProbeLock("start"); !held || pid != os.Getpid() {
 			release1()
 			t.Fatalf("ProbeLock while held = (%v, %d), want (true, %d)", held, pid, os.Getpid())
 		}
@@ -292,12 +296,12 @@ func TestAcquireLockWait_probeAndContention(t *testing.T) {
 
 		var waits []time.Duration
 		var reportedPID int
-		release2, err := AcquireLockWait(t.Context(), dir, "start", func(_ string, holderPID int, waited time.Duration) {
+		release2, err := dir.AcquireLock(t.Context(), "start", func(_ string, holderPID int, waited time.Duration) {
 			waits = append(waits, waited)
 			reportedPID = holderPID
 		})
 		if err != nil {
-			t.Fatalf("AcquireLockWait: %v", err)
+			t.Fatalf("AcquireLock: %v", err)
 		}
 		release2()
 
@@ -305,17 +309,17 @@ func TestAcquireLockWait_probeAndContention(t *testing.T) {
 			t.Fatalf("onWait = %v (pid=%d), want [0s 5s] (pid=%d)", waits, reportedPID, os.Getpid())
 		}
 
-		if held, _ := ProbeLock(dir, "start"); held {
+		if held, _ := dir.ProbeLock("start"); held {
 			t.Error("ProbeLock after release = true, want false")
 		}
 	})
 }
 
-func TestAcquireLockWait_contextCancelled(t *testing.T) {
-	dir := t.TempDir()
+func TestStateDir_AcquireLock_contextCancelled(t *testing.T) {
+	dir := StateDir(t.TempDir())
 
 	synctest.Test(t, func(t *testing.T) {
-		release, err := AcquireLock(dir, "start")
+		release, err := dir.AcquireLock(t.Context(), "start", nil)
 		if err != nil {
 			t.Fatalf("AcquireLock: %v", err)
 		}
@@ -324,11 +328,11 @@ func TestAcquireLockWait_contextCancelled(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
 		defer cancel()
 		var calls int
-		_, err = AcquireLockWait(ctx, dir, "start", func(_ string, _ int, _ time.Duration) {
+		_, err = dir.AcquireLock(ctx, "start", func(_ string, _ int, _ time.Duration) {
 			calls++
 		})
 		if err == nil {
-			t.Fatal("AcquireLockWait while lock held returned nil; want timeout error")
+			t.Fatal("AcquireLock while lock held returned nil; want timeout error")
 		}
 		if !strings.Contains(err.Error(), "held by pid=") {
 			t.Errorf("error %q should include holder PID", err.Error())

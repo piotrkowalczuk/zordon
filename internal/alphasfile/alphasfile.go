@@ -8,6 +8,7 @@
 package alphasfile
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"math/big"
@@ -251,13 +252,13 @@ func (m *ServiceMeta) Workspaceable() bool {
 // (vars / arguments / files / readiness / sudo are ignored). Pure, needs no
 // Invocation — the entry point for `zordon workspace`.
 func ParseServices(path string) ([]*ServiceMeta, error) {
-	return ParseServicesWith(path, LoadOptions{})
+	return ParseServicesWith(context.Background(), path, LoadOptions{})
 }
 
 // ParseServicesWith is ParseServices with load options, so imports resolve
 // the same way they do for the rest of a command.
-func ParseServicesWith(path string, opts LoadOptions) ([]*ServiceMeta, error) {
-	tree, err := LoadTreeWith(path, opts)
+func ParseServicesWith(ctx context.Context, path string, opts LoadOptions) ([]*ServiceMeta, error) {
+	tree, err := LoadTreeWith(ctx, path, opts)
 	if err != nil {
 		return nil, err
 	}
