@@ -25,6 +25,11 @@ type LockPin struct {
 // left alone. It returns the lock entries it added or moved, and every pin it
 // set.
 func PinSources(af *Alphasfile, opts LoadOptions, pull bool) ([]LockChange, []LockPin, error) {
+	release, err := lockPins(opts.Home, opts.LockPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer release()
 	lock, err := readLock(opts.LockPath)
 	if err != nil {
 		return nil, nil, err
@@ -33,14 +38,14 @@ func PinSources(af *Alphasfile, opts LoadOptions, pull bool) ([]LockChange, []Lo
 	pinned := map[sourceKey]string{}
 	for _, svc := range af.All() {
 		p := svc.Package
-		if p == nil || !p.followsBranch() || p.Editable || p.InPlace {
+		if p == nil || !p.FollowsBranch() || p.Editable || p.InPlace {
 			continue
 		}
 		prim, err := source.NewPrimary(opts.Home, p.Git, "", "", nil)
 		if err != nil {
 			return nil, nil, fmt.Errorf("service %s: %w", svc.Name(), err)
 		}
-		key := sourceKey{repo: prim.Repo, ref: p.followedRef()}
+		key := sourceKey{repo: prim.Repo, ref: p.FollowedRef()}
 		commit, ok := pinned[key]
 		if !ok {
 			locked, inLock := lock.sources[key]
@@ -74,6 +79,21 @@ func PinSources(af *Alphasfile, opts LoadOptions, pull bool) ([]LockChange, []Lo
 	return changes, sortPins(pins), nil
 }
 
+// FollowsBranch reports whether the package is a git source whose revision
+// moves: one that names a branch, or none and so takes the default branch.
+func (p *Package) FollowsBranch() bool {
+	return p.Git != "" && p.Tag == "" && p.Rev == ""
+}
+
+// FollowedRef is the ref a source that follows a branch resolves: its
+// branch, or HEAD for the default branch.
+func (p *Package) FollowedRef() string {
+	if p.Branch != "" {
+		return p.Branch
+	}
+	return "HEAD"
+}
+
 // pins lists the repositories a load used, sorted.
 func (l *lockFile) pins() []LockPin {
 	pins := make([]LockPin, 0, len(l.used))
@@ -89,18 +109,4 @@ func sortPins(pins []LockPin) []LockPin {
 		return cmp.Or(strings.Compare(a.Repo, b.Repo), strings.Compare(a.Ref, b.Ref))
 	})
 	return pins
-}
-
-// followsBranch reports whether the package is a git source whose revision
-// moves: one that names a branch, or none and so takes the default branch.
-func (p *Package) followsBranch() bool {
-	return p.Git != "" && p.Tag == "" && p.Rev == ""
-}
-
-// followedRef is the ref a source that follows a branch resolves.
-func (p *Package) followedRef() string {
-	if p.Branch != "" {
-		return p.Branch
-	}
-	return "HEAD"
 }

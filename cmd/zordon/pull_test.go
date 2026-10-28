@@ -37,3 +37,15 @@ func TestPullFlag_Set_rejectsAPolicy(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestPullFlag_Set_lastOneWins(t *testing.T) {
+	var p pullFlag
+	for _, v := range []string{"srv", "pkg"} {
+		if err := p.Set(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if p.srv || !p.pkg {
+		t.Errorf("--pull=srv --pull=pkg = %+v, want pkg only", p)
+	}
+}

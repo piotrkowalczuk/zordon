@@ -55,7 +55,7 @@ func statusImports(tree *alphasfile.Tree, wd string, up upstream) string {
 		case e.Origin != "":
 			if repo, commit, ok := strings.Cut(e.Origin, "@"); ok {
 				notes = append(notes, "@"+commit)
-				if n := up.note(repo, commit); n != "" {
+				if n := up.note(repo, "", commit); n != "" {
 					notes = append(notes, n)
 				}
 			}
@@ -127,18 +127,6 @@ func statusServices(ctx context.Context, st *protocol.StateInfo, workspace strin
 		}
 	}
 	return b.String()
-}
-
-// sourceNote says how far a service's locked git source is behind its ref.
-func sourceNote(s *alphasfile.Service, up upstream) string {
-	if s.Package == nil || s.Package.Locked == "" {
-		return ""
-	}
-	p, err := source.NewPrimary("", s.Package.Git, "", "", nil)
-	if err != nil {
-		return ""
-	}
-	return up.note(p.Repo, s.Package.Locked)
 }
 
 // live reports whether st comes from a running alpha rather than from

@@ -17,7 +17,6 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
-	"github.com/piotrkowalczuk/zordon/internal/source"
 	"github.com/piotrkowalczuk/zordon/internal/summary"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
@@ -302,7 +301,7 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
 
-		if err := pinLevel(lvl, af, zordonHome, kc, lvl.IsLeaf() && pull.srv, log); err != nil {
+		if err := pinLevel(ctx, lvl, af, zordonHome, kc, lvl.IsLeaf() && pull.srv, log); err != nil {
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
 
@@ -329,8 +328,9 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 
 // pinLevel pins the git sources of the level's services to the lock, moving
 // them to the newest commit with pull, and records how far every pin of the
-// level, sources and required repositories alike, is behind its ref.
-func pinLevel(lvl ChainLevel, af *alphasfile.Alphasfile, zordonHome string, kc zlock.GlobalKeychain, pull bool, log *zlog.Logger) error {
+// level, sources and required repositories alike, is behind its ref as of the
+// last fetch.
+func pinLevel(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, zordonHome string, kc zlock.GlobalKeychain, pull bool, log *zlog.Logger) error {
 	opts, err := loadOptions(zordonHome, kc, lvl.Path(), nil)
 	if err != nil {
 		return err
@@ -340,7 +340,9 @@ func pinLevel(lvl ChainLevel, af *alphasfile.Alphasfile, zordonHome string, kc z
 		return err
 	}
 	logLockChanges(log, changes)
-	recordUpstream(lvl.Invocation().StateDir, append(lvl.Tree().Pins(), pins...), source.ModFetcher{Home: zordonHome, Keychain: kc}, log)
+	if counter, ok := opts.Fetcher.(behindCounter); ok {
+		recordUpstream(ctx, lvl.Invocation().StateDir, append(lvl.Tree().Pins(), pins...), counter, log)
+	}
 	return nil
 }
 

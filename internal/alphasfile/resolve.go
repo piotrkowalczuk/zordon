@@ -2,6 +2,7 @@ package alphasfile
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/source"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 const (
@@ -471,6 +473,16 @@ func readLock(path string) (*lockFile, error) {
 		l.sources[sourceKey{repo: s.Repo, ref: s.Ref}] = s.Commit
 	}
 	return l, nil
+}
+
+// lockPins serializes reading and rewriting the lock at path across zordon
+// processes, see zlock.GlobalKeychain.LockPins. Without a home or a lock there
+// is nothing to serialize.
+func lockPins(home, path string) (func(), error) {
+	if home == "" || path == "" {
+		return func() {}, nil
+	}
+	return zlock.NewGlobalKeychain(home).LockPins(context.Background(), path)
 }
 
 // write rewrites the lock, sorted: the repositories this load used when

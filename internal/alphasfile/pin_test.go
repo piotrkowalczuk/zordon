@@ -1,8 +1,10 @@
 package alphasfile
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -142,4 +144,36 @@ func pinnedTo(af *Alphasfile, name string) string {
 		}
 	}
 	return "missing"
+}
+
+func TestPinSources_concurrentStartsKeepEachOthersPins(t *testing.T) {
+	dir, home := t.TempDir(), t.TempDir()
+	repos := map[string]string{}
+	for i := range 8 {
+		repos[fmt.Sprintf("github.com/acme/ui%d", i)] = gitRepo(t, map[string]string{"README": fmt.Sprint(i)})
+	}
+	f := newRepoFetcher(repos)
+	opts := LoadOptions{Home: home, LockPath: filepath.Join(dir, LockFileName), Fetcher: f}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(repos))
+	for repo := range repos {
+		wg.Go(func() {
+			af := &Alphasfile{Services: []*Service{pinSvc("ui", &Package{Git: repo})}}
+			if _, _, err := PinSources(af, opts, false); err != nil {
+				errs <- err
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	lock := readFile(t, filepath.Join(dir, LockFileName))
+	for repo := range repos {
+		if !strings.Contains(lock, "source \""+repo+"\"") {
+			t.Errorf("a concurrent start lost the pin of %s:\n%s", repo, lock)
+		}
+	}
 }

@@ -26,13 +26,14 @@ func (p *pullFlag) String() string {
 	return ""
 }
 
+// Set replaces what an earlier --pull chose, so the last one given wins.
 func (p *pullFlag) Set(v string) error {
+	*p = pullFlag{}
 	switch v {
 	case "true", "all":
 		p.srv, p.pkg = true, true
 		return nil
 	case "false":
-		p.srv, p.pkg = false, false
 		return nil
 	}
 	for part := range strings.SplitSeq(v, ",") {

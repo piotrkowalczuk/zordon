@@ -1,7 +1,9 @@
 package zlock
 
 import (
+	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -76,4 +78,33 @@ func TestGlobalKeychain(t *testing.T) {
 		t.Fatalf("LockRepo: %v", err)
 	}
 	unlockRepo()
+}
+
+func TestGlobalKeychain_LockPins(t *testing.T) {
+	kc := NewGlobalKeychain(t.TempDir())
+	project := filepath.Join(t.TempDir(), "zordon.lock")
+
+	unlock, err := kc.LockPins(t.Context(), project)
+	if err != nil {
+		t.Fatalf("LockPins: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := kc.LockPins(ctx, project); !errors.Is(err, context.DeadlineExceeded) {
+		unlock()
+		t.Fatalf("second LockPins of one project = %v, want it to wait", err)
+	}
+	other, err := kc.LockPins(t.Context(), filepath.Join(t.TempDir(), "zordon.lock"))
+	if err != nil {
+		unlock()
+		t.Fatalf("LockPins of another project: %v", err)
+	}
+	other()
+	unlock()
+
+	again, err := kc.LockPins(t.Context(), project)
+	if err != nil {
+		t.Fatalf("LockPins after unlock: %v", err)
+	}
+	again()
 }
