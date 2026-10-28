@@ -38,3 +38,17 @@ func TestLogger_Service_noColorNoAnsi(t *testing.T) {
 		t.Fatalf("unexpected line shape: %q", out)
 	}
 }
+
+func TestLogger_WithPID(t *testing.T) {
+	var humanBuf bytes.Buffer
+	New(&humanBuf, false).WithPID(85531).Info("alpha", "removed file %s", ".env")
+	if got := humanBuf.String(); !strings.Contains(got, "alpha[85531]    [INFO ] - removed file .env\n") {
+		t.Fatalf("human mode WithPID output = %q; want alpha[85531] column", got)
+	}
+
+	var agentBuf bytes.Buffer
+	New(&agentBuf, true).WithPID(63873).Warn("registry", "orphan reaper")
+	if got := agentBuf.String(); !strings.Contains(got, " registry[63873] WARN orphan reaper\n") {
+		t.Fatalf("agent mode WithPID output = %q; want registry[63873] column", got)
+	}
+}

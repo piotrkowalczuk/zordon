@@ -678,8 +678,8 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 
 		var etcDir, varDir string
 		if r.inv != nil {
-			etcDir = filepath.Join(r.inv.StateDir, "etc", display)
-			varDir = filepath.Join(r.inv.StateDir, "var", display)
+			etcDir = r.inv.StateDir.Join("etc", display)
+			varDir = r.inv.StateDir.Join("var", display)
 		}
 		st := &svcState{
 			sb:       sb,
@@ -2104,7 +2104,7 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 		"fs::src":   str(func() string { return dirs.root }),             // src.path: checkout root (service scope only)
 		"fs::exe":   str(func() string { return dirs.exe }),              // src.path + src.exe: exe-anchored work dir (= self.dir)
 		"fs::bin":   str(func() string { return r.binDir(dirs.module) }), // build outputs (outside src); <bin>/<module> inside a module
-		"fs::state": str(func() string { return r.inv.StateDir }),        // per-workspace state root (workspaces/<wt>)
+		"fs::state": str(func() string { return r.inv.StateDir.Path() }), // per-workspace state root (workspaces/<wt>)
 		"fs::etc":   str(func() string { return dirs.etc }),              // <StateDir>/etc/<svc>: generated config that must persist (service scope only)
 		"fs::var":   str(func() string { return dirs.vardir }),           // <StateDir>/var/<svc>: variable runtime state — db/logs (service scope only)
 		"fs::hash":  r.fsHashFunc(),                                      // instance identity (location)
@@ -2200,14 +2200,14 @@ func (r *resolver) svcPathFunc(sub string) function.Function {
 		Params: []function.Parameter{{Name: "service", Type: cty.DynamicPseudoType}},
 		Type:   function.StaticReturnType(cty.String),
 		Impl: func(args []cty.Value, _ cty.Type) (cty.Value, error) {
-			if r.inv == nil || r.inv.StateDir == "" {
+			if r.inv == nil || !r.inv.StateDir.IsSet() {
 				return cty.NilVal, fmt.Errorf("fs::service::%s() called but no invocation configured", sub)
 			}
 			module, _, name, err := serviceRefAttrs(args[0], "fs::service::"+sub)
 			if err != nil {
 				return cty.NilVal, err
 			}
-			return cty.StringVal(filepath.Join(r.inv.StateDir, sub, DisplayName(module, name))), nil
+			return cty.StringVal(r.inv.StateDir.Join(sub, DisplayName(module, name))), nil
 		},
 	})
 }

@@ -7,21 +7,6 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 )
 
-func svc(name string, after ...string) *alphasfile.Service {
-	return &alphasfile.Service{
-		Toolchain: "go",
-		Runtime:   &alphasfile.RuntimeConfig{Name: name, After: after},
-	}
-}
-
-func names(in []*alphasfile.Service) []string {
-	out := make([]string, len(in))
-	for i, s := range in {
-		out[i] = s.Name()
-	}
-	return out
-}
-
 func TestParsePicks(t *testing.T) {
 	cases := map[string]struct {
 		in   []string
@@ -157,6 +142,21 @@ func TestPickServices_ShortName(t *testing.T) {
 	if _, err := pickServices([]*alphasfile.Service{api}, []string{"shop/api"}); err == nil {
 		t.Error("only a module named like its package is left out of the short name")
 	}
+}
+
+func svc(name string, after ...string) *alphasfile.Service {
+	return &alphasfile.Service{
+		Toolchain: "go",
+		Runtime:   &alphasfile.RuntimeConfig{Name: name, After: after},
+	}
+}
+
+func names(in []*alphasfile.Service) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = s.Name()
+	}
+	return out
 }
 
 func equalStrings(a, b []string) bool {

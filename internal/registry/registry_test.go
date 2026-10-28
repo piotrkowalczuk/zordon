@@ -9,16 +9,18 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
-func TestRegister_thenLookup(t *testing.T) {
-	home := t.TempDir()
+func TestRegistry_Register_thenLookup(t *testing.T) {
+	reg := New(zfs.StateDir(t.TempDir()))
 	want := Entry{Port: 51010, FsHash: "abc", Service: "svc", PGID: 9347}
 
-	if err := Register(home, want); err != nil {
+	if err := reg.Register(t.Context(), want); err != nil {
 		t.Fatal(err)
 	}
-	got, ok, err := LookupPort(home, 51010)
+	got, ok, err := reg.LookupPort(t.Context(), 51010)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,27 +35,27 @@ func TestRegister_thenLookup(t *testing.T) {
 // REGRESSION: a service that restarts inside the same alpha (reconfigure)
 // must overwrite its old row — otherwise stale (PGID, port) entries
 // accumulate and confuse later reapers / debuggers.
-func TestRegister_sameServiceReplacesPriorEntry(t *testing.T) {
-	home := t.TempDir()
-	_ = Register(home, Entry{Port: 1000, FsHash: "abc", Service: "svc", PGID: 100})
-	_ = Register(home, Entry{Port: 2000, FsHash: "abc", Service: "svc", PGID: 200})
+func TestRegistry_Register_sameServiceReplacesPriorEntry(t *testing.T) {
+	reg := New(zfs.StateDir(t.TempDir()))
+	_ = reg.Register(t.Context(), Entry{Port: 1000, FsHash: "abc", Service: "svc", PGID: 100})
+	_ = reg.Register(t.Context(), Entry{Port: 2000, FsHash: "abc", Service: "svc", PGID: 200})
 
-	got, ok, _ := LookupPort(home, 2000)
+	got, ok, _ := reg.LookupPort(t.Context(), 2000)
 	if !ok || got.PGID != 200 {
 		t.Errorf("new entry not present: ok=%v pgid=%d", ok, got.PGID)
 	}
-	if _, ok, _ := LookupPort(home, 1000); ok {
+	if _, ok, _ := reg.LookupPort(t.Context(), 1000); ok {
 		t.Error("stale entry on port 1000 survived a re-register")
 	}
 }
 
-func TestListByFsHash_filtersByFsHash(t *testing.T) {
-	home := t.TempDir()
-	_ = Register(home, Entry{Port: 1, FsHash: "abc", Service: "s1", PGID: 1})
-	_ = Register(home, Entry{Port: 2, FsHash: "xyz", Service: "s2", PGID: 2})
-	_ = Register(home, Entry{Port: 3, FsHash: "abc", Service: "s3", PGID: 3})
+func TestRegistry_ListByFsHash_filtersByFsHash(t *testing.T) {
+	reg := New(zfs.StateDir(t.TempDir()))
+	_ = reg.Register(t.Context(), Entry{Port: 1, FsHash: "abc", Service: "s1", PGID: 1})
+	_ = reg.Register(t.Context(), Entry{Port: 2, FsHash: "xyz", Service: "s2", PGID: 2})
+	_ = reg.Register(t.Context(), Entry{Port: 3, FsHash: "abc", Service: "s3", PGID: 3})
 
-	got, err := ListByFsHash(home, "abc")
+	got, err := reg.ListByFsHash(t.Context(), "abc")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,23 +69,23 @@ func TestListByFsHash_filtersByFsHash(t *testing.T) {
 	}
 }
 
-func TestRemove_byFsHashAndService(t *testing.T) {
-	home := t.TempDir()
-	_ = Register(home, Entry{Port: 1, FsHash: "abc", Service: "keep", PGID: 1})
-	_ = Register(home, Entry{Port: 2, FsHash: "abc", Service: "drop", PGID: 2})
+func TestRegistry_Remove_byFsHashAndService(t *testing.T) {
+	reg := New(zfs.StateDir(t.TempDir()))
+	_ = reg.Register(t.Context(), Entry{Port: 1, FsHash: "abc", Service: "keep", PGID: 1})
+	_ = reg.Register(t.Context(), Entry{Port: 2, FsHash: "abc", Service: "drop", PGID: 2})
 
-	if err := Remove(home, "abc", "drop"); err != nil {
+	if err := reg.Remove(t.Context(), "abc", "drop"); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := ListByFsHash(home, "abc")
+	got, _ := reg.ListByFsHash(t.Context(), "abc")
 	if len(got) != 1 || got[0].Service != "keep" {
 		t.Errorf("Remove left wrong entries: %+v", got)
 	}
 }
 
-func TestRemove_missingIsNoOp(t *testing.T) {
-	home := t.TempDir()
-	if err := Remove(home, "doesnt", "exist"); err != nil {
+func TestRegistry_Remove_missingIsNoOp(t *testing.T) {
+	reg := New(zfs.StateDir(t.TempDir()))
+	if err := reg.Remove(t.Context(), "doesnt", "exist"); err != nil {
 		t.Errorf("Remove on absent entry errored: %v", err)
 	}
 }
@@ -91,13 +93,13 @@ func TestRemove_missingIsNoOp(t *testing.T) {
 // REGRESSION: the registry file must be safe to read on first run
 // (file doesn't exist yet). LookupPort/ListByFsHash should return
 // "no entries" without surfacing an os.IsNotExist error.
-func TestLookup_emptyHomeReturnsNoEntries(t *testing.T) {
-	home := t.TempDir()
+func TestRegistry_Lookup_emptyHomeReturnsNoEntries(t *testing.T) {
+	reg := New(zfs.StateDir(t.TempDir()))
 
-	if _, ok, err := LookupPort(home, 1000); err != nil || ok {
+	if _, ok, err := reg.LookupPort(t.Context(), 1000); err != nil || ok {
 		t.Errorf("LookupPort on fresh home: ok=%v err=%v; want ok=false err=nil", ok, err)
 	}
-	got, err := ListByFsHash(home, "anything")
+	got, err := reg.ListByFsHash(t.Context(), "anything")
 	if err != nil {
 		t.Errorf("ListByFsHash on fresh home: %v", err)
 	}
@@ -109,8 +111,8 @@ func TestLookup_emptyHomeReturnsNoEntries(t *testing.T) {
 // REGRESSION: two concurrent writers must serialize via the flock so
 // neither sees the other mid-write. Without the lock, json.Unmarshal
 // of a half-written file would error and entries would silently vanish.
-func TestRegister_concurrentWritersSerialize(t *testing.T) {
-	home := t.TempDir()
+func TestRegistry_Register_concurrentWritersSerialize(t *testing.T) {
+	reg := New(zfs.StateDir(t.TempDir()))
 
 	const goroutines = 8
 	const each = 5
@@ -118,7 +120,7 @@ func TestRegister_concurrentWritersSerialize(t *testing.T) {
 	for g := range goroutines {
 		wg.Go(func() {
 			for i := range each {
-				err := Register(home, Entry{
+				err := reg.Register(t.Context(), Entry{
 					Port:    g*100 + i,
 					FsHash:  "fs",
 					Service: fmt.Sprintf("svc-%d-%d", g, i),
@@ -132,7 +134,7 @@ func TestRegister_concurrentWritersSerialize(t *testing.T) {
 	}
 	wg.Wait()
 
-	got, err := ListByFsHash(home, "fs")
+	got, err := reg.ListByFsHash(t.Context(), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,20 +147,20 @@ func TestRegister_concurrentWritersSerialize(t *testing.T) {
 // gone (clean exit between Register and Reap) without signalling them,
 // AND must drop them from the registry too — otherwise every subsequent
 // Reap re-checks them forever.
-func TestReapByFsHash_dropsDeadEntriesWithoutSignal(t *testing.T) {
-	home := t.TempDir()
+func TestRegistry_ReapByFsHash_dropsDeadEntriesWithoutSignal(t *testing.T) {
+	reg := New(zfs.StateDir(t.TempDir()))
 	// PGID well past typical live PID space: kill(-pgid, 0) returns
 	// ESRCH; reaper should skip the signal but still drop the row.
-	_ = Register(home, Entry{Port: 1, FsHash: "abc", Service: "ghost", PGID: 999999})
-	_ = Register(home, Entry{Port: 2, FsHash: "xyz", Service: "other", PGID: 999998})
+	_ = reg.Register(t.Context(), Entry{Port: 1, FsHash: "abc", Service: "ghost", PGID: 999999})
+	_ = reg.Register(t.Context(), Entry{Port: 2, FsHash: "xyz", Service: "other", PGID: 999998})
 
-	if err := ReapByFsHash(home, "abc", 10*time.Millisecond, nil); err != nil {
+	if err := reg.ReapByFsHash(t.Context(), "abc", 10*time.Millisecond, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := ListByFsHash(home, "abc"); len(got) != 0 {
+	if got, _ := reg.ListByFsHash(t.Context(), "abc"); len(got) != 0 {
 		t.Errorf("dead entries not pruned: %+v", got)
 	}
-	if got, _ := ListByFsHash(home, "xyz"); len(got) != 1 {
+	if got, _ := reg.ListByFsHash(t.Context(), "xyz"); len(got) != 1 {
 		t.Errorf("foreign fs_hash entry collateral-damaged: %+v", got)
 	}
 }
@@ -166,8 +168,8 @@ func TestReapByFsHash_dropsDeadEntriesWithoutSignal(t *testing.T) {
 // REGRESSION: reaper sends signals only to entries matching fsHash;
 // peers from other federation levels / projects on the same host
 // must not get killed.
-func TestReapByFsHash_sparesOtherFsHashes(t *testing.T) {
-	home := t.TempDir()
+func TestRegistry_ReapByFsHash_sparesOtherFsHashes(t *testing.T) {
+	reg := New(zfs.StateDir(t.TempDir()))
 
 	// Spawn a sleeping child with its own pgid (Setpgid: true). The
 	// reap below targets fs_hash "abc"; our sleeper is registered as
@@ -183,10 +185,10 @@ func TestReapByFsHash_sparesOtherFsHashes(t *testing.T) {
 	})
 	pgid := cmdSleep.Process.Pid // Setpgid = true ⇒ pid == pgid
 
-	_ = Register(home, Entry{Port: 1, FsHash: "alive", Service: "sleeper", PGID: pgid})
-	_ = Register(home, Entry{Port: 2, FsHash: "abc", Service: "ghost", PGID: 999999})
+	_ = reg.Register(t.Context(), Entry{Port: 1, FsHash: "alive", Service: "sleeper", PGID: pgid})
+	_ = reg.Register(t.Context(), Entry{Port: 2, FsHash: "abc", Service: "ghost", PGID: 999999})
 
-	if err := ReapByFsHash(home, "abc", 10*time.Millisecond, nil); err != nil {
+	if err := reg.ReapByFsHash(t.Context(), "abc", 10*time.Millisecond, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := syscall.Kill(-pgid, 0); err != nil {
@@ -198,7 +200,8 @@ func TestReapByFsHash_sparesOtherFsHashes(t *testing.T) {
 // tooling (jq, future `zordon ports` debug cmd) can parse it.
 func TestWriteEntries_producesParseableJSON(t *testing.T) {
 	home := t.TempDir()
-	_ = Register(home, Entry{Port: 1, FsHash: "abc", Service: "svc", PGID: 1})
+	reg := New(zfs.StateDir(home))
+	_ = reg.Register(t.Context(), Entry{Port: 1, FsHash: "abc", Service: "svc", PGID: 1})
 
 	data, err := os.ReadFile(filepath.Join(home, "registry.json"))
 	if err != nil {

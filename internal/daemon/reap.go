@@ -1,10 +1,20 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"syscall"
 	"time"
 )
+
+// Alive reports whether a process with pid exists on the host.
+func Alive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
 
 // ReapGroup drives a process group to exit: SIGTERM(-pgid), wait up to grace for
 // exited to close, then SIGKILL(-pgid). Returns nil once the group is gone.

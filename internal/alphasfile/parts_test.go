@@ -191,7 +191,7 @@ func TestLoadTreeWith_symlinkedPartCannotLeaveTheCheckout(t *testing.T) {
 	gitRun(t, infra, "-c", "user.email=a@b", "-c", "user.name=z", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "link")
 	dir := t.TempDir()
 	root := writeTree(t, dir, map[string]string{"Alphasfile": webAt("main")})
-	_, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
+	_, err := LoadTreeWith(t.Context(), root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
 	if err == nil || !strings.Contains(err.Error(), "leaves the checkout of github.com/acme/infra@") {
 		t.Fatalf("a part of a fetched package that links out of the checkout must not be read, got %v", err)
 	}

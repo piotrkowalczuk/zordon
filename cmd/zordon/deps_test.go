@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -74,14 +75,14 @@ func TestPkgGet(t *testing.T) {
 		Fetcher:  localFetcher{"github.com/acme/infra": infra},
 	}
 	var out bytes.Buffer
-	if err := pkgGet(&out, af, opts, "github.com/acme/infra@main"); err != nil {
+	if err := pkgGet(t.Context(), &out, af, opts, "github.com/acme/infra@main"); err != nil {
 		t.Fatal(err)
 	}
 	want := "require \"github.com/acme/infra\" { ref = \"main\" } in " + af + "\ngithub.com/acme/infra@main: (new) -> " + head[:12] + "\n"
 	if out.String() != want {
 		t.Errorf("printed %q, want %q", out.String(), want)
 	}
-	if _, err := alphasfile.LoadTreeWith(af, opts); err != nil {
+	if _, err := alphasfile.LoadTreeWith(t.Context(), af, opts); err != nil {
 		t.Errorf("after pkg get the Alphasfile loads: %v", err)
 	}
 }
@@ -94,7 +95,7 @@ func TestImportLines_searchOrigin(t *testing.T) {
 	})
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{"Alphasfile": infraWebAtMain})
-	tree, err := alphasfile.LoadTreeWith(filepath.Join(dir, "Alphasfile"), alphasfile.LoadOptions{Search: []string{checkout}})
+	tree, err := alphasfile.LoadTreeWith(t.Context(), filepath.Join(dir, "Alphasfile"), alphasfile.LoadOptions{Search: []string{checkout}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +123,7 @@ func TestUpdateLock(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := updateLock(&out, af, opts, nil); err != nil {
+	if err := updateLock(t.Context(), &out, af, opts, nil); err != nil {
 		t.Fatal(err)
 	}
 	if want := "github.com/acme/infra@main: (new) -> " + first[:12] + "\n"; out.String() != want {
@@ -130,7 +131,7 @@ func TestUpdateLock(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := updateLock(&out, af, opts, nil); err != nil {
+	if err := updateLock(t.Context(), &out, af, opts, nil); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != "zordon.lock is up to date\n" {
@@ -141,7 +142,7 @@ func TestUpdateLock(t *testing.T) {
 	commitAll(t, infra, "next")
 	next := gitHead(t, infra)
 	out.Reset()
-	if err := updateLock(&out, af, opts, []string{"github.com/acme/infra"}); err != nil {
+	if err := updateLock(t.Context(), &out, af, opts, []string{"github.com/acme/infra"}); err != nil {
 		t.Fatal(err)
 	}
 	if want := "github.com/acme/infra@main: " + first[:12] + " -> " + next[:12] + "\n"; out.String() != want {
@@ -152,19 +153,19 @@ func TestUpdateLock(t *testing.T) {
 // localFetcher serves repository identities from local git repositories.
 type localFetcher map[string]string
 
-func (f localFetcher) Resolve(repo, ref string) (string, error) {
-	out, err := exec.Command("git", "-C", f[repo], "rev-parse", "--verify", ref+"^{commit}").Output()
+func (f localFetcher) Resolve(ctx context.Context, repo, ref string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", f[repo], "rev-parse", "--verify", ref+"^{commit}").Output()
 	return strings.TrimSpace(string(out)), err
 }
 
-func (f localFetcher) Materialize(repo, commit, dest string) error {
+func (f localFetcher) Materialize(ctx context.Context, repo, commit, dest string) error {
 	if zfs.Exists(dest) {
 		return nil
 	}
-	if err := exec.Command("git", "clone", "-q", f[repo], dest).Run(); err != nil {
+	if err := exec.CommandContext(ctx, "git", "clone", "-q", f[repo], dest).Run(); err != nil {
 		return err
 	}
-	return exec.Command("git", "-C", dest, "checkout", "-q", "--detach", commit).Run()
+	return exec.CommandContext(ctx, "git", "-C", dest, "checkout", "-q", "--detach", commit).Run()
 }
 
 func writeFiles(t *testing.T, dir string, files map[string]string) {

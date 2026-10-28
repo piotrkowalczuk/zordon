@@ -359,7 +359,7 @@ func registerProvisionTools(ctx context.Context, srv *mcp.Server, log *zlog.Logg
 		if lv.state == nil {
 			continue
 		}
-		socket := lv.inv.SocketPath()
+		socket := lv.Socket()
 		for _, p := range mcpserver.Provisions(lv.state.Services) {
 			name := mcpserver.Unique(seen, p.ToolName())
 			provID, sock := p.ID, socket
@@ -402,8 +402,8 @@ func splitProvisionInput(req *mcp.CallToolRequest) (args map[string]any, env map
 // arguments + env, and streams the provision's output back as the tool result.
 // A failed provision (or a missing alpha) yields an error result (IsError) —
 // never a torn-down alpha and never a protocol-level error.
-func invokeProvisionTool(ctx context.Context, socket, provID string, args map[string]any, env map[string]string) *mcp.CallToolResult {
-	conn, err := control.Dial(socket, 1*time.Second)
+func invokeProvisionTool(ctx context.Context, socket control.AlphaSocketPath, provID string, args map[string]any, env map[string]string) *mcp.CallToolResult {
+	conn, err := socket.Dial(1 * time.Second)
 	if err != nil {
 		if control.IsNotRunning(err) {
 			return errorResult("alpha is not running for this provision; run `zordon start` first")

@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 // ResolveDataDir is the only piece of the package that's pure-Go (no
@@ -26,7 +28,7 @@ func TestResolveDataDir_walkUpFindsNearestExisting(t *testing.T) {
 	mustMkdir(t, filepath.Join(project, ".zordon", "toolchain", "installs", "go", "1.25.6"))
 
 	got := ResolveDataDir(deep, filepath.Join(home, ".zordon", "toolchain"), "go", "1.25.6")
-	want := filepath.Join(project, ".zordon", "toolchain")
+	want := zfs.StateDir(filepath.Join(project, ".zordon", "toolchain"))
 	if got != want {
 		t.Errorf("ResolveDataDir = %s; want project-level %s", got, want)
 	}
@@ -44,7 +46,7 @@ func TestResolveDataDir_innerOverridesOuter(t *testing.T) {
 	mustMkdir(t, filepath.Join(project, ".zordon", "toolchain", "installs", "go", "1.25.6"))
 
 	got := ResolveDataDir(project, filepath.Join(home, ".zordon", "toolchain"), "go", "1.25.6")
-	want := filepath.Join(project, ".zordon", "toolchain")
+	want := zfs.StateDir(filepath.Join(project, ".zordon", "toolchain"))
 	if got != want {
 		t.Errorf("ResolveDataDir = %s; want closest %s", got, want)
 	}
@@ -59,7 +61,7 @@ func TestResolveDataDir_noInstallReturnsHomeDefault(t *testing.T) {
 	// Nothing pre-installed anywhere.
 	defaultDD := filepath.Join(home, ".zordon", "toolchain")
 	got := ResolveDataDir(project, defaultDD, "go", "1.25.6")
-	if got != defaultDD {
+	if got.Path() != defaultDD {
 		t.Errorf("ResolveDataDir = %s; want defaultDataDir %s", got, defaultDD)
 	}
 }
@@ -76,7 +78,7 @@ func TestResolveDataDir_versionSpecific(t *testing.T) {
 
 	defaultDD := filepath.Join(home, ".zordon", "toolchain")
 	got := ResolveDataDir(project, defaultDD, "go", "1.26.0")
-	want := defaultDD
+	want := zfs.StateDir(defaultDD)
 	if got != want {
 		t.Errorf("ResolveDataDir for 1.26.0 = %s; want home default %s "+
 			"(local 1.25.6 must not match)", got, want)
@@ -107,7 +109,7 @@ func TestResolveDataDir_doesNotLeakAboveDefaultDataDir(t *testing.T) {
 
 	defaultDD := filepath.Join(testCache, "toolchain")
 	got := ResolveDataDir(testCache, defaultDD, "go", "1.25.6")
-	if got != defaultDD {
+	if got.Path() != defaultDD {
 		t.Errorf("walk-up leaked above bound: ResolveDataDir = %s; want %s", got, defaultDD)
 	}
 }
@@ -118,14 +120,14 @@ func TestResolveDataDir_doesNotLeakAboveDefaultDataDir(t *testing.T) {
 // concurrent `gem install bundler` calls from corrupting the shared
 // tarball-extract under installs/ruby/<ver>/.
 func TestAcquire_serializesSameKey(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := zfs.StateDir(t.TempDir())
 
 	var inside atomic.Int32
 	var maxInside atomic.Int32
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Go(func() {
-			release, err := Acquire(dataDir, "ruby", "3.3.10")
+			release, err := Acquire(t.Context(), dataDir, "ruby", "3.3.10")
 			if err != nil {
 				t.Errorf("Acquire: %v", err)
 				return
@@ -151,9 +153,9 @@ func TestAcquire_serializesSameKey(t *testing.T) {
 // TestAcquire_independentKeysParallelize asserts the granularity is
 // (tool, version) — two different versions don't block each other.
 func TestAcquire_independentKeysParallelize(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := zfs.StateDir(t.TempDir())
 
-	r1, err := Acquire(dataDir, "ruby", "3.0.7")
+	r1, err := Acquire(t.Context(), dataDir, "ruby", "3.0.7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +164,7 @@ func TestAcquire_independentKeysParallelize(t *testing.T) {
 	// Should NOT block: different version is a different lock.
 	done := make(chan struct{})
 	go func() {
-		r2, err := Acquire(dataDir, "ruby", "3.3.10")
+		r2, err := Acquire(t.Context(), dataDir, "ruby", "3.3.10")
 		if err != nil {
 			t.Errorf("Acquire(3.3.10): %v", err)
 			return

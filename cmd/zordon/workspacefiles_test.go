@@ -492,7 +492,7 @@ func discardLogger() *zlog.Logger { return zlog.New(io.Discard, false) }
 func namedWorkspaceInv(root, name string) *invocation.InvocationState {
 	dir := filepath.Join(root, "workspaces", name)
 	return &invocation.InvocationState{
-		Dir: dir, Workspace: name, StateDir: dir,
+		Dir: dir, Workspace: name, StateDir: zfs.StateDir(dir),
 		FsHash: "abcd1234ef567890", TmpDir: filepath.Join(root, "tmp"),
 	}
 }
@@ -500,7 +500,7 @@ func namedWorkspaceInv(root, name string) *invocation.InvocationState {
 func mainWorkspaceInv(root string) *invocation.InvocationState {
 	return &invocation.InvocationState{
 		Dir: root, Workspace: invocation.MainWorkspace,
-		StateDir: filepath.Join(root, "workspaces", invocation.MainWorkspace),
+		StateDir: zfs.StateDir(filepath.Join(root, "workspaces", invocation.MainWorkspace)),
 		FsHash:   "abcd1234ef567890", TmpDir: filepath.Join(root, "tmp"),
 	}
 }

@@ -22,6 +22,7 @@
 package zfs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // File is a type alias so callers can hold a *zfs.File without
@@ -160,31 +162,126 @@ func EnsureSharedDir(path string) error {
 	return nil
 }
 
-// AcquireLock takes a process-wide exclusive flock on
-// <stateDir>/<name>.lock. The state dir is created if missing
-// (EnsureDir semantics). The returned release function drops the
-// lock and closes the FD; callers `defer release()`.
-//
-// This is the only way to take a file lock in zordon — control,
-// registry, and tools all funnel through here so the lock file mode,
-// open flags, and unlock-on-release behaviour stay uniform.
-func AcquireLock(stateDir, name string) (release func(), err error) {
-	if err := EnsureDir(stateDir); err != nil {
-		return nil, err
+// StateDir is a directory holding lock and state files. Injecting it once
+// binds lock operations (AcquireLock, TryAcquireLock, ProbeLock) and child
+// path resolution (Join, Sub) to that directory via methods instead of
+// threading raw path strings through every call.
+type StateDir string
+
+// Path returns the state directory path as a string.
+func (d StateDir) Path() string { return string(d) }
+
+// String returns the state directory path.
+func (d StateDir) String() string { return string(d) }
+
+// IsSet reports whether the state directory path is non-empty.
+func (d StateDir) IsSet() bool { return d != "" }
+
+// Join joins path elements onto d and returns the resulting path string.
+func (d StateDir) Join(elem ...string) string {
+	return filepath.Join(append([]string{string(d)}, elem...)...)
+}
+
+// Sub returns a child StateDir rooted under d.
+func (d StateDir) Sub(elem ...string) StateDir {
+	return StateDir(d.Join(elem...))
+}
+
+// TryAcquireLock attempts a non-blocking exclusive flock on <d>/<name>.lock.
+// The state dir is created if missing (EnsureDir semantics). When acquired,
+// ok is true and the caller must invoke release() to drop the lock. When held
+// by another process, ok is false and holderPID is the lock holder's recorded
+// PID (0 if unknown).
+func (d StateDir) TryAcquireLock(name string) (release func(), holderPID int, ok bool, err error) {
+	if err := EnsureDir(d.Path()); err != nil {
+		return nil, 0, false, err
 	}
-	lockPath := filepath.Join(stateDir, name+".lock")
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, filePerm)
+	lockPath := filepath.Join(d.Path(), name+".lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, filePerm)
 	if err != nil {
-		return nil, fmt.Errorf("zfs: open lock %s: %w", lockPath, err)
+		return nil, 0, false, fmt.Errorf("zfs: open lock %s: %w", lockPath, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == nil {
+		writeLockPID(f)
+		return unlockClosure(f), 0, true, nil
+	}
+	if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 		_ = f.Close()
-		return nil, fmt.Errorf("zfs: flock %s: %w", lockPath, err)
+		return nil, 0, false, fmt.Errorf("zfs: flock %s: %w", lockPath, err)
 	}
-	return func() {
+	pid := readLockPID(f)
+	if pid == 0 {
+		time.Sleep(10 * time.Millisecond)
+		pid = readLockPID(f)
+	}
+	_ = f.Close()
+	return nil, pid, false, nil
+}
+
+// AcquireLock takes a process-wide exclusive flock on <d>/<name>.lock,
+// blocking until the lock is acquired or ctx is cancelled. It tries
+// TryAcquireLock first; if another process holds the lock, onWait (when
+// non-nil) is invoked immediately with 0 elapsed time and then every 5s.
+func (d StateDir) AcquireLock(ctx context.Context, name string, onWait func(lockPath string, holderPID int, waited time.Duration)) (release func(), err error) {
+	release, holderPID, ok, err := d.TryAcquireLock(name)
+	if err != nil || ok {
+		return release, err
+	}
+
+	lockPath := filepath.Join(d.Path(), name+".lock")
+	start := time.Now()
+	if onWait != nil {
+		onWait(lockPath, holderPID, 0)
+	}
+	lastReport := start
+	for {
+		select {
+		case <-ctx.Done():
+			if holderPID > 0 {
+				return nil, fmt.Errorf("zfs: waiting for lock %s (held by pid=%d): %w", lockPath, holderPID, ctx.Err())
+			}
+			return nil, fmt.Errorf("zfs: waiting for lock %s: %w", lockPath, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+		release, pid, ok, err := d.TryAcquireLock(name)
+		if err != nil || ok {
+			return release, err
+		}
+		if pid > 0 {
+			holderPID = pid
+		}
+		if onWait != nil && time.Since(lastReport) >= 5*time.Second {
+			onWait(lockPath, holderPID, time.Since(start))
+			lastReport = time.Now()
+		}
+	}
+}
+
+// ProbeLock reports whether an exclusive lock on <d>/<name>.lock is currently
+// held by any open file description, along with the holder's PID when recorded
+// in the lock file.
+func (d StateDir) ProbeLock(name string) (held bool, holderPID int) {
+	lockPath := filepath.Join(d.Path(), name+".lock")
+	f, err := os.OpenFile(lockPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return false, 0
+	}
+	defer f.Close()
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+	if err == nil {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
-	}, nil
+		return false, 0
+	}
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		pid := readLockPID(f)
+		if pid == 0 {
+			time.Sleep(10 * time.Millisecond)
+			pid = readLockPID(f)
+		}
+		return true, pid
+	}
+	return false, 0
 }
 
 // AtomicWrite replaces path's contents with data via temp+sync+rename
@@ -608,4 +705,30 @@ func Copy(src, dst string) error {
 		return fmt.Errorf("zfs: close %s: %w", dst, err)
 	}
 	return nil
+}
+
+func unlockClosure(f *os.File) func() {
+	return func() {
+		_ = f.Truncate(0)
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}
+}
+
+func writeLockPID(f *os.File) {
+	_ = f.Truncate(0)
+	_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+}
+
+func readLockPID(f *os.File) int {
+	var buf [32]byte
+	n, _ := f.ReadAt(buf[:], 0)
+	if n <= 0 {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
 }

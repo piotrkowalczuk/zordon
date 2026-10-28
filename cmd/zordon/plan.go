@@ -30,8 +30,8 @@ import (
 // preflight of "just the subset I'm about to start" renders the same
 // service set start would bring up. Parents are always rendered whole
 // (they are shared context, not what you're starting).
-func runPlan(_ context.Context, w io.Writer, zordonHome string, picks []string, testCfg alphasfile.TestConfig) error {
-	levels, err := walkChain(zordonHome, func(lv *level) (*protocol.StateInfo, error) {
+func runPlan(ctx context.Context, w io.Writer, zordonHome string, picks []string, testCfg alphasfile.TestConfig) error {
+	levels, err := walkChain(ctx, zordonHome, func(lv *level) (*protocol.StateInfo, error) {
 		af, err := alphasfile.Resolve(lv.tree, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
 		if err != nil {
 			return nil, err

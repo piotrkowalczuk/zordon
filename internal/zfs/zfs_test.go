@@ -1,10 +1,13 @@
 package zfs
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 )
 
 func TestZordonHome_overrideWins(t *testing.T) {
@@ -260,4 +263,82 @@ func TestCheckSpawnCwd(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStateDir_AcquireLock_probeAndContention(t *testing.T) {
+	dir := StateDir(t.TempDir())
+
+	synctest.Test(t, func(t *testing.T) {
+		if held, pid := dir.ProbeLock("start"); held || pid != 0 {
+			t.Fatalf("ProbeLock before acquire = (%v, %d), want (false, 0)", held, pid)
+		}
+
+		release1, holderPID, ok, err := dir.TryAcquireLock("start")
+		if err != nil || !ok || holderPID != 0 {
+			t.Fatalf("TryAcquireLock = (%v, %d, %v), want (true, 0, nil)", ok, holderPID, err)
+		}
+		if _, holderPID, ok, err := dir.TryAcquireLock("start"); err != nil || ok || holderPID != os.Getpid() {
+			release1()
+			t.Fatalf("TryAcquireLock while held = (%v, %d, %v), want (false, %d, nil)", ok, holderPID, err, os.Getpid())
+		}
+		if held, pid := dir.ProbeLock("start"); !held || pid != os.Getpid() {
+			release1()
+			t.Fatalf("ProbeLock while held = (%v, %d), want (true, %d)", held, pid, os.Getpid())
+		}
+
+		go func() {
+			select {
+			case <-time.After(5100 * time.Millisecond):
+			case <-t.Context().Done():
+			}
+			release1()
+		}()
+
+		var waits []time.Duration
+		var reportedPID int
+		release2, err := dir.AcquireLock(t.Context(), "start", func(_ string, holderPID int, waited time.Duration) {
+			waits = append(waits, waited)
+			reportedPID = holderPID
+		})
+		if err != nil {
+			t.Fatalf("AcquireLock: %v", err)
+		}
+		release2()
+
+		if len(waits) != 2 || waits[0] != 0 || waits[1] != 5*time.Second || reportedPID != os.Getpid() {
+			t.Fatalf("onWait = %v (pid=%d), want [0s 5s] (pid=%d)", waits, reportedPID, os.Getpid())
+		}
+
+		if held, _ := dir.ProbeLock("start"); held {
+			t.Error("ProbeLock after release = true, want false")
+		}
+	})
+}
+
+func TestStateDir_AcquireLock_contextCancelled(t *testing.T) {
+	dir := StateDir(t.TempDir())
+
+	synctest.Test(t, func(t *testing.T) {
+		release, err := dir.AcquireLock(t.Context(), "start", nil)
+		if err != nil {
+			t.Fatalf("AcquireLock: %v", err)
+		}
+		defer release()
+
+		ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+		defer cancel()
+		var calls int
+		_, err = dir.AcquireLock(ctx, "start", func(_ string, _ int, _ time.Duration) {
+			calls++
+		})
+		if err == nil {
+			t.Fatal("AcquireLock while lock held returned nil; want timeout error")
+		}
+		if !strings.Contains(err.Error(), "held by pid=") {
+			t.Errorf("error %q should include holder PID", err.Error())
+		}
+		if calls != 2 {
+			t.Errorf("onWait calls before 6s timeout = %d, want 2 (at 0s and 5s)", calls)
+		}
+	})
 }

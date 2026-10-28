@@ -104,19 +104,23 @@ type level struct {
 	state        *protocol.StateInfo // nil ⇒ not running
 }
 
+func (lv *level) Socket() control.AlphaSocketPath {
+	return control.AlphaSocketPath(lv.inv.SocketPath())
+}
+
 // resolveChain walks the chain top-down WITHOUT spawning anything, building
 // each level's Invocation from the resolved services of running ancestors.
 // The leaf's Invocation is derived from CWD (so a run from a workspace dir
 // gets that workspace's identity); parents are always "main", rooted at
 // their own directory.
 func resolveChain(ctx context.Context, zordonHome string, testCfg alphasfile.TestConfig) ([]*level, error) {
-	return walkChain(zordonHome, func(lv *level) (*protocol.StateInfo, error) {
+	return walkChain(ctx, zordonHome, func(lv *level) (*protocol.StateInfo, error) {
 		// Prefer the running alpha (carries live PIDs / readiness); fall
 		// back to static evaluation. A static-eval error is tolerated
 		// here — `status` should still print "alpha not running" rather
 		// than refuse the whole report just because one level can't be
 		// re-evaluated from disk.
-		if resp, e := control.Roundtrip(ctx, lv.inv.SocketPath(), &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
+		if resp, e := lv.Socket().Roundtrip(ctx, &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
 			return resp.State, nil
 		}
 		af, err := alphasfile.Resolve(lv.tree, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
@@ -176,8 +180,8 @@ func stateFromAlphasfile(af *alphasfile.Alphasfile) *protocol.StateInfo {
 // resolve owns the per-level policy (live alpha first vs. static-only
 // vs. strict-static); a returned (nil, nil) means "no state for this
 // level" — deeper levels won't see its services as parent context.
-func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, error)) ([]*level, error) {
-	fed, err := NewFederationState(zordonHome)
+func walkChain(ctx context.Context, zordonHome string, resolve func(*level) (*protocol.StateInfo, error)) ([]*level, error) {
+	fed, err := NewFederationState(ctx, zordonHome)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +217,7 @@ func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, err
 func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, wantSummary bool, picks []string, zordonHome string, testCfg alphasfile.TestConfig) error {
 	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
 
-	fed, err := NewFederationState(zordonHome)
+	fed, err := NewFederationState(ctx, zordonHome)
 	if err != nil {
 		return err
 	}
@@ -255,7 +259,6 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 
 	var parents alphasfile.GlobalComputedState
 	for _, lvl := range fed.Levels() {
-		inv := lvl.Invocation()
 		parentDotenv := append([]string{}, parents.Dotenv()...)
 		parentEnv := parents.Env()
 		parentJSON, err := json.Marshal(parents.Services())
@@ -264,7 +267,7 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 		}
 		cfgHash := invocation.ConfigHash(lvl.Bytes(), parentJSON)
 
-		unlock, err := control.Lock(inv.StateDir)
+		unlock, err := lvl.AcquireLock(ctx, timeout, log)
 		if err != nil {
 			return err
 		}
@@ -277,7 +280,7 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
 		if reused {
-			log.Info("zordon", "%s [%s] up-to-date (alpha pid=%d), reusing", lvl.Path(), inv.FsHash, old.PID)
+			log.Info("zordon", "%s [%s] up-to-date (alpha pid=%d), reusing", lvl.Path(), lvl.Invocation().FsHash, old.PID)
 			parents.Join(adoptedBlock(old))
 			continue
 		}
@@ -329,7 +332,7 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 // alpha is waited out rather than rejected; otherwise a running stack is an
 // error directing the user to stop first.
 func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, verbose, agent, waitStopped bool, zordonHome string, testCfg alphasfile.TestConfig) error {
-	fed, err := NewFederationState(zordonHome)
+	fed, err := NewFederationState(ctx, zordonHome)
 	if err != nil {
 		return err
 	}
@@ -344,7 +347,6 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 
 	var parents alphasfile.GlobalComputedState
 	for _, lvl := range fed.Levels() {
-		inv := lvl.Invocation()
 		parentDotenv := append([]string{}, parents.Dotenv()...)
 		parentEnv := parents.Env()
 		parentJSON, err := json.Marshal(parents.Services())
@@ -373,12 +375,19 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			if !waitStopped {
 				return fmt.Errorf("%s: alpha is running (pid=%d); run `zordon stop` first, or `zordon stop --clean`", lvl.Path(), old.PID)
 			}
-			if err := waitSocketGone(ctx, inv.SocketPath(), timeout); err != nil {
+			if err := lvl.WaitAlphaGone(ctx, old.PID, timeout, log); err != nil {
+				return fmt.Errorf("%s: waiting for alpha to stop before clean: %w", lvl.Path(), err)
+			}
+		} else if held, holderPID := lvl.Socket().ProbeLock(); held {
+			if !waitStopped {
+				return fmt.Errorf("%s: alpha (pid=%d) is still tearing down; wait or run `zordon stop --clean`", lvl.Path(), holderPID)
+			}
+			if err := lvl.WaitAlphaGone(ctx, holderPID, timeout, log); err != nil {
 				return fmt.Errorf("%s: waiting for alpha to stop before clean: %w", lvl.Path(), err)
 			}
 		}
 
-		unlock, err := control.Lock(inv.StateDir)
+		unlock, err := lvl.AcquireLock(ctx, timeout, log)
 		if err != nil {
 			return err
 		}
@@ -394,7 +403,7 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 // alpha down (it exists only to run the clean snippets).
 func cleanLeaf(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, parentDotenv []string, parentEnv map[string]string, cfg startConfig, log *zlog.Logger) error {
 	inv := lvl.inv
-	sock := inv.SocketPath()
+	sock := lvl.Socket()
 
 	levelLog := zfs.NewResolver(inv.Dir, inv.FsHash).AlphaLogFile(cfg.alphaLog)
 	if err := zfs.EnsureSharedDir(filepath.Dir(levelLog)); err != nil {
@@ -409,15 +418,17 @@ func cleanLeaf(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, p
 	if err := spawnAlpha(cfg.alphaBin, levelLog, sock, cfg.timeout, cfg.verbose, log, inv.Env); err != nil {
 		return fmt.Errorf("%s: %w", lvl.afPath, err)
 	}
-	if err := control.WaitListening(ctxLevel, sock); err != nil {
+	if err := sock.WaitListening(ctxLevel); err != nil {
 		return fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
 
 	cleanErr := pushClean(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.agent)
-	// Always shut the transient alpha down, success or failure.
-	if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
+	// Always shut the transient alpha down, success or failure, and wait for
+	// its teardown before returning so a subsequent `zordon start` doesn't race it.
+	if _, e := sock.Roundtrip(ctx, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
 		log.Error("zordon", "shutdown transient alpha: %v", e)
 	}
+	_ = lvl.WaitAlphaGone(ctx, 0, cfg.timeout, log)
 	if cleanErr != nil {
 		return fmt.Errorf("%s: %w", lvl.afPath, cleanErr)
 	}
@@ -499,31 +510,6 @@ func runSudoSteps(services []*alphasfile.Service, log *zlog.Logger) {
 					log.Info("zordon", "sudo[%s/%s]: verified", s.Name(), step.Name)
 				}
 			}
-		}
-	}
-}
-
-// waitSocketGone blocks until nothing answers on sock (old alpha exited) or
-// the timeout elapses.
-func waitSocketGone(ctx context.Context, sock string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	delay := 20 * time.Millisecond
-	for {
-		c, err := control.Dial(sock, 100*time.Millisecond)
-		if err != nil {
-			return nil
-		}
-		c.Close()
-		if time.Now().After(deadline) {
-			return errors.New("old alpha still listening")
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-		}
-		if delay < 250*time.Millisecond {
-			delay *= 2
 		}
 	}
 }

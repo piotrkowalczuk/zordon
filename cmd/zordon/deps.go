@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -35,31 +36,31 @@ func loadOptions(zordonHome, afPath string, chain []string) (alphasfile.LoadOpti
 		Home:     zordonHome,
 		Search:   search,
 		LockPath: filepath.Join(filepath.Dir(afPath), alphasfile.LockFileName),
-		Fetcher:  source.ModFetcher{Home: zordonHome},
+		Fetcher:  source.ModFetcher{Home: zfs.StateDir(zordonHome)},
 	}, nil
 }
 
 // loadTree loads afPath the way every command does.
-func loadTree(zordonHome, afPath string, chain []string) (*alphasfile.Tree, error) {
+func loadTree(ctx context.Context, zordonHome, afPath string, chain []string) (*alphasfile.Tree, error) {
 	opts, err := loadOptions(zordonHome, afPath, chain)
 	if err != nil {
 		return nil, err
 	}
-	return alphasfile.LoadTreeWith(afPath, opts)
+	return alphasfile.LoadTreeWith(ctx, afPath, opts)
 }
 
 // parseServices is alphasfile.ParseServices with the command's load options.
-func parseServices(zordonHome, afPath string) ([]*alphasfile.ServiceMeta, error) {
+func parseServices(ctx context.Context, zordonHome, afPath string) ([]*alphasfile.ServiceMeta, error) {
 	opts, err := loadOptions(zordonHome, afPath, nil)
 	if err != nil {
 		return nil, err
 	}
-	return alphasfile.ParseServicesWith(afPath, opts)
+	return alphasfile.ParseServicesWith(ctx, afPath, opts)
 }
 
 // runUpdate re-resolves the remote repositories the invocation's Alphasfile
 // imports, all of them or the ones named, and rewrites zordon.lock.
-func runUpdate(out io.Writer, zordonHome string, repos []string) error {
+func runUpdate(ctx context.Context, out io.Writer, zordonHome string, repos []string) error {
 	af, err := walkUp()
 	if err != nil {
 		return err
@@ -68,12 +69,12 @@ func runUpdate(out io.Writer, zordonHome string, repos []string) error {
 	if err != nil {
 		return err
 	}
-	return updateLock(out, af, opts, repos)
+	return updateLock(ctx, out, af, opts, repos)
 }
 
 // runPkgGet requires a repository at a ref for the invocation's Alphasfile
 // and locks it when the stack imports it.
-func runPkgGet(out io.Writer, zordonHome string, args []string) error {
+func runPkgGet(ctx context.Context, out io.Writer, zordonHome string, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("usage: zordon pkg get <repo>@<ref>")
 	}
@@ -85,10 +86,10 @@ func runPkgGet(out io.Writer, zordonHome string, args []string) error {
 	if err != nil {
 		return err
 	}
-	return pkgGet(out, af, opts, args[0])
+	return pkgGet(ctx, out, af, opts, args[0])
 }
 
-func pkgGet(out io.Writer, af string, opts alphasfile.LoadOptions, arg string) error {
+func pkgGet(ctx context.Context, out io.Writer, af string, opts alphasfile.LoadOptions, arg string) error {
 	repo, ref, _ := strings.Cut(arg, "@")
 	written, err := alphasfile.AddRequire(af, repo, ref)
 	if err != nil {
@@ -97,13 +98,13 @@ func pkgGet(out io.Writer, af string, opts alphasfile.LoadOptions, arg string) e
 	if _, err := fmt.Fprintf(out, "require %q { ref = %q } in %s\n", repo, ref, written); err != nil {
 		return err
 	}
-	return updateLock(out, af, opts, []string{repo})
+	return updateLock(ctx, out, af, opts, []string{repo})
 }
 
-func updateLock(out io.Writer, af string, opts alphasfile.LoadOptions, repos []string) error {
+func updateLock(ctx context.Context, out io.Writer, af string, opts alphasfile.LoadOptions, repos []string) error {
 	opts.Update = repos
 	opts.UpdateAll = len(repos) == 0
-	tree, err := alphasfile.LoadTreeWith(af, opts)
+	tree, err := alphasfile.LoadTreeWith(ctx, af, opts)
 	if err != nil {
 		return err
 	}

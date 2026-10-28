@@ -45,6 +45,7 @@ type Logger struct {
 	w         io.Writer
 	agent     bool
 	color     bool
+	pid       int
 	startedAt time.Time
 }
 
@@ -59,16 +60,16 @@ func New(w io.Writer, agent bool) *Logger {
 	}
 }
 
-func isTerminal(w io.Writer) bool {
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
+// WithPID tags every emitted <src> with [pid] (e.g. "alpha[12345]") for shared
+// append-only log files where multiple daemon lifetimes interleave.
+func (l *Logger) WithPID(pid int) *Logger {
+	return &Logger{
+		w:         l.w,
+		agent:     l.agent,
+		color:     l.color,
+		pid:       pid,
+		startedAt: l.startedAt,
 	}
-	fi, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 func (l *Logger) Info(src, format string, args ...any) {
@@ -97,12 +98,16 @@ func (l *Logger) Service(src, stream, line string) {
 func (l *Logger) emit(src, level, msg string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	displaySrc := src
+	if l.pid > 0 {
+		displaySrc = fmt.Sprintf("%s[%d]", src, l.pid)
+	}
 	if l.agent {
 		fmt.Fprintf(l.w, "%d %s %s %s\n",
-			time.Since(l.startedAt).Milliseconds(), src, level, msg)
+			time.Since(l.startedAt).Milliseconds(), displaySrc, level, msg)
 		return
 	}
-	srcCol := fmt.Sprintf("%-15s", src)
+	srcCol := fmt.Sprintf("%-15s", displaySrc)
 	tail := ""
 	if l.color {
 		srcCol = colorFor(src) + srcCol + ansiReset
@@ -114,6 +119,18 @@ func (l *Logger) emit(src, level, msg string) {
 	}
 	fmt.Fprintf(l.w, "[%s] %s [%-5s] - %s%s\n",
 		time.Now().Format(time.RFC3339), srcCol, level, msg, tail)
+}
+
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 func colorFor(src string) string {

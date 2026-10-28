@@ -102,7 +102,7 @@ func (w WorkspaceName) IsMain() bool {
 type InvocationState struct {
 	Dir       string            // normalized invocation dir (project root or workspace dir)
 	Workspace string            // "main" or "<name>"
-	StateDir  string            // <X>/workspaces/<Workspace>
+	StateDir  zfs.StateDir      // <X>/workspaces/<Workspace>
 	FsHash    string            // sha8(Dir) — instance identity
 	TmpDir    string            // $TMPDIR/zordon-<FsHash>  (short; sockets live here)
 	Env       map[string]string // injected into spawned services
@@ -142,21 +142,21 @@ func (i *InvocationState) OwnsService(svc string) bool {
 // CheckoutPath is where service <svc>'s git worktree is materialized for
 // this invocation.
 func (i *InvocationState) CheckoutPath(svc string) string {
-	return filepath.Join(i.StateDir, "src", svc)
+	return i.StateDir.Join("src", svc)
 }
 
 // BinDir is where build outputs land for this invocation — deliberately
 // OUTSIDE the source checkouts so building never dirties a `dir` primary's
 // git worktree. This is what fs::bin() returns.
 func (i *InvocationState) BinDir() string {
-	return filepath.Join(i.StateDir, "bin")
+	return i.StateDir.Join("bin")
 }
 
 // ProjectRoot is the directory the leaf Alphasfile lives in (the workspace's
 // <X>). Relative `dir` primaries resolve against this.
 func (i *InvocationState) ProjectRoot() string {
 	// StateDir == <root>/workspaces/<ws>
-	return filepath.Dir(filepath.Dir(i.StateDir))
+	return filepath.Dir(filepath.Dir(i.StateDir.Path()))
 }
 
 // SocketPath is the alpha control socket for this invocation (kept under
@@ -166,8 +166,8 @@ func (i *InvocationState) SocketPath() string {
 }
 
 // LockPath / AlphaLogPath live in the (in-tree) state dir.
-func (i *InvocationState) LockPath() string     { return filepath.Join(i.StateDir, "start.lock") }
-func (i *InvocationState) AlphaLogPath() string { return filepath.Join(i.StateDir, "alpha.log") }
+func (i *InvocationState) LockPath() string     { return i.StateDir.Join("start.lock") }
+func (i *InvocationState) AlphaLogPath() string { return i.StateDir.Join("alpha.log") }
 
 // workspaceBoundary walks up from cwd to the nearest workspace boundary: a dir
 // directly under `workspaces/` (path-authoritative) or one carrying a
@@ -284,7 +284,7 @@ func ConfigHash(afBytes, parentCtx []byte) string {
 }
 
 func build(dir, root, ws string) *InvocationState {
-	stateDir := filepath.Join(root, "workspaces", ws)
+	stateDir := zfs.StateDir(filepath.Join(root, "workspaces", ws))
 	fsh := shortSum([]byte(dir))
 	tmp := filepath.Join(zfs.SystemTempDir(), "zordon-"+fsh)
 	return &InvocationState{
@@ -293,10 +293,10 @@ func build(dir, root, ws string) *InvocationState {
 		StateDir:      stateDir,
 		FsHash:        fsh,
 		TmpDir:        tmp,
-		OwnedServices: scanOwnedServices(stateDir, ws),
+		OwnedServices: scanOwnedServices(stateDir.Path(), ws),
 		Env: map[string]string{
 			"ZORDON_WORKSPACE": ws,
-			"ZORDON_STATE_DIR": stateDir,
+			"ZORDON_STATE_DIR": stateDir.Path(),
 			"ZORDON_FS_HASH":   fsh,
 		},
 	}

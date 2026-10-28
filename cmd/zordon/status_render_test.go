@@ -38,7 +38,7 @@ func TestStatusImports_remote(t *testing.T) {
 	writeFiles(t, dir, map[string]string{
 		"Alphasfile": "require \"github.com/acme/infra\" { ref = \"main\" }\nimport \"github.com/acme/infra/pkgs/web\" {}\n",
 	})
-	tree, err := alphasfile.LoadTreeWith(filepath.Join(dir, "Alphasfile"), alphasfile.LoadOptions{Search: []string{checkout}})
+	tree, err := alphasfile.LoadTreeWith(t.Context(), filepath.Join(dir, "Alphasfile"), alphasfile.LoadOptions{Search: []string{checkout}})
 	if err != nil {
 		t.Fatal(err)
 	}

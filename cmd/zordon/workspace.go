@@ -104,7 +104,7 @@ func runWorkspaceCreate(ctx context.Context, log *zlog.Logger, out io.Writer, ar
 	// Generated files land BEFORE the checkouts: an agent or a dev container
 	// reads them the moment the directory exists, and while src/ is still
 	// absent nothing can accidentally be written into a service's git tree.
-	spec, err := applyWorkspaceHere(log, out, name, zordonHome)
+	spec, err := applyWorkspaceHere(ctx, log, out, name, zordonHome)
 	if err != nil {
 		return err
 	}
@@ -141,7 +141,7 @@ func applyTarget(flag invocation.WorkspaceName, cwd string) (invocation.Workspac
 // runWorkspaceApply re-renders the declared files for an existing workspace.
 // It is also the only way the project root ("main") ever gets them: main is
 // never created, so it has no create step to hang them off.
-func runWorkspaceApply(log *zlog.Logger, out io.Writer, flag invocation.WorkspaceName, zordonHome string) error {
+func runWorkspaceApply(ctx context.Context, log *zlog.Logger, out io.Writer, flag invocation.WorkspaceName, zordonHome string) error {
 	cwd, err := zfs.Getwd()
 	if err != nil {
 		return err
@@ -159,7 +159,7 @@ func runWorkspaceApply(log *zlog.Logger, out io.Writer, flag invocation.Workspac
 			return fmt.Errorf("no such workspace %q; create it with: zordon workspace create %s", ws.Name(), ws.Name())
 		}
 	}
-	spec, err := applyWorkspaceTo(log, out, root, ws, zordonHome)
+	spec, err := applyWorkspaceTo(ctx, log, out, root, ws, zordonHome)
 	if err != nil {
 		return err
 	}
@@ -171,12 +171,12 @@ func runWorkspaceApply(log *zlog.Logger, out io.Writer, flag invocation.Workspac
 
 // applyWorkspaceHere renders and writes the files for a named workspace of the
 // project the current invocation belongs to.
-func applyWorkspaceHere(log *zlog.Logger, out io.Writer, name, zordonHome string) (*alphasfile.WorkspaceSpec, error) {
+func applyWorkspaceHere(ctx context.Context, log *zlog.Logger, out io.Writer, name, zordonHome string) (*alphasfile.WorkspaceSpec, error) {
 	root, err := projectRoot()
 	if err != nil {
 		return nil, err
 	}
-	return applyWorkspaceTo(log, out, root, invocation.WorkspaceName(name), zordonHome)
+	return applyWorkspaceTo(ctx, log, out, root, invocation.WorkspaceName(name), zordonHome)
 }
 
 // renderWorkspaceHere resolves the block WITHOUT writing anything, for callers
@@ -219,7 +219,7 @@ func workspaceInvocation(root string, ws invocation.WorkspaceName) (*invocation.
 // would resolve to "main". By this point the directory and its .workspace
 // marker exist, so the ordinary walk-up sees exactly what it would see after
 // a `cd` into it.
-func applyWorkspaceTo(log *zlog.Logger, out io.Writer, root string, ws invocation.WorkspaceName, zordonHome string) (*alphasfile.WorkspaceSpec, error) {
+func applyWorkspaceTo(ctx context.Context, log *zlog.Logger, out io.Writer, root string, ws invocation.WorkspaceName, zordonHome string) (*alphasfile.WorkspaceSpec, error) {
 	inv, err := workspaceInvocation(root, ws)
 	if err != nil {
 		return nil, err
@@ -229,7 +229,7 @@ func applyWorkspaceTo(log *zlog.Logger, out io.Writer, root string, ws invocatio
 	if err != nil {
 		return nil, err
 	}
-	protected, err := serviceSourceDirs(af, zordonHome)
+	protected, err := serviceSourceDirs(ctx, af, zordonHome)
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +242,8 @@ func applyWorkspaceTo(log *zlog.Logger, out io.Writer, root string, ws invocatio
 // serviceSourceDirs lists the trees the services build from, so a generated
 // file can be kept out of them. In main those are the developer's own
 // directories, which no path convention can identify — only the manifest can.
-func serviceSourceDirs(afPath, zordonHome string) ([]string, error) {
-	metas, err := parseServices(zordonHome, afPath)
+func serviceSourceDirs(ctx context.Context, afPath, zordonHome string) ([]string, error) {
+	metas, err := parseServices(ctx, zordonHome, afPath)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +381,7 @@ func runWorkspaceServiceRm(ctx context.Context, log *zlog.Logger, out io.Writer,
 	if err != nil {
 		return err
 	}
-	metas, err := parseServices(zordonHome, af)
+	metas, err := parseServices(ctx, zordonHome, af)
 	if err != nil {
 		return err
 	}
@@ -448,7 +448,7 @@ func checkoutServices(ctx context.Context, log *zlog.Logger, spec *alphasfile.Wo
 	if err != nil {
 		return err
 	}
-	metas, err := parseServices(zordonHome, af)
+	metas, err := parseServices(ctx, zordonHome, af)
 	if err != nil {
 		return err
 	}

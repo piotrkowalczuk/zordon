@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 // examples/workspace is a monorepo: three services (serviceA, serviceB,
@@ -20,7 +21,7 @@ func TestExampleWorkspaceMonorepo(t *testing.T) {
 	compile := func(wt, stateDir string) []*Service {
 		iv := &invocation.InvocationState{
 			FsHash: "abc0000011112222", TmpDir: "/tmp/zordon-abc0000011112222",
-			Workspace: wt, StateDir: stateDir,
+			Workspace: wt, StateDir: zfs.StateDir(stateDir),
 		}
 		af, err := Compile("/repo/examples/workspace/Alphasfile", b, iv, nil, "", TestConfig{})
 		if err != nil {
