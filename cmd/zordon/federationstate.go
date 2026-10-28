@@ -40,13 +40,12 @@ func (l ChainLevel) State() zfs.StateDir { return l.inv.StateDir }
 // so a second `zordon start` / `zordon clean` informs the user which PID holds
 // the lock instead of hanging silently.
 func (l ChainLevel) AcquireLock(ctx context.Context, timeout time.Duration, log *zlog.Logger) (func(), error) {
-	lockCtx := ctx
-	var cancel context.CancelFunc
 	if timeout > 0 {
-		lockCtx, cancel = context.WithTimeout(ctx, timeout)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	return l.State().AcquireLock(lockCtx, "start", func(lockPath string, holderPID int, waited time.Duration) {
+	return l.State().AcquireLock(ctx, "start", func(lockPath string, holderPID int, waited time.Duration) {
 		if log == nil {
 			return
 		}
@@ -225,15 +224,15 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 		return nil, fmt.Errorf("mkdir tmp dir: %w", err)
 	}
 
-	ctxLevel, cancel := context.WithTimeout(ctx, cfg.timeout)
+	ctx, cancel := context.WithTimeout(ctx, cfg.timeout)
 	defer cancel()
 	if err := spawnAlpha(cfg.alphaBin, levelLog, sock, cfg.timeout, cfg.verbose, log, inv.Env); err != nil {
 		return nil, fmt.Errorf("%s: %w", lvl.afPath, err)
 	}
-	if err := sock.WaitListening(ctxLevel); err != nil {
+	if err := sock.WaitListening(ctx); err != nil {
 		return nil, fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
-	sum, err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent)
+	sum, err := pushConfigure(ctx, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", lvl.afPath, err)
 	}

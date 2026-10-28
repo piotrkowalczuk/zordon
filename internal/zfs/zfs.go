@@ -197,7 +197,7 @@ func (d StateDir) TryAcquireLock(name string) (release func(), holderPID int, ok
 		return nil, 0, false, err
 	}
 	lockPath := filepath.Join(d.Path(), name+".lock")
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, filePerm)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, filePerm)
 	if err != nil {
 		return nil, 0, false, fmt.Errorf("zfs: open lock %s: %w", lockPath, err)
 	}
@@ -244,13 +244,12 @@ func (d StateDir) AcquireLock(ctx context.Context, name string, onWait func(lock
 			return nil, fmt.Errorf("zfs: waiting for lock %s: %w", lockPath, ctx.Err())
 		case <-time.After(50 * time.Millisecond):
 		}
-		var tryPID int
-		release, tryPID, ok, err = d.TryAcquireLock(name)
+		release, pid, ok, err := d.TryAcquireLock(name)
 		if err != nil || ok {
 			return release, err
 		}
-		if tryPID > 0 {
-			holderPID = tryPID
+		if pid > 0 {
+			holderPID = pid
 		}
 		if onWait != nil && time.Since(lastReport) >= 5*time.Second {
 			onWait(lockPath, holderPID, time.Since(start))
@@ -264,7 +263,7 @@ func (d StateDir) AcquireLock(ctx context.Context, name string, onWait func(lock
 // in the lock file.
 func (d StateDir) ProbeLock(name string) (held bool, holderPID int) {
 	lockPath := filepath.Join(d.Path(), name+".lock")
-	f, err := os.Open(lockPath)
+	f, err := os.OpenFile(lockPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return false, 0
 	}
@@ -710,6 +709,7 @@ func Copy(src, dst string) error {
 
 func unlockClosure(f *os.File) func() {
 	return func() {
+		_ = f.Truncate(0)
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
 	}

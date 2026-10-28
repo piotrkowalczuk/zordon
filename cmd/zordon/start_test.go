@@ -1,19 +1,10 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
-	"github.com/piotrkowalczuk/zordon/internal/control"
-	"github.com/piotrkowalczuk/zordon/internal/protocol"
-	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
 
 func TestParsePicks(t *testing.T) {
@@ -150,62 +141,6 @@ func TestPickServices_ShortName(t *testing.T) {
 	}
 	if _, err := pickServices([]*alphasfile.Service{api}, []string{"shop/api"}); err == nil {
 		t.Error("only a module named like its package is left out of the short name")
-	}
-}
-
-func TestPushConfigure_respectsContextTimeout(t *testing.T) {
-	sock, cleanup := startStuckStreamServer(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
-	defer cancel()
-
-	_, err := pushConfigure(ctx, zlog.New(io.Discard, true), sock, "Alphasfile", "fshash", "cfghash", nil, nil, &alphasfile.Alphasfile{}, true, true)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("pushConfigure err = %v, want context.DeadlineExceeded", err)
-	}
-}
-
-func TestPushClean_respectsContextTimeout(t *testing.T) {
-	sock, cleanup := startStuckStreamServer(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
-	defer cancel()
-
-	err := pushClean(ctx, zlog.New(io.Discard, true), sock, "Alphasfile", "fshash", "cfghash", nil, nil, &alphasfile.Alphasfile{}, true)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("pushClean err = %v, want context.DeadlineExceeded", err)
-	}
-}
-
-func startStuckStreamServer(t *testing.T) (control.AlphaSocketPath, func()) {
-	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "zstart-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	sock := control.AlphaSocketPath(filepath.Join(dir, "a.sock"))
-	ln, err := sock.Listen()
-	if err != nil {
-		_ = os.RemoveAll(dir)
-		t.Fatalf("Listen: %v", err)
-	}
-	done := make(chan struct{})
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		var req protocol.Request
-		_ = protocol.NewDecoder(conn).Read(&req)
-		<-done
-	}()
-	return sock, func() {
-		close(done)
-		_ = ln.Close()
-		_ = os.RemoveAll(dir)
 	}
 }
 

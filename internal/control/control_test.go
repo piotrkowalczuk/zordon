@@ -49,9 +49,8 @@ func TestAlphaSocketPath_Roundtrip_stuckServerTimesOutAndIsNotClassifiedAsNotRun
 	}
 
 	missingSock := AlphaSocketPath(filepath.Join(dir, "missing.sock"))
-	_, missingErr := missingSock.Roundtrip(t.Context(), &protocol.Request{Op: protocol.OpState})
-	if !IsNotRunning(missingErr) {
-		t.Fatalf("IsNotRunning(%v) = false on missing socket; want true", missingErr)
+	if _, err := missingSock.Roundtrip(t.Context(), &protocol.Request{Op: protocol.OpState}); !IsNotRunning(err) {
+		t.Fatalf("IsNotRunning(%v) = false on missing socket; want true", err)
 	}
 }
 

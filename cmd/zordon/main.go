@@ -444,15 +444,6 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock control.AlphaSock
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.SetDeadline(time.Now())
-		case <-stop:
-		}
-	}()
 
 	enc := protocol.NewEncoder(conn)
 	dec := protocol.NewDecoder(conn)
@@ -472,6 +463,9 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock control.AlphaSock
 	}); err != nil {
 		return nil, fmt.Errorf("send configure: %w", err)
 	}
+
+	// Clear the deadline for the streaming phase (bringup can take minutes)
+	_ = conn.SetDeadline(time.Time{})
 
 	log.Info("zordon", "config pushed (%d services, failfast=%v), streaming bringup logs", len(af.All()), failfast)
 
@@ -516,9 +510,6 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock control.AlphaSock
 	for {
 		var ev protocol.Event
 		if err := dec.Read(&ev); err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, finish(fmt.Errorf("bringup timed out: %w", ctxErr))
-			}
 			// Stream died without an explicit verdict (EOF or read
 			// error from alpha disappearing). Run the summary on
 			// whatever failures we've already recorded — the first
@@ -566,15 +557,6 @@ func pushClean(ctx context.Context, log *zlog.Logger, sock control.AlphaSocketPa
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.SetDeadline(time.Now())
-		case <-stop:
-		}
-	}()
 
 	enc := protocol.NewEncoder(conn)
 	dec := protocol.NewDecoder(conn)
@@ -593,14 +575,12 @@ func pushClean(ctx context.Context, log *zlog.Logger, sock control.AlphaSocketPa
 	}); err != nil {
 		return fmt.Errorf("send clean: %w", err)
 	}
+	_ = conn.SetDeadline(time.Time{})
 	log.Info("zordon", "clean requested (%d services), streaming", len(af.All()))
 
 	for {
 		var ev protocol.Event
 		if err := dec.Read(&ev); err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return fmt.Errorf("clean timed out: %w", ctxErr)
-			}
 			return fmt.Errorf("recv event: %w", err)
 		}
 		switch ev.Kind {

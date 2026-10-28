@@ -277,9 +277,9 @@ func TestStateDir_AcquireLock_probeAndContention(t *testing.T) {
 		if err != nil || !ok || holderPID != 0 {
 			t.Fatalf("TryAcquireLock = (%v, %d, %v), want (true, 0, nil)", ok, holderPID, err)
 		}
-		if _, busyPID, busyOK, busyErr := dir.TryAcquireLock("start"); busyErr != nil || busyOK || busyPID != os.Getpid() {
+		if _, holderPID, ok, err := dir.TryAcquireLock("start"); err != nil || ok || holderPID != os.Getpid() {
 			release1()
-			t.Fatalf("TryAcquireLock while held = (%v, %d, %v), want (false, %d, nil)", busyOK, busyPID, busyErr, os.Getpid())
+			t.Fatalf("TryAcquireLock while held = (%v, %d, %v), want (false, %d, nil)", ok, holderPID, err, os.Getpid())
 		}
 		if held, pid := dir.ProbeLock("start"); !held || pid != os.Getpid() {
 			release1()

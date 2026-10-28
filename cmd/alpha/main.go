@@ -2021,11 +2021,11 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 	// runProvision's toolchainEnv blocks on the `ready` barrier, so spawning
 	// the goroutines here is enough — they short-circuit when the install is
 	// already cached in ZORDON_HOME.
-	tcCtx, cancelTC := state.shutdownCtx()
-	defer cancelTC()
+	ctx, cancel := state.shutdownCtx()
+	defer cancel()
 	for _, tc := range pinnedToolchains(newConfig.Toolchain) {
 		state.addToolchain(tc)
-		go bringupToolchain(tcCtx, tc, state.zordonHome, log)
+		go bringupToolchain(ctx, tc, state.zordonHome, log)
 	}
 	pkgSeen := map[string]bool{}
 	for _, svc := range services {
@@ -2042,7 +2042,7 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 			tc.installEnv = svc.Runtime.BuildEnv
 		}
 		state.addToolchain(tc)
-		go bringupToolchain(tcCtx, tc, state.zordonHome, log)
+		go bringupToolchain(ctx, tc, state.zordonHome, log)
 	}
 
 	// Reverse order: services last-declared first, provisions within a
@@ -2236,11 +2236,11 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	// bringupToolchain goroutine short-circuits to Reach("ready") in
 	// microseconds when the install is a no-op, and other entities can
 	// always resolve `toolchain.X@ready` as a barrier.
-	tcCtx, cancelTC := state.shutdownCtx()
-	defer cancelTC()
+	ctx, cancel := state.shutdownCtx()
+	defer cancel()
 	for _, tc := range pinnedToolchains(newConfig.Toolchain) {
 		state.addToolchain(tc)
-		go bringupToolchain(tcCtx, tc, state.zordonHome, log)
+		go bringupToolchain(ctx, tc, state.zordonHome, log)
 	}
 
 	// pkg services: each declares a native package (redis/postgres/…)
@@ -2264,7 +2264,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 			tc.installEnv = svc.Runtime.BuildEnv
 		}
 		state.addToolchain(tc)
-		go bringupToolchain(tcCtx, tc, state.zordonHome, log)
+		go bringupToolchain(ctx, tc, state.zordonHome, log)
 	}
 
 	// Pre-allocate every entity FIRST so cross-refs in `after` resolve
@@ -2942,9 +2942,9 @@ func bringupAndSuperviseStart(prepCtx context.Context, b *bringup, svc *alphasfi
 	// catches via AssertNoLeftovers.
 	defer func() {
 		if registered {
-			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), cfg.shutdownGrace)
-			defer cancelCleanup()
-			if err := state.registry.Remove(cleanupCtx, state.fsHash, name); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), cfg.shutdownGrace)
+			defer cancel()
+			if err := state.registry.Remove(ctx, state.fsHash, name); err != nil {
 				log.Error("alpha", "registry remove %s: %v", name, err)
 			}
 		}
