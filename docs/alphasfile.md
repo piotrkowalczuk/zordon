@@ -243,7 +243,10 @@ import "./caddy" "edge" {
 | entrypoint imports | several imports of the same package at the entrypoint's top level must pass the same features and the same input expressions, compared as written |
 | cycle | packages that import each other resolve in any order when none of those imports has `enabled`, since such an import counts whatever its importer's features are; a cycle through an import with `enabled` cannot be configured first, and importing one of its packages at the entrypoint's top level breaks it |
 | parts | every `Alphasfile.<name>` in the package's directory is a part of it; see [Parts](#parts) |
-| toolchain | the package's `toolchain {}` pins every component that has none of its own |
+| toolchain | the package's `toolchain {}` pins every component that has none of its own; it is the package's whole toolchain, so a package with one takes nothing from its importers |
+| toolchain from importers | a package without `toolchain {}` runs with the toolchain of the packages that import it, which flows on to what it imports, so a package that imports a whole module pins the module; see [examples/package_toolchain](https://github.com/piotrkowalczuk/zordon/tree/main/examples/package_toolchain) |
+| importers disagree | two importers whose toolchains differ are an error naming both; a `toolchain {}` in the imported package settles it; two blocks that pin the same versions agree |
+| entrypoint imports | an import from the entrypoint's top level passes no toolchain, since the entrypoint's own pins already apply to the whole level |
 | visibility | a package's components see each other and whatever the package or the component imports |
 | federation | importing a package that is a federation level of the invocation is an error, because it would run twice |
 | on its own | `zordon start` in the package's directory runs it with default inputs and no features; a required input is an error |

@@ -572,6 +572,10 @@ func (t *Tree) finish() error {
 		}
 	}
 
+	toolchains, err := t.packageToolchains()
+	if err != nil {
+		return err
+	}
 	for _, f := range t.files {
 		if f.block != nil {
 			p := f.pkg.name
@@ -582,7 +586,7 @@ func (t *Tree) finish() error {
 			t.addEdges(pkgScope(p))
 			for _, mb := range f.block.Modules {
 				id := p + "/" + mb.Name
-				cp, err := t.pruneModule(mb, f.pkg.settings, id, f.block.Toolchain)
+				cp, err := t.pruneModule(mb, f.pkg.settings, id, toolchains[p].toolchainBlock())
 				if err != nil {
 					return err
 				}

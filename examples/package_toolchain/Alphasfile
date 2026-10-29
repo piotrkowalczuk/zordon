@@ -1,0 +1,5 @@
+# The stack package pins the toolchain of everything it imports. Neither this
+# entrypoint nor the app package pins one, so app builds with the go of stack.
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+import "./stack" {}
