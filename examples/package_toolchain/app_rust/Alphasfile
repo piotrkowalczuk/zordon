@@ -1,9 +1,9 @@
-package "app" {
+package "app_rust" {
   component "app" {
-    service "go" "app" {
+    service "rust" "app" {
       src {
         path = "../../.."
-        exe  = "./examples/go/src/app"
+        exe  = "./examples/rust/src/app"
       }
 
       vars = { port = net::pickport() }

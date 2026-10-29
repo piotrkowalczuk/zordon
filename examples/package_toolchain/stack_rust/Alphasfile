@@ -1,0 +1,3 @@
+package "stack_rust" {
+  import "../app_rust" {}
+}
