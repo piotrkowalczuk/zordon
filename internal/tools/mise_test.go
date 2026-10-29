@@ -1,8 +1,11 @@
 package tools
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -181,5 +184,45 @@ func mustMkdir(t *testing.T, p string) {
 	t.Helper()
 	if err := os.MkdirAll(p, 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEnsureTools_skipsAToolAlreadyInstalled(t *testing.T) {
+	cases := map[string]struct {
+		toolchain   string
+		present     bool
+		wantInstall bool
+	}{
+		"ruby-present":   {"ruby", true, false},
+		"ruby-missing":   {"ruby", false, true},
+		"nodejs-present": {"nodejs", true, false},
+		"nodejs-missing": {"nodejs", false, true},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			dir := t.TempDir()
+			calls := filepath.Join(dir, "calls")
+			listExit := 1
+			if c.present {
+				listExit = 0
+			}
+			bin := filepath.Join(dir, "mise")
+			script := "#!/bin/sh\necho \"$@\" >> '" + calls + "'\ncase \"$*\" in *' gem list '*|*' npm ls '*) exit " + strconv.Itoa(listExit) + ";; esac\nexit 0\n"
+			if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := EnsureTools(bin, dir, c.toolchain, "1.0.0", map[string]string{"tool": "2.0.0"}, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(calls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			installed := strings.Contains(string(got), " gem install ") || strings.Contains(string(got), " npm install ")
+			if installed != c.wantInstall {
+				t.Errorf("installed = %v, want %v; mise was called with:\n%s", installed, c.wantInstall, got)
+			}
+		})
 	}
 }

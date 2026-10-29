@@ -280,9 +280,9 @@ func EnsurePackage(binPath, dataDir, name, version string, buildEnv zenv.Environ
 // must be re-installed per pinned version.
 //
 // Runs through `mise exec <tool>@<version> -- <installer> ...` so each
-// install lands in the right interpreter's world. Idempotent in the
-// sense the underlying installer decides: gem/pip/cargo no-op on a
-// matching name+version that's already present.
+// install lands in the right interpreter's world. A tool already present at
+// its version is skipped: gem and npm reinstall it otherwise, rewriting
+// files that a service started earlier may be loading at that moment.
 //
 // Returns the first install error or nil. Output (progress, warnings)
 // goes to logOut so the user can see what's happening on first run.
@@ -291,6 +291,9 @@ func EnsureTools(binPath, dataDir, toolchain, version string, items map[string]s
 		return nil
 	}
 	for name, ver := range items {
+		if check := toolPresentCmd(binPath, dataDir, toolchain, version, name, ver); check != nil && check.Run() == nil {
+			continue
+		}
 		cmd, err := toolInstallCmd(binPath, dataDir, toolchain, version, name, ver)
 		if err != nil {
 			return err
@@ -342,6 +345,23 @@ func toolInstallCmd(binPath, dataDir, toolchain, version, name, ver string) (*ex
 	}
 	full := append([]string{"exec", spec, "--"}, argv...)
 	return miseCommand(binPath, dataDir, full...), nil
+}
+
+// toolPresentCmd builds a command that succeeds when name@ver is already
+// installed in the pinned interpreter's tool world, or nil for a toolchain
+// whose installer is a no-op on an installed version anyway.
+func toolPresentCmd(binPath, dataDir, toolchain, version, name, ver string) *exec.Cmd {
+	var argv []string
+	switch toolchain {
+	case "ruby":
+		argv = []string{"gem", "list", "--installed", "--exact", name, "--version", ver}
+	case "nodejs":
+		argv = []string{"npm", "ls", "--global", "--depth=0", name + "@" + ver}
+	default:
+		return nil
+	}
+	full := append([]string{"exec", miseToolName(toolchain) + "@" + version, "--"}, argv...)
+	return miseCommand(binPath, dataDir, full...)
 }
 
 // Acquire takes a process-wide exclusive lock on a lock file scoped to
