@@ -1,4 +1,10 @@
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  go {
+    version = "1.27.0"
+  }
+}
 
 # Three services so `zordon start <picks>` can demonstrate:
 #   - bringing up one in isolation (api, no deps);

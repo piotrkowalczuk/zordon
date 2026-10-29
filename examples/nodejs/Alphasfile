@@ -1,7 +1,7 @@
 # Closed-world env: services see ONLY these host vars. Mirrors the
 # ruby example; same closed-world discipline applies to nodejs because
-# Corepack reads HOME for its cache and npm needs PATH/HOME.
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+# npm needs HOME; PATH comes from the pinned toolchain, not the shell.
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 toolchain {
   # mise installs node under ~/.zordon/toolchain/installs/node/<version>

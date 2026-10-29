@@ -9,7 +9,7 @@
 # First start may take a while: mise builds redis from source (vfox/asdf
 # backend) and downloads prebuilt postgres. Subsequent starts reuse the
 # install.
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 service "pkg" "redis" {
   # bare name → mise registry picks the backend (redis → vfox→asdf).

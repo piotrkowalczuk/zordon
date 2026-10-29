@@ -1,7 +1,13 @@
 # Picks: a service by its own name when it is unique, a component, a package,
 # or a component of a package. shop and billing each have a service named
 # worker, so "worker" alone names two services and is refused.
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  go {
+    version = "1.27.0"
+  }
+}
 
 import "./shop" {}
 import "./billing" {}

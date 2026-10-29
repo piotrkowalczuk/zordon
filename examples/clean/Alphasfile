@@ -1,4 +1,10 @@
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  go {
+    version = "1.27.0"
+  }
+}
 
 # examples/clean — teardown snippets. A provision's `cmd` sets something
 # up at bringup; its `clean` undoes it. `zordon clean` runs the clean

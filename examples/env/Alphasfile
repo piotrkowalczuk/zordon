@@ -1,4 +1,10 @@
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  go {
+    version = "1.27.0"
+  }
+}
 
 # Top-level env: a global overlay applied under every service — the
 # dotenv-less way to set a variable for the whole stack. GLOBAL_INLINE

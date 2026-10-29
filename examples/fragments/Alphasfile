@@ -2,6 +2,12 @@
 # parts: every Alphasfile.<name> next to an Alphasfile belongs to it, and
 # nothing has to import it. tools/Alphasfile.lint has no Alphasfile next to
 # it, so zordon never reads it.
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  go {
+    version = "1.27.0"
+  }
+}
 
 import "./platform" {}

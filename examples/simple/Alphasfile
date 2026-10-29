@@ -1,9 +1,12 @@
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 # Pinned so the example never depends on whatever cargo/ruby the host has:
 # mise materializes both, and the example runs the same on a laptop and in
 # a bare CI container.
 toolchain {
+  go {
+    version = "1.27.0"
+  }
   rust {
     version = "1.91.0"
   }

@@ -12,9 +12,12 @@
 #
 # First start downloads atlas via mise/aqua (a prebuilt single binary — fast;
 # cached under <repo>/.zordon afterwards).
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 toolchain {
+  go {
+    version = "1.27.0"
+  }
   pkg {
     # key = mise ref (optionally backend-qualified), value = version.
     # Installed via `mise install aqua:ariga/atlas@1.2.0`. Multiple entries

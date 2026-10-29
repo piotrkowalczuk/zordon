@@ -1,4 +1,10 @@
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  go {
+    version = "1.27.0"
+  }
+}
 
 # examples/provision — bringup-time actions (check/cmd/verify) chained
 # via `after`, plus a detached fire-and-forget provision that runs

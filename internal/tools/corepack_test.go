@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
 	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
@@ -34,6 +35,7 @@ func TestCorepackMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureMise: %v", err)
 	}
+	host := zenv.FromHost([]string{"HOME", "USER", "PATH", "LANG", "TMPDIR"})
 
 	for _, nv := range nodeVersions {
 		t.Run("node-"+nv, func(t *testing.T) {
@@ -43,11 +45,11 @@ func TestCorepackMatrix(t *testing.T) {
 			}
 			defer release()
 
-			env, err := MiseEnv(bin, dataDir, "node", nv, os.Stderr)
+			env, err := MiseEnv(bin, dataDir, "node", nv, host, os.Stderr)
 			if err != nil {
 				t.Fatalf("MiseEnv node@%s: %v", nv, err)
 			}
-			if err := EnsureNodeCorepack(bin, dataDir, nv, env, os.Stderr); err != nil {
+			if err := EnsureNodeCorepack(bin, dataDir, nv, host, env, os.Stderr); err != nil {
 				t.Fatalf("EnsureNodeCorepack node@%s: %v", nv, err)
 			}
 			if home := env["COREPACK_HOME"]; !strings.HasPrefix(home, filepath.Join(dataDir, "node-corepack", nv)+string(filepath.Separator)) {
@@ -56,7 +58,7 @@ func TestCorepackMatrix(t *testing.T) {
 			cwd := t.TempDir()
 			for _, pm := range pms {
 				cmd := exec.Command(bin, "exec", "node@"+nv, "--", pm, "--version")
-				cmd.Env = overlayEnv(isolatedEnv(dataDir, bin), env)
+				cmd.Env = overlayEnv(isolatedEnv(host, dataDir, bin), env)
 				cmd.Dir = cwd
 				out, err := cmd.CombinedOutput()
 				if err != nil {

@@ -7,7 +7,7 @@
 # Attach (GoLand/VS Code): "Go Remote" / Go Attach, host 127.0.0.1,
 # port = `zordon get service.go.app.debugger.port`.
 
-sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+sysenv = ["HOME", "USER", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 
 toolchain {
   go {
