@@ -165,8 +165,7 @@ func (i *InvocationState) SocketPath() string {
 	return filepath.Join(i.TmpDir, "alpha.sock")
 }
 
-// LockPath / AlphaLogPath live in the (in-tree) state dir.
-func (i *InvocationState) LockPath() string     { return filepath.Join(i.StateDir, "start.lock") }
+// AlphaLogPath lives in the (in-tree) state dir.
 func (i *InvocationState) AlphaLogPath() string { return filepath.Join(i.StateDir, "alpha.log") }
 
 // workspaceBoundary walks up from cwd to the nearest workspace boundary: a dir

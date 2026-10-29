@@ -60,7 +60,8 @@ func TestWorkspaceFilePath_rejects(t *testing.T) {
 		"service config":   {rel: "etc/api/conf", want: "etc/"},
 		"service state":    {rel: "var/api/data", want: "var/"},
 		"workspace marker": {rel: invocation.WorkspaceMarker, want: "zordon's own"},
-		"start lock":       {rel: "start.lock", want: "zordon's own"},
+		"zordon lock":      {rel: "zordon.lock", want: "zordon's own"},
+		"alpha lock":       {rel: "alpha.lock", want: "zordon's own"},
 		"alpha log":        {rel: "alpha.log", want: "zordon's own"},
 	}
 

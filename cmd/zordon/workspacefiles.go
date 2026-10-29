@@ -27,7 +27,7 @@ import (
 var reservedStateDirs = []string{"src", "bin", "etc", "var"}
 
 // reservedStateFiles are zordon's own bookkeeping inside a workspace dir.
-var reservedStateFiles = []string{invocation.WorkspaceMarker, "start.lock", "alpha.log"}
+var reservedStateFiles = []string{invocation.WorkspaceMarker, "zordon.lock", "alpha.lock", "alpha.log"}
 
 // applyWorkspaceFiles materializes every declared file for one workspace.
 //
