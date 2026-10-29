@@ -877,6 +877,58 @@ service "go" "second" {
 	}
 }
 
+// TestGoService_runtimeWaitsOnProvisionOfItsOwnBuild pins that
+// runtime.after gates the process, not the checkout and build: a
+// service can hold its runtime on a provision that needs its own built
+// artifact (a migration run from the checkout, a smoke check on the
+// binary). Gating the build on runtime.after deadlocks that service.
+func TestGoService_runtimeWaitsOnProvisionOfItsOwnBuild(t *testing.T) {
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/app")
+
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "app" {
+  src {
+    path = "./src/app"
+    exe = "."
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd   = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+    after = [self.runtime.provision.smoke.success]
+
+    provision "smoke" {
+      after = [self.build.success]
+      cmd   = "test -x ${fs::bin()}/app && ${test::log("smoke")}"
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`)
+
+	mustStart(t, p)
+	if got := p.TestLog(); len(got) != 1 || got[0] != "smoke" {
+		t.Fatalf("test log = %v, want [smoke]", got)
+	}
+}
+
 // TestGoService_buildFailureBlocksRuntime is the load-bearing negative
 // proof of the build barrier: when a service's `build { cmd }` exits
 // non-zero, the runtime command MUST NOT be executed. The build phase

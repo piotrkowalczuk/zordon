@@ -1,5 +1,5 @@
 // Package summary builds the timing report printed after a successful
-// `zordon start`: each service's bringup broken into phases (wait / build /
+// `zordon start`: each service's bringup broken into phases (build / wait /
 // spawn / ready) and each provision's run duration, ordered by when things
 // actually started so the report reads as the real bringup sequence.
 //
@@ -23,10 +23,11 @@ type StartSummary struct {
 	Provisions []ProvisionTiming `json:"provisions,omitempty"` // observed run order
 }
 
-// ServiceTiming breaks one service's bringup into phases: wait (blocked on
-// dependencies) → build (workspace prepare + build cmd) → spawn (exec
-// launch) → ready (readiness probe / stabilization). Total is scheduled→ready.
-// Deps attributes the wait phase across the individual dependencies.
+// ServiceTiming breaks one service's bringup into phases: build (toolchain,
+// workspace prepare and build cmd) → wait (blocked on runtime.after) → spawn
+// (exec launch) → ready (readiness probe / stabilization). Total is
+// scheduled→ready. Deps attributes the waiting across the individual
+// dependencies.
 type ServiceTiming struct {
 	Name      string      `json:"name"`
 	Toolchain string      `json:"toolchain,omitempty"`
@@ -68,8 +69,8 @@ type Service struct {
 	Toolchain string
 	Deps      []Dep
 	Scheduled time.Time
-	Started   time.Time // deps cleared, the service's own work begins
 	BuildDone time.Time
+	Started   time.Time // runtime.after cleared, the process is about to spawn
 	Running   time.Time // process launched
 	Ready     time.Time
 }
@@ -107,9 +108,9 @@ func Build(bringupStart, now time.Time, services []Service, provisions []Provisi
 			Name:      x.Name,
 			Toolchain: x.Toolchain,
 			Deps:      depTimings(x.Scheduled, x.Deps),
-			WaitMS:    msBetween(x.Scheduled, x.Started),
-			BuildMS:   msBetween(x.Started, x.BuildDone),
-			SpawnMS:   msBetween(x.BuildDone, x.Running),
+			BuildMS:   msBetween(x.Scheduled, x.BuildDone),
+			WaitMS:    msBetween(x.BuildDone, x.Started),
+			SpawnMS:   msBetween(x.Started, x.Running),
 			ReadyMS:   msBetween(x.Running, x.Ready),
 			TotalMS:   msBetween(x.Scheduled, x.Ready),
 		})
