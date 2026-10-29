@@ -1,0 +1,29 @@
+# A package in the repository the working place requires. test.sh copies
+# greet/ next to hello/ into a fresh git repository, which the place imports
+# by its Go-style path while its hello service takes the same repository as a
+# git source.
+package "greet" {
+  component "greet" {
+    service "go" "greet" {
+      src {
+        path = ".."
+        exe  = "./greet"
+      }
+
+      vars = { port = net::pickport() }
+
+      runtime {
+        cmd = ["${fs::bin()}/greet", "-addr", "127.0.0.1:${self.vars.port}"]
+      }
+
+      readiness {
+        http {
+          path = "/"
+          port = self.vars.port
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}

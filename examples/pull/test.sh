@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-# Claim: a service whose git source follows a branch is locked to a commit.
-# The first start records the commit the branch points at in zordon.lock and
-# builds it; a later start keeps it when the branch moves; start --pull=srv
-# moves it to the newest commit and says so; and a lock that holds an older
-# commit, as one a teammate committed would, rebuilds the checkout there and
-# status says how far it is behind. The repository is a local git repository
-# that git reaches through url.<base>.insteadOf, so nothing leaves the machine.
+# Claim: what a working place takes from git is locked to a commit, and
+# zordon start --pull moves the lock. The place runs a service whose git
+# source follows a branch and imports a package from a repository it
+# requires. The first start records the commit each one points at in
+# zordon.lock and builds it; a later start keeps both when the branch moves;
+# --pull=pkg moves the required repository and leaves the service's source,
+# --pull=srv the other way round, --pull=all both, each saying so; and a lock
+# that holds older commits, as one a teammate committed would, rebuilds there
+# and status says how far each pin is behind. The service's source and the
+# required repository are one local git repository that git reaches through
+# url.<base>.insteadOf, so nothing leaves the machine.
 cd "$(dirname "$0")"
 source ../_lib.sh
 need curl
 
 build_bins
 
-# A fresh name per run: the bare clone under the zordon home is keyed by it.
+# A fresh name per run: the bare clone and the module checkouts under the
+# zordon home are keyed by it.
 REPO="github.com/zordon-example/hello-$$-$RANDOM"
 ZHOME="${ZORDON_HOME:-$HOME/.zordon}"
 TMP="$(mktemp -d)"
@@ -21,7 +26,7 @@ PLACE="$TMP/place"
 cleanup() {
 	(cd "$PLACE" && zordon stop --agent >/dev/null 2>&1) || true
 	pkill -f "$PLACE/" >/dev/null 2>&1 || true
-	rm -rf "$TMP" "$ZHOME/src/github.com/zordon-example"
+	rm -rf "$TMP" "$ZHOME/src/github.com/zordon-example" "$ZHOME/mod/github.com/zordon-example"
 }
 trap cleanup EXIT
 
@@ -30,9 +35,17 @@ commit_all() { # <message>
 	git -C "$UP" -c user.email=z@example.com -c user.name=zordon -c commit.gpgsign=false commit -q -m "$1"
 	git -C "$UP" rev-parse HEAD
 }
+bump() { # <from> <to>: a commit where both programs answer with <to>
+	local f
+	for f in hello greet; do
+		sed -i.bak "s/$f $1/$f $2/" "$UP/$f/main.go"
+		rm "$UP/$f/main.go.bak"
+	done
+	commit_all "$2"
+}
 
 mkdir -p "$UP" "$PLACE"
-cp -R hello "$UP/"
+cp -R hello greet "$UP/"
 printf 'module %s\n\n%s\n' "$REPO" "$(grep '^go ' "$ROOT/go.mod")" >"$UP/go.mod"
 git -C "$UP" init -q -b main
 first="$(commit_all one)"
@@ -47,6 +60,11 @@ toolchain {
     version = "1.27.0"
   }
 }
+
+# The package follows main; the lock holds the commit.
+require "$REPO" { ref = "main" }
+
+import "$REPO/greet" {}
 
 # No branch, tag or rev: the service follows the default branch.
 service "go" "hello" {
@@ -74,33 +92,54 @@ start_place() { # [zordon start flags...]
 	info "zordon start${*:+ $*} in $PLACE"
 	(cd "$PLACE" && zordon start --agent --timeout 600s --alpha-log "$PLACE/alpha.log" "$@" 2>&1)
 }
-hello() {
+answer() { # <port expression>: what GET / on that port says
 	local port
-	port="$(cd "$PLACE" && zordon get service.go.hello.vars.port)" || fail "zordon get of the port failed"
-	http_get "http://127.0.0.1:$port/" || fail "hello does not answer on $port"
+	port="$(cd "$PLACE" && zordon get "$1")" || fail "zordon get $1 failed"
+	http_get "http://127.0.0.1:$port/" || fail "nothing answers on $port"
 }
+hello() { answer service.go.hello.vars.port; }
+greet() { answer package.greet.component.greet.service.go.greet.vars.port; }
+lock() { tr -s ' \n' ' ' <"$PLACE/zordon.lock"; }
 status() { (cd "$PLACE" && zordon status --agent --format=text); }
 
 start_place >/dev/null || fail "first start failed"
 assert_contains "$(hello)" "hello one" "the service runs its git source"
-assert_contains "$(tr -s ' \n' ' ' <"$PLACE/zordon.lock")" "source \"$REPO\" { ref = \"HEAD\" commit = \"$first\" }" "the first start locks the commit the default branch points at"
+assert_contains "$(greet)" "greet one" "the package runs from the required repository"
+assert_contains "$(lock)" "source \"$REPO\" { ref = \"HEAD\" commit = \"$first\" }" "the first start locks the commit the service's branch points at"
+assert_contains "$(lock)" "repo \"$REPO\" { ref = \"main\" commit = \"$first\" }" "the first start locks the commit the required repository's branch points at"
 
-sed -i.bak 's/hello one/hello two/' "$UP/hello/main.go"
-rm "$UP/hello/main.go.bak"
-second="$(commit_all two)"
+second="$(bump one two)"
 
 start_place >/dev/null || fail "start after the branch moved failed"
 assert_contains "$(hello)" "hello one" "the lock keeps the service on its commit when the branch moves"
+assert_contains "$(greet)" "greet one" "the lock keeps the package on its commit when the branch moves"
+
+out="$(start_place --pull=pkg)" || fail "start --pull=pkg failed:\n$out"
+assert_contains "$out" "zordon.lock $REPO@main: ${first:0:12} -> ${second:0:12}" "--pull=pkg reports the moved repository pin"
+assert_contains "$(greet)" "greet two" "--pull=pkg builds the required repository's newest commit"
+assert_contains "$(hello)" "hello one" "--pull=pkg leaves the service's source where it was"
+assert_contains "$(lock)" "source \"$REPO\" { ref = \"HEAD\" commit = \"$first\" }" "--pull=pkg leaves the source pin in the lock"
 
 out="$(start_place --pull=srv)" || fail "start --pull=srv failed:\n$out"
-assert_contains "$out" "zordon.lock $REPO@HEAD: ${first:0:12} -> ${second:0:12}" "--pull=srv reports the moved pin"
-assert_contains "$(hello)" "hello two" "--pull=srv builds the newest commit"
-assert_contains "$(cat "$PLACE/zordon.lock")" "commit = \"$second\"" "--pull=srv rewrites the lock"
+assert_contains "$out" "zordon.lock $REPO@HEAD: ${first:0:12} -> ${second:0:12}" "--pull=srv reports the moved source pin"
+assert_contains "$(hello)" "hello two" "--pull=srv builds the service's newest commit"
+assert_contains "$(lock)" "source \"$REPO\" { ref = \"HEAD\" commit = \"$second\" }" "--pull=srv rewrites the lock"
 
-sed -i.bak "s/$second/$first/" "$PLACE/zordon.lock"
+third="$(bump two three)"
+
+out="$(start_place --pull=all)" || fail "start --pull=all failed:\n$out"
+assert_contains "$out" "zordon.lock $REPO@main: ${second:0:12} -> ${third:0:12}" "--pull=all reports the moved repository pin"
+assert_contains "$out" "zordon.lock $REPO@HEAD: ${second:0:12} -> ${third:0:12}" "--pull=all reports the moved source pin"
+assert_contains "$(hello)" "hello three" "--pull=all builds the service's newest commit"
+assert_contains "$(greet)" "greet three" "--pull=all builds the required repository's newest commit"
+
+sed -i.bak "s/$third/$second/g" "$PLACE/zordon.lock"
 rm "$PLACE/zordon.lock.bak"
 start_place >/dev/null || fail "start from an older lock failed"
-assert_contains "$(hello)" "hello one" "a lock holding an older commit rebuilds the checkout there"
-assert_contains "$(status)" "behind HEAD by 1" "status says how far the pin is behind its ref"
+assert_contains "$(hello)" "hello two" "a lock holding an older commit rebuilds the service there"
+assert_contains "$(greet)" "greet two" "a lock holding an older commit rebuilds the package there"
+st="$(status)"
+assert_contains "$st" "behind HEAD by 1" "status says how far the service's source is behind its ref"
+assert_contains "$st" "behind main by 1" "status says how far the required repository is behind its ref"
 
 pass "pull"
