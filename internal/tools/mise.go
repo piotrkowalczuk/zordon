@@ -44,7 +44,7 @@ import (
 //
 // stderr from cargo install is piped to logOut so the user sees
 // progress on a slow first run.
-func EnsureMise(zordonHome string, logOut io.Writer) (string, error) {
+func EnsureMise(kc zlock.GlobalKeychain, zordonHome string, logOut io.Writer) (string, error) {
 	bin := filepath.Join(zordonHome, "bin", "mise")
 	if zfs.Exists(bin) {
 		return bin, nil
@@ -60,7 +60,7 @@ func EnsureMise(zordonHome string, logOut io.Writer) (string, error) {
 	// Serialize cargo install so two alphas starting at the same time
 	// don't try to write the same binary. Re-check existence under the
 	// lock — the other waiter just did it for us.
-	release, err := zlock.NewGlobalKeychain(zordonHome).LockMise(context.Background())
+	release, err := kc.LockMise(context.Background())
 	if err != nil {
 		return "", err
 	}
@@ -207,8 +207,8 @@ func miseCommand(binPath, dataDir string, args ...string) *exec.Cmd {
 //
 // Mise installs the version automatically if it's missing under
 // dataDir; stderr is piped so progress shows on first install. Callers
-// must hold the per-(tool, version) lock from Acquire — auto-install
-// races otherwise.
+// must hold the per-(tool, version) lock from GlobalKeychain.LockTool —
+// auto-install races otherwise.
 func MiseEnv(binPath, dataDir, tool, version string, logOut io.Writer) (map[string]string, error) {
 	env, _, err := MiseEnvWithBinDirs(binPath, dataDir, tool, version, logOut)
 	return env, err
@@ -255,7 +255,7 @@ func MiseEnvWithBinDirs(binPath, dataDir, tool, version string, logOut io.Writer
 // — mise no-ops when the version is already present under dataDir.
 // Download/compile progress goes to logOut (some backends build from
 // source on first install). Callers hold the per-(name, version)
-// Acquire lock, since the install writes under dataDir.
+// GlobalKeychain.LockTool lock, since the install writes under dataDir.
 func EnsurePackage(binPath, dataDir, name, version string, buildEnv zenv.EnvironmentVariables, logOut io.Writer) error {
 	spec := name + "@" + version
 	cmd := miseCommand(binPath, dataDir, "install", spec)
@@ -362,18 +362,4 @@ func toolPresentCmd(binPath, dataDir, toolchain, version, name, ver string) *exe
 	}
 	full := append([]string{"exec", miseToolName(toolchain) + "@" + version, "--"}, argv...)
 	return miseCommand(binPath, dataDir, full...)
-}
-
-// Acquire takes a process-wide exclusive lock on a lock file scoped to
-// (tool, version) under dataDir. Concurrent callers in this process —
-// and in any other process that mounts the same dataDir — serialize at
-// this granularity, so the same Ruby's `gem install bundler` can't run
-// twice in parallel and corrupt the tarball-extract.
-//
-// The returned release closes the lock file (which drops the flock
-// implicitly). Callers wrap EnsureTools and MiseEnv together inside one
-// Acquire so the same locked critical section covers both installing
-// tools and reading env (which itself may auto-install the version).
-func Acquire(dataDir, tool, version string) (zlock.UnlockFunc, error) {
-	return zlock.NewGlobalKeychain(dataDir).LockTool(context.Background(), tool, version)
 }

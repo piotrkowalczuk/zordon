@@ -29,8 +29,8 @@ import (
 //
 // Idempotent: if the shims and refreshed corepack already exist (e.g. a
 // previous alpha run materialized this toolchain), we skip the install +
-// enable. The caller must hold the per-(tool, version) lock from Acquire to
-// guard concurrent first-runs.
+// enable. The caller must hold the per-(tool, version) lock from
+// GlobalKeychain.LockTool to guard concurrent first-runs.
 //
 // On success, mutates env: prepends the shim dir AND the refreshed-corepack
 // bin dir to PATH so service spawns find the zordon-managed shims ahead of

@@ -19,6 +19,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/summary"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
 
@@ -109,8 +110,8 @@ type level struct {
 // The leaf's Invocation is derived from CWD (so a run from a workspace dir
 // gets that workspace's identity); parents are always "main", rooted at
 // their own directory.
-func resolveChain(ctx context.Context, zordonHome string, testCfg alphasfile.TestConfig) ([]*level, error) {
-	return walkChain(zordonHome, func(lv *level) (*protocol.StateInfo, error) {
+func resolveChain(ctx context.Context, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) ([]*level, error) {
+	return walkChain(zordonHome, kc, func(lv *level) (*protocol.StateInfo, error) {
 		// Prefer the running alpha (carries live PIDs / readiness); fall
 		// back to static evaluation. A static-eval error is tolerated
 		// here — `status` should still print "alpha not running" rather
@@ -176,8 +177,8 @@ func stateFromAlphasfile(af *alphasfile.Alphasfile) *protocol.StateInfo {
 // resolve owns the per-level policy (live alpha first vs. static-only
 // vs. strict-static); a returned (nil, nil) means "no state for this
 // level" — deeper levels won't see its services as parent context.
-func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, error)) ([]*level, error) {
-	fed, err := NewFederationState(zordonHome)
+func walkChain(zordonHome string, kc zlock.GlobalKeychain, resolve func(*level) (*protocol.StateInfo, error)) ([]*level, error) {
+	fed, err := NewFederationState(zordonHome, kc)
 	if err != nil {
 		return nil, err
 	}
@@ -210,10 +211,10 @@ func walkChain(zordonHome string, resolve func(*level) (*protocol.StateInfo, err
 	return out, nil
 }
 
-func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, wantSummary bool, picks []string, zordonHome string, testCfg alphasfile.TestConfig) error {
+func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, wantSummary bool, picks []string, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) error {
 	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
 
-	fed, err := NewFederationState(zordonHome)
+	fed, err := NewFederationState(zordonHome, kc)
 	if err != nil {
 		return err
 	}
@@ -264,7 +265,7 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 		}
 		cfgHash := invocation.ConfigHash(lvl.Bytes(), parentJSON)
 
-		unlock, err := control.Lock(inv.StateDir)
+		unlock, err := lvl.Keychain().TryLockZordon()
 		if err != nil {
 			return err
 		}
@@ -328,8 +329,8 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 // waitStopped is set (the `zordon stop --clean` path) a still-running leaf
 // alpha is waited out rather than rejected; otherwise a running stack is an
 // error directing the user to stop first.
-func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, verbose, agent, waitStopped bool, zordonHome string, testCfg alphasfile.TestConfig) error {
-	fed, err := NewFederationState(zordonHome)
+func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, verbose, agent, waitStopped bool, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) error {
+	fed, err := NewFederationState(zordonHome, kc)
 	if err != nil {
 		return err
 	}
@@ -378,7 +379,7 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 			}
 		}
 
-		unlock, err := control.Lock(inv.StateDir)
+		unlock, err := lvl.Keychain().TryLockZordon()
 		if err != nil {
 			return err
 		}
@@ -427,8 +428,8 @@ func cleanLeaf(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, p
 // runSudo applies the idempotent privileged hooks for every running level
 // in the chain (steps pulled from each alpha's live state so snippets carry
 // the ports services actually bound to).
-func runSudo(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg alphasfile.TestConfig) error {
-	levels, err := resolveChain(ctx, zordonHome, testCfg)
+func runSudo(ctx context.Context, log *zlog.Logger, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) error {
+	levels, err := resolveChain(ctx, zordonHome, kc, testCfg)
 	if err != nil {
 		return err
 	}

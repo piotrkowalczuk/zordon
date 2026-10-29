@@ -15,6 +15,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/zdoc"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 // runPlan resolves every Alphasfile in the federation chain statically
@@ -30,8 +31,8 @@ import (
 // preflight of "just the subset I'm about to start" renders the same
 // service set start would bring up. Parents are always rendered whole
 // (they are shared context, not what you're starting).
-func runPlan(_ context.Context, w io.Writer, zordonHome string, picks []string, testCfg alphasfile.TestConfig) error {
-	levels, err := walkChain(zordonHome, func(lv *level) (*protocol.StateInfo, error) {
+func runPlan(_ context.Context, w io.Writer, zordonHome string, kc zlock.GlobalKeychain, picks []string, testCfg alphasfile.TestConfig) error {
+	levels, err := walkChain(zordonHome, kc, func(lv *level) (*protocol.StateInfo, error) {
 		af, err := alphasfile.Resolve(lv.tree, lv.inv, lv.parentCtx, lv.cfgHash, testCfg)
 		if err != nil {
 			return nil, err

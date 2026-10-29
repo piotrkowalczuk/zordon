@@ -8,7 +8,7 @@ import (
 )
 
 func TestWorkspaceKeychain_TryLockZordon(t *testing.T) {
-	kc := NewWorkspaceKeychain(t.TempDir())
+	kc := NewGlobalKeychain(t.TempDir()).ForWorkspace(t.TempDir())
 
 	unlock, err := kc.TryLockZordon()
 	if err != nil {

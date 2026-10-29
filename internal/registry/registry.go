@@ -64,11 +64,11 @@ type Logger interface {
 // Register adds an entry under flock. Existing entries for the same
 // (FsHash, Service) are replaced — a service restart shouldn't leave
 // two stale rows.
-func Register(zordonHome string, e Entry) error {
+func Register(kc zlock.GlobalKeychain, zordonHome string, e Entry) error {
 	if e.TS.IsZero() {
 		e.TS = time.Now().UTC()
 	}
-	return withFile(zordonHome, func(entries []Entry) ([]Entry, error) {
+	return withFile(kc, zordonHome, func(entries []Entry) ([]Entry, error) {
 		entries = dropByService(entries, e.FsHash, e.Service)
 		return append(entries, e), nil
 	})
@@ -77,8 +77,8 @@ func Register(zordonHome string, e Entry) error {
 // Remove deletes the (FsHash, Service) entry. No-op if absent — a
 // service that never registered (no port) calling Remove on shutdown
 // is harmless.
-func Remove(zordonHome, fsHash, service string) error {
-	return withFile(zordonHome, func(entries []Entry) ([]Entry, error) {
+func Remove(kc zlock.GlobalKeychain, zordonHome, fsHash, service string) error {
+	return withFile(kc, zordonHome, func(entries []Entry) ([]Entry, error) {
 		return dropByService(entries, fsHash, service), nil
 	})
 }
@@ -86,10 +86,10 @@ func Remove(zordonHome, fsHash, service string) error {
 // LookupPort returns the first entry binding the given port. Useful
 // for `zordon ports` style debugging: a user staring at "bind: address
 // already in use" wants to know WHICH alpha holds 51010.
-func LookupPort(zordonHome string, port int) (Entry, bool, error) {
+func LookupPort(kc zlock.GlobalKeychain, zordonHome string, port int) (Entry, bool, error) {
 	var found Entry
 	var ok bool
-	err := withFileReadOnly(zordonHome, func(entries []Entry) {
+	err := withFileReadOnly(kc, zordonHome, func(entries []Entry) {
 		for _, e := range entries {
 			if e.Port == port {
 				found, ok = e, true
@@ -103,9 +103,9 @@ func LookupPort(zordonHome string, port int) (Entry, bool, error) {
 // ListByFsHash returns every entry registered under the given fs_hash.
 // Used by alpha at startup to identify orphans from a previous run
 // of the same Alphasfile instance.
-func ListByFsHash(zordonHome, fsHash string) ([]Entry, error) {
+func ListByFsHash(kc zlock.GlobalKeychain, zordonHome, fsHash string) ([]Entry, error) {
 	var out []Entry
-	err := withFileReadOnly(zordonHome, func(entries []Entry) {
+	err := withFileReadOnly(kc, zordonHome, func(entries []Entry) {
 		for _, e := range entries {
 			if e.FsHash == fsHash {
 				out = append(out, e)
@@ -124,8 +124,8 @@ func ListByFsHash(zordonHome, fsHash string) ([]Entry, error) {
 // Entries whose pgid is already gone (process exited cleanly between
 // registration and now) are removed without signal — there's nothing
 // to reap.
-func ReapByFsHash(zordonHome, fsHash string, grace time.Duration, log Logger) error {
-	return withFile(zordonHome, func(entries []Entry) ([]Entry, error) {
+func ReapByFsHash(kc zlock.GlobalKeychain, zordonHome, fsHash string, grace time.Duration, log Logger) error {
+	return withFile(kc, zordonHome, func(entries []Entry) ([]Entry, error) {
 		var ours, others []Entry
 		for _, e := range entries {
 			if e.FsHash == fsHash {
@@ -183,8 +183,8 @@ func dropByService(entries []Entry, fsHash, service string) []Entry {
 // adjacent .lock file, reads the registry JSON, hands it to f for
 // mutation, writes the result back atomically (temp + rename so a
 // crash mid-write leaves the previous good state intact).
-func withFile(zordonHome string, f func([]Entry) ([]Entry, error)) error {
-	regPath, release, err := openLocked(zordonHome)
+func withFile(kc zlock.GlobalKeychain, zordonHome string, f func([]Entry) ([]Entry, error)) error {
+	regPath, release, err := openLocked(kc, zordonHome)
 	if err != nil {
 		return err
 	}
@@ -204,8 +204,8 @@ func withFile(zordonHome string, f func([]Entry) ([]Entry, error)) error {
 // withFileReadOnly avoids the rewrite cost — still takes LOCK_EX so
 // the snapshot it reads is consistent with whatever a parallel writer
 // is doing (no half-written file ever observed).
-func withFileReadOnly(zordonHome string, f func([]Entry)) error {
-	regPath, release, err := openLocked(zordonHome)
+func withFileReadOnly(kc zlock.GlobalKeychain, zordonHome string, f func([]Entry)) error {
+	regPath, release, err := openLocked(kc, zordonHome)
 	if err != nil {
 		return err
 	}
@@ -223,11 +223,11 @@ func withFileReadOnly(zordonHome string, f func([]Entry)) error {
 // <zordonHome>/registry.lock, and returns the registry's data path
 // plus a release function. The lock is held for as long as the
 // caller keeps the release closure unrun.
-func openLocked(zordonHome string) (string, zlock.UnlockFunc, error) {
+func openLocked(kc zlock.GlobalKeychain, zordonHome string) (string, zlock.UnlockFunc, error) {
 	if zordonHome == "" {
 		return "", nil, errors.New("registry: empty zordon home")
 	}
-	release, err := zlock.NewGlobalKeychain(zordonHome).LockRegistry(context.Background())
+	release, err := kc.LockRegistry(context.Background())
 	if err != nil {
 		return "", nil, fmt.Errorf("registry: %w", err)
 	}

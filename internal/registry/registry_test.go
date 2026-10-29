@@ -9,16 +9,19 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 func TestRegister_thenLookup(t *testing.T) {
 	home := t.TempDir()
+	kc := zlock.NewGlobalKeychain(home)
 	want := Entry{Port: 51010, FsHash: "abc", Service: "svc", PGID: 9347}
 
-	if err := Register(home, want); err != nil {
+	if err := Register(kc, home, want); err != nil {
 		t.Fatal(err)
 	}
-	got, ok, err := LookupPort(home, 51010)
+	got, ok, err := LookupPort(kc, home, 51010)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,25 +38,27 @@ func TestRegister_thenLookup(t *testing.T) {
 // accumulate and confuse later reapers / debuggers.
 func TestRegister_sameServiceReplacesPriorEntry(t *testing.T) {
 	home := t.TempDir()
-	_ = Register(home, Entry{Port: 1000, FsHash: "abc", Service: "svc", PGID: 100})
-	_ = Register(home, Entry{Port: 2000, FsHash: "abc", Service: "svc", PGID: 200})
+	kc := zlock.NewGlobalKeychain(home)
+	_ = Register(kc, home, Entry{Port: 1000, FsHash: "abc", Service: "svc", PGID: 100})
+	_ = Register(kc, home, Entry{Port: 2000, FsHash: "abc", Service: "svc", PGID: 200})
 
-	got, ok, _ := LookupPort(home, 2000)
+	got, ok, _ := LookupPort(kc, home, 2000)
 	if !ok || got.PGID != 200 {
 		t.Errorf("new entry not present: ok=%v pgid=%d", ok, got.PGID)
 	}
-	if _, ok, _ := LookupPort(home, 1000); ok {
+	if _, ok, _ := LookupPort(kc, home, 1000); ok {
 		t.Error("stale entry on port 1000 survived a re-register")
 	}
 }
 
 func TestListByFsHash_filtersByFsHash(t *testing.T) {
 	home := t.TempDir()
-	_ = Register(home, Entry{Port: 1, FsHash: "abc", Service: "s1", PGID: 1})
-	_ = Register(home, Entry{Port: 2, FsHash: "xyz", Service: "s2", PGID: 2})
-	_ = Register(home, Entry{Port: 3, FsHash: "abc", Service: "s3", PGID: 3})
+	kc := zlock.NewGlobalKeychain(home)
+	_ = Register(kc, home, Entry{Port: 1, FsHash: "abc", Service: "s1", PGID: 1})
+	_ = Register(kc, home, Entry{Port: 2, FsHash: "xyz", Service: "s2", PGID: 2})
+	_ = Register(kc, home, Entry{Port: 3, FsHash: "abc", Service: "s3", PGID: 3})
 
-	got, err := ListByFsHash(home, "abc")
+	got, err := ListByFsHash(kc, home, "abc")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,13 +74,14 @@ func TestListByFsHash_filtersByFsHash(t *testing.T) {
 
 func TestRemove_byFsHashAndService(t *testing.T) {
 	home := t.TempDir()
-	_ = Register(home, Entry{Port: 1, FsHash: "abc", Service: "keep", PGID: 1})
-	_ = Register(home, Entry{Port: 2, FsHash: "abc", Service: "drop", PGID: 2})
+	kc := zlock.NewGlobalKeychain(home)
+	_ = Register(kc, home, Entry{Port: 1, FsHash: "abc", Service: "keep", PGID: 1})
+	_ = Register(kc, home, Entry{Port: 2, FsHash: "abc", Service: "drop", PGID: 2})
 
-	if err := Remove(home, "abc", "drop"); err != nil {
+	if err := Remove(kc, home, "abc", "drop"); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := ListByFsHash(home, "abc")
+	got, _ := ListByFsHash(kc, home, "abc")
 	if len(got) != 1 || got[0].Service != "keep" {
 		t.Errorf("Remove left wrong entries: %+v", got)
 	}
@@ -83,7 +89,8 @@ func TestRemove_byFsHashAndService(t *testing.T) {
 
 func TestRemove_missingIsNoOp(t *testing.T) {
 	home := t.TempDir()
-	if err := Remove(home, "doesnt", "exist"); err != nil {
+	kc := zlock.NewGlobalKeychain(home)
+	if err := Remove(kc, home, "doesnt", "exist"); err != nil {
 		t.Errorf("Remove on absent entry errored: %v", err)
 	}
 }
@@ -93,11 +100,12 @@ func TestRemove_missingIsNoOp(t *testing.T) {
 // "no entries" without surfacing an os.IsNotExist error.
 func TestLookup_emptyHomeReturnsNoEntries(t *testing.T) {
 	home := t.TempDir()
+	kc := zlock.NewGlobalKeychain(home)
 
-	if _, ok, err := LookupPort(home, 1000); err != nil || ok {
+	if _, ok, err := LookupPort(kc, home, 1000); err != nil || ok {
 		t.Errorf("LookupPort on fresh home: ok=%v err=%v; want ok=false err=nil", ok, err)
 	}
-	got, err := ListByFsHash(home, "anything")
+	got, err := ListByFsHash(kc, home, "anything")
 	if err != nil {
 		t.Errorf("ListByFsHash on fresh home: %v", err)
 	}
@@ -111,6 +119,7 @@ func TestLookup_emptyHomeReturnsNoEntries(t *testing.T) {
 // of a half-written file would error and entries would silently vanish.
 func TestRegister_concurrentWritersSerialize(t *testing.T) {
 	home := t.TempDir()
+	kc := zlock.NewGlobalKeychain(home)
 
 	const goroutines = 8
 	const each = 5
@@ -118,7 +127,7 @@ func TestRegister_concurrentWritersSerialize(t *testing.T) {
 	for g := range goroutines {
 		wg.Go(func() {
 			for i := range each {
-				err := Register(home, Entry{
+				err := Register(kc, home, Entry{
 					Port:    g*100 + i,
 					FsHash:  "fs",
 					Service: fmt.Sprintf("svc-%d-%d", g, i),
@@ -132,7 +141,7 @@ func TestRegister_concurrentWritersSerialize(t *testing.T) {
 	}
 	wg.Wait()
 
-	got, err := ListByFsHash(home, "fs")
+	got, err := ListByFsHash(kc, home, "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,18 +156,19 @@ func TestRegister_concurrentWritersSerialize(t *testing.T) {
 // Reap re-checks them forever.
 func TestReapByFsHash_dropsDeadEntriesWithoutSignal(t *testing.T) {
 	home := t.TempDir()
+	kc := zlock.NewGlobalKeychain(home)
 	// PGID well past typical live PID space: kill(-pgid, 0) returns
 	// ESRCH; reaper should skip the signal but still drop the row.
-	_ = Register(home, Entry{Port: 1, FsHash: "abc", Service: "ghost", PGID: 999999})
-	_ = Register(home, Entry{Port: 2, FsHash: "xyz", Service: "other", PGID: 999998})
+	_ = Register(kc, home, Entry{Port: 1, FsHash: "abc", Service: "ghost", PGID: 999999})
+	_ = Register(kc, home, Entry{Port: 2, FsHash: "xyz", Service: "other", PGID: 999998})
 
-	if err := ReapByFsHash(home, "abc", 10*time.Millisecond, nil); err != nil {
+	if err := ReapByFsHash(kc, home, "abc", 10*time.Millisecond, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := ListByFsHash(home, "abc"); len(got) != 0 {
+	if got, _ := ListByFsHash(kc, home, "abc"); len(got) != 0 {
 		t.Errorf("dead entries not pruned: %+v", got)
 	}
-	if got, _ := ListByFsHash(home, "xyz"); len(got) != 1 {
+	if got, _ := ListByFsHash(kc, home, "xyz"); len(got) != 1 {
 		t.Errorf("foreign fs_hash entry collateral-damaged: %+v", got)
 	}
 }
@@ -168,6 +178,7 @@ func TestReapByFsHash_dropsDeadEntriesWithoutSignal(t *testing.T) {
 // must not get killed.
 func TestReapByFsHash_sparesOtherFsHashes(t *testing.T) {
 	home := t.TempDir()
+	kc := zlock.NewGlobalKeychain(home)
 
 	// Spawn a sleeping child with its own pgid (Setpgid: true). The
 	// reap below targets fs_hash "abc"; our sleeper is registered as
@@ -183,10 +194,10 @@ func TestReapByFsHash_sparesOtherFsHashes(t *testing.T) {
 	})
 	pgid := cmdSleep.Process.Pid // Setpgid = true ⇒ pid == pgid
 
-	_ = Register(home, Entry{Port: 1, FsHash: "alive", Service: "sleeper", PGID: pgid})
-	_ = Register(home, Entry{Port: 2, FsHash: "abc", Service: "ghost", PGID: 999999})
+	_ = Register(kc, home, Entry{Port: 1, FsHash: "alive", Service: "sleeper", PGID: pgid})
+	_ = Register(kc, home, Entry{Port: 2, FsHash: "abc", Service: "ghost", PGID: 999999})
 
-	if err := ReapByFsHash(home, "abc", 10*time.Millisecond, nil); err != nil {
+	if err := ReapByFsHash(kc, home, "abc", 10*time.Millisecond, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := syscall.Kill(-pgid, 0); err != nil {
@@ -198,7 +209,8 @@ func TestReapByFsHash_sparesOtherFsHashes(t *testing.T) {
 // tooling (jq, future `zordon ports` debug cmd) can parse it.
 func TestWriteEntries_producesParseableJSON(t *testing.T) {
 	home := t.TempDir()
-	_ = Register(home, Entry{Port: 1, FsHash: "abc", Service: "svc", PGID: 1})
+	kc := zlock.NewGlobalKeychain(home)
+	_ = Register(kc, home, Entry{Port: 1, FsHash: "abc", Service: "svc", PGID: 1})
 
 	data, err := os.ReadFile(filepath.Join(home, "registry.json"))
 	if err != nil {

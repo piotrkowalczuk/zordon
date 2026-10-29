@@ -12,6 +12,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/summary"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
 
@@ -24,6 +25,7 @@ type ChainLevel struct {
 	afPath string
 	tree   *alphasfile.Tree
 	inv    *invocation.InvocationState
+	kc     zlock.WorkspaceKeychain
 	isLeaf bool
 }
 
@@ -31,6 +33,7 @@ func (l ChainLevel) Path() string                            { return l.afPath }
 func (l ChainLevel) Bytes() []byte                           { return l.tree.Bytes() }
 func (l ChainLevel) Tree() *alphasfile.Tree                  { return l.tree }
 func (l ChainLevel) Invocation() *invocation.InvocationState { return l.inv }
+func (l ChainLevel) Keychain() zlock.WorkspaceKeychain       { return l.kc }
 
 // IsLeaf reports whether this is the invocation (leaf) level — the one the
 // user ran `zordon start` in. Leaf-ness is a chain-position fact, NOT a
@@ -50,7 +53,7 @@ type FederationState struct {
 // NewFederationState discovers the chain root→leaf from the cwd, reads each
 // Alphasfile, and builds its InvocationState (leaf from cwd; parents rooted at
 // their own dir).
-func NewFederationState(zordonHome string) (*FederationState, error) {
+func NewFederationState(zordonHome string, kc zlock.GlobalKeychain) (*FederationState, error) {
 	chain, invFile, err := discoverChain(zordonHome)
 	if err != nil {
 		return nil, err
@@ -61,7 +64,7 @@ func NewFederationState(zordonHome string) (*FederationState, error) {
 	}
 	levels := make([]ChainLevel, 0, len(chain))
 	for _, afPath := range chain {
-		tree, err := loadTree(zordonHome, afPath, chain)
+		tree, err := loadTree(zordonHome, kc, afPath, chain)
 		if err != nil {
 			return nil, err
 		}
@@ -75,7 +78,13 @@ func NewFederationState(zordonHome string) (*FederationState, error) {
 		if err != nil {
 			return nil, err
 		}
-		levels = append(levels, ChainLevel{afPath: afPath, tree: tree, inv: inv, isLeaf: isLeaf})
+		levels = append(levels, ChainLevel{
+			afPath: afPath,
+			tree:   tree,
+			inv:    inv,
+			kc:     kc.ForWorkspace(inv.StateDir),
+			isLeaf: isLeaf,
+		})
 	}
 	return &FederationState{levels: levels}, nil
 }

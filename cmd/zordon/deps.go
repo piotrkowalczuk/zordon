@@ -10,12 +10,13 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/source"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 // loadOptions is how every command loads an Alphasfile: the zordon.work that
 // applies to the working directory, the lock next to the Alphasfile, and a
 // fetcher for remote imports.
-func loadOptions(zordonHome, afPath string, chain []string) (alphasfile.LoadOptions, error) {
+func loadOptions(zordonHome string, kc zlock.GlobalKeychain, afPath string, chain []string) (alphasfile.LoadOptions, error) {
 	cwd, err := zfs.Getwd()
 	if err != nil {
 		return alphasfile.LoadOptions{}, err
@@ -35,13 +36,13 @@ func loadOptions(zordonHome, afPath string, chain []string) (alphasfile.LoadOpti
 		Home:     zordonHome,
 		Search:   search,
 		LockPath: filepath.Join(filepath.Dir(afPath), alphasfile.LockFileName),
-		Fetcher:  source.ModFetcher{Home: zordonHome},
+		Fetcher:  source.ModFetcher{Home: zordonHome, Keychain: kc},
 	}, nil
 }
 
 // loadTree loads afPath the way every command does.
-func loadTree(zordonHome, afPath string, chain []string) (*alphasfile.Tree, error) {
-	opts, err := loadOptions(zordonHome, afPath, chain)
+func loadTree(zordonHome string, kc zlock.GlobalKeychain, afPath string, chain []string) (*alphasfile.Tree, error) {
+	opts, err := loadOptions(zordonHome, kc, afPath, chain)
 	if err != nil {
 		return nil, err
 	}
@@ -49,8 +50,8 @@ func loadTree(zordonHome, afPath string, chain []string) (*alphasfile.Tree, erro
 }
 
 // parseServices is alphasfile.ParseServices with the command's load options.
-func parseServices(zordonHome, afPath string) ([]*alphasfile.ServiceMeta, error) {
-	opts, err := loadOptions(zordonHome, afPath, nil)
+func parseServices(zordonHome string, kc zlock.GlobalKeychain, afPath string) ([]*alphasfile.ServiceMeta, error) {
+	opts, err := loadOptions(zordonHome, kc, afPath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -59,12 +60,12 @@ func parseServices(zordonHome, afPath string) ([]*alphasfile.ServiceMeta, error)
 
 // runUpdate re-resolves the remote repositories the invocation's Alphasfile
 // imports, all of them or the ones named, and rewrites zordon.lock.
-func runUpdate(out io.Writer, zordonHome string, repos []string) error {
+func runUpdate(out io.Writer, zordonHome string, kc zlock.GlobalKeychain, repos []string) error {
 	af, err := walkUp()
 	if err != nil {
 		return err
 	}
-	opts, err := loadOptions(zordonHome, af, nil)
+	opts, err := loadOptions(zordonHome, kc, af, nil)
 	if err != nil {
 		return err
 	}
@@ -73,7 +74,7 @@ func runUpdate(out io.Writer, zordonHome string, repos []string) error {
 
 // runPkgGet requires a repository at a ref for the invocation's Alphasfile
 // and locks it when the stack imports it.
-func runPkgGet(out io.Writer, zordonHome string, args []string) error {
+func runPkgGet(out io.Writer, zordonHome string, kc zlock.GlobalKeychain, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("usage: zordon pkg get <repo>@<ref>")
 	}
@@ -81,7 +82,7 @@ func runPkgGet(out io.Writer, zordonHome string, args []string) error {
 	if err != nil {
 		return err
 	}
-	opts, err := loadOptions(zordonHome, af, nil)
+	opts, err := loadOptions(zordonHome, kc, af, nil)
 	if err != nil {
 		return err
 	}

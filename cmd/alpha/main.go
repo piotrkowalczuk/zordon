@@ -41,6 +41,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/tools"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 	"github.com/piotrkowalczuk/zordon/internal/zversion"
 )
@@ -303,6 +304,7 @@ type runConfig struct {
 	Stabilization time.Duration
 	ShutdownGrace time.Duration
 	Home          zfs.DirName              // resolved zordon home (--home → ZORDON_HOME; "" ⇒ ~/.zordon)
+	Keychain      zlock.GlobalKeychain     // host-wide lock keychain rooted at Home
 	TommyBin      zfs.DirName              // tommy wrapper override (--tommy-bin → ZORDON_TOMMY_BIN)
 	Workspace     invocation.WorkspaceName // which workspace this alpha runs for (--workspace → ZORDON_WORKSPACE)
 	ReadyFD       zfs.FileDescriptor       // parent handshake fd (--ready-fd → ZORDON_READY_FD; 0 ⇒ no handshake)
@@ -344,12 +346,14 @@ func main() {
 		ShortHelp: "run the alpha supervisor; signals readiness on --ready-fd if set",
 		Flags:     runFlags,
 		Exec: func(ctx context.Context, args []string) error {
+			zordonHome := zfs.ZordonHome(home.Path())
 			return runAlpha(ctx, runConfig{
 				SockPath:      *sockPath,
 				LogFile:       *logFile,
 				Stabilization: *stabilization,
 				ShutdownGrace: *shutdownGrace,
-				Home:          zfs.DirName(zfs.ZordonHome(home.Path())),
+				Home:          zfs.DirName(zordonHome),
+				Keychain:      zlock.NewGlobalKeychain(zordonHome),
 				TommyBin:      tommyBin,
 				Workspace:     workspace,
 				ReadyFD:       readyFD,
@@ -375,14 +379,15 @@ type alphaState struct {
 	mu             sync.RWMutex
 	startedAt      time.Time
 	alphasfilePath string
-	fsHash         string            // filesystem-location identity (== inv.FsHash)
-	cfgHash        string            // manifest identity (Alphasfile+parent ctx); drives drift detection
-	zordonHome     string            // ~/.zordon — host-wide registry root (empty ⇒ registry disabled)
-	tommyBin       string            // path to the tommy wrapper interposed before every service (empty ⇒ spawn unwrapped)
-	workspace      string            // workspace name this alpha runs for (== invocation.MainWorkspace by default)
-	parentDotenv   []string          // file-level dotenv paths inherited from federation parents
-	parentEnv      map[string]string // file-level inline env inherited from federation parents (deeper ancestor wins)
-	agentMode      bool              // configured via `zordon --agent`: apply agent{} env overlay
+	fsHash         string               // filesystem-location identity (== inv.FsHash)
+	cfgHash        string               // manifest identity (Alphasfile+parent ctx); drives drift detection
+	zordonHome     string               // ~/.zordon — host-wide registry root (empty ⇒ registry disabled)
+	keychain       zlock.GlobalKeychain // host-wide lock keychain rooted at zordonHome
+	tommyBin       string               // path to the tommy wrapper interposed before every service (empty ⇒ spawn unwrapped)
+	workspace      string               // workspace name this alpha runs for (== invocation.MainWorkspace by default)
+	parentDotenv   []string             // file-level dotenv paths inherited from federation parents
+	parentEnv      map[string]string    // file-level inline env inherited from federation parents (deeper ancestor wins)
+	agentMode      bool                 // configured via `zordon --agent`: apply agent{} env overlay
 	config         *alphasfile.Alphasfile
 	services       map[string]*serviceCtx   // keyed by service name
 	provisions     map[string]*provisionCtx // keyed by provision ID ("service.<tc>.<svc>.runtime.provision.<name>")
@@ -587,7 +592,7 @@ func (s *alphaState) drainedCh() <-chan struct{} {
 // bringupToolchain goroutine then drives EnsureMise → EnsureTools →
 // MiseEnv and Reaches "ready" (or "failed") on completion.
 //
-// All operations are serialized per (lang, version) by tools.Acquire
+// All operations are serialized per (lang, version) by kc.LockTool
 // — same lock that prevented the gem-install race when applyToolchain-
 // Env did this work inline.
 type toolchainCtx struct {
@@ -665,7 +670,7 @@ func (tc *toolchainCtx) TerminalFailure() *barrier.Barrier {
 
 // bringupToolchain runs the install side-effects for one pinned
 // toolchain on a dedicated goroutine: EnsureMise (cargo install if
-// first run) → tools.Acquire (per-(lang,version) flock) →
+// first run) → kc.LockTool (per-(lang,version) flock) →
 // EnsureTools (gem install bundler, etc.) → MiseEnv (read PATH/etc.
 // in JSON). On success: cache env, Reach("ready"). On any error:
 // Reach("failed") so service goroutines waiting on toolchain@ready
@@ -674,7 +679,7 @@ func (tc *toolchainCtx) TerminalFailure() *barrier.Barrier {
 // Idempotent enough that a federation level booting after a parent
 // has already materialized the same version will short-circuit on
 // the existing installs/locks and finish in milliseconds.
-func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
+func bringupToolchain(tc *toolchainCtx, zordonHome string, kc zlock.GlobalKeychain, log *zlog.Logger) {
 	tc.lifecycle.Reach("installing")
 	log.Info("alpha", "toolchain %s@%s: installing", tc.lang, tc.version)
 
@@ -683,7 +688,7 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
 		tc.lifecycle.Reach("failed")
 		return
 	}
-	bin, err := tools.EnsureMise(zordonHome, logWriter(log, "mise-install"))
+	bin, err := tools.EnsureMise(kc, zordonHome, logWriter(log, "mise-install"))
 	if err != nil {
 		log.Error("alpha", "toolchain %s: ensure mise: %v", tc.lang, err)
 		tc.lifecycle.Reach("failed")
@@ -695,7 +700,7 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
 	// below: multiple independent (ref, version) installs, each locked on
 	// its own key, rather than one interpreter with tools layered in.
 	if tc.pkgTools != nil {
-		bringupPkgTools(tc, bin, zordonHome, log)
+		bringupPkgTools(tc, bin, zordonHome, kc, log)
 		return
 	}
 	// ResolveDataDir uses zordonHome as the walk-up anchor; the
@@ -704,9 +709,9 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
 	// materialize toolchains BEFORE services run).
 	defaultDataDir := filepath.Join(zordonHome, "toolchain")
 	dataDir := tools.ResolveDataDir(zordonHome, defaultDataDir, tc.lang, tc.version)
-	release, err := tools.Acquire(dataDir, tc.lang, tc.version)
+	release, err := kc.LockTool(context.Background(), tc.lang, tc.version)
 	if err != nil {
-		log.Error("alpha", "toolchain %s: acquire: %v", tc.lang, err)
+		log.Error("alpha", "toolchain %s: lock tool: %v", tc.lang, err)
 		tc.lifecycle.Reach("failed")
 		return
 	}
@@ -766,14 +771,14 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, log *zlog.Logger) {
 // installs, not one interpreter's layered tool world. Any install error
 // Reaches "failed" so waiters on toolchain.pkg@ready unblock rather than
 // deadlock.
-func bringupPkgTools(tc *toolchainCtx, bin, zordonHome string, log *zlog.Logger) {
+func bringupPkgTools(tc *toolchainCtx, bin, zordonHome string, kc zlock.GlobalKeychain, log *zlog.Logger) {
 	defaultDataDir := filepath.Join(zordonHome, "toolchain")
 	var pooled []string
 	for ref, version := range tc.pkgTools {
 		dataDir := tools.ResolveDataDir(zordonHome, defaultDataDir, ref, version)
-		release, err := tools.Acquire(dataDir, ref, version)
+		release, err := kc.LockTool(context.Background(), ref, version)
 		if err != nil {
-			log.Error("alpha", "toolchain pkg: acquire %s@%s: %v", ref, version, err)
+			log.Error("alpha", "toolchain pkg: lock tool %s@%s: %v", ref, version, err)
 			tc.lifecycle.Reach("failed")
 			return
 		}
@@ -1719,7 +1724,7 @@ func serveAlpha(ctx context.Context, rc runConfig, life *daemon.Lifeline) error 
 	// control socket: a service binary from the prior run holding a TCP port
 	// would make a fresh bind fail otherwise.
 	if zordonHome != "" && fsHash != "" {
-		if err := registry.ReapByFsHash(zordonHome, fsHash, cfg.shutdownGrace, log); err != nil {
+		if err := registry.ReapByFsHash(rc.Keychain, zordonHome, fsHash, cfg.shutdownGrace, log); err != nil {
 			log.Error("alpha", "registry reap: %v", err)
 		}
 	}
@@ -1742,6 +1747,7 @@ func serveAlpha(ctx context.Context, rc runConfig, life *daemon.Lifeline) error 
 		startedAt:  time.Now(),
 		fsHash:     fsHash,
 		zordonHome: zordonHome,
+		keychain:   rc.Keychain,
 		tommyBin:   tommyBin,
 		workspace:  rc.Workspace.Name(),
 		shutdownCh: make(chan struct{}),
@@ -2029,7 +2035,7 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 	// already cached in ZORDON_HOME.
 	for _, tc := range pinnedToolchains(newConfig.Toolchain) {
 		state.addToolchain(tc)
-		go bringupToolchain(tc, state.zordonHome, log)
+		go bringupToolchain(tc, state.zordonHome, state.keychain, log)
 	}
 	pkgSeen := map[string]bool{}
 	for _, svc := range services {
@@ -2046,7 +2052,7 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 			tc.installEnv = svc.Runtime.BuildEnv
 		}
 		state.addToolchain(tc)
-		go bringupToolchain(tc, state.zordonHome, log)
+		go bringupToolchain(tc, state.zordonHome, state.keychain, log)
 	}
 
 	// Reverse order: services last-declared first, provisions within a
@@ -2242,7 +2248,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	// always resolve `toolchain.X@ready` as a barrier.
 	for _, tc := range pinnedToolchains(newConfig.Toolchain) {
 		state.addToolchain(tc)
-		go bringupToolchain(tc, state.zordonHome, log)
+		go bringupToolchain(tc, state.zordonHome, state.keychain, log)
 	}
 
 	// pkg services: each declares a native package (redis/postgres/…)
@@ -2266,7 +2272,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 			tc.installEnv = svc.Runtime.BuildEnv
 		}
 		state.addToolchain(tc)
-		go bringupToolchain(tc, state.zordonHome, log)
+		go bringupToolchain(tc, state.zordonHome, state.keychain, log)
 	}
 
 	// Pre-allocate every entity FIRST so cross-refs in `after` resolve
@@ -2864,7 +2870,7 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 		if p := readinessOf(svc); p != nil && p.HTTP != nil {
 			port = p.HTTP.Port
 		}
-		err := registry.Register(state.zordonHome, registry.Entry{
+		err := registry.Register(state.keychain, state.zordonHome, registry.Entry{
 			Port:    port,
 			FsHash:  state.fsHash,
 			Service: name,
@@ -2885,7 +2891,7 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 	// catches via AssertNoLeftovers.
 	defer func() {
 		if registered {
-			if err := registry.Remove(state.zordonHome, state.fsHash, name); err != nil {
+			if err := registry.Remove(state.keychain, state.zordonHome, state.fsHash, name); err != nil {
 				log.Error("alpha", "registry remove %s: %v", name, err)
 			}
 		}

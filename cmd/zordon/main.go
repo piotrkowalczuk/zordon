@@ -26,6 +26,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/ring"
 	"github.com/piotrkowalczuk/zordon/internal/summary"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 	"github.com/piotrkowalczuk/zordon/internal/zversion"
 )
@@ -111,6 +112,10 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	testCfg := func() alphasfile.TestConfig {
 		return alphasfile.TestConfig{Harness: *testHarness, LogPath: testLog.Path()}
 	}
+	homeAndKeychain := func() (string, zlock.GlobalKeychain) {
+		h := zfs.ZordonHome(home.Path())
+		return h, zlock.NewGlobalKeychain(h)
+	}
 
 	// start
 	startFlags := ff.NewFlagSet("start").SetParent(rootFlags)
@@ -131,9 +136,10 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "ensure alpha is running and push the Alphasfile config (--services/ZORDON_SERVICES or positional args bring up just that subset)",
 		Flags:     startFlags,
 		Exec: func(ctx context.Context, args []string) error {
+			zordonHome, kc := homeAndKeychain()
 			return runStart(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent, *startSummary,
 				parsePicks(append(strings.Fields(*startServices), args...)),
-				zfs.ZordonHome(home.Path()),
+				zordonHome, kc,
 				testCfg())
 		},
 	}
@@ -150,10 +156,11 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 			if err != nil {
 				return err
 			}
+			zordonHome, kc := homeAndKeychain()
 			if f == FormatText {
-				return runStatus(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg())
+				return runStatus(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, zordonHome, kc, testCfg())
 			}
-			return runStatusReport(ctx, stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg(), f)
+			return runStatusReport(ctx, stdio.Stdout, zordonHome, kc, testCfg(), f)
 		},
 	}
 
@@ -170,12 +177,12 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		Flags:     stopFlags,
 		Exec: func(ctx context.Context, args []string) error {
 			log := zlog.New(stdio.Stderr, *agent)
-			zordonHome := zfs.ZordonHome(home.Path())
-			if err := runStop(ctx, log, zordonHome, testCfg()); err != nil {
+			zordonHome, kc := homeAndKeychain()
+			if err := runStop(ctx, log, zordonHome, kc, testCfg()); err != nil {
 				return err
 			}
 			if *stopClean {
-				return runClean(ctx, log, *stopAlphaBin, *stopAlphaLog, *stopTimeout, *verbose, *agent, true, zordonHome, testCfg())
+				return runClean(ctx, log, *stopAlphaBin, *stopAlphaLog, *stopTimeout, *verbose, *agent, true, zordonHome, kc, testCfg())
 			}
 			return nil
 		},
@@ -189,7 +196,8 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "run the idempotent privileged hooks for the whole federation chain",
 		Flags:     sudoFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runSudo(ctx, zlog.New(stdio.Stderr, *agent), zfs.ZordonHome(home.Path()), testCfg())
+			zordonHome, kc := homeAndKeychain()
+			return runSudo(ctx, zlog.New(stdio.Stderr, *agent), zordonHome, kc, testCfg())
 		},
 	}
 
@@ -211,7 +219,8 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "create a workspace and check out its workspaceable services",
 		Flags:     wsCreateFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runWorkspaceCreate(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, args, zfs.ZordonHome(home.Path()))
+			zordonHome, kc := homeAndKeychain()
+			return runWorkspaceCreate(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, args, zordonHome, kc)
 		},
 	}
 	wsListFlags := ff.NewFlagSet("list").SetParent(wsFlags)
@@ -256,8 +265,9 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "check out additional services into an existing workspace",
 		Flags:     wsServiceAddFlags,
 		Exec: func(ctx context.Context, args []string) error {
+			zordonHome, kc := homeAndKeychain()
 			return runWorkspaceServiceAdd(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsAddWorkspace,
-				parsePicks(append(strings.Fields(*wsAddServices), args...)), zfs.ZordonHome(home.Path()))
+				parsePicks(append(strings.Fields(*wsAddServices), args...)), zordonHome, kc)
 		},
 	}
 	wsServiceRmFlags := ff.NewFlagSet("rm").SetParent(wsServiceFlags)
@@ -270,8 +280,9 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "detach service checkouts from an existing workspace",
 		Flags:     wsServiceRmFlags,
 		Exec: func(ctx context.Context, args []string) error {
+			zordonHome, kc := homeAndKeychain()
 			return runWorkspaceServiceRm(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsRmWorkspace,
-				parsePicks(append(strings.Fields(*wsRmServices), args...)), zfs.ZordonHome(home.Path()))
+				parsePicks(append(strings.Fields(*wsRmServices), args...)), zordonHome, kc)
 		},
 	}
 	// workspace apply: re-render the top-level `workspace { file ... }` block
@@ -290,7 +301,8 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "write the declared workspace files into an existing workspace",
 		Flags:     wsApplyFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runWorkspaceApply(zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsApplyWorkspace, zfs.ZordonHome(home.Path()))
+			zordonHome, kc := homeAndKeychain()
+			return runWorkspaceApply(zlog.New(stdio.Stderr, *agent), stdio.Stdout, wsApplyWorkspace, zordonHome, kc)
 		},
 	}
 	wsServiceCmd.Subcommands = []*ff.Command{wsServiceAddCmd, wsServiceRmCmd}
@@ -305,7 +317,8 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "render the resolved Alphasfile chain with every interpolation baked to a concrete value (--services/ZORDON_SERVICES or positional args render just that subset of the invocation level); errors on the first unresolvable expression",
 		Flags:     planFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runPlan(ctx, stdio.Stdout, zfs.ZordonHome(home.Path()), parsePicks(append(strings.Fields(*planServices), args...)), testCfg())
+			zordonHome, kc := homeAndKeychain()
+			return runPlan(ctx, stdio.Stdout, zordonHome, kc, parsePicks(append(strings.Fields(*planServices), args...)), testCfg())
 		},
 	}
 
@@ -317,7 +330,8 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "print a resolved value (dotted path or Go template) e.g. service.go.prometheus.vars.address",
 		Flags:     getFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runGet(ctx, args, stdio.Stdout, zfs.ZordonHome(home.Path()), testCfg())
+			zordonHome, kc := homeAndKeychain()
+			return runGet(ctx, args, stdio.Stdout, zordonHome, kc, testCfg())
 		},
 	}
 
@@ -349,11 +363,13 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 					return fmt.Errorf("mcp --dir: %w", err)
 				}
 			}
+			zordonHome, kc := homeAndKeychain()
 			return runMCP(ctx, stdio, mcpConfig{
 				Transport:  *mcpTransport,
 				Listen:     listen,
 				AllowHosts: *mcpAllowHost,
-				Home:       zfs.ZordonHome(home.Path()),
+				Home:       zordonHome,
+				Keychain:   kc,
 				Agent:      *agent,
 				Test:       testCfg(),
 			})
@@ -371,7 +387,8 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "run each provision's clean teardown snippet for the invocation level; the stack must be stopped first (or use zordon stop --clean)",
 		Flags:     cleanFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runClean(ctx, zlog.New(stdio.Stderr, *agent), *cleanAlphaBin, *cleanAlphaLog, *cleanTimeout, *verbose, *agent, false, zfs.ZordonHome(home.Path()), testCfg())
+			zordonHome, kc := homeAndKeychain()
+			return runClean(ctx, zlog.New(stdio.Stderr, *agent), *cleanAlphaBin, *cleanAlphaLog, *cleanTimeout, *verbose, *agent, false, zordonHome, kc, testCfg())
 		},
 	}
 
@@ -390,7 +407,8 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "require a repository at a branch, tag or commit (in the zordon.mod above the Alphasfile, or in the Alphasfile when there is none) and lock it",
 		Flags:     pkgGetFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runPkgGet(stdio.Stdout, zfs.ZordonHome(home.Path()), args)
+			zordonHome, kc := homeAndKeychain()
+			return runPkgGet(stdio.Stdout, zordonHome, kc, args)
 		},
 	}
 	pkgUpdateFlags := ff.NewFlagSet("update").SetParent(pkgFlags)
@@ -400,7 +418,8 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		ShortHelp: "re-resolve the required repositories (all, or the named ones) to their newest commits and rewrite zordon.lock",
 		Flags:     pkgUpdateFlags,
 		Exec: func(ctx context.Context, args []string) error {
-			return runUpdate(stdio.Stdout, zfs.ZordonHome(home.Path()), args)
+			zordonHome, kc := homeAndKeychain()
+			return runUpdate(stdio.Stdout, zordonHome, kc, args)
 		},
 	}
 	pkgCmd.Subcommands = []*ff.Command{pkgGetCmd, pkgUpdateCmd}
@@ -846,11 +865,11 @@ func readHandshake(r *os.File, readyCh chan<- struct{}, errCh chan<- error, logf
 	errCh <- errors.New("alpha closed handshake without READY")
 }
 
-func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome string, testCfg alphasfile.TestConfig) error {
+func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) error {
 	_ = log // status output is structured stdout, not log-style
 
 	// Status reports the whole federation chain, not just the invocation.
-	levels, err := resolveChain(ctx, zordonHome, testCfg)
+	levels, err := resolveChain(ctx, zordonHome, kc, testCfg)
 	if err != nil {
 		return err
 	}
@@ -984,11 +1003,11 @@ func healthErr(ctx context.Context, s *alphasfile.Service) error {
 	return s.Runtime.Readiness.Check(pctx)
 }
 
-func runStop(ctx context.Context, log *zlog.Logger, zordonHome string, testCfg alphasfile.TestConfig) error {
+func runStop(ctx context.Context, log *zlog.Logger, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) error {
 	// Stop only the invocation (leaf); parents are shared infra. We still
 	// need the chain walk to derive the leaf's socket (its hash depends on
 	// the resolved parent context).
-	levels, err := resolveChain(ctx, zordonHome, testCfg)
+	levels, err := resolveChain(ctx, zordonHome, kc, testCfg)
 	if err != nil {
 		return err
 	}

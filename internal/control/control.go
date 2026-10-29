@@ -13,20 +13,11 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
-	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 // Socket/state paths are now derived per-invocation by internal/invocation
-// (Invocation.SocketPath / .StateDir), so this package only owns the lock,
-// the listener, and the request/response helpers.
-
-// Lock takes a non-blocking exclusive flock on <stateDir>/zordon.lock so that
-// only one `zordon start` / `zordon clean` operates on a given Alphasfile at a
-// time. The returned func releases the lock (and must be called). stateDir is
-// created if missing.
-func Lock(stateDir string) (zlock.UnlockFunc, error) {
-	return zlock.NewWorkspaceKeychain(stateDir).TryLockZordon()
-}
+// (Invocation.SocketPath / .StateDir), so this package only owns the
+// listener and the request/response helpers.
 
 // Listen binds a unix socket at path with 0600 permissions.
 // Stale sockets from a dead previous alpha are removed automatically.

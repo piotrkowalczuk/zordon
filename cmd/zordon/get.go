@@ -13,6 +13,7 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 // runGet resolves the federation chain (running alpha if any, else a
@@ -24,11 +25,11 @@ import (
 //
 // (anything containing "{{" is treated as a template). Scalars print
 // raw; maps/slices print as compact JSON so the output is scriptable.
-func runGet(ctx context.Context, args []string, w io.Writer, zordonHome string, testCfg alphasfile.TestConfig) error {
+func runGet(ctx context.Context, args []string, w io.Writer, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) error {
 	if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
 		return errors.New("usage: zordon get <expr>  (e.g. service.go.prometheus.vars.address)")
 	}
-	levels, err := resolveChain(ctx, zordonHome, testCfg)
+	levels, err := resolveChain(ctx, zordonHome, kc, testCfg)
 	if err != nil {
 		return err
 	}

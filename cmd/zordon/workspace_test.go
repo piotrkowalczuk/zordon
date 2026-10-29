@@ -9,6 +9,7 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 
 	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
@@ -81,7 +82,8 @@ service "go" "app" {
 `)
 	mustDir(t, filepath.Join(root, "src", "app"))
 
-	_, err := applyWorkspaceTo(discardLogger(), io.Discard, root, invocation.MainWorkspace, t.TempDir())
+	home := t.TempDir()
+	_, err := applyWorkspaceTo(discardLogger(), io.Discard, root, invocation.MainWorkspace, home, zlock.NewGlobalKeychain(home))
 	if err == nil {
 		t.Fatal("applyWorkspaceTo succeeded, want the write into a service source refused")
 	}
@@ -171,8 +173,9 @@ service "go" "app" {
 	mustWrite(t, edited, "EDITED BY THE USER\n")
 
 	t.Chdir(root)
+	home := t.TempDir()
 	err := runWorkspaceServiceAdd(t.Context(), discardLogger(), io.Discard,
-		invocation.WorkspaceName("feature"), []string{"app"}, t.TempDir())
+		invocation.WorkspaceName("feature"), []string{"app"}, home, zlock.NewGlobalKeychain(home))
 	if err != nil {
 		t.Fatalf("runWorkspaceServiceAdd: %v", err)
 	}
@@ -211,7 +214,8 @@ service "go" "tool" {
 }
 `)
 
-	got, err := serviceSourceDirs(af, t.TempDir())
+	home := t.TempDir()
+	got, err := serviceSourceDirs(af, home, zlock.NewGlobalKeychain(home))
 	if err != nil {
 		t.Fatalf("serviceSourceDirs: %v", err)
 	}
@@ -248,7 +252,8 @@ workspace {
 	if err != nil {
 		t.Fatalf("applyTarget: %v", err)
 	}
-	if _, err := applyWorkspaceTo(discardLogger(), io.Discard, root, ws, t.TempDir()); err != nil {
+	home := t.TempDir()
+	if _, err := applyWorkspaceTo(discardLogger(), io.Discard, root, ws, home, zlock.NewGlobalKeychain(home)); err != nil {
 		t.Fatalf("applyWorkspaceTo: %v", err)
 	}
 

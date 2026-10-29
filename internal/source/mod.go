@@ -80,12 +80,13 @@ func (p Primary) ResolveCommit(ctx context.Context, ref string) (string, error) 
 // ModFetcher fetches repositories that Alphasfiles import by identity. It
 // keeps the bare clones under the zordon home, like service sources.
 type ModFetcher struct {
-	Home string
+	Home     string
+	Keychain zlock.GlobalKeychain
 }
 
 // Resolve fetches repo and returns the commit ref points at now.
 func (f ModFetcher) Resolve(repo, ref string) (string, error) {
-	release, err := f.lock(repo)
+	release, err := f.Keychain.LockRepo(context.Background(), repo)
 	if err != nil {
 		return "", err
 	}
@@ -107,7 +108,7 @@ func (f ModFetcher) Materialize(repo, commit, dest string) error {
 	if !IsCommit(commit) {
 		return fmt.Errorf("check out %s: %q is not a commit hash", repo, commit)
 	}
-	release, err := f.lock(repo)
+	release, err := f.Keychain.LockRepo(context.Background(), repo)
 	if err != nil {
 		return err
 	}
@@ -120,12 +121,6 @@ func (f ModFetcher) Materialize(repo, commit, dest string) error {
 		return fmt.Errorf("check out %s@%s: %w", repo, commit, err)
 	}
 	return nil
-}
-
-// lock serializes fetches and checkouts of repo across zordon processes,
-// which share its bare clone and checkouts under the home.
-func (f ModFetcher) lock(repo string) (zlock.UnlockFunc, error) {
-	return zlock.NewGlobalKeychain(f.Home).LockRepo(context.Background(), repo)
 }
 
 // captureRunner runs git quietly and folds its output into the error, so a

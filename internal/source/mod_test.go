@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 func TestSplitIdentity(t *testing.T) {
@@ -100,7 +101,8 @@ func TestModFetcher(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(gitHome, ".config"))
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 
-	f := ModFetcher{Home: t.TempDir()}
+	home := t.TempDir()
+	f := ModFetcher{Home: home, Keychain: zlock.NewGlobalKeychain(home)}
 	commit, err := f.Resolve("github.com/acme/infra", "v1")
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +139,8 @@ func TestModFetcher_concurrent(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(gitHome, ".config"))
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 
-	f := ModFetcher{Home: t.TempDir()}
+	home := t.TempDir()
+	f := ModFetcher{Home: home, Keychain: zlock.NewGlobalKeychain(home)}
 	dest := filepath.Join(t.TempDir(), "checkout")
 	want := revParse(t, upstream, "v1")
 	errs := make(chan error, 6)
