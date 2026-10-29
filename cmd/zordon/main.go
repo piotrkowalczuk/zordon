@@ -664,11 +664,11 @@ func printStartSummary(out io.Writer, s *summary.StartSummary) {
 
 	if len(s.Services) > 0 {
 		fmt.Fprintf(out, "  %-3s %-16s %-8s %8s %8s %8s %8s %8s\n",
-			"#", "service", "toolchain", "wait", "build", "spawn", "ready", "total")
+			"#", "service", "toolchain", "build", "wait", "spawn", "ready", "total")
 		for i, st := range s.Services {
 			fmt.Fprintf(out, "  %-3d %-16s %-8s %8s %8s %8s %8s %8s\n",
 				i+1, st.Name, st.Toolchain,
-				fmtDur(st.WaitMS), fmtDur(st.BuildMS), fmtDur(st.SpawnMS), fmtDur(st.ReadyMS), fmtDur(st.TotalMS))
+				fmtDur(st.BuildMS), fmtDur(st.WaitMS), fmtDur(st.SpawnMS), fmtDur(st.ReadyMS), fmtDur(st.TotalMS))
 			if len(st.Deps) > 0 {
 				fmt.Fprintln(out, "      after:")
 				for _, d := range st.Deps {

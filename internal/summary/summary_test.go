@@ -10,7 +10,7 @@ func TestBuild_phasesAndOrder(t *testing.T) {
 	at := func(ms int64) time.Time { return base.Add(time.Duration(ms) * time.Millisecond) }
 
 	// Passed out of start order (api before db) to prove Build sorts by
-	// Started; api's wait is db's whole readiness (it depends on db).
+	// Started; api builds alongside db, then waits for db to be ready.
 	services := []Service{
 		{
 			Name: "api", Toolchain: "go",
@@ -18,14 +18,14 @@ func TestBuild_phasesAndOrder(t *testing.T) {
 				{Ref: "toolchain.go@ready", SatisfiedAt: at(50)},
 				{Ref: "service.go.db.runtime@ready", SatisfiedAt: at(1800)},
 			},
-			Scheduled: at(0), Started: at(1800), BuildDone: at(2000), Running: at(2020), Ready: at(2400),
+			Scheduled: at(0), BuildDone: at(200), Started: at(1800), Running: at(1820), Ready: at(2200),
 		},
 		{
 			Name: "db", Toolchain: "go",
 			Deps: []Dep{
 				{Ref: "toolchain.go@ready", SatisfiedAt: at(0)},
 			},
-			Scheduled: at(0), Started: at(0), BuildDone: at(1400), Running: at(1410), Ready: at(1800),
+			Scheduled: at(0), BuildDone: at(1400), Started: at(1400), Running: at(1410), Ready: at(1800),
 		},
 	}
 	provisions := []Provision{
@@ -54,11 +54,11 @@ func TestBuild_phasesAndOrder(t *testing.T) {
 		label     string
 		got, want int64
 	}{
-		{"wait", api.WaitMS, 1800},
 		{"build", api.BuildMS, 200},
+		{"wait", api.WaitMS, 1600},
 		{"spawn", api.SpawnMS, 20},
 		{"ready", api.ReadyMS, 380},
-		{"total", api.TotalMS, 2400},
+		{"total", api.TotalMS, 2200},
 	} {
 		if c.got != c.want {
 			t.Errorf("api %s = %d, want %d", c.label, c.got, c.want)
@@ -96,8 +96,8 @@ func TestBuild_clampsBadDeltasAndPreservesInput(t *testing.T) {
 	at := func(ms int64) time.Time { return base.Add(time.Duration(ms) * time.Millisecond) }
 
 	services := []Service{
-		{Name: "z", Scheduled: at(100), Started: at(50)}, // Started before Scheduled
-		{Name: "a", Scheduled: at(0), Started: at(10)},
+		{Name: "z", Scheduled: at(100), BuildDone: at(100), Started: at(50)}, // Started before BuildDone
+		{Name: "a", Scheduled: at(0), BuildDone: at(5), Started: at(10)},
 	}
 	orig := append([]Service(nil), services...)
 

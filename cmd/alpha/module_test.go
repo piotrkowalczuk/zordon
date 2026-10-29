@@ -186,7 +186,7 @@ func TestBuildCmd_moduleRunsBareArtifact(t *testing.T) {
 	}
 }
 
-func TestImplicitRuntimeAfter_moduleToolchainRef(t *testing.T) {
+func TestToolchainAfter_moduleToolchainRef(t *testing.T) {
 	s := &alphaState{}
 	legacy := newToolchainCtx("go", "1.22.0", nil, nil)
 	legacy.key = "legacy/go"
@@ -203,7 +203,7 @@ func TestImplicitRuntimeAfter_moduleToolchainRef(t *testing.T) {
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
-			got := implicitRuntimeAfter(c.svc, s)
+			got := toolchainAfter(c.svc, s)
 			if len(got) != 1 || got[0] != c.want {
 				t.Fatalf("got %v, want [%s]", got, c.want)
 			}
