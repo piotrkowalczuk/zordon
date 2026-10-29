@@ -249,3 +249,45 @@ func equalKeys(a, b []string) bool {
 	}
 	return true
 }
+
+func TestPinnedToolchains_sharesIdenticalPins(t *testing.T) {
+	ruby := func() *alphasfile.ToolchainConfig {
+		return &alphasfile.ToolchainConfig{Version: "3.3.12", Tools: map[string]string{"bundler": "2.5.22"}}
+	}
+	got := pinnedToolchains(map[string]*alphasfile.ToolchainConfig{
+		"a/app/ruby":   ruby(),
+		"b/app/ruby":   ruby(),
+		"c/app/ruby":   {Version: "3.3.12", Tools: map[string]string{"bundler": "2.6.0"}},
+		"a/app/pkg":    {Tools: map[string]string{"aqua:a/b": "1.0"}},
+		"b/app/pkg":    {Tools: map[string]string{"aqua:a/b": "1.0"}},
+		"b/app/nodejs": {Version: "24.0.0"},
+	})
+	if len(got) != 4 {
+		t.Fatalf("got %d toolchains, want one per distinct pin: ruby with bundler 2.5.22, ruby with 2.6.0, pkg, nodejs", len(got))
+	}
+	s := &alphaState{}
+	for _, tc := range got {
+		s.addToolchain(tc)
+	}
+	if s.toolchains["a/app/ruby"] != s.toolchains["b/app/ruby"] {
+		t.Error("identical ruby pins must share one toolchain, so it is installed once")
+	}
+	if s.toolchains["a/app/ruby"] == s.toolchains["c/app/ruby"] {
+		t.Error("ruby pins with different tools must not share a toolchain")
+	}
+	if s.toolchains["a/app/pkg"] != s.toolchains["b/app/pkg"] {
+		t.Error("identical pkg pins must share one toolchain")
+	}
+	if len(s.toolchains) != 6 {
+		t.Errorf("every pin key must resolve, got %v", toolchainKeysOf(s))
+	}
+}
+
+func toolchainKeysOf(s *alphaState) []string {
+	keys := make([]string, 0, len(s.toolchains))
+	for k := range s.toolchains {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}

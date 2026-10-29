@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -594,7 +595,11 @@ type toolchainCtx struct {
 	// (`toolchain.<key>@ready`): the language label for the entrypoint's
 	// pin, `<module>/<lang>` for a module's own pin. Empty means "same as
 	// lang" (pkg entities and pre-module callers).
-	key     string
+	key string
+	// aliases are the other pin keys whose toolchain is identical to this
+	// one; they share its install and its barriers instead of each
+	// installing the same thing into the same directory.
+	aliases []string
 	lang    string
 	version string
 	// env is the result of `mise env --json <lang>@<version>`, set
@@ -1366,32 +1371,62 @@ func (s *alphaState) addToolchain(tc *toolchainCtx) {
 		key = tc.lang
 	}
 	s.toolchains[key] = tc
+	for _, alias := range tc.aliases {
+		s.toolchains[alias] = tc
+	}
 }
 
-// pinnedToolchains allocates one toolchainCtx per pin in the resolved
+// pinnedToolchains allocates the toolchainCtx of the pins in the resolved
 // Toolchain map: language pins (versioned) and the version-less `pkg`
 // pseudo-toolchains that carry standalone CLIs. Keys may be module-scoped
-// (`<module>/<lang>`); the language label is recovered for mise.
+// (`<module>/<lang>`); the language label is recovered for mise. Pins with
+// the same toolchain share one ctx, the other keys as its aliases: a package
+// that pins every component it imports would otherwise install one toolchain
+// once per component, concurrently, into one directory, rewriting files a
+// service already runs from.
 func pinnedToolchains(toolchain map[string]*alphasfile.ToolchainConfig) []*toolchainCtx {
 	var out []*toolchainCtx
-	for key, tcCfg := range toolchain {
+	byConfig := map[string]*toolchainCtx{}
+	for _, key := range slices.Sorted(maps.Keys(toolchain)) {
+		tcCfg := toolchain[key]
 		if tcCfg == nil {
 			continue
 		}
 		lang := alphasfile.ToolchainLang(key)
-		switch {
-		case tcCfg.Version != "":
-			tc := newToolchainCtx(lang, tcCfg.Version, tcCfg.Tools, tcCfg.Env)
-			tc.key = key
-			out = append(out, tc)
-		case lang == alphasfile.ToolchainPkg && len(tcCfg.Tools) > 0:
-			tc := newToolchainCtx(alphasfile.ToolchainPkg, "", nil, nil)
-			tc.key = key
-			tc.pkgTools = tcCfg.Tools
-			out = append(out, tc)
+		if tcCfg.Version == "" && (lang != alphasfile.ToolchainPkg || len(tcCfg.Tools) == 0) {
+			continue
 		}
+		id := toolchainIdentity(lang, tcCfg)
+		if tc, ok := byConfig[id]; ok {
+			tc.aliases = append(tc.aliases, key)
+			continue
+		}
+		var tc *toolchainCtx
+		if tcCfg.Version != "" {
+			tc = newToolchainCtx(lang, tcCfg.Version, tcCfg.Tools, tcCfg.Env)
+		} else {
+			tc = newToolchainCtx(alphasfile.ToolchainPkg, "", nil, nil)
+			tc.pkgTools = tcCfg.Tools
+		}
+		tc.key = key
+		byConfig[id] = tc
+		out = append(out, tc)
 	}
 	return out
+}
+
+// toolchainIdentity is everything an install depends on: two pins with the
+// same language, version, tools and env install the same thing.
+func toolchainIdentity(lang string, cfg *alphasfile.ToolchainConfig) string {
+	var b strings.Builder
+	b.WriteString(lang + "@" + cfg.Version)
+	for _, k := range slices.Sorted(maps.Keys(cfg.Tools)) {
+		b.WriteString("|tool:" + k + "=" + cfg.Tools[k])
+	}
+	for _, k := range slices.Sorted(maps.Keys(cfg.Env)) {
+		b.WriteString("|env:" + k + "=" + cfg.Env[k])
+	}
+	return b.String()
 }
 
 func (s *alphaState) setReadiness(name, state string) {
