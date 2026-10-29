@@ -28,6 +28,7 @@
 package registry
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +37,7 @@ import (
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 // Entry is one row in the registry. The (FsHash, Service) pair is the
@@ -221,11 +223,11 @@ func withFileReadOnly(zordonHome string, f func([]Entry)) error {
 // <zordonHome>/registry.lock, and returns the registry's data path
 // plus a release function. The lock is held for as long as the
 // caller keeps the release closure unrun.
-func openLocked(zordonHome string) (string, func(), error) {
+func openLocked(zordonHome string) (string, zlock.UnlockFunc, error) {
 	if zordonHome == "" {
 		return "", nil, errors.New("registry: empty zordon home")
 	}
-	release, err := zfs.AcquireLock(zordonHome, "registry")
+	release, err := zlock.NewGlobalKeychain(zordonHome).LockRegistry(context.Background())
 	if err != nil {
 		return "", nil, fmt.Errorf("registry: %w", err)
 	}

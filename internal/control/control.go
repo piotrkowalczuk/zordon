@@ -13,21 +13,19 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 // Socket/state paths are now derived per-invocation by internal/invocation
 // (Invocation.SocketPath / .StateDir), so this package only owns the lock,
 // the listener, and the request/response helpers.
 
-// Lock takes an exclusive, blocking flock on <stateDir>/start.lock so that
-// only one `zordon start` operates on a given Alphasfile at a time. The
-// returned func releases the lock (and must be called). stateDir is created
-// if missing.
-//
-// Federation acquires locks strictly top-down (root → invocation), a
-// consistent global order, so concurrent zordon invocations can't deadlock.
-func Lock(stateDir string) (func(), error) {
-	return zfs.AcquireLock(stateDir, "start")
+// Lock takes a non-blocking exclusive flock on <stateDir>/zordon.lock so that
+// only one `zordon start` / `zordon clean` operates on a given Alphasfile at a
+// time. The returned func releases the lock (and must be called). stateDir is
+// created if missing.
+func Lock(stateDir string) (zlock.UnlockFunc, error) {
+	return zlock.NewWorkspaceKeychain(stateDir).TryLockZordon()
 }
 
 // Listen binds a unix socket at path with 0600 permissions.

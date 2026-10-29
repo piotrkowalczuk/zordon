@@ -6,11 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
-	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 // SplitIdentity splits a Go-style identity such as
@@ -125,8 +124,8 @@ func (f ModFetcher) Materialize(repo, commit, dest string) error {
 
 // lock serializes fetches and checkouts of repo across zordon processes,
 // which share its bare clone and checkouts under the home.
-func (f ModFetcher) lock(repo string) (func(), error) {
-	return zfs.AcquireLock(filepath.Join(f.Home, "locks"), "mod-"+strings.ReplaceAll(repo, "/", "_"))
+func (f ModFetcher) lock(repo string) (zlock.UnlockFunc, error) {
+	return zlock.NewGlobalKeychain(f.Home).LockRepo(context.Background(), repo)
 }
 
 // captureRunner runs git quietly and folds its output into the error, so a

@@ -24,6 +24,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,6 +34,7 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 // EnsureMise returns the path to the zordon-owned mise binary at
@@ -58,7 +60,7 @@ func EnsureMise(zordonHome string, logOut io.Writer) (string, error) {
 	// Serialize cargo install so two alphas starting at the same time
 	// don't try to write the same binary. Re-check existence under the
 	// lock — the other waiter just did it for us.
-	release, err := zfs.AcquireLock(filepath.Join(zordonHome, "locks"), "mise")
+	release, err := zlock.NewGlobalKeychain(zordonHome).LockMise(context.Background())
 	if err != nil {
 		return "", err
 	}
@@ -352,14 +354,6 @@ func toolInstallCmd(binPath, dataDir, toolchain, version, name, ver string) (*ex
 // implicitly). Callers wrap EnsureTools and MiseEnv together inside one
 // Acquire so the same locked critical section covers both installing
 // tools and reading env (which itself may auto-install the version).
-func Acquire(dataDir, tool, version string) (release func(), err error) {
-	return zfs.AcquireLock(filepath.Join(dataDir, "locks"), sanitizeForPath(tool)+"-"+version)
-}
-
-// sanitizeForPath makes a mise tool ref safe as a single filesystem path
-// component: a backend-qualified pkg ref like "aqua:etcd-io/etcd" carries
-// ':' and '/' that would otherwise nest into a non-existent directory or
-// break a lock-file path. Language refs (go/rust/...) are unchanged.
-func sanitizeForPath(s string) string {
-	return strings.NewReplacer("/", "-", ":", "-").Replace(s)
+func Acquire(dataDir, tool, version string) (zlock.UnlockFunc, error) {
+	return zlock.NewGlobalKeychain(dataDir).LockTool(context.Background(), tool, version)
 }

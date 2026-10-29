@@ -1,10 +1,14 @@
 package zfs
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 )
 
 func TestZordonHome_overrideWins(t *testing.T) {
@@ -260,4 +264,83 @@ func TestCheckSpawnCwd(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTryLock(t *testing.T) {
+	dir := t.TempDir()
+
+	unlock, err := TryLock(dir, "aqua:etcd-io/etcd-3.5")
+	if err != nil {
+		t.Fatalf("TryLock: %v", err)
+	}
+	wantPath := filepath.Join(dir, "aqua-etcd-io-etcd-3.5.lock")
+	if !Exists(wantPath) {
+		t.Fatalf("expected sanitized lock file %s to exist", wantPath)
+	}
+
+	_, err = TryLock(dir, "aqua:etcd-io/etcd-3.5")
+	if !errors.Is(err, ErrLocked) {
+		unlock()
+		t.Fatalf("TryLock while held = %v, want ErrLocked", err)
+	}
+	var lockErr *LockError
+	if !errors.As(err, &lockErr) || lockErr.HolderPID != os.Getpid() || lockErr.Path != wantPath {
+		unlock()
+		t.Fatalf("LockError = %+v, want HolderPID=%d Path=%s", lockErr, os.Getpid(), wantPath)
+	}
+
+	unlock()
+
+	unlock2, err := TryLock(dir, "aqua:etcd-io/etcd-3.5")
+	if err != nil {
+		t.Fatalf("TryLock after unlock: %v", err)
+	}
+	unlock2()
+}
+
+func TestLock_waitsUntilUnlocked(t *testing.T) {
+	dir := t.TempDir()
+
+	synctest.Test(t, func(t *testing.T) {
+		unlock1, err := TryLock(dir, "start")
+		if err != nil {
+			t.Fatalf("TryLock: %v", err)
+		}
+		go func() {
+			select {
+			case <-time.After(150 * time.Millisecond):
+			case <-t.Context().Done():
+			}
+			unlock1()
+		}()
+
+		unlock2, err := Lock(t.Context(), dir, "start")
+		if err != nil {
+			t.Fatalf("Lock: %v", err)
+		}
+		unlock2()
+	})
+}
+
+func TestLock_contextCancelled(t *testing.T) {
+	dir := t.TempDir()
+
+	synctest.Test(t, func(t *testing.T) {
+		unlock, err := TryLock(dir, "start")
+		if err != nil {
+			t.Fatalf("TryLock: %v", err)
+		}
+		defer unlock()
+
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		defer cancel()
+		_, err = Lock(ctx, dir, "start")
+		if !errors.Is(err, ErrLocked) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Lock error = %v, want ErrLocked and context.DeadlineExceeded", err)
+		}
+		var lockErr *LockError
+		if !errors.As(err, &lockErr) || lockErr.HolderPID != os.Getpid() {
+			t.Fatalf("LockError = %+v, want HolderPID=%d", lockErr, os.Getpid())
+		}
+	})
 }
