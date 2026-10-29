@@ -434,6 +434,62 @@ package "web" {
 	}
 }
 
+func TestOpen_packageToolchainPinsWhatItImports(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":       `import "./stack" {}`,
+		"stack/Alphasfile": "package \"stack\" {\n  toolchain {\n    go { version = \"1.22.0\" }\n  }\n  import \"../a\" {}\n}\n",
+		"a/Alphasfile":     "package \"a\" {\n  import \"../c\" {}\n" + toolchainSvc("a") + "}\n",
+		"c/Alphasfile":     "package \"c\" {\n" + toolchainSvc("c") + "}\n",
+	})
+	af := openTree(t, root)
+	for _, key := range []string{"a/a/go", "c/c/go"} {
+		if tc := af.Toolchain[key]; tc == nil || tc.Version != "1.22.0" {
+			t.Errorf("%s = %v; the pin of stack must reach every package below it, got %v", key, tc, toolchainKeys(af))
+		}
+	}
+}
+
+func TestOpen_packageOwnToolchainIgnoresItsImporters(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":   `import "./a" {}`,
+		"a/Alphasfile": "package \"a\" {\n  toolchain {\n    go { version = \"1.22.0\" }\n  }\n  import \"../c\" {}\n" + toolchainSvc("a") + "}\n",
+		"c/Alphasfile": "package \"c\" {\n  toolchain {\n    ruby { version = \"3.3.0\" }\n  }\n" + toolchainSvc("c") + "}\n",
+	})
+	af := openTree(t, root)
+	if tc := af.Toolchain["c/c/ruby"]; tc == nil || tc.Version != "3.3.0" {
+		t.Errorf("c/c/ruby = %v", tc)
+	}
+	if tc := af.Toolchain["c/c/go"]; tc != nil {
+		t.Errorf("c/c/go = %v; a package's own toolchain is its whole toolchain, nothing comes from its importers", tc)
+	}
+}
+
+func TestOpen_packageImportersAgreeOnAToolchain(t *testing.T) {
+	pin := "  toolchain {\n    go { version = \"1.22.0\" }\n  }\n"
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":   "import \"./a\" {}\nimport \"./b\" {}\n",
+		"a/Alphasfile": "package \"a\" {\n" + pin + "  import \"../c\" {}\n}\n",
+		"b/Alphasfile": "package \"b\" {\n" + pin + "  import \"../c\" {}\n}\n",
+		"c/Alphasfile": "package \"c\" {\n" + toolchainSvc("c") + "}\n",
+	})
+	if tc := openTree(t, root).Toolchain["c/c/go"]; tc == nil || tc.Version != "1.22.0" {
+		t.Errorf("c/c/go = %v; two importers that pin the same toolchain agree", tc)
+	}
+}
+
+func TestLoadTree_packageImportersPinDifferentToolchains(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile":   "import \"./a\" {}\nimport \"./b\" {}\n",
+		"a/Alphasfile": "package \"a\" {\n  toolchain {\n    go { version = \"1.22.0\" }\n  }\n  import \"../c\" {}\n}\n",
+		"b/Alphasfile": "package \"b\" {\n  toolchain {\n    go { version = \"1.23.0\" }\n  }\n  import \"../c\" {}\n}\n",
+		"c/Alphasfile": "package \"c\" {\n" + toolchainSvc("c") + "}\n",
+	})
+	_, err := LoadTree(root)
+	if err == nil || !strings.Contains(err.Error(), "package c: package a runs it with the toolchain of package a") || !strings.Contains(err.Error(), "give package c a toolchain {} of its own, or make them agree") {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestLoadTree_packageRunsOnItsOwn(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `
@@ -572,4 +628,9 @@ func TestLoadTree_invalidPackageAlias(t *testing.T) {
 	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `"no spaces" is not a valid package name`) {
 		t.Fatalf("got %v", err)
 	}
+}
+
+// toolchainSvc is a component named after its package with one go service.
+func toolchainSvc(name string) string {
+	return "  component \"" + name + "\" {\n    service \"go\" \"" + name + "\" {\n      git { url = \"github.com/x/" + name + "\" }\n    }\n  }\n"
 }

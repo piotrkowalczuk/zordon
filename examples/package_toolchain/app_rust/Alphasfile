@@ -1,0 +1,25 @@
+package "app_rust" {
+  component "app" {
+    service "rust" "app" {
+      src {
+        path = "../../.."
+        exe  = "./examples/rust/src/app"
+      }
+
+      vars = { port = net::pickport() }
+
+      runtime {
+        cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+      }
+
+      readiness {
+        http {
+          path = "/"
+          port = self.vars.port
+        }
+        period            = "200ms"
+        failure_threshold = 50
+      }
+    }
+  }
+}

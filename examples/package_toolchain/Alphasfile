@@ -1,0 +1,14 @@
+# Two ways to pin the toolchain of a stack.
+#
+# stack_go pins go in its own toolchain {}, and the pin reaches app_go, which
+# it imports and which pins nothing. stack_rust pins nothing: rust is pinned
+# here, in the entrypoint, and applies to every service of the level that
+# has no pin of its own, app_rust among them.
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  rust { version = "1.83.0" }
+}
+
+import "./stack_go" {}
+import "./stack_rust" {}
