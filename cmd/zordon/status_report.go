@@ -12,6 +12,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 // Output formats of --format. Left unset it is FormatAgent under --agent and
@@ -84,8 +85,8 @@ func outputFormat(format string, agent bool) (string, error) {
 // runStatusReport writes the stack in the agent or json format. It always
 // writes a report and returns nil: an error resolving the stack is a state of
 // the report, so a caller parses stdout whatever happened.
-func runStatusReport(ctx context.Context, out io.Writer, zordonHome string, testCfg alphasfile.TestConfig, format string) error {
-	r := statusReport(ctx, zordonHome, testCfg)
+func runStatusReport(ctx context.Context, out io.Writer, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig, format string) error {
+	r := statusReport(ctx, zordonHome, kc, testCfg)
 	switch format {
 	case FormatJSON:
 		return json.NewEncoder(out).Encode(r)
@@ -118,8 +119,8 @@ func (r StatusReport) logfmt() string {
 	return b.String()
 }
 
-func statusReport(ctx context.Context, zordonHome string, testCfg alphasfile.TestConfig) StatusReport {
-	levels, err := resolveChain(ctx, zordonHome, testCfg)
+func statusReport(ctx context.Context, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) StatusReport {
+	levels, err := resolveChain(ctx, zordonHome, kc, testCfg)
 	switch {
 	case errors.Is(err, invocation.ErrNoAlphasfile):
 		return StatusReport{State: StackNoAlphasfile}

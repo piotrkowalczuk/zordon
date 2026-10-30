@@ -15,6 +15,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/source"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
 
@@ -77,7 +78,7 @@ func runWorkspaceList(out io.Writer) error {
 	return nil
 }
 
-func runWorkspaceCreate(ctx context.Context, log *zlog.Logger, out io.Writer, args []string, zordonHome string) error {
+func runWorkspaceCreate(ctx context.Context, log *zlog.Logger, out io.Writer, args []string, zordonHome string, kc zlock.GlobalKeychain) error {
 	if len(args) < 1 {
 		return errors.New("usage: zordon workspace create <name> [service[@rev] ...]")
 	}
@@ -104,7 +105,7 @@ func runWorkspaceCreate(ctx context.Context, log *zlog.Logger, out io.Writer, ar
 	// Generated files land BEFORE the checkouts: an agent or a dev container
 	// reads them the moment the directory exists, and while src/ is still
 	// absent nothing can accidentally be written into a service's git tree.
-	spec, err := applyWorkspaceHere(log, out, name, zordonHome)
+	spec, err := applyWorkspaceHere(log, out, name, zordonHome, kc)
 	if err != nil {
 		return err
 	}
@@ -112,7 +113,7 @@ func runWorkspaceCreate(ctx context.Context, log *zlog.Logger, out io.Writer, ar
 	// Materialize source checkouts. With no service args, every workspaceable
 	// service gets a working tree (so the whole project is editable in this
 	// workspace); pass names (optionally svc@rev) to scope it down.
-	if err := checkoutServices(ctx, log, spec, dir, args[1:], zordonHome); err != nil {
+	if err := checkoutServices(ctx, log, spec, dir, args[1:], zordonHome, kc); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "workspace ready. Bring it up with:\n  cd %s && zordon start\n", dir)
@@ -141,7 +142,7 @@ func applyTarget(flag invocation.WorkspaceName, cwd string) (invocation.Workspac
 // runWorkspaceApply re-renders the declared files for an existing workspace.
 // It is also the only way the project root ("main") ever gets them: main is
 // never created, so it has no create step to hang them off.
-func runWorkspaceApply(log *zlog.Logger, out io.Writer, flag invocation.WorkspaceName, zordonHome string) error {
+func runWorkspaceApply(log *zlog.Logger, out io.Writer, flag invocation.WorkspaceName, zordonHome string, kc zlock.GlobalKeychain) error {
 	cwd, err := zfs.Getwd()
 	if err != nil {
 		return err
@@ -159,7 +160,7 @@ func runWorkspaceApply(log *zlog.Logger, out io.Writer, flag invocation.Workspac
 			return fmt.Errorf("no such workspace %q; create it with: zordon workspace create %s", ws.Name(), ws.Name())
 		}
 	}
-	spec, err := applyWorkspaceTo(log, out, root, ws, zordonHome)
+	spec, err := applyWorkspaceTo(log, out, root, ws, zordonHome, kc)
 	if err != nil {
 		return err
 	}
@@ -171,12 +172,12 @@ func runWorkspaceApply(log *zlog.Logger, out io.Writer, flag invocation.Workspac
 
 // applyWorkspaceHere renders and writes the files for a named workspace of the
 // project the current invocation belongs to.
-func applyWorkspaceHere(log *zlog.Logger, out io.Writer, name, zordonHome string) (*alphasfile.WorkspaceSpec, error) {
+func applyWorkspaceHere(log *zlog.Logger, out io.Writer, name, zordonHome string, kc zlock.GlobalKeychain) (*alphasfile.WorkspaceSpec, error) {
 	root, err := projectRoot()
 	if err != nil {
 		return nil, err
 	}
-	return applyWorkspaceTo(log, out, root, invocation.WorkspaceName(name), zordonHome)
+	return applyWorkspaceTo(log, out, root, invocation.WorkspaceName(name), zordonHome, kc)
 }
 
 // renderWorkspaceHere resolves the block WITHOUT writing anything, for callers
@@ -219,7 +220,7 @@ func workspaceInvocation(root string, ws invocation.WorkspaceName) (*invocation.
 // would resolve to "main". By this point the directory and its .workspace
 // marker exist, so the ordinary walk-up sees exactly what it would see after
 // a `cd` into it.
-func applyWorkspaceTo(log *zlog.Logger, out io.Writer, root string, ws invocation.WorkspaceName, zordonHome string) (*alphasfile.WorkspaceSpec, error) {
+func applyWorkspaceTo(log *zlog.Logger, out io.Writer, root string, ws invocation.WorkspaceName, zordonHome string, kc zlock.GlobalKeychain) (*alphasfile.WorkspaceSpec, error) {
 	inv, err := workspaceInvocation(root, ws)
 	if err != nil {
 		return nil, err
@@ -229,7 +230,7 @@ func applyWorkspaceTo(log *zlog.Logger, out io.Writer, root string, ws invocatio
 	if err != nil {
 		return nil, err
 	}
-	protected, err := serviceSourceDirs(af, zordonHome)
+	protected, err := serviceSourceDirs(af, zordonHome, kc)
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +243,8 @@ func applyWorkspaceTo(log *zlog.Logger, out io.Writer, root string, ws invocatio
 // serviceSourceDirs lists the trees the services build from, so a generated
 // file can be kept out of them. In main those are the developer's own
 // directories, which no path convention can identify — only the manifest can.
-func serviceSourceDirs(afPath, zordonHome string) ([]string, error) {
-	metas, err := parseServices(zordonHome, afPath)
+func serviceSourceDirs(afPath, zordonHome string, kc zlock.GlobalKeychain) ([]string, error) {
+	metas, err := parseServices(zordonHome, kc, afPath)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +286,7 @@ func runWorkspaceRm(log *zlog.Logger, args []string) error {
 // already-created workspace (`zordon workspace service add`). It reuses
 // checkoutServices — the same machinery `create` uses — so an added service
 // lands on the per-service branch and path `zordon start` expects.
-func runWorkspaceServiceAdd(ctx context.Context, log *zlog.Logger, out io.Writer, ws invocation.WorkspaceName, picks []string, zordonHome string) error {
+func runWorkspaceServiceAdd(ctx context.Context, log *zlog.Logger, out io.Writer, ws invocation.WorkspaceName, picks []string, zordonHome string, kc zlock.GlobalKeychain) error {
 	if ws.IsMain() {
 		return errors.New(`"main" uses the live src tree in place — no per-service checkout; pass --workspace=<name>`)
 	}
@@ -307,7 +308,7 @@ func runWorkspaceServiceAdd(ctx context.Context, log *zlog.Logger, out io.Writer
 	if err != nil {
 		return err
 	}
-	if err := checkoutServices(ctx, log, spec, dir, picks, zordonHome); err != nil {
+	if err := checkoutServices(ctx, log, spec, dir, picks, zordonHome, kc); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "added %s to workspace %q\n", strings.Join(picks, ", "), ws.Name())
@@ -362,7 +363,7 @@ func workspaceTargets(metas []*alphasfile.ServiceMeta, picks []string) ([]checko
 // runWorkspaceServiceRm detaches one or more service checkouts from an
 // existing workspace (`zordon workspace service rm`), removing the git
 // worktree and its tree while leaving the rest of the workspace intact.
-func runWorkspaceServiceRm(ctx context.Context, log *zlog.Logger, out io.Writer, ws invocation.WorkspaceName, svcs []string, zordonHome string) error {
+func runWorkspaceServiceRm(ctx context.Context, log *zlog.Logger, out io.Writer, ws invocation.WorkspaceName, svcs []string, zordonHome string, kc zlock.GlobalKeychain) error {
 	if ws.IsMain() {
 		return errors.New(`"main" uses the live src tree in place — no per-service checkout; pass --workspace=<name>`)
 	}
@@ -381,7 +382,7 @@ func runWorkspaceServiceRm(ctx context.Context, log *zlog.Logger, out io.Writer,
 	if err != nil {
 		return err
 	}
-	metas, err := parseServices(zordonHome, af)
+	metas, err := parseServices(zordonHome, kc, af)
 	if err != nil {
 		return err
 	}
@@ -443,12 +444,12 @@ func runWorkspaceServiceRm(ctx context.Context, log *zlog.Logger, out io.Writer,
 // resolves at `zordon start` — both come from the same
 // `workspace { branch }` template — so start reuses these checkouts (and
 // monorepo services sharing one primary don't collide on a shared branch).
-func checkoutServices(ctx context.Context, log *zlog.Logger, spec *alphasfile.WorkspaceSpec, wsdir string, picks []string, zordonHome string) error {
+func checkoutServices(ctx context.Context, log *zlog.Logger, spec *alphasfile.WorkspaceSpec, wsdir string, picks []string, zordonHome string, kc zlock.GlobalKeychain) error {
 	af, err := walkUp()
 	if err != nil {
 		return err
 	}
-	metas, err := parseServices(zordonHome, af)
+	metas, err := parseServices(zordonHome, kc, af)
 	if err != nil {
 		return err
 	}

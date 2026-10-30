@@ -24,6 +24,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/mcpserver"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
 
@@ -68,7 +69,7 @@ func runMCP(ctx context.Context, stdio commandIO, cfg mcpConfig) error {
 	)
 
 	registerCommandTools(srv, cfg.Home, cfg.Agent, cfg.Test)
-	registerProvisionTools(ctx, srv, log, cfg.Home, cfg.Test)
+	registerProvisionTools(ctx, srv, log, cfg.Home, cfg.Keychain, cfg.Test)
 
 	if cfg.Transport == transportHTTP {
 		return serveMCPHTTP(ctx, log, srv, cfg.Listen, cfg.AllowHosts)
@@ -85,6 +86,7 @@ type mcpConfig struct {
 	Listen     string   // resolved bind address; empty under stdio
 	AllowHosts []string // extra Host headers accepted on a loopback listener
 	Home       string
+	Keychain   zlock.GlobalKeychain
 	Agent      bool
 	Test       alphasfile.TestConfig
 }
@@ -346,8 +348,8 @@ func commandArgv(zordonHome string, agent bool, testCfg alphasfile.TestConfig, n
 	return append(argv, args...)
 }
 
-func registerProvisionTools(ctx context.Context, srv *mcp.Server, log *zlog.Logger, zordonHome string, testCfg alphasfile.TestConfig) {
-	levels, err := resolveChain(ctx, zordonHome, testCfg)
+func registerProvisionTools(ctx context.Context, srv *mcp.Server, log *zlog.Logger, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) {
+	levels, err := resolveChain(ctx, zordonHome, kc, testCfg)
 	if err != nil {
 		// No chain (e.g. run outside a project) — still serve command tools.
 		log.Warn("mcp", "provision tools unavailable: %v", err)

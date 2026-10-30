@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
 	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
@@ -26,20 +27,21 @@ func TestCorepackMatrix(t *testing.T) {
 
 	ztest.AssertSystem(t)
 	zordonHome := zordontest.DefaultHome(t)
+	kc := zlock.NewGlobalKeychain(zordonHome)
 	dataDir := filepath.Join(zordonHome, "toolchain")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	bin, err := EnsureMise(zordonHome, os.Stderr)
+	bin, err := EnsureMise(kc, zordonHome, os.Stderr)
 	if err != nil {
 		t.Fatalf("EnsureMise: %v", err)
 	}
 
 	for _, nv := range nodeVersions {
 		t.Run("node-"+nv, func(t *testing.T) {
-			release, err := Acquire(dataDir, "node", nv)
+			release, err := kc.LockTool(t.Context(), "node", nv)
 			if err != nil {
-				t.Fatalf("Acquire: %v", err)
+				t.Fatalf("LockTool: %v", err)
 			}
 			defer release()
 

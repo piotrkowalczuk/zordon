@@ -30,7 +30,11 @@ func NewGlobalKeychain(homeDir string) GlobalKeychain {
 }
 
 func (k GlobalKeychain) ForWorkspace(workspaceDir string) WorkspaceKeychain {
-	return NewWorkspaceKeychain(workspaceDir)
+	_ = k.revealHome()
+	if strings.TrimSpace(workspaceDir) == "" {
+		panic("zlock: GlobalKeychain.ForWorkspace requires non-empty workspaceDir")
+	}
+	return WorkspaceKeychain{workspaceDir: workspaceDir}
 }
 
 // LockRegistry takes an exclusive lock on <homeDir>/registry.lock.
@@ -64,13 +68,6 @@ type WorkspaceKeychain struct {
 	workspaceDir string
 }
 
-func NewWorkspaceKeychain(workspaceDir string) WorkspaceKeychain {
-	if strings.TrimSpace(workspaceDir) == "" {
-		panic("zlock: NewWorkspaceKeychain requires non-empty workspaceDir")
-	}
-	return WorkspaceKeychain{workspaceDir: workspaceDir}
-}
-
 // TryLockZordon takes a non-blocking lock on <workspaceDir>/zordon.lock.
 func (k WorkspaceKeychain) TryLockZordon() (UnlockFunc, error) {
 	return zfs.TryLock(k.revealWorkspace(), "zordon")
@@ -96,7 +93,7 @@ func (k GlobalKeychain) revealHome() string {
 
 func (k WorkspaceKeychain) revealWorkspace() string {
 	if k.workspaceDir == "" {
-		panic("zlock: zero-value WorkspaceKeychain used — construct with NewWorkspaceKeychain")
+		panic("zlock: zero-value WorkspaceKeychain used — construct with GlobalKeychain.ForWorkspace")
 	}
 	return k.workspaceDir
 }

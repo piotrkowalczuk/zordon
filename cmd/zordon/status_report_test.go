@@ -8,6 +8,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
@@ -180,7 +181,8 @@ func TestRunStatusReport_noAlphasfile(t *testing.T) {
 			t.Chdir(t.TempDir())
 			var out bytes.Buffer
 
-			if err := runStatusReport(t.Context(), &out, t.TempDir(), alphasfile.TestConfig{}, c.format); err != nil {
+			home := t.TempDir()
+			if err := runStatusReport(t.Context(), &out, home, zlock.NewGlobalKeychain(home), alphasfile.TestConfig{}, c.format); err != nil {
 				t.Fatalf("runStatusReport() error = %v, want nil", err)
 			}
 
