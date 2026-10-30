@@ -7,12 +7,13 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
-// A module service checks out one level deeper (src/<module>/<svc>), so the
-// ownership scan must recognize both the flat and the nested marker layout.
+// A module service checks out one level deeper (src/<module>/<svc>) and a
+// component's service two (src/<package>/<component>/<svc>), so the
+// ownership scan must recognize every marker layout a display name has.
 func TestInvocationState_OwnsService_nestedModuleCheckout(t *testing.T) {
 	root := t.TempDir()
 	ws := filepath.Join(root, "workspaces", "feature")
-	for _, rel := range []string{"api", "payments/db"} {
+	for _, rel := range []string{"api", "payments/db", "risk-engine/app/risk-engine", "legacy/app/svc/four"} {
 		if err := zfs.EnsureDir(filepath.Join(ws, "src", rel, ".git")); err != nil {
 			t.Fatal(err)
 		}
@@ -26,10 +27,13 @@ func TestInvocationState_OwnsService_nestedModuleCheckout(t *testing.T) {
 		svc  string
 		want bool
 	}{
-		"flat checkout":               {"api", true},
-		"nested module checkout":      {"payments/db", true},
-		"nested dir without .git":     {"payments/api", false},
-		"module dir is not a service": {"payments", false},
+		"flat checkout":                     {"api", true},
+		"nested module checkout":            {"payments/db", true},
+		"nested dir without .git":           {"payments/api", false},
+		"module dir is not a service":       {"payments", false},
+		"component checkout":                {"risk-engine/app/risk-engine", true},
+		"component dir is not a service":    {"risk-engine/app", false},
+		"four levels is not a display name": {"legacy/app/svc/four", false},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
