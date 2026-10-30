@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
@@ -301,42 +302,42 @@ func build(dir, root, ws string) *InvocationState {
 	}
 }
 
-// scanOwnedServices reads <stateDir>/src/*/.git markers (one per service
-// that got a real `git worktree add`). Returns nil for the main workspace
+// scanOwnedServices reads the .git markers under <stateDir>/src, one per
+// service that got a real `git worktree add`, and keys them by the path
+// below src, which is the service's display name: <svc>, <module>/<svc>, or
+// <package>/<component>/<svc>. A directory that holds a marker is a checkout,
+// so nothing below it is read. Returns nil for the main workspace
 // (irrelevant — main never forks) and for a fresh workspace with no
 // materialized services (== "ownership unknown", legacy default).
 func scanOwnedServices(stateDir, ws string) map[string]bool {
 	if ws == "" || ws == MainWorkspace {
 		return nil
 	}
-	srcDir := filepath.Join(stateDir, "src")
-	entries, err := zfs.ReadDir(srcDir)
-	if err != nil {
-		return nil
-	}
 	owned := map[string]bool{}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if _, err := zfs.Stat(filepath.Join(srcDir, e.Name(), ".git")); err == nil {
-			owned[e.Name()] = true
-			continue
-		}
-		// A module's services check out one level deeper: src/<module>/<svc>.
-		nested, err := zfs.ReadDir(filepath.Join(srcDir, e.Name()))
+	var scan func(dir, name string, depth int)
+	scan = func(dir, name string, depth int) {
+		entries, err := zfs.ReadDir(dir)
 		if err != nil {
-			continue
+			return
 		}
-		for _, n := range nested {
-			if !n.IsDir() {
+		for _, e := range entries {
+			if !e.IsDir() {
 				continue
 			}
-			if _, err := zfs.Stat(filepath.Join(srcDir, e.Name(), n.Name(), ".git")); err == nil {
-				owned[e.Name()+"/"+n.Name()] = true
+			sub := filepath.Join(dir, e.Name())
+			svc := path.Join(name, e.Name())
+			if _, err := zfs.Stat(filepath.Join(sub, ".git")); err == nil {
+				owned[svc] = true
+				continue
+			}
+			// A display name has at most three segments; deeper is a
+			// checkout's own tree, or a leftover, and not worth walking.
+			if depth < 3 {
+				scan(sub, svc, depth+1)
 			}
 		}
 	}
+	scan(filepath.Join(stateDir, "src"), "", 1)
 	if len(owned) == 0 {
 		return nil
 	}
