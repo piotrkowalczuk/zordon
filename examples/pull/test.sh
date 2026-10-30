@@ -5,9 +5,10 @@
 # requires. The first start records the commit each one points at in
 # zordon.lock and builds it; a later start keeps both when the branch moves;
 # --pull=pkg moves the required repository and leaves the service's source,
-# --pull=srv the other way round, --pull=all both, each saying so; and a lock
-# that holds older commits, as one a teammate committed would, rebuilds there
-# and status says how far each pin is behind. The service's source and the
+# --pull=srv the other way round, --pull=all both, each saying so; status says
+# how far a pin is behind the ref its repository last fetched; and a lock that
+# holds other commits, as one a teammate committed would, rebuilds there,
+# whether the bare clone has fetched them or not. The service's source and the
 # required repository are one local git repository that git reaches through
 # url.<base>.insteadOf, so nothing leaves the machine.
 cd "$(dirname "$0")"
@@ -100,7 +101,12 @@ answer() { # <port expression>: what GET / on that port says
 hello() { answer service.go.hello.vars.port; }
 greet() { answer package.greet.component.greet.service.go.greet.vars.port; }
 lock() { tr -s ' \n' ' ' <"$PLACE/zordon.lock"; }
-status() { (cd "$PLACE" && zordon status --agent --format=text); }
+# The place's own level: a federation root above it has pins of its own.
+status() { (cd "$PLACE" && zordon status --agent --format=text) | sed -n '/^\.\/Alphasfile/,$p'; }
+assert_lacks() { # <haystack> <needle> [label]
+	if [[ "$1" == *"$2"* ]]; then fail "${3:-unexpected $2}:\n$1"; fi
+	pass "${3:-no $2}"
+}
 
 start_place >/dev/null || fail "first start failed"
 assert_contains "$(hello)" "hello one" "the service runs its git source"
@@ -119,11 +125,13 @@ assert_contains "$out" "zordon.lock $REPO@main: ${first:0:12} -> ${second:0:12}"
 assert_contains "$(greet)" "greet two" "--pull=pkg builds the required repository's newest commit"
 assert_contains "$(hello)" "hello one" "--pull=pkg leaves the service's source where it was"
 assert_contains "$(lock)" "source \"$REPO\" { ref = \"HEAD\" commit = \"$first\" }" "--pull=pkg leaves the source pin in the lock"
+assert_contains "$(status)" "behind HEAD by 1" "status says the service's source is behind the ref --pull=pkg fetched"
 
 out="$(start_place --pull=srv)" || fail "start --pull=srv failed:\n$out"
 assert_contains "$out" "zordon.lock $REPO@HEAD: ${first:0:12} -> ${second:0:12}" "--pull=srv reports the moved source pin"
 assert_contains "$(hello)" "hello two" "--pull=srv builds the service's newest commit"
 assert_contains "$(lock)" "source \"$REPO\" { ref = \"HEAD\" commit = \"$second\" }" "--pull=srv rewrites the lock"
+assert_lacks "$(status)" "behind" "status says nothing once both pins are at the fetched ref"
 
 third="$(bump two three)"
 
@@ -141,5 +149,14 @@ assert_contains "$(greet)" "greet two" "a lock holding an older commit rebuilds 
 st="$(status)"
 assert_contains "$st" "behind HEAD by 1" "status says how far the service's source is behind its ref"
 assert_contains "$st" "behind main by 1" "status says how far the required repository is behind its ref"
+
+fourth="$(bump three four)"
+sed -i.bak "s/$second/$fourth/g" "$PLACE/zordon.lock"
+rm "$PLACE/zordon.lock.bak"
+out="$(start_place)" || fail "start from a lock ahead of the bare clone failed:\n$out"
+assert_contains "$(hello)" "hello four" "a lock holding a commit nothing here fetched yet, as a teammate's would, checks the service out there"
+assert_contains "$(greet)" "greet four" "a lock holding a commit nothing here fetched yet checks the package out there"
+assert_lacks "$out" "cannot tell how far" "a pin the bare clone has not fetched is left out quietly"
+assert_lacks "$(status)" "behind" "status says nothing of a pin the bare clone has not fetched"
 
 pass "pull"

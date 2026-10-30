@@ -87,7 +87,7 @@ source "github.com/acme/ui" {
 | locked source | a service that was not picked into a workspace is cloned at the locked commit, so its code changes only when the lock does; services that build from one repository and ref share the entry; a picked or `src {}` checkout is yours and is never moved |
 | `zordon start --pull=srv` | moves the `source` entry of every service it starts to the newest commit of its ref; `--pull=all`, or a bare `--pull`, does that and `--pull=pkg` |
 | behind | `zordon start` counts, for every `repo` and `source` pin of each level it starts, the commits the ref has that the pin does not, in the bare clone and without the network, so the count is as of the last fetch of that repository: one by `--pull`, by a missing pin, or by a picked checkout |
-| behind in status | `zordon status` shows `behind <ref> by <n> (fetched <time>)` next to the pin; `--format=json` and `--format=agent` report it as `behind` and `behind_ref` on the service and as `pins` of the stack; a repository never fetched is left out |
+| behind in status | `zordon status` shows `behind <ref> by <n> (fetched <time>)` next to the pin; `--format=json` and `--format=agent` report it as `behind` and `behind_ref` on the service and as `pins` of the stack, which lists only what is behind; a repository never fetched, or a commit it has not fetched yet, is left out |
 | concurrent starts | every workspace of a project shares its `zordon.lock`; zordon serializes reading and rewriting it with a lock under `$ZORDON_HOME/locks`, so one start never drops another's pin |
 
 Checkouts live in `$ZORDON_HOME/mod/<host>/<owner>/<repo>@<commit>`.

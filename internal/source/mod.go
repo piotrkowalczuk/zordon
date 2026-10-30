@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
@@ -130,7 +130,8 @@ func (f ModFetcher) Materialize(repo, commit, dest string) error {
 
 // Behind counts the commits ref has that commit does not in repo's bare
 // clone, without the network: as of the last fetch, whose time it returns. A
-// repository never fetched yields an error wrapping fs.ErrNotExist.
+// repository never fetched, or one that has not fetched commit yet, yields an
+// error wrapping fs.ErrNotExist.
 func (f ModFetcher) Behind(ctx context.Context, repo, ref, commit string) (int, time.Time, error) {
 	if !IsCommit(commit) {
 		return 0, time.Time{}, fmt.Errorf("count %s behind %s: %q is not a commit hash", repo, ref, commit)
@@ -169,10 +170,15 @@ func captureRunner(_ context.Context, cmd *exec.Cmd) error {
 	return nil
 }
 
-// countBehind counts the commits ref has that commit does not, in gitDir.
+// countBehind counts the commits ref has that commit does not, in gitDir. A
+// checkout is cloned from upstream, not from gitDir, so gitDir may lack a
+// commit the lock holds: one a teammate pinned since its last fetch.
 func countBehind(ctx context.Context, gitDir, ref, commit string) (int, error) {
 	if err := CheckRef(ref); err != nil {
 		return 0, err
+	}
+	if err := exec.CommandContext(ctx, "git", "-C", gitDir, "cat-file", "-e", commit+"^{commit}").Run(); err != nil {
+		return 0, fmt.Errorf("%s has not fetched %s yet: %w", gitDir, shortRef(commit), fs.ErrNotExist)
 	}
 	out, err := exec.CommandContext(ctx, "git", "-C", gitDir, "rev-list", "--count", commit+".."+ref).Output()
 	if err != nil {
@@ -185,11 +191,11 @@ func countBehind(ctx context.Context, gitDir, ref, commit string) (int, error) {
 // a fetch, packed-refs after the clone itself.
 func lastFetch(bare string) (time.Time, error) {
 	for _, name := range []string{"FETCH_HEAD", "packed-refs"} {
-		if fi, err := os.Stat(filepath.Join(bare, name)); err == nil {
+		if fi, err := zfs.Stat(filepath.Join(bare, name)); err == nil {
 			return fi.ModTime(), nil
 		}
 	}
-	if _, err := os.Stat(bare); err != nil {
+	if _, err := zfs.Stat(bare); err != nil {
 		return time.Time{}, fmt.Errorf("%s not fetched yet: %w", bare, err)
 	}
 	return time.Time{}, fmt.Errorf("%s has no fetch to date: %w", bare, fs.ErrNotExist)
