@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
@@ -593,7 +594,8 @@ func (f *repoFetcher) Materialize(repo, commit, dest string) error {
 
 func remoteOpts(t *testing.T, dir string, f Fetcher) LoadOptions {
 	t.Helper()
-	opts := LoadOptions{Home: t.TempDir(), LockPath: filepath.Join(dir, LockFileName)}
+	home := t.TempDir()
+	opts := LoadOptions{Home: home, LockPath: filepath.Join(dir, LockFileName), Keychain: zlock.NewGlobalKeychain(home)}
 	if f != nil {
 		opts.Fetcher = f
 	}

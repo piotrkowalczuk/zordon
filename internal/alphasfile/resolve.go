@@ -50,6 +50,9 @@ type LoadOptions struct {
 	Search []string
 	// LockPath is the lock file of the entrypoint; empty disables locking.
 	LockPath string
+	// Keychain serializes reading and rewriting the lock across zordon
+	// processes; the zero keychain leaves that to the caller.
+	Keychain zlock.GlobalKeychain
 	// Fetcher gets remote repositories; nil means remote imports resolve
 	// only from the lock and the existing checkouts.
 	Fetcher Fetcher
@@ -475,14 +478,14 @@ func readLock(path string) (*lockFile, error) {
 	return l, nil
 }
 
-// lockPins serializes reading and rewriting the lock at path across zordon
-// processes, see zlock.GlobalKeychain.LockPins. Without a home or a lock there
-// is nothing to serialize.
-func lockPins(home, path string) (func(), error) {
-	if home == "" || path == "" {
+// lockPins serializes reading and rewriting the lock across zordon processes,
+// see zlock.GlobalKeychain.LockPins. Without a lock or a keychain there is
+// nothing to serialize.
+func lockPins(opts LoadOptions) (func(), error) {
+	if opts.LockPath == "" || opts.Keychain == (zlock.GlobalKeychain{}) {
 		return func() {}, nil
 	}
-	return zlock.NewGlobalKeychain(home).LockPins(context.Background(), path)
+	return opts.Keychain.LockPins(context.Background(), opts.LockPath)
 }
 
 // write rewrites the lock, sorted: the repositories this load used when

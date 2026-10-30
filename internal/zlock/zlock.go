@@ -73,7 +73,11 @@ func (k GlobalKeychain) LockPins(ctx context.Context, lockPath string) (UnlockFu
 	if strings.TrimSpace(lockPath) == "" {
 		panic("zlock: GlobalKeychain.LockPins requires non-empty lockPath")
 	}
-	sum := sha256.Sum256([]byte(filepath.Clean(lockPath)))
+	abs, err := filepath.Abs(lockPath)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256([]byte(abs))
 	return zfs.Lock(ctx, filepath.Join(k.revealHome(), "locks"), "pins-"+hex.EncodeToString(sum[:8]))
 }
 

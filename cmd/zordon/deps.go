@@ -36,6 +36,7 @@ func loadOptions(zordonHome string, kc zlock.GlobalKeychain, afPath string, chai
 		Home:     zordonHome,
 		Search:   search,
 		LockPath: filepath.Join(filepath.Dir(afPath), alphasfile.LockFileName),
+		Keychain: kc,
 		Fetcher:  source.ModFetcher{Home: zordonHome, Keychain: kc},
 	}, nil
 }

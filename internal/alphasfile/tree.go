@@ -91,7 +91,7 @@ func LoadTreeWith(path string, opts LoadOptions) (*Tree, error) {
 	if err != nil {
 		return nil, err
 	}
-	release, err := lockPins(opts.Home, opts.LockPath)
+	release, err := lockPins(opts)
 	if err != nil {
 		return nil, err
 	}

@@ -25,7 +25,7 @@ type LockPin struct {
 // left alone. It returns the lock entries it added or moved, and every pin it
 // set.
 func PinSources(af *Alphasfile, opts LoadOptions, pull bool) ([]LockChange, []LockPin, error) {
-	release, err := lockPins(opts.Home, opts.LockPath)
+	release, err := lockPins(opts)
 	if err != nil {
 		return nil, nil, err
 	}

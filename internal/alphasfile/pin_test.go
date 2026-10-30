@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 func TestPinSources_locksTheCommitTheRefPointsAt(t *testing.T) {
@@ -132,20 +134,6 @@ func TestLoadTreeWith_keepsTheSourcePins(t *testing.T) {
 	}
 }
 
-func pinSvc(name string, p *Package) *Service {
-	p.Toolchain = "go"
-	return &Service{Toolchain: "go", Package: p, Runtime: &RuntimeConfig{Name: name}}
-}
-
-func pinnedTo(af *Alphasfile, name string) string {
-	for _, s := range af.Services {
-		if s.Name() == name {
-			return s.Package.Locked
-		}
-	}
-	return "missing"
-}
-
 func TestPinSources_concurrentStartsKeepEachOthersPins(t *testing.T) {
 	dir, home := t.TempDir(), t.TempDir()
 	repos := map[string]string{}
@@ -153,7 +141,7 @@ func TestPinSources_concurrentStartsKeepEachOthersPins(t *testing.T) {
 		repos[fmt.Sprintf("github.com/acme/ui%d", i)] = gitRepo(t, map[string]string{"README": fmt.Sprint(i)})
 	}
 	f := newRepoFetcher(repos)
-	opts := LoadOptions{Home: home, LockPath: filepath.Join(dir, LockFileName), Fetcher: f}
+	opts := LoadOptions{Home: home, LockPath: filepath.Join(dir, LockFileName), Keychain: zlock.NewGlobalKeychain(home), Fetcher: f}
 
 	var wg sync.WaitGroup
 	errs := make(chan error, len(repos))
@@ -176,4 +164,18 @@ func TestPinSources_concurrentStartsKeepEachOthersPins(t *testing.T) {
 			t.Errorf("a concurrent start lost the pin of %s:\n%s", repo, lock)
 		}
 	}
+}
+
+func pinSvc(name string, p *Package) *Service {
+	p.Toolchain = "go"
+	return &Service{Toolchain: "go", Package: p, Runtime: &RuntimeConfig{Name: name}}
+}
+
+func pinnedTo(af *Alphasfile, name string) string {
+	for _, s := range af.Services {
+		if s.Name() == name {
+			return s.Package.Locked
+		}
+	}
+	return "missing"
 }
