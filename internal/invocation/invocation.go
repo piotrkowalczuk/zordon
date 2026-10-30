@@ -110,7 +110,7 @@ type InvocationState struct {
 
 	// OwnedServices is the set of services this (named) workspace took at
 	// `zordon workspace create <ws> [svc ...]`. Populated by build() from a
-	// scan of <StateDir>/src/*/.git (presence of .git = a real `git worktree
+	// scan of <StateDir>/src/**/.git (a .git file = a real `git worktree
 	// add` was performed). Services NOT in this set fall back to the anchor
 	// Alphasfile's resolved dir (same as the main workspace's InPlace) so
 	// they share the user's live tree instead of getting a forked, empty
@@ -302,8 +302,8 @@ func build(dir, root, ws string) *InvocationState {
 	}
 }
 
-// scanOwnedServices reads the .git markers under <stateDir>/src, one per
-// service that got a real `git worktree add`, and keys them by the path
+// scanOwnedServices reads the .git files under <stateDir>/src, the gitlink
+// each real `git worktree add` leaves, and keys them by the path
 // below src, which is the service's display name: <svc>, <module>/<svc>, or
 // <package>/<component>/<svc>. A directory that holds a marker is a checkout,
 // so nothing below it is read. Returns nil for the main workspace
@@ -326,8 +326,12 @@ func scanOwnedServices(stateDir, ws string) map[string]bool {
 			}
 			sub := filepath.Join(dir, e.Name())
 			svc := path.Join(name, e.Name())
-			if _, err := zfs.Stat(filepath.Join(sub, ".git")); err == nil {
-				owned[svc] = true
+			// A worktree's .git is a file; a directory is the plain clone
+			// of an unpicked git source, for the next start to rebuild.
+			if info, err := zfs.Stat(filepath.Join(sub, ".git")); err == nil {
+				if info.Mode().IsRegular() {
+					owned[svc] = true
+				}
 				continue
 			}
 			// A display name has at most three segments; deeper is a

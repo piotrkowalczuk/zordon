@@ -1,6 +1,7 @@
 package invocation
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -14,12 +15,12 @@ func TestInvocationState_OwnsService_nestedModuleCheckout(t *testing.T) {
 	root := t.TempDir()
 	ws := filepath.Join(root, "workspaces", "feature")
 	for _, rel := range []string{"api", "payments/db", "risk-engine/app/risk-engine", "legacy/app/svc/four"} {
-		if err := zfs.EnsureDir(filepath.Join(ws, "src", rel, ".git")); err != nil {
+		writeGitlink(t, filepath.Join(ws, "src", rel))
+	}
+	for _, rel := range []string{"payments/api", "vendor/clone/.git"} {
+		if err := zfs.EnsureDir(filepath.Join(ws, "src", rel)); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := zfs.EnsureDir(filepath.Join(ws, "src", "payments", "api")); err != nil {
-		t.Fatal(err)
 	}
 	inv := build(ws, root, "feature")
 
@@ -34,6 +35,7 @@ func TestInvocationState_OwnsService_nestedModuleCheckout(t *testing.T) {
 		"component checkout":                {"risk-engine/app/risk-engine", true},
 		"component dir is not a service":    {"risk-engine/app", false},
 		"four levels is not a display name": {"legacy/app/svc/four", false},
+		"plain clone of an unpicked source": {"vendor/clone", false},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -44,5 +46,16 @@ func TestInvocationState_OwnsService_nestedModuleCheckout(t *testing.T) {
 	}
 	if got := inv.CheckoutPath("payments/db"); got != filepath.Join(ws, "src", "payments", "db") {
 		t.Errorf("CheckoutPath = %q", got)
+	}
+}
+
+// writeGitlink leaves at dir what `git worktree add` does: a .git file.
+func writeGitlink(t *testing.T, dir string) {
+	t.Helper()
+	if err := zfs.EnsureDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
