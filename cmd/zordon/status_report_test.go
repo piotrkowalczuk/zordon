@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
@@ -154,16 +155,33 @@ func TestStatusReport_logfmt(t *testing.T) {
 			{Name: "shop/worker", State: ServiceReady, Picked: true, Print: "http://127.0.0.1:8080/  (shop)"},
 			{Name: "db", State: ServiceUnhealthy, Shared: true, Health: `dial "x": refused`, Revision: "0123456789ab"},
 			{Name: "web", State: ServiceStopped, CheckoutPath: "/proj/workspaces/feature/src/web", Branch: "zordon/feature/web"},
+			{Name: "ui", State: ServiceReady, Behind: 2, BehindRef: "HEAD"},
 		},
+		Pins: []upstreamPin{{Kind: pinSource, Repo: "github.com/acme/ui", Ref: "HEAD", Commit: "0123456789abcdef", Behind: 2, Fetched: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)}},
 	}
 
 	want := `workspace=feature state=running alphasfile=/proj/Alphasfile
 service=shop/worker state=ready picked=true print="http://127.0.0.1:8080/  (shop)"
 service=db state=unhealthy health="dial \"x\": refused" shared=true revision=0123456789ab
 service=web state=stopped checkout_path=/proj/workspaces/feature/src/web branch=zordon/feature/web
+service=ui state=ready behind=2 behind_ref=HEAD
+pin=github.com/acme/ui kind=source ref=HEAD commit=0123456789abcdef behind=2 fetched=2026-10-30T12:00:00Z
 `
 	if got := r.logfmt(); got != want {
 		t.Fatalf("logfmt() =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestStatusReport_json_pins(t *testing.T) {
+	r := StatusReport{State: StackStopped, Pins: []upstreamPin{{Kind: pinRepo, Repo: "github.com/acme/infra", Ref: "main", Commit: "0123456789abcdef", Behind: 1, Fetched: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)}}}
+
+	got, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"state":"stopped","pins":[{"kind":"repo","repo":"github.com/acme/infra","ref":"main","commit":"0123456789abcdef","behind":1,"fetched":"2026-10-30T12:00:00Z"}]}`
+	if string(got) != want {
+		t.Fatalf("json = %s\nwant %s", got, want)
 	}
 }
 

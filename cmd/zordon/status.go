@@ -55,7 +55,7 @@ func statusImports(tree *alphasfile.Tree, wd string, up upstream) string {
 		case e.Origin != "":
 			if repo, commit, ok := strings.Cut(e.Origin, "@"); ok {
 				notes = append(notes, "@"+commit)
-				if n := up.note(repo, "", commit); n != "" {
+				if n := up.note(pinRepo, repo, "", commit); n != "" {
 					notes = append(notes, n)
 				}
 			}

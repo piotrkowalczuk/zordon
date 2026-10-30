@@ -52,8 +52,8 @@ type StatusReport struct {
 	State      string          `json:"state"`
 	Error      string          `json:"error,omitempty"`
 	Services   []StatusService `json:"services,omitempty"`
-	// Pins are the invocation's locked repositories and sources with how far
-	// each is behind its ref, as of the last fetch.
+	// Pins are the invocation's locked repositories and sources whose ref
+	// moved on past the pin, as of the last fetch, with how far.
 	Pins []upstreamPin `json:"pins,omitempty"`
 }
 
@@ -103,7 +103,8 @@ func runStatusReport(ctx context.Context, out io.Writer, zordonHome string, kc z
 	panic(fmt.Sprintf("runStatusReport: format %q has no report", format))
 }
 
-// logfmt renders the report as logfmt lines: the stack, then one per service.
+// logfmt renders the report as logfmt lines: the stack, one per service,
+// then one per pin that is behind its ref.
 func (r StatusReport) logfmt() string {
 	var b strings.Builder
 	writeLogfmt(&b, "workspace", r.Workspace, "state", r.State, "alphasfile", r.Alphasfile, "state_dir", r.StateDir, "error", r.Error)
@@ -125,7 +126,7 @@ func (r StatusReport) logfmt() string {
 		)
 	}
 	for _, p := range r.Pins {
-		writeLogfmt(&b, "pin", p.Repo, "ref", p.Ref, "commit", p.Commit, "behind", strconv.Itoa(p.Behind), "fetched", p.Fetched.Format(time.RFC3339))
+		writeLogfmt(&b, "pin", p.Repo, "kind", p.Kind, "ref", p.Ref, "commit", p.Commit, "behind", intField(p.Behind), "fetched", p.Fetched.Format(time.RFC3339))
 	}
 	return b.String()
 }
@@ -150,7 +151,7 @@ func statusReport(ctx context.Context, zordonHome string, kc zlock.GlobalKeychai
 				r.State = StackRunning
 			}
 			if up, err := readUpstream(lv.inv.StateDir); err == nil {
-				r.Pins = up.Pins
+				r.Pins = up.behind()
 			}
 		}
 		if lv.state == nil {

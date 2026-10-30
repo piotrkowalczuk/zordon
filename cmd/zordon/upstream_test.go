@@ -22,23 +22,50 @@ func TestRecordUpstream(t *testing.T) {
 	broken := alphasfile.LockPin{Repo: "github.com/acme/broken", Ref: "main", Commit: strings.Repeat("d", 40)}
 	counter := fakeCounter{ui.Repo: 3, infra.Repo: 0}
 
-	recordUpstream(t.Context(), dir, []alphasfile.LockPin{ui, infra, ui, never, broken}, counter, zlog.New(io.Discard, false))
+	recordUpstream(t.Context(), dir, []alphasfile.LockPin{infra, never}, []alphasfile.LockPin{ui, broken}, counter, zlog.New(io.Discard, false))
 
 	up, err := readUpstream(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(up.Pins) != 2 {
-		t.Fatalf("recorded %+v; want ui and infra once each, the unfetched and the broken one left out", up)
+		t.Fatalf("recorded %+v; want ui and infra, the unfetched and the broken one left out", up)
 	}
-	if got := up.note(ui.Repo, "", ui.Commit[:12]); !strings.HasPrefix(got, "behind HEAD by 3 (fetched ") {
+	if got := up.note(pinSource, ui.Repo, "", ui.Commit[:12]); !strings.HasPrefix(got, "behind HEAD by 3 (fetched ") {
 		t.Errorf("note for ui = %q", got)
 	}
-	if got := up.note(infra.Repo, "main", infra.Commit); got != "" {
+	if got := up.note(pinRepo, infra.Repo, "main", infra.Commit); got != "" {
 		t.Errorf("note for a current pin = %q, want none", got)
 	}
-	if got := up.note(ui.Repo, "", strings.Repeat("e", 40)); got != "" {
+	if got := up.note(pinRepo, ui.Repo, "", ui.Commit); got != "" {
+		t.Errorf("note for ui as a repository pin = %q, want none: it is a source pin", got)
+	}
+	if got := up.note(pinSource, ui.Repo, "", strings.Repeat("e", 40)); got != "" {
 		t.Errorf("note for another commit = %q, want none: the count belongs to the pin it was taken for", got)
+	}
+	if got := up.behind(); len(got) != 1 || got[0].Repo != ui.Repo {
+		t.Errorf("behind() = %+v, want ui alone", got)
+	}
+}
+
+func TestRecordUpstream_keepsThePinsOfServicesNotStarted(t *testing.T) {
+	dir := t.TempDir()
+	ui := alphasfile.LockPin{Repo: "github.com/acme/ui", Ref: "HEAD", Commit: strings.Repeat("a", 40)}
+	web := alphasfile.LockPin{Repo: "github.com/acme/web", Ref: "HEAD", Commit: strings.Repeat("b", 40)}
+	log := zlog.New(io.Discard, false)
+
+	recordUpstream(t.Context(), dir, nil, []alphasfile.LockPin{ui, web}, fakeCounter{ui.Repo: 1, web.Repo: 1}, log)
+	recordUpstream(t.Context(), dir, nil, []alphasfile.LockPin{ui}, fakeCounter{ui.Repo: 0}, log)
+
+	up, err := readUpstream(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := up.note(pinSource, ui.Repo, "HEAD", ui.Commit); got != "" {
+		t.Errorf("note for ui = %q, want none: the start counted it again", got)
+	}
+	if got := up.note(pinSource, web.Repo, "HEAD", web.Commit); !strings.HasPrefix(got, "behind HEAD by 1") {
+		t.Errorf("note for web = %q, want the count of the start that had it", got)
 	}
 }
 
@@ -52,17 +79,21 @@ func TestReadUpstream_nothingRecorded(t *testing.T) {
 func TestSourceNote(t *testing.T) {
 	locked := strings.Repeat("a", 40)
 	up := upstream{Pins: []upstreamPin{
-		{Repo: "github.com/acme/ui", Ref: "HEAD", Commit: locked, Behind: 2},
-		{Repo: "github.com/acme/ui", Ref: "release", Commit: locked, Behind: 0},
+		{Kind: pinSource, Repo: "github.com/acme/ui", Ref: "HEAD", Commit: locked, Behind: 2},
+		{Kind: pinSource, Repo: "github.com/acme/ui", Ref: "release", Commit: locked, Behind: 0},
+		{Kind: pinRepo, Repo: "github.com/acme/ui", Ref: "main", Commit: locked, Behind: 5},
 	}}
 	cases := map[string]struct {
 		pkg  alphasfile.Package
 		want string
 	}{
-		"default-branch": {alphasfile.Package{Git: "https://github.com/acme/ui", Locked: locked}, "behind HEAD by 2"},
-		"other-ref":      {alphasfile.Package{Git: "github.com/acme/ui", Branch: "release", Locked: locked}, ""},
-		"stopped-level":  {alphasfile.Package{Git: "github.com/acme/ui"}, "behind HEAD by 2"},
-		"tagged":         {alphasfile.Package{Git: "github.com/acme/ui", Tag: "v1"}, ""},
+		"default-branch":  {alphasfile.Package{Git: "https://github.com/acme/ui", Locked: locked}, "behind HEAD by 2"},
+		"other-ref":       {alphasfile.Package{Git: "github.com/acme/ui", Branch: "release", Locked: locked}, ""},
+		"stopped-level":   {alphasfile.Package{Git: "github.com/acme/ui"}, "behind HEAD by 2"},
+		"tagged":          {alphasfile.Package{Git: "github.com/acme/ui", Tag: "v1"}, ""},
+		"picked":          {alphasfile.Package{Git: "github.com/acme/ui", Editable: true}, ""},
+		"in-place":        {alphasfile.Package{Git: "github.com/acme/ui", InPlace: true}, ""},
+		"required-is-not": {alphasfile.Package{Git: "github.com/acme/ui", Branch: "main"}, ""},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
