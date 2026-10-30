@@ -196,7 +196,7 @@ func walkChain(zordonHome string, kc zlock.GlobalKeychain, resolve func(*level) 
 			isInvocation: cl.IsLeaf(),
 			inv:          cl.Invocation(),
 			parentCtx:    parents.ParentContext(),
-			cfgHash:      invocation.ConfigHash(cl.Bytes(), parentJSON),
+			cfgHash:      cl.ConfigHash(parentJSON),
 		}
 		st, err := resolve(lv)
 		if err != nil {
@@ -211,12 +211,15 @@ func walkChain(zordonHome string, kc zlock.GlobalKeychain, resolve func(*level) 
 	return out, nil
 }
 
-func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, wantSummary bool, picks []string, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) error {
+func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, wantSummary bool, pull pullFlag, picks []string, zordonHome string, kc zlock.GlobalKeychain, testCfg alphasfile.TestConfig) error {
 	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
 
 	fed, err := NewFederationState(zordonHome, kc)
 	if err != nil {
 		return err
+	}
+	for _, lvl := range fed.Levels() {
+		logLockChanges(log, lvl.Tree().LockChanges())
 	}
 	if len(fed.Levels()) > 1 {
 		log.Info("zordon", "federation chain (%d):", len(fed.Levels()))
@@ -255,7 +258,9 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 	var summaries []*summary.StartSummary
 
 	var parents alphasfile.GlobalComputedState
-	for _, lvl := range fed.Levels() {
+	levels := fed.Levels()
+	for i := range levels {
+		lvl := &levels[i]
 		inv := lvl.Invocation()
 		parentDotenv := append([]string{}, parents.Dotenv()...)
 		parentEnv := parents.Env()
@@ -263,7 +268,6 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 		if err != nil {
 			return fmt.Errorf("marshal parent ctx: %w", err)
 		}
-		cfgHash := invocation.ConfigHash(lvl.Bytes(), parentJSON)
 
 		unlock, err := lvl.Keychain().TryLockZordon()
 		if err != nil {
@@ -271,9 +275,20 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 		}
 		unlocks = append(unlocks, unlock)
 
+		// Under the workspace lock, so a start already running here is not
+		// moved off its pins by this one.
+		if lvl.IsLeaf() && pull.pkg {
+			changes, err := fed.Pull()
+			if err != nil {
+				return err
+			}
+			logLockChanges(log, changes)
+		}
+		cfgHash := lvl.ConfigHash(parentJSON)
+
 		// resolveLevel carries the multi-agent invariant: the leaf always
 		// recomputes/restarts; a parent is reused unless its config drifted.
-		af, old, reused, err := resolveLevel(ctx, lvl, cfgHash, parents.ParentContext(), testCfg)
+		af, old, reused, err := resolveLevel(ctx, *lvl, cfgHash, parents.ParentContext(), testCfg)
 		if err != nil {
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
@@ -296,7 +311,11 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
 
-		sum, err := reconcileAlpha(ctx, lvl, af, old, parentDotenv, parentEnv, cfg, log)
+		if err := pinLevel(ctx, *lvl, af, zordonHome, kc, lvl.IsLeaf() && pull.srv, log); err != nil {
+			return fmt.Errorf("%s: %w", lvl.Path(), err)
+		}
+
+		sum, err := reconcileAlpha(ctx, *lvl, af, old, parentDotenv, parentEnv, cfg, log)
 		if err != nil {
 			return err
 		}
@@ -315,6 +334,36 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 		}
 	}
 	return nil
+}
+
+// pinLevel pins the git sources of the level's services to the lock, moving
+// them to the newest commit with pull, and records how far every pin of the
+// level, sources and required repositories alike, is behind its ref as of the
+// last fetch.
+func pinLevel(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, zordonHome string, kc zlock.GlobalKeychain, pull bool, log *zlog.Logger) error {
+	opts, err := loadOptions(zordonHome, kc, lvl.Path(), nil)
+	if err != nil {
+		return err
+	}
+	changes, pins, err := alphasfile.PinSources(af, opts, pull)
+	if err != nil {
+		return err
+	}
+	logLockChanges(log, changes)
+	if counter, ok := opts.Fetcher.(behindCounter); ok {
+		recordUpstream(ctx, lvl.Invocation().StateDir, lvl.Tree().Pins(), pins, counter, log)
+	}
+	return nil
+}
+
+func logLockChanges(log *zlog.Logger, changes []alphasfile.LockChange) {
+	for _, c := range changes {
+		old := c.Old
+		if old == "" {
+			old = "(new)"
+		}
+		log.Info("zordon", "%s %s@%s: %s -> %s", alphasfile.LockFileName, c.Repo, c.Ref, shortSHA(old), shortSHA(c.New))
+	}
 }
 
 // runClean runs each provision's `clean` teardown snippet for the
@@ -352,7 +401,7 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		if err != nil {
 			return fmt.Errorf("marshal parent ctx: %w", err)
 		}
-		cfgHash := invocation.ConfigHash(lvl.Bytes(), parentJSON)
+		cfgHash := lvl.ConfigHash(parentJSON)
 
 		af, old, reused, err := resolveLevel(ctx, lvl, cfgHash, parents.ParentContext(), testCfg)
 		if err != nil {

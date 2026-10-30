@@ -51,6 +51,7 @@ type Tree struct {
 	chain    map[string]bool
 	src      importSource
 	changes  []LockChange
+	pins     []LockPin
 }
 
 // ImportEdge is one imported file and the modules the stack takes from it,
@@ -90,6 +91,11 @@ func LoadTreeWith(path string, opts LoadOptions) (*Tree, error) {
 	if err != nil {
 		return nil, err
 	}
+	release, err := lockPins(opts)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	src, err := newIdentitySource(opts)
 	if err != nil {
 		return nil, err
@@ -107,11 +113,12 @@ func LoadTreeWith(path string, opts LoadOptions) (*Tree, error) {
 		return nil, err
 	}
 	if src.lock.dirty && opts.LockPath != "" {
-		if err := src.lock.write(); err != nil {
+		if err := src.lock.write(true); err != nil {
 			return nil, fmt.Errorf("write %s: %w", LockFileName, err)
 		}
 	}
 	t.changes = src.changes
+	t.pins = src.lock.pins()
 	return t, nil
 }
 
@@ -159,6 +166,9 @@ func (t *Tree) Unused() []UnusedModule { return t.unused }
 
 // LockChanges lists the lock entries this load added or moved.
 func (t *Tree) LockChanges() []LockChange { return t.changes }
+
+// Pins lists the repositories this load took from the lock or locked, sorted.
+func (t *Tree) Pins() []LockPin { return t.pins }
 
 // Bytes is the manifest identity input for invocation.ConfigHash: the
 // entrypoint's bytes, then each loaded file's identity and bytes. A tree

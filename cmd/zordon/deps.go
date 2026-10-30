@@ -36,17 +36,9 @@ func loadOptions(zordonHome string, kc zlock.GlobalKeychain, afPath string, chai
 		Home:     zordonHome,
 		Search:   search,
 		LockPath: filepath.Join(filepath.Dir(afPath), alphasfile.LockFileName),
+		Keychain: kc,
 		Fetcher:  source.ModFetcher{Home: zordonHome, Keychain: kc},
 	}, nil
-}
-
-// loadTree loads afPath the way every command does.
-func loadTree(zordonHome string, kc zlock.GlobalKeychain, afPath string, chain []string) (*alphasfile.Tree, error) {
-	opts, err := loadOptions(zordonHome, kc, afPath, chain)
-	if err != nil {
-		return nil, err
-	}
-	return alphasfile.LoadTreeWith(afPath, opts)
 }
 
 // parseServices is alphasfile.ParseServices with the command's load options.

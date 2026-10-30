@@ -6,6 +6,8 @@ package zlock
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 
@@ -61,6 +63,22 @@ func (k GlobalKeychain) LockRepo(ctx context.Context, repo string) (UnlockFunc, 
 		panic("zlock: GlobalKeychain.LockRepo requires non-empty repo")
 	}
 	return zfs.Lock(ctx, filepath.Join(k.revealHome(), "locks"), "repo-"+repo)
+}
+
+// LockPins takes an exclusive lock on <homeDir>/locks/pins-<hash>.lock, where
+// hash names the zordon.lock at lockPath. Every workspace of a project shares
+// that file and each start reads and may rewrite it, so the lock serializes
+// the read-modify-write across processes without adding a file to the project.
+func (k GlobalKeychain) LockPins(ctx context.Context, lockPath string) (UnlockFunc, error) {
+	if strings.TrimSpace(lockPath) == "" {
+		panic("zlock: GlobalKeychain.LockPins requires non-empty lockPath")
+	}
+	abs, err := filepath.Abs(lockPath)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256([]byte(abs))
+	return zfs.Lock(ctx, filepath.Join(k.revealHome(), "locks"), "pins-"+hex.EncodeToString(sum[:8]))
 }
 
 // WorkspaceKeychain holds per-workspace lifecycle locks rooted at <projectRoot>/workspaces/<workspace>.

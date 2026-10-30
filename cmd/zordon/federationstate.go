@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
@@ -48,6 +49,9 @@ func (l ChainLevel) IsLeaf() bool { return l.isLeaf }
 // probing.
 type FederationState struct {
 	levels []ChainLevel
+	home   string
+	kc     zlock.GlobalKeychain
+	chain  []string
 }
 
 // NewFederationState discovers the chain root→leaf from the cwd, reads each
@@ -64,11 +68,15 @@ func NewFederationState(zordonHome string, kc zlock.GlobalKeychain) (*Federation
 	}
 	levels := make([]ChainLevel, 0, len(chain))
 	for _, afPath := range chain {
-		tree, err := loadTree(zordonHome, kc, afPath, chain)
+		isLeaf := afPath == invFile
+		opts, err := loadOptions(zordonHome, kc, afPath, chain)
 		if err != nil {
 			return nil, err
 		}
-		isLeaf := afPath == invFile
+		tree, err := alphasfile.LoadTreeWith(afPath, opts)
+		if err != nil {
+			return nil, err
+		}
 		var inv *invocation.InvocationState
 		if isLeaf {
 			inv, err = invocation.NewInvocationState(cwd)
@@ -86,10 +94,49 @@ func NewFederationState(zordonHome string, kc zlock.GlobalKeychain) (*Federation
 			isLeaf: isLeaf,
 		})
 	}
-	return &FederationState{levels: levels}, nil
+	return &FederationState{levels: levels, home: zordonHome, kc: kc, chain: chain}, nil
 }
 
 func (f *FederationState) Levels() []ChainLevel { return f.levels }
+
+// Pull re-resolves the repositories the leaf's Alphasfile requires to their
+// newest commit and locks them there, as zordon pkg update does, and returns
+// what moved. The caller holds the leaf's workspace lock, so no start running
+// here is moved off its pins.
+func (f *FederationState) Pull() ([]alphasfile.LockChange, error) {
+	for i := range f.levels {
+		lvl := &f.levels[i]
+		if !lvl.isLeaf {
+			continue
+		}
+		opts, err := loadOptions(f.home, f.kc, lvl.afPath, f.chain)
+		if err != nil {
+			return nil, err
+		}
+		opts.UpdateAll = true
+		tree, err := alphasfile.LoadTreeWith(lvl.afPath, opts)
+		if err != nil {
+			return nil, err
+		}
+		lvl.tree = tree
+		return tree.LockChanges(), nil
+	}
+	return nil, nil
+}
+
+// ConfigHash is the level's manifest identity under parentJSON: its
+// Alphasfile bytes, which carry the repository pins, and its zordon.lock,
+// which carries the source pins, so a parent whose lock moved restarts as one
+// whose Alphasfile changed does. The start that first pins a parent's sources
+// rewrites that lock after computing this, so the parent restarts once more
+// on the start after it.
+func (l ChainLevel) ConfigHash(parentJSON []byte) string {
+	lock, err := zfs.Read(filepath.Join(filepath.Dir(l.afPath), alphasfile.LockFileName))
+	if err != nil {
+		lock = nil
+	}
+	return invocation.ConfigHash(slices.Concat(l.Bytes(), lock), parentJSON)
+}
 
 // adoptedBlock rebuilds the BlockComputedState of a running alpha from the
 // facts it reported, so a reused (or statically-walked) level folds into the

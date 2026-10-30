@@ -8,6 +8,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
@@ -51,6 +52,9 @@ type StatusReport struct {
 	State      string          `json:"state"`
 	Error      string          `json:"error,omitempty"`
 	Services   []StatusService `json:"services,omitempty"`
+	// Pins are the invocation's locked repositories and sources whose ref
+	// moved on past the pin, as of the last fetch, with how far.
+	Pins []upstreamPin `json:"pins,omitempty"`
 }
 
 // StatusService is one service of a StatusReport.
@@ -66,6 +70,8 @@ type StatusService struct {
 	CheckoutPath string `json:"checkout_path,omitempty"` // the git tree the service builds from, absolute
 	Branch       string `json:"branch,omitempty"`        // the branch that tree is on
 	SourceDir    string `json:"source_dir,omitempty"`    // the service's own directory in that tree, absolute
+	Behind       int    `json:"behind,omitempty"`        // commits the ref of its locked git source has past the pin, as of the last fetch
+	BehindRef    string `json:"behind_ref,omitempty"`    // the ref Behind counts against
 }
 
 // outputFormat resolves --format against --agent, which defaults it.
@@ -97,7 +103,8 @@ func runStatusReport(ctx context.Context, out io.Writer, zordonHome string, kc z
 	panic(fmt.Sprintf("runStatusReport: format %q has no report", format))
 }
 
-// logfmt renders the report as logfmt lines: the stack, then one per service.
+// logfmt renders the report as logfmt lines: the stack, one per service,
+// then one per pin that is behind its ref.
 func (r StatusReport) logfmt() string {
 	var b strings.Builder
 	writeLogfmt(&b, "workspace", r.Workspace, "state", r.State, "alphasfile", r.Alphasfile, "state_dir", r.StateDir, "error", r.Error)
@@ -114,7 +121,12 @@ func (r StatusReport) logfmt() string {
 			"checkout_path", s.CheckoutPath,
 			"branch", s.Branch,
 			"source_dir", s.SourceDir,
+			"behind", intField(s.Behind),
+			"behind_ref", s.BehindRef,
 		)
+	}
+	for _, p := range r.Pins {
+		writeLogfmt(&b, "pin", p.Repo, "kind", p.Kind, "ref", p.Ref, "commit", p.Commit, "behind", intField(p.Behind), "fetched", p.Fetched.Format(time.RFC3339))
 	}
 	return b.String()
 }
@@ -138,6 +150,9 @@ func statusReport(ctx context.Context, zordonHome string, kc zlock.GlobalKeychai
 			if live(lv.state) {
 				r.State = StackRunning
 			}
+			if up, err := readUpstream(lv.inv.StateDir); err == nil {
+				r.Pins = up.behind()
+			}
 		}
 		if lv.state == nil {
 			continue
@@ -155,6 +170,7 @@ func reportServices(ctx context.Context, lv *level) []StatusService {
 	for _, r := range lv.state.Running {
 		running[r.Name] = r
 	}
+	up, _ := readUpstream(lv.inv.StateDir)
 	out := make([]StatusService, 0, len(lv.state.Services))
 	for _, s := range lv.state.Services {
 		svc := StatusService{
@@ -177,6 +193,9 @@ func reportServices(ctx context.Context, lv *level) []StatusService {
 			if co.isDrifted() {
 				svc.Checkout = fmt.Sprintf("on branch %s, not %s", co.Ref, co.Want)
 			}
+		}
+		if p, ok := up.sourcePin(s); ok && p.Behind > 0 {
+			svc.Behind, svc.BehindRef = p.Behind, p.Ref
 		}
 		out = append(out, svc)
 	}
@@ -228,6 +247,13 @@ func logfmtValue(v string) string {
 		return strconv.Quote(v)
 	}
 	return v
+}
+
+func intField(v int) string {
+	if v == 0 {
+		return ""
+	}
+	return strconv.Itoa(v)
 }
 
 func boolField(v bool) string {

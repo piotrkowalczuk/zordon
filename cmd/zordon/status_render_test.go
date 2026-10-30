@@ -23,7 +23,7 @@ func TestStatusImports_local(t *testing.T) {
 	want := "imports\n" +
 		"  shop   ./shop\n" +
 		"  caddy  ./caddy  ← shop   features: dns\n"
-	if got := statusImports(tree, dir); got != want {
+	if got := statusImports(tree, dir, upstream{}); got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
 }
@@ -45,7 +45,7 @@ func TestStatusImports_remote(t *testing.T) {
 	want := "imports\n" +
 		"  web  github.com/acme/infra/pkgs/web  search " + checkout + "\n" +
 		"  db   …/pkgs/db                       ← web\n"
-	if got := statusImports(tree, dir); got != want {
+	if got := statusImports(tree, dir, upstream{}); got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
 }
@@ -60,17 +60,17 @@ func TestStatusServices_live(t *testing.T) {
 		"  shop/hugo — stopped     http://127.0.0.1:1/\n" +
 		"  caddy/caddy — stopped   http://127.0.0.1:2/\n" +
 		"  tool — stopped\n"
-	if got := statusServices(t.Context(), st, "main"); got != want {
+	if got := statusServices(t.Context(), st, "main", upstream{}); got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
 }
 
 func TestStatusServices_notRunningHidesPrint(t *testing.T) {
 	st := &protocol.StateInfo{Services: []*alphasfile.Service{statusSvc("shop/shop", "hugo", "http://127.0.0.1:1/")}}
-	if got, want := statusServices(t.Context(), st, "main"), "services\n  shop/hugo — stopped\n"; got != want {
+	if got, want := statusServices(t.Context(), st, "main", upstream{}), "services\n  shop/hugo — stopped\n"; got != want {
 		t.Errorf("got %q, want %q; ports picked for the report are not the service's", got, want)
 	}
-	if got, want := statusServices(t.Context(), &protocol.StateInfo{PID: 9}, "main"), "services: none configured yet\n"; got != want {
+	if got, want := statusServices(t.Context(), &protocol.StateInfo{PID: 9}, "main", upstream{}), "services: none configured yet\n"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }

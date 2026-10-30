@@ -33,8 +33,9 @@ func statusHeader(lv *level, wd string) string {
 }
 
 // statusImports is the table of what a level imports: one row per package
-// with where it comes from, who imports it and its features.
-func statusImports(tree *alphasfile.Tree, wd string) string {
+// with where it comes from, how far its pin is behind, who imports it and
+// its features.
+func statusImports(tree *alphasfile.Tree, wd string, up upstream) string {
 	if tree == nil || len(tree.Imports())+len(tree.Unused()) == 0 {
 		return ""
 	}
@@ -52,8 +53,11 @@ func statusImports(tree *alphasfile.Tree, wd string) string {
 		case strings.HasPrefix(e.Origin, "search "):
 			notes = append(notes, "search "+relPath(strings.TrimPrefix(e.Origin, "search "), wd))
 		case e.Origin != "":
-			if _, commit, ok := strings.Cut(e.Origin, "@"); ok {
+			if repo, commit, ok := strings.Cut(e.Origin, "@"); ok {
 				notes = append(notes, "@"+commit)
+				if n := up.note(pinRepo, repo, "", commit); n != "" {
+					notes = append(notes, n)
+				}
 			}
 		}
 		if len(e.ImportedBy) > 0 {
@@ -82,8 +86,9 @@ func statusImports(tree *alphasfile.Tree, wd string) string {
 // statusServices is the table of a level's services: the name status and
 // zordon start both accept, the state, and what the service prints. A level
 // whose alpha does not run shows no print line, because its ports were
-// picked for this report only.
-func statusServices(ctx context.Context, st *protocol.StateInfo, workspace string) string {
+// picked for this report only. A checkout pinned by the lock says how far it
+// is behind the ref it follows.
+func statusServices(ctx context.Context, st *protocol.StateInfo, workspace string, up upstream) string {
 	if len(st.Services) == 0 {
 		return "services: none configured yet\n"
 	}
@@ -100,6 +105,9 @@ func statusServices(ctx context.Context, st *protocol.StateInfo, workspace strin
 			state = serviceState(ctx, s, status)
 		}
 		r := row{head: s.ShortName() + " — " + state, checkout: checkoutStatus(ctx, s, workspace)}
+		if n := sourceNote(s, up); n != "" && r.checkout != "" {
+			r.checkout += "   " + n
+		}
 		if live(st) && s.Runtime != nil {
 			r.print = s.Runtime.Print
 		}

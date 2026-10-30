@@ -5,10 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
@@ -123,6 +128,32 @@ func (f ModFetcher) Materialize(repo, commit, dest string) error {
 	return nil
 }
 
+// Behind counts the commits ref has that commit does not in repo's bare
+// clone, without the network: as of the last fetch, whose time it returns. A
+// repository never fetched, or one that has not fetched commit yet, yields an
+// error wrapping fs.ErrNotExist.
+func (f ModFetcher) Behind(ctx context.Context, repo, ref, commit string) (int, time.Time, error) {
+	if !IsCommit(commit) {
+		return 0, time.Time{}, fmt.Errorf("count %s behind %s: %q is not a commit hash", repo, ref, commit)
+	}
+	p, err := NewPrimary(f.Home, repo, "", ref, nil)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	bare := p.primaryPath()
+	fetched, err := lastFetch(bare)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	release, err := f.Keychain.LockRepo(ctx, repo)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	defer release()
+	n, err := countBehind(ctx, bare, ref, commit)
+	return n, fetched, err
+}
+
 // captureRunner runs git quietly and folds its output into the error, so a
 // failed fetch explains itself without streaming progress into zordon's
 // output.
@@ -137,4 +168,42 @@ func captureRunner(_ context.Context, cmd *exec.Cmd) error {
 		return fmt.Errorf("%s: %w: %s", strings.Join(cmd.Args, " "), err, strings.TrimSpace(out.String()))
 	}
 	return nil
+}
+
+// countBehind counts the commits ref has that commit does not, in gitDir. A
+// checkout is cloned from upstream, not from gitDir, so gitDir may lack a
+// commit the lock holds: one a teammate pinned since its last fetch.
+func countBehind(ctx context.Context, gitDir, ref, commit string) (int, error) {
+	if err := CheckRef(ref); err != nil {
+		return 0, err
+	}
+	if err := exec.CommandContext(ctx, "git", "-C", gitDir, "cat-file", "-e", commit+"^{commit}").Run(); err != nil {
+		return 0, fmt.Errorf("%s has not fetched %s yet: %w", gitDir, shortRef(commit), fs.ErrNotExist)
+	}
+	out, err := exec.CommandContext(ctx, "git", "-C", gitDir, "rev-list", "--count", commit+".."+ref).Output()
+	if err != nil {
+		return 0, fmt.Errorf("count %s..%s in %s: %w", shortRef(commit), ref, gitDir, err)
+	}
+	return strconv.Atoi(strings.TrimSpace(string(out)))
+}
+
+// lastFetch is when a bare clone last talked to its remote: FETCH_HEAD after
+// a fetch, packed-refs after the clone itself.
+func lastFetch(bare string) (time.Time, error) {
+	for _, name := range []string{"FETCH_HEAD", "packed-refs"} {
+		if fi, err := zfs.Stat(filepath.Join(bare, name)); err == nil {
+			return fi.ModTime(), nil
+		}
+	}
+	if _, err := zfs.Stat(bare); err != nil {
+		return time.Time{}, fmt.Errorf("%s not fetched yet: %w", bare, err)
+	}
+	return time.Time{}, fmt.Errorf("%s has no fetch to date: %w", bare, fs.ErrNotExist)
+}
+
+func shortRef(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
 }

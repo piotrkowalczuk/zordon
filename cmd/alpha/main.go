@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -3700,9 +3701,12 @@ func prepareWorkspace(ctx context.Context, svc *alphasfile.Service, name, wsName
 		// code: clone it directly at its ref, DETACHED — no shared bare, no
 		// branch, no worktree registration (issue #73). Only a picked
 		// (editable) service earns a real worktree on zordon/<ws>/<svc>.
+		// A source that follows a branch is cloned at the commit zordon.lock
+		// holds for it, so its code moves only when the lock does.
 		if !svc.Package.Editable {
-			log.Info("alpha", "prepare %s: clone -> %s @ %s (third-party, no worktree)", name, checkout, svc.Ref())
-			if err := p.Clone(ctx, checkout, svc.Ref(), runner); err != nil {
+			ref := cmp.Or(svc.Package.Locked, svc.Ref())
+			log.Info("alpha", "prepare %s: clone -> %s @ %s (third-party, no worktree)", name, checkout, ref)
+			if err := p.Clone(ctx, checkout, ref, runner); err != nil {
 				return "", fmt.Errorf("git clone: %w", err)
 			}
 			return dest, nil

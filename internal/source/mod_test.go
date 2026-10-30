@@ -1,11 +1,15 @@
 package source
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
@@ -203,4 +207,61 @@ func revParse(t *testing.T, repo, ref string) string {
 		t.Fatal(err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func TestCountBehind(t *testing.T) {
+	repo := taggedRepo(t)
+	v1 := revParse(t, repo, "v1")
+	head := revParse(t, repo, "main")
+	cases := map[string]struct {
+		ref, commit string
+		want        int
+	}{
+		"behind":  {"main", v1, 1},
+		"current": {"main", head, 0},
+		"HEAD":    {"HEAD", v1, 1},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			got, err := countBehind(t.Context(), repo, c.ref, c.commit)
+			if err != nil || got != c.want {
+				t.Fatalf("countBehind(%s, %s) = %d, %v; want %d", c.ref, c.commit, got, err, c.want)
+			}
+		})
+	}
+}
+
+func TestModFetcher_Behind_rejectsAnAbbreviatedCommit(t *testing.T) {
+	if _, _, err := (ModFetcher{Home: t.TempDir()}).Behind(t.Context(), "github.com/acme/ui", "main", "abc123"); err == nil || !strings.Contains(err.Error(), "is not a commit hash") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestModFetcher_Behind_neverFetched(t *testing.T) {
+	_, _, err := (ModFetcher{Home: t.TempDir()}).Behind(t.Context(), "github.com/acme/ui", "main", strings.Repeat("a", 40))
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("got %v, want fs.ErrNotExist: counting must not go to the network", err)
+	}
+}
+
+func TestLastFetch(t *testing.T) {
+	bare := t.TempDir()
+	if _, err := lastFetch(bare); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a bare without packed-refs or FETCH_HEAD: got %v", err)
+	}
+	stamp := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	for _, name := range []string{"packed-refs", "FETCH_HEAD"} {
+		path := filepath.Join(bare, name)
+		if err := zfs.AtomicWrite(path, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+		stamp = stamp.Add(time.Hour)
+	}
+	got, err := lastFetch(bare)
+	if err != nil || !got.Equal(stamp.Add(-time.Hour)) {
+		t.Fatalf("got %v, %v; want FETCH_HEAD's time", got, err)
+	}
 }
