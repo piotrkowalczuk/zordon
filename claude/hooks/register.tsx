@@ -276,7 +276,9 @@ export function splitScope(services: ZordonService[]): { scope: ZordonService[];
   return { scope: services.filter(x => x.isPicked), runtime: services.filter(x => !x.isPicked) }
 }
 
-// Opens a file in the desktop's default app: open on macOS, xdg-open elsewhere.
+// Opens a file or a URL in the desktop's default app: open on macOS,
+// xdg-open elsewhere. Links are buttons calling it rather than Link elements:
+// a terminal without OSC 8 hyperlinks draws a Link's label and then its URL.
 async function openFile($: EngineInterface, path: string): Promise<void> {
   for (const opener of ['open', 'xdg-open']) {
     try {
@@ -480,7 +482,7 @@ type RenderEvent = Parameters<EngineInterface['ui']['resolve']>[0]
 // and the zordon MCP calls Claude made this session. With no workspace a
 // single box says so instead.
 async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) {
-  const { Box, Text, Link, Markdown, Button, Code } = $.ui.resolve(e)
+  const { Box, Text, Markdown, Button, Code } = $.ui.resolve(e)
   const colors = await palette($)
   const collapsed = await read($, isCollapsed)
   const isStackFolded = await read($, isScopeCollapsed)
@@ -584,7 +586,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
         {collapsed && summary(s) ? <Text dimColor> · {summary(s)?.replace(/^zordon /, '')}</Text> : null}
       </Text>
       <Box gap={1}>
-        <Link href="https://zordon.io/" label="zordon.io" />
+        <Button key="open-zordon-io" plain label="zordon.io" onPress={() => openFile($, 'https://zordon.io/')} />
         <Button key="collapse" plain label={collapsed ? '+' : '−'} onPress={() => update($, isCollapsed, c => !c)} />
       </Box>
     </Box>
@@ -622,9 +624,10 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
           <Text dimColor wrap="wrap">
             No Alphasfile anywhere in this tree
           </Text>
-          <Text dimColor>
-            Learn more at <Link href="https://zordon.io/" label="zordon.io" />
-          </Text>
+          <Box>
+            <Text dimColor>Learn more at </Text>
+            <Button key="learn-zordon-io" plain label="zordon.io" onPress={() => openFile($, 'https://zordon.io/')} />
+          </Box>
         </Box>
       </Box>
     )
@@ -639,7 +642,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
               {c.label}
             </Text>
             {c.pr ? (
-              <Link href={c.pr.url} label={c.branch ?? ''} />
+              <Button key={`pr-${c.path}`} plain label={c.branch ?? ''} onPress={() => openFile($, c.pr?.url ?? '')} />
             ) : (
               <Text dimColor wrap="truncate-end">
                 {c.branch ?? 'detached'}
