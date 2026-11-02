@@ -666,6 +666,31 @@ func TestLoadTreeWith_perModuleZordonModInSubdirectories(t *testing.T) {
 			t.Fatalf("services = %v", got)
 		}
 	})
+
+	t.Run("zordon.work search at repo root with both root and subdirectory zordon.mod", func(t *testing.T) {
+		both := t.TempDir()
+		writeTree(t, both, map[string]string{
+			ModFileName:           "module = \"github.com/acme/infra\"\n",
+			"pkgs/db/zordon.mod":  "module = \"github.com/acme/infra/pkgs/db\"\n",
+			"pkgs/db/Alphasfile":  pkgDB,
+			"pkgs/web/zordon.mod": "module = \"github.com/acme/infra/pkgs/web\"\nrequire \"github.com/acme/infra/pkgs/db\" { ref = \"pkgs/db/v0.1.0\" }\n",
+			"pkgs/web/Alphasfile": pkgWebRequiring(`import "github.com/acme/infra/pkgs/db" {}`),
+		})
+		dir := t.TempDir()
+		root := writeTree(t, dir, map[string]string{
+			ModFileName:  "module = \"github.com/acme/app\"\nrequire \"github.com/acme/infra/pkgs/web\" { ref = \"pkgs/web/v0.1.0\" }\n",
+			"Alphasfile": `import "github.com/acme/infra/pkgs/web" {}` + "\n",
+		})
+		opts := remoteOpts(t, dir, nil)
+		opts.Search = []string{both}
+		tree, err := LoadTreeWith(root, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := serviceNames(resolveTree(t, tree)); !equalStrs(got, []string{"web/web/web", "db/db/db"}) {
+			t.Fatalf("services = %v", got)
+		}
+	})
 }
 
 func TestReadWorkFile(t *testing.T) {

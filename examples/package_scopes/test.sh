@@ -40,6 +40,8 @@ for svc in coredns/coredns caddy/caddy primary_store/store billing/store/store o
 done
 
 http="$(zordon get package.caddy.component.caddy.service.go.caddy.vars.http)" || fail "get caddy http port failed"
+vhosts_dir="$(zordon get package.caddy.component.caddy.service.go.caddy.vars.vhosts_dir)" || fail "get caddy vhosts_dir failed"
+assert_contains "$vhosts_dir" "/vhosts" "caddy exposes vhosts_dir var for shared vhost drop-ins"
 
 orders_resp="$(curl -fsS --max-time 5 -H "Host: orders.test" "http://127.0.0.1:$http/orders/")" || fail "caddy did not route orders.test"
 assert_contains "$orders_resp" "orders ok (store=primary audit=false keys=orders_schema=v1,shared=true)" "orders uses bound primary_store with merged seed map"

@@ -105,6 +105,21 @@ func TestSourceNote(t *testing.T) {
 	}
 }
 
+func TestUpstream_note_longestPrefixMatch(t *testing.T) {
+	rootCommit := strings.Repeat("a", 40)
+	webCommit := strings.Repeat("b", 40)
+	up := upstream{Pins: []upstreamPin{
+		{Kind: pinRepo, Repo: "github.com/acme/infra", Ref: "main", Commit: rootCommit, Behind: 2},
+		{Kind: pinRepo, Repo: "github.com/acme/infra/pkgs/web", Ref: "pkgs/web/v0.2.0", Commit: webCommit, Behind: 5},
+	}}
+	if got := up.note(pinRepo, "github.com/acme/infra/pkgs/web/sub", "", webCommit[:12]); !strings.HasPrefix(got, "behind pkgs/web/v0.2.0 by 5") {
+		t.Errorf("longest prefix pin note = %q, want prefix \"behind pkgs/web/v0.2.0 by 5\"", got)
+	}
+	if got := up.note(pinRepo, "github.com/acme/infra/other", "", rootCommit[:12]); !strings.HasPrefix(got, "behind main by 2") {
+		t.Errorf("root prefix pin note = %q, want prefix \"behind main by 2\"", got)
+	}
+}
+
 type fakeCounter map[string]int
 
 func (f fakeCounter) Behind(_ context.Context, repo, _, _ string) (int, time.Time, error) {

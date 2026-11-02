@@ -324,6 +324,12 @@ func (s *identitySource) search(imp *importBlock, id string) (resolved, bool, er
 	type hit struct{ dir, path, how string }
 	var hits []hit
 	for _, dir := range s.opts.Search {
+		if subPath, subMod, err := s.subModOf(dir, id); err != nil {
+			return resolved{}, false, err
+		} else if subMod != "" {
+			hits = append(hits, hit{dir: dir, path: subPath, how: fmt.Sprintf("zordon.mod: module %q", subMod)})
+			continue
+		}
 		mod, err := s.modOf(dir)
 		if err != nil {
 			return resolved{}, false, err
@@ -332,14 +338,6 @@ func (s *identitySource) search(imp *importBlock, id string) (resolved, bool, er
 			rest := strings.TrimPrefix(strings.TrimPrefix(id, mod), "/")
 			hits = append(hits, hit{dir: dir, path: filepath.Join(dir, filepath.FromSlash(rest)), how: fmt.Sprintf("zordon.mod: module %q", mod)})
 			continue
-		}
-		if mod == "" {
-			if subPath, subMod, err := s.subModOf(dir, id); err != nil {
-				return resolved{}, false, err
-			} else if subMod != "" {
-				hits = append(hits, hit{dir: dir, path: subPath, how: fmt.Sprintf("zordon.mod: module %q", subMod)})
-				continue
-			}
 		}
 		if p := filepath.Join(dir, filepath.FromSlash(id)); zfs.Exists(p) {
 			hits = append(hits, hit{dir: dir, path: p, how: "path " + p})
