@@ -10,10 +10,9 @@ test('the stack pane draws header, services and footer on every surface', async 
     const ui = await $.ui.mount({ plugin: 'zordon', surface, ...PANE })
     expect(await ui.find({ type: 'Text', text: /^feature$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /1\.3 GB/ })).toBeDefined()
-    // Link takes only https: spelled as new URL(href).href; anything else
-    // refuses the whole tree in a session, which the kit does not check.
-    const link = await ui.find({ type: 'Link' })
-    expect(link?.props.href).toBe(new URL('https://zordon.io').href)
+    // no Link: a terminal without OSC 8 draws its label and then its URL
+    expect(await ui.find({ type: 'Link' })).toBeUndefined()
+    expect((await ui.find({ key: 'open-zordon-io' }))?.props.label).toBe('zordon.io')
     expect(await ui.find({ type: 'Text', text: /NOT-THERE/ })).toBeUndefined()
     await ui.unmount()
   }
@@ -53,10 +52,10 @@ test('workspace and runtime boxes fold on their own', async ($, on) => {
   host(on, FEATURE)
   await openStack($)
   const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
-  expect(await ui.find({ type: 'Link', text: 'zordon/feature/api' })).toBeDefined()
+  expect(await ui.find({ key: 'pr-/proj/workspaces/feature/src/api' })).toBeDefined()
   expect(await ui.find({ key: 'details-postgres' })).toBeDefined()
   await ui.press({ key: 'fold-workspace' })
-  expect(await ui.find({ type: 'Link', text: 'zordon/feature/api' })).toBeUndefined()
+  expect(await ui.find({ key: 'pr-/proj/workspaces/feature/src/api' })).toBeUndefined()
   expect(await ui.find({ key: 'details-postgres' })).toBeDefined()
   await ui.press({ key: 'fold-runtime' })
   expect(await ui.find({ key: 'details-postgres' })).toBeUndefined()
@@ -93,10 +92,10 @@ test('the workspace groups its services by checkout, each branch linked to its p
   await openStack($)
   const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
 
-  expect((await ui.find({ type: 'Link', text: 'zordon/feature/api' }))?.props.href).toBe(PR.url)
+  expect((await ui.find({ key: 'pr-/proj/workspaces/feature/src/api' }))?.props.label).toBe('zordon/feature/api')
   expect(await ui.find({ type: 'Text', text: /^#7$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^zordon\/feature\/worker$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Link', text: 'zordon/feature/worker' })).toBeUndefined()
+  expect(await ui.find({ key: 'pr-/proj/workspaces/feature/src/worker' })).toBeUndefined()
   // only what is in the workspace's src/; gateway builds from the project root
   for (const label of [/^src\/api$/, /^src\/worker$/]) {
     expect(await ui.find({ type: 'Text', text: label })).toBeDefined()
@@ -148,5 +147,22 @@ test('a service opens to its details: the whole print, wrapped, and where its co
 
   await ui.press({ key: 'details-api' })
   expect(await ui.find({ type: 'Text', text: /^source / })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a branch with a pull request opens it in the browser on press', async ($, on) => {
+  const opened: string[] = []
+  on('process.run', { argv: ['open'] } as never, ($, e) => {
+    opened.push(e.argv[1] ?? '')
+
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  host(on, FEATURE)
+  await openStack($)
+  const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
+
+  await ui.press({ key: 'pr-/proj/workspaces/feature/src/api' })
+  await ui.press({ key: 'open-zordon-io' })
+  expect(opened).toEqual([PR.url, 'https://zordon.io/'])
   await ui.unmount()
 })

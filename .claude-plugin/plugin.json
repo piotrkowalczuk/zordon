@@ -1,7 +1,7 @@
 {
   "name": "zordon",
   "displayName": "Zordon",
-  "version": "0.22.4",
+  "version": "0.22.5",
   "description": "Local dev-stack supervisor (databases, brokers, services) declared in an Alphasfile, run as host processes — auto-registers the `zordon mcp` server so agents can start/stop the stack, inspect it, and run declared provisions without shelling out, and shows the stack in a Claude Code pane.",
   "author": {
     "name": "piotrkowalczuk",
