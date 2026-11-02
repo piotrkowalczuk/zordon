@@ -127,12 +127,19 @@ func (u upstream) behind() []upstreamPin {
 // matching any, and that holds commit, which may be abbreviated or empty to
 // match any.
 func (u upstream) find(kind, repo, ref, commit string) (upstreamPin, bool) {
+	var best upstreamPin
+	found := false
 	for _, p := range u.Pins {
-		if p.Kind == kind && p.Repo == repo && (ref == "" || p.Ref == ref) && strings.HasPrefix(p.Commit, commit) {
-			return p, true
+		if p.Kind != kind || (ref != "" && p.Ref != ref) || !strings.HasPrefix(p.Commit, commit) {
+			continue
+		}
+		if p.Repo == repo || strings.HasPrefix(repo, p.Repo+"/") {
+			if !found || len(p.Repo) > len(best.Repo) {
+				best, found = p, true
+			}
 		}
 	}
-	return upstreamPin{}, false
+	return best, found
 }
 
 // note says how far a pin is behind its ref; empty when it is current or was

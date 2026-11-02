@@ -517,9 +517,9 @@ func orderImportBlocks(blocks []*importBlock) []*importBlock {
 			cand = path.Base(ib.Path)
 		}
 		switch {
-		case targets[cand] && ib.PackagesRange == (hcl.Range{}):
+		case ib.PackagesRange == (hcl.Range{}):
 			pass1 = append(pass1, ib)
-		case ib.PackagesRange != (hcl.Range{}):
+		case targets[cand]:
 			pass2 = append(pass2, ib)
 		default:
 			pass3 = append(pass3, ib)

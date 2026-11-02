@@ -29,7 +29,7 @@ search "../checkouts" {}
 | discovery | zordon walks the physical path of the working directory, symlinks resolved, up to the filesystem root |
 | more than one file | an error that lists every `zordon.work` found on the way |
 | repeated entry | an error naming both entries |
-| match by `zordon.mod` | a directory whose `zordon.mod` module is a prefix of the import identity provides it; the rest of the identity is the path inside the directory |
+| match by `zordon.mod` | a directory whose `zordon.mod` (at the directory root or in a matching subpath directory) has a `module` that is a prefix of the import identity provides it; the rest of the identity is the path inside that module directory |
 | match by layout | a directory holding `<host>/<owner>/<repo>/<path>` for the imported identity provides it |
 | two matching entries | an error that lists both and says which rule matched |
 | version | the ref of the require is ignored; the directory's current files are used; the require is still needed |
@@ -50,7 +50,7 @@ require "github.com/acme/infra" {
 |---|---|
 | content | one attribute, `module`, and any number of `require` blocks |
 | `module` | a repository identity on github.com, gitlab.com or bitbucket.org, optionally followed by a path inside it; makes the directory match `search` entries by identity |
-| `require "<repo>" { ref = "<ref>" }` | the version of a repository that files of this module import; the label is the repository alone, the ref a branch, a tag or a commit |
+| `require "<repo>[/<path>]" { ref = "<ref>" }` | the version of a repository or a subpath inside it that files of this module import, matched by longest prefix; the ref is a branch, a tag or a commit |
 | scope | every file below the `zordon.mod` up to the next one; inside a remote checkout the search stops at the checkout's root |
 | file-level `require` | an error in any file below a `zordon.mod`; a file with no `zordon.mod` above it declares its requires itself |
 | repeated require | an error naming both |
