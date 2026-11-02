@@ -29,7 +29,7 @@ func TestProducerNodeFromTrav_moduleRoot(t *testing.T) {
 			if diags.HasErrors() {
 				t.Fatal(diags.Error())
 			}
-			svc, id, ok := producerNodeFromTrav(trav, ServiceRef(c.selfModule, "go", "me"), c.selfModule)
+			svc, id, ok := producerNodeFromTrav(trav, ServiceRef(c.selfModule, "go", "me"), c.selfModule, nil)
 			if ok != c.ok || svc != c.wantSvc || id != c.wantID {
 				t.Errorf("got (%q,%q,%v), want (%q,%q,%v)", svc, id, ok, c.wantSvc, c.wantID, c.ok)
 			}

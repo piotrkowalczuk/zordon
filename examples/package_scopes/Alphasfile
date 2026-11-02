@@ -1,0 +1,43 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+import "github.com/zordon-io/zordon-modules/coredns" {
+  inputs = {
+    hosts = {
+      "orders.test"  = { ip = "127.0.0.1" }
+      "billing.test" = { ip = "127.0.0.1" }
+    }
+  }
+}
+
+import "github.com/zordon-io/zordon-modules/caddy" {
+  features = ["dns"]
+  packages = {
+    coredns = package.coredns
+  }
+  inputs = {
+    dns_hosts = {
+      "health.test" = { ip = "127.0.0.1" }
+    }
+  }
+}
+
+import "./store" "primary_store" {
+  inputs = {
+    label = "primary"
+    seed  = { shared = "true" }
+  }
+}
+
+import "./checkout" {
+  packages = {
+    caddy          = package.caddy
+    "orders/store" = package.primary_store
+    "billing/store" = {
+      features = ["audit"]
+      inputs = {
+        label = "billing-isolated"
+        seed  = { tier = "enterprise" }
+      }
+    }
+  }
+}

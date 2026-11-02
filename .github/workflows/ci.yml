@@ -201,6 +201,7 @@ jobs:
           - src_git
           # package builds Caddy, CoreDNS and Hugo from source: network-bound.
           - package
+          - package_scopes
           - gateway
           # java clones spring-petclinic and runs its Maven wrapper: a
           # real (heavy, network-bound) JVM build per distro. The wrapper

@@ -24,7 +24,7 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 		}
 		var found error
 		hclsyntax.VisitAll(body, func(n hclsyntax.Node) hcl.Diagnostics {
-			if found != nil || tree.isDisabled(n.Range()) {
+			if found != nil || sb.file.isDisabled(n.Range()) {
 				return nil
 			}
 			st, ok := n.(*hclsyntax.ScopeTraversalExpr)
@@ -41,7 +41,7 @@ func checkVisibility(services []*serviceBlock, tree *Tree) error {
 			case "package":
 				found = packageRefError(tree, sb, st.SrcRange, name)
 				if found == nil {
-					found = outputRefError(tree, st.Traversal, st.SrcRange, name)
+					found = outputRefError(tree, sb, st.Traversal, st.SrcRange, name)
 				}
 			case "inputs":
 				found = inputRefError(tree, sb, st.SrcRange, name)
@@ -64,8 +64,8 @@ func moduleRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) err
 	return nil
 }
 
-func outputRefError(tree *Tree, trav hcl.Traversal, at hcl.Range, p string) error {
-	pkg := tree.packages[p]
+func outputRefError(tree *Tree, sb *serviceBlock, trav hcl.Traversal, at hcl.Range, p string) error {
+	pkg := tree.packages[tree.resolvePackageRef(sb.module, p)]
 	if pkg == nil || len(trav) < 3 {
 		return nil
 	}
@@ -96,7 +96,7 @@ func inputRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) erro
 }
 
 func packageRefError(tree *Tree, sb *serviceBlock, at hcl.Range, name string) error {
-	pkg := tree.packages[name]
+	pkg := tree.packages[tree.resolvePackageRef(sb.module, name)]
 	if pkg == nil || tree.packageVisible(sb.module, name) {
 		return nil
 	}

@@ -239,7 +239,7 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	// not a whole-service edge. A.env→B.vars and B.env→A.vars are
 	// independent and resolve cleanly; only a literal A.vars→B.vars
 	// while B.vars→A.vars is a cycle, and that's a real bug.
-	g, err := newGraph(services, &graphValues{outputs: r.tree.outputs, inputs: r.tree.inputs}, parentKnown)
+	g, err := newGraph(services, &graphValues{outputs: r.tree.outputs, inputs: r.tree.inputs}, r.tree, parentKnown)
 	if err != nil {
 		return nil, err
 	}
@@ -1812,11 +1812,11 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 		if id == DefaultModule {
 			continue
 		}
-		if p, m, ok := strings.Cut(id, "/"); ok {
+		if p, m, ok := SplitPackageModule(id); ok {
 			if inPkg && p == selfPkg {
 				modules[m] = r.moduleCty(id)
 			}
-			if r.tree.packageVisible(dirs.module, p) {
+			if r.tree == nil || r.tree.packages[p] == nil {
 				if packages[p] == nil {
 					packages[p] = map[string]cty.Value{}
 				}
@@ -1831,19 +1831,32 @@ func (r *resolver) ctxWith(self map[string]cty.Value, dirs srcDirs) *hcl.EvalCon
 	if len(modules) > 0 {
 		vars["component"] = cty.ObjectVal(modules)
 	}
-	for p, outs := range r.outputs {
-		if len(outs) > 0 && r.tree.packageVisible(dirs.module, p) && packages[p] == nil {
-			packages[p] = map[string]cty.Value{}
+	if r.tree != nil {
+		if vis := r.tree.scopes[dirs.module]; vis != nil {
+			for localName, targetPkg := range vis.pkgs {
+				for id := range ids {
+					if p, m, ok := SplitPackageModule(id); ok && p == targetPkg {
+						if packages[localName] == nil {
+							packages[localName] = map[string]cty.Value{}
+						}
+						packages[localName][m] = r.moduleCty(id)
+					}
+				}
+				if len(r.outputs[targetPkg]) > 0 && packages[localName] == nil {
+					packages[localName] = map[string]cty.Value{}
+				}
+			}
 		}
 	}
 	if len(packages) > 0 {
 		pkgs := make(map[string]cty.Value, len(packages))
-		for p, mods := range packages {
+		for localName, mods := range packages {
+			targetPkg := r.tree.resolvePackageRef(dirs.module, localName)
 			obj := map[string]cty.Value{"component": cty.ObjectVal(mods)}
-			if outs := r.outputs[p]; len(outs) > 0 {
+			if outs := r.outputs[targetPkg]; len(outs) > 0 {
 				obj["outputs"] = cty.ObjectVal(copyCtyMap(outs))
 			}
-			pkgs[p] = cty.ObjectVal(obj)
+			pkgs[localName] = cty.ObjectVal(obj)
 		}
 		vars["package"] = cty.ObjectVal(pkgs)
 	}

@@ -7,7 +7,6 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
@@ -90,16 +89,17 @@ type importSource interface {
 }
 
 type identitySource struct {
-	opts    LoadOptions
-	lock    *lockFile
-	refs    map[string]refUse
-	mods    map[string]*modFile
-	scopes  map[*treeFile]*reqScope
-	entry   *reqScope
-	changes []LockChange
-	// fresh are the repositories resolved by this load, so an update
-	// fetches each once and every import of it reads the same commit.
-	fresh map[string]bool
+	opts        LoadOptions
+	lock        *lockFile
+	refs        map[string]refUse
+	mods        map[string]*modFile
+	scopes      map[*treeFile]*reqScope
+	entry       *reqScope
+	entryDirect map[string]bool
+	changes     []LockChange
+	// fresh maps (vcsRepo, ref) to the commit resolved during this load, so
+	// an update fetches each once and every import of it reads the same commit.
+	fresh map[sourceKey]string
 }
 
 type refUse struct {
@@ -124,12 +124,13 @@ func newIdentitySource(opts LoadOptions) (*identitySource, error) {
 		return nil, err
 	}
 	return &identitySource{
-		opts:   opts,
-		lock:   lock,
-		refs:   map[string]refUse{},
-		mods:   map[string]*modFile{},
-		scopes: map[*treeFile]*reqScope{},
-		fresh:  map[string]bool{},
+		opts:        opts,
+		lock:        lock,
+		refs:        map[string]refUse{},
+		mods:        map[string]*modFile{},
+		scopes:      map[*treeFile]*reqScope{},
+		entryDirect: map[string]bool{},
+		fresh:       map[sourceKey]string{},
 	}, nil
 }
 
@@ -159,6 +160,15 @@ func (s *identitySource) visit(f *treeFile) error {
 	s.scopes[f] = sc
 	if s.entry == nil {
 		s.entry = sc
+		for _, imp := range f.root.allImports() {
+			if !isLocalPath(imp.Path) {
+				if repo, sub, _, err := source.SplitIdentity(imp.Path); err == nil {
+					if key, _ := matchRequire(sc.reqs, repo, sub); key != "" {
+						s.entryDirect[key] = true
+					}
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -170,7 +180,11 @@ func (s *identitySource) resolve(importer *treeFile, imp *importBlock) (resolved
 	if isLocalPath(imp.Path) {
 		return s.resolveLocal(importer, imp)
 	}
-	repo, sub, ref, err := source.SplitIdentity(imp.Path)
+	return s.resolveRemote(importer, imp, imp.Path)
+}
+
+func (s *identitySource) resolveRemote(importer *treeFile, imp *importBlock, rawPath string) (resolved, error) {
+	repo, sub, ref, err := source.SplitIdentity(rawPath)
 	if err != nil {
 		return resolved{}, fmt.Errorf("%s: %s %q is neither a local path (those start with ./, ../, / or ~/) nor a remote identity such as github.com/owner/repo/dir: %w", imp.DefRange, imp.keyword, imp.Path, err)
 	}
@@ -178,29 +192,49 @@ func (s *identitySource) resolve(importer *treeFile, imp *importBlock) (resolved
 	if ref != "" {
 		return resolved{}, fmt.Errorf("%s: %s %q: a version is not part of an import path; drop @%s and add require %q { ref = %q } %s", imp.DefRange, imp.keyword, imp.Path, ref, repo, ref, sc.hint)
 	}
+	reqKey, req := matchRequire(sc.reqs, repo, sub)
+	entryKey, entryReq := matchRequire(s.entry.reqs, repo, sub)
+	hasSubpathReq := (reqKey != "" && reqKey != repo) || (entryKey != "" && entryKey != repo)
 	if res, ok := sameCheckout(importer, repo, sub); ok {
-		return confinedResult(imp, res)
+		if !hasSubpathReq {
+			return confinedResult(imp, res)
+		}
+		if req == nil && entryReq != nil {
+			reqKey, req = entryKey, entryReq
+		}
 	}
-	req := sc.reqs[repo]
+	if req == nil && entryReq != nil {
+		reqKey, req = entryKey, entryReq
+	}
 	if req == nil {
 		return resolved{}, fmt.Errorf("%s: %s %q: no version of %s is required here; add require %q { ref = \"<branch, tag or commit>\" } %s, or run zordon pkg get %s@<ref>", imp.DefRange, imp.keyword, imp.Path, repo, repo, sc.hint, repo)
 	}
 	id := strings.TrimSuffix(repo+"/"+sub, "/")
 	if res, ok, err := s.search(imp, id); err != nil || ok {
 		// A pin the search stands in for survives a rewrite of the lock.
-		if _, locked := s.lock.repos[repo]; ok && locked {
-			s.lock.used[repo] = true
+		if ok {
+			for k := range s.lock.repos {
+				if k.repo == reqKey || k.repo == repo {
+					s.lock.used[k] = true
+				}
+			}
 		}
 		return res, err
 	}
 	ref, at := req.Ref, req.DefRange
-	if e := s.entry.reqs[repo]; e != nil {
-		ref, at = e.Ref, e.DefRange
-	} else if prev, seen := s.refs[repo]; seen && prev.ref != ref {
-		return resolved{}, fmt.Errorf("%s: require %q asks for ref %q, but %s asks for %q; one stack uses one version of a repository, so pin it in %s", req.DefRange, repo, ref, prev.at, prev.ref, s.entry.where)
+	if sc != s.entry {
+		if entryReq != nil {
+			if len(entryKey) > len(reqKey) || !s.entryDirect[entryKey] {
+				reqKey, ref = entryKey, entryReq.Ref
+			}
+		} else {
+			if prev, seen := s.refs[reqKey]; seen && prev.ref != ref {
+				return resolved{}, fmt.Errorf("%s: require %q asks for ref %q, but %s asks for %q; one stack uses one version of a repository, so pin it in %s", req.DefRange, reqKey, ref, prev.at, prev.ref, s.entry.where)
+			}
+			s.refs[reqKey] = refUse{ref: ref, at: at}
+		}
 	}
-	s.refs[repo] = refUse{ref: ref, at: at}
-	commit, err := s.commitFor(repo, ref, imp)
+	commit, err := s.commitFor(reqKey, repo, ref, imp)
 	if err != nil {
 		return resolved{}, err
 	}
@@ -250,9 +284,18 @@ func (s *identitySource) resolveLocal(importer *treeFile, imp *importBlock) (res
 	if err != nil {
 		return resolved{}, err
 	}
+	sub := filepath.ToSlash(rel)
+	if own, _, ok := strings.Cut(importer.repoAt, "@"); ok && sub != "." {
+		sc := s.scopes[importer]
+		reqKey, _ := matchRequire(sc.reqs, own, sub)
+		entryKey, _ := matchRequire(s.entry.reqs, own, sub)
+		if (reqKey != "" && reqKey != own) || (entryKey != "" && entryKey != own) {
+			return s.resolveRemote(importer, imp, own+"/"+sub)
+		}
+	}
 	return resolved{
 		path:     p,
-		identity: importer.repoAt + "//" + filepath.ToSlash(rel),
+		identity: importer.repoAt + "//" + sub,
 		confine:  importer.confine,
 		repoAt:   importer.repoAt,
 		origin:   importer.origin,
@@ -281,6 +324,12 @@ func (s *identitySource) search(imp *importBlock, id string) (resolved, bool, er
 	type hit struct{ dir, path, how string }
 	var hits []hit
 	for _, dir := range s.opts.Search {
+		if subPath, subMod, err := s.subModOf(dir, id); err != nil {
+			return resolved{}, false, err
+		} else if subMod != "" {
+			hits = append(hits, hit{dir: dir, path: subPath, how: fmt.Sprintf("zordon.mod: module %q", subMod)})
+			continue
+		}
 		mod, err := s.modOf(dir)
 		if err != nil {
 			return resolved{}, false, err
@@ -313,6 +362,30 @@ func (s *identitySource) modOf(dir string) (string, error) {
 		return "", err
 	}
 	return mod.module, nil
+}
+
+func (s *identitySource) subModOf(dir, id string) (string, string, error) {
+	_, sub, _, err := source.SplitIdentity(id)
+	if err != nil || sub == "" {
+		return "", "", nil
+	}
+	for cur := sub; cur != ""; {
+		subDir := filepath.Join(dir, filepath.FromSlash(cur))
+		mod, err := s.modOf(subDir)
+		if err != nil {
+			return "", "", err
+		}
+		if mod != "" && (id == mod || strings.HasPrefix(id, mod+"/")) {
+			rest := strings.TrimPrefix(strings.TrimPrefix(id, mod), "/")
+			return filepath.Join(subDir, filepath.FromSlash(rest)), mod, nil
+		}
+		if i := strings.LastIndexByte(cur, '/'); i >= 0 {
+			cur = cur[:i]
+		} else {
+			cur = ""
+		}
+	}
+	return "", "", nil
 }
 
 // modIn reads dir/zordon.mod once; nil when the directory has none.
@@ -363,60 +436,99 @@ func sameCheckout(importer *treeFile, repo, sub string) (resolved, bool) {
 	}, true
 }
 
+// matchRequire finds the longest prefix match for repo[/sub] in reqs.
+func matchRequire(reqs map[string]*requireBlock, repo, sub string) (string, *requireBlock) {
+	if len(reqs) == 0 {
+		return "", nil
+	}
+	full := repo
+	if sub != "" {
+		full = repo + "/" + sub
+	}
+	for cur := full; ; {
+		if req := reqs[cur]; req != nil {
+			return cur, req
+		}
+		if cur == repo {
+			return "", nil
+		}
+		i := strings.LastIndexByte(cur, '/')
+		cur = cur[:i]
+	}
+}
+
 func requireMap(blocks []*requireBlock) (map[string]*requireBlock, error) {
 	out := map[string]*requireBlock{}
 	for _, rb := range blocks {
 		repo, sub, ref, err := source.SplitIdentity(rb.Repo)
+		key := repo
+		if sub != "" {
+			key = repo + "/" + sub
+		}
 		switch {
 		case err != nil:
 			return nil, fmt.Errorf("%s: require %q: %w", rb.DefRange, rb.Repo, err)
-		case sub != "" || ref != "" || repo != rb.Repo:
-			return nil, fmt.Errorf("%s: require %q: name the repository alone, such as %q, and put the version in ref", rb.DefRange, rb.Repo, repo)
+		case ref != "" || key != rb.Repo:
+			return nil, fmt.Errorf("%s: require %q: name the repository alone, such as %q, and put the version in ref", rb.DefRange, rb.Repo, key)
 		case strings.TrimSpace(rb.Ref) == "":
 			return nil, fmt.Errorf("%s: require %q: ref names a branch, tag or commit and cannot be empty", rb.DefRange, rb.Repo)
 		}
 		if err := source.CheckRef(rb.Ref); err != nil {
 			return nil, fmt.Errorf("%s: require %q: %w", rb.DefRange, rb.Repo, err)
 		}
-		if prev, dup := out[repo]; dup {
+		if prev, dup := out[key]; dup {
 			return nil, fmt.Errorf("%s: require %q repeats the require at %s", rb.DefRange, rb.Repo, prev.DefRange)
 		}
-		out[repo] = rb
+		out[key] = rb
 	}
 	return out, nil
 }
 
-func (s *identitySource) commitFor(repo, ref string, imp *importBlock) (string, error) {
-	e, locked := s.lock.repos[repo]
-	if locked && e.ref == ref && (!s.updating(repo) || s.fresh[repo]) {
-		s.lock.used[repo] = true
-		return e.commit, nil
+func (s *identitySource) commitFor(reqKey, vcsRepo, ref string, imp *importBlock) (string, error) {
+	k := sourceKey{repo: reqKey, ref: ref}
+	fk := sourceKey{repo: vcsRepo, ref: ref}
+	commit, locked := s.lock.repos[k]
+	if locked && (!s.updating(reqKey, vcsRepo) || s.fresh[fk] != "") {
+		s.lock.used[k] = true
+		return commit, nil
 	}
-	if s.opts.Fetcher == nil {
-		return "", fmt.Errorf("%s: %s %q: %s@%s is not in %s and fetching is off", imp.DefRange, imp.keyword, imp.Path, repo, ref, LockFileName)
+	if c := s.fresh[fk]; c != "" {
+		commit = c
+	} else {
+		if s.opts.Fetcher == nil {
+			return "", fmt.Errorf("%s: %s %q: %s@%s is not in %s and fetching is off", imp.DefRange, imp.keyword, imp.Path, reqKey, ref, LockFileName)
+		}
+		var err error
+		commit, err = s.opts.Fetcher.Resolve(vcsRepo, ref)
+		if err != nil {
+			return "", fmt.Errorf("%s: %s %q: %w", imp.DefRange, imp.keyword, imp.Path, err)
+		}
+		s.fresh[fk] = commit
 	}
-	commit, err := s.opts.Fetcher.Resolve(repo, ref)
-	if err != nil {
-		return "", fmt.Errorf("%s: %s %q: %w", imp.DefRange, imp.keyword, imp.Path, err)
+	old := s.lock.repos[k]
+	if old == "" {
+		if init, ok := s.lock.initial[reqKey]; ok && !s.lock.used[sourceKey{repo: reqKey, ref: init.ref}] {
+			old = init.commit
+		}
 	}
-	if !locked || e.commit != commit || e.ref != ref {
-		s.changes = append(s.changes, LockChange{Repo: repo, Ref: ref, Old: e.commit, New: commit})
+	if !locked || s.lock.repos[k] != commit {
+		s.changes = append(s.changes, LockChange{Repo: reqKey, Ref: ref, Old: old, New: commit})
 		s.lock.dirty = true
 	}
-	s.lock.repos[repo] = lockEntry{ref: ref, commit: commit}
-	s.lock.used[repo] = true
-	s.fresh[repo] = true
+	s.lock.repos[k] = commit
+	s.lock.used[k] = true
 	return commit, nil
 }
 
-func (s *identitySource) updating(repo string) bool {
-	return s.opts.UpdateAll || slices.Contains(s.opts.Update, repo)
+func (s *identitySource) updating(reqKey, vcsRepo string) bool {
+	return s.opts.UpdateAll || slices.Contains(s.opts.Update, reqKey) || slices.Contains(s.opts.Update, vcsRepo)
 }
 
 type lockFile struct {
 	path    string
-	repos   map[string]lockEntry
-	used    map[string]bool
+	repos   map[sourceKey]string
+	initial map[string]lockEntry
+	used    map[sourceKey]bool
 	sources map[sourceKey]string
 	dirty   bool
 }
@@ -447,7 +559,13 @@ type lockDoc struct {
 }
 
 func readLock(path string) (*lockFile, error) {
-	l := &lockFile{path: path, repos: map[string]lockEntry{}, used: map[string]bool{}, sources: map[sourceKey]string{}}
+	l := &lockFile{
+		path:    path,
+		repos:   map[sourceKey]string{},
+		initial: map[string]lockEntry{},
+		used:    map[sourceKey]bool{},
+		sources: map[sourceKey]string{},
+	}
 	if path == "" || !zfs.Exists(path) {
 		return l, nil
 	}
@@ -467,7 +585,8 @@ func readLock(path string) (*lockFile, error) {
 		if !source.IsCommit(r.Commit) {
 			return nil, fmt.Errorf("%s: repo %q: commit %q is not a commit hash; remove the entry and run zordon pkg update", path, r.Repo, r.Commit)
 		}
-		l.repos[r.Repo] = lockEntry{ref: r.Ref, commit: r.Commit}
+		l.repos[sourceKey{repo: r.Repo, ref: r.Ref}] = r.Commit
+		l.initial[r.Repo] = lockEntry{ref: r.Ref, commit: r.Commit}
 	}
 	for _, s := range doc.Sources {
 		if !source.IsCommit(s.Commit) {
@@ -495,16 +614,17 @@ func lockPins(opts LoadOptions) (func(), error) {
 func (l *lockFile) write(pruneRepos bool) error {
 	var b strings.Builder
 	b.WriteString("# Generated by zordon. Commit it; `zordon pkg update` moves the pins.\n")
-	repos := make([]string, 0, len(l.repos))
-	for repo := range l.repos {
-		if !pruneRepos || l.used[repo] {
-			repos = append(repos, repo)
+	repos := make([]sourceKey, 0, len(l.repos))
+	for k := range l.repos {
+		if !pruneRepos || l.used[k] {
+			repos = append(repos, k)
 		}
 	}
-	sort.Strings(repos)
-	for _, repo := range repos {
-		e := l.repos[repo]
-		fmt.Fprintf(&b, "\nrepo %q {\n  ref    = %q\n  commit = %q\n}\n", repo, e.ref, e.commit)
+	slices.SortFunc(repos, func(a, b sourceKey) int {
+		return cmp.Or(strings.Compare(a.repo, b.repo), strings.Compare(a.ref, b.ref))
+	})
+	for _, k := range repos {
+		fmt.Fprintf(&b, "\nrepo %q {\n  ref    = %q\n  commit = %q\n}\n", k.repo, k.ref, l.repos[k])
 	}
 	keys := slices.SortedFunc(maps.Keys(l.sources), func(a, b sourceKey) int {
 		return cmp.Or(strings.Compare(a.repo, b.repo), strings.Compare(a.ref, b.ref))

@@ -189,7 +189,7 @@ func renderState(st *protocol.StateInfo) []byte {
 	pkgBodies := map[string]*hclwrite.Body{}
 	for _, id := range moduleOrder(st) {
 		parent, name := body, id
-		if p, m, inPkg := strings.Cut(id, "/"); inPkg {
+		if p, m, inPkg := alphasfile.SplitPackageModule(id); inPkg {
 			if pkgBodies[p] == nil {
 				pkgBodies[p] = body.AppendNewBlock("package", []string{p}).Body()
 			}

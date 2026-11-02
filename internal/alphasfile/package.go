@@ -20,6 +20,7 @@ type pkgNeed struct {
 	by    string // "package caddy" or "component gw"
 	block *importBlock
 	set   *pkgSettings
+	bound bool
 }
 
 // inputDecl is one input of a package. Every import that sets it gives a
@@ -258,6 +259,135 @@ func sameSettings(a, b *pkgSettings) bool {
 	return true
 }
 
+func (t *Tree) parsePackageRules(f *treeFile, scope string, ib *importBlock) ([]*pkgRule, error) {
+	if ib.PackagesRange == (hcl.Range{}) {
+		return nil, nil
+	}
+	obj, ok := ib.Packages.(*hclsyntax.ObjectConsExpr)
+	if !ok {
+		return nil, fmt.Errorf("%s: import %q: packages must be an object such as { pkg = package.pkg }", ib.PackagesRange, ib.Path)
+	}
+	src := f.srcOf(ib.PackagesRange.Filename)
+	seen := map[string]bool{}
+	var rules []*pkgRule
+	for _, item := range obj.Items {
+		key, ok := staticKey(item.KeyExpr)
+		if !ok || !validRuleTarget(key) {
+			return nil, fmt.Errorf("%s: import %q: packages key must be a package name or path such as \"caddy\" or \"billing/postgres\"", item.KeyExpr.Range(), ib.Path)
+		}
+		if seen[key] {
+			return nil, fmt.Errorf("%s: import %q: packages key %q is listed twice", item.KeyExpr.Range(), ib.Path, key)
+		}
+		seen[key] = true
+		switch val := item.ValueExpr.(type) {
+		case *hclsyntax.ScopeTraversalExpr:
+			name, ok := traverseAttrName(val.Traversal[len(val.Traversal)-1])
+			if !ok || len(val.Traversal) != 2 || val.Traversal.RootName() != "package" {
+				return nil, fmt.Errorf("%s: import %q: packages[%q] must be package.<name> or { features = [...], inputs = { ... } }", val.Range(), ib.Path, key)
+			}
+			target := t.resolveTargetPackage(scope, name)
+			if target == nil {
+				return nil, fmt.Errorf("%s: import %q: package.%s is not imported in this scope; import it before %q", val.Range(), ib.Path, name, ib.Path)
+			}
+			rules = append(rules, &pkgRule{key: key, at: val.Range(), target: target, used: new(bool)})
+		case *hclsyntax.ObjectConsExpr:
+			set, err := parseRuleSettings(val, ib, key, scope, src)
+			if err != nil {
+				return nil, err
+			}
+			rules = append(rules, &pkgRule{key: key, at: val.Range(), set: set, used: new(bool)})
+		default:
+			return nil, fmt.Errorf("%s: import %q: packages[%q] must be package.<name> or { features = [...], inputs = { ... } }", item.ValueExpr.Range(), ib.Path, key)
+		}
+	}
+	return rules, nil
+}
+
+func (t *Tree) resolveTargetPackage(scope, name string) *pkgInstance {
+	for _, l := range t.links[scope] {
+		if l.pkg != nil && (l.localName == name || l.localName == "" && l.pkg.name == name) {
+			return l.pkg
+		}
+	}
+	if p, inPkg := packageOf(scope); inPkg {
+		for _, l := range t.links[pkgScope(p)] {
+			if l.pkg != nil && (l.localName == name || l.localName == "" && l.pkg.name == name) {
+				return l.pkg
+			}
+		}
+	} else if scope != DefaultModule {
+		for _, l := range t.links[DefaultModule] {
+			if l.pkg != nil && (l.localName == name || l.localName == "" && l.pkg.name == name) {
+				return l.pkg
+			}
+		}
+	}
+	return nil
+}
+
+func parseRuleSettings(body *hclsyntax.ObjectConsExpr, ib *importBlock, key, scope string, src []byte) (*pkgSettings, error) {
+	set := &pkgSettings{at: body.Range(), inputs: map[string]*inputArg{}}
+	seenField := map[string]bool{}
+	for _, item := range body.Items {
+		field, ok := staticKey(item.KeyExpr)
+		if !ok || (field != "features" && field != "inputs") {
+			return nil, fmt.Errorf("%s: import %q: packages[%q] takes features and inputs only", item.KeyExpr.Range(), ib.Path, key)
+		}
+		if seenField[field] {
+			return nil, fmt.Errorf("%s: import %q: packages[%q] sets %s twice", item.KeyExpr.Range(), ib.Path, key, field)
+		}
+		seenField[field] = true
+		switch field {
+		case "features":
+			v, diags := item.ValueExpr.Value(nil)
+			if diags.HasErrors() || v.IsNull() || !(v.Type().IsTupleType() || v.Type().IsListType()) {
+				return nil, fmt.Errorf("%s: import %q: packages[%q].features must be a list of strings", item.ValueExpr.Range(), ib.Path, key)
+			}
+			for _, elem := range v.AsValueSlice() {
+				if elem.IsNull() || !elem.Type().Equals(cty.String) {
+					return nil, fmt.Errorf("%s: import %q: packages[%q].features must be a list of strings", item.ValueExpr.Range(), ib.Path, key)
+				}
+				set.features = append(set.features, elem.AsString())
+			}
+			sort.Strings(set.features)
+			for i := 1; i < len(set.features); i++ {
+				if set.features[i] == set.features[i-1] {
+					return nil, fmt.Errorf("%s: import %q: packages[%q] lists feature %q twice", item.ValueExpr.Range(), ib.Path, key, set.features[i])
+				}
+			}
+		case "inputs":
+			inObj, ok := item.ValueExpr.(*hclsyntax.ObjectConsExpr)
+			if !ok {
+				return nil, fmt.Errorf("%s: import %q: packages[%q].inputs must be an object such as { name = value }", item.ValueExpr.Range(), ib.Path, key)
+			}
+			for _, inItem := range inObj.Items {
+				name, ok := staticKey(inItem.KeyExpr)
+				if !ok {
+					return nil, fmt.Errorf("%s: import %q: packages[%q].inputs must be an object such as { name = value }", inItem.KeyExpr.Range(), ib.Path, key)
+				}
+				arg := &inputArg{expr: inItem.ValueExpr, scope: scope, at: inItem.ValueExpr.Range()}
+				if r := inItem.ValueExpr.Range(); src != nil && r.End.Byte <= len(src) {
+					arg.src = string(r.SliceBytes(src))
+				}
+				set.inputs[name] = arg
+			}
+		}
+	}
+	return set, nil
+}
+
+func validRuleTarget(target string) bool {
+	if target == "" {
+		return false
+	}
+	for part := range strings.SplitSeq(target, "/") {
+		if !moduleNameRe.MatchString(part) {
+			return false
+		}
+	}
+	return true
+}
+
 // resolvePackages fixes the features of every package and the source of each
 // of its inputs. A package the entrypoint imports at its top level gets what
 // that import passes, and every other import of it in the stack must be
@@ -301,7 +431,7 @@ func (t *Tree) resolvePackages() error {
 			if err := checkSatisfied(p, n); err != nil {
 				return err
 			}
-			addArgs(p, n.set)
+			addNeedArgs(p, p.file.block, n)
 		}
 	}
 	for _, name := range sortedKeys(t.packages) {
@@ -320,23 +450,43 @@ func (t *Tree) resolvePackage(p *pkgInstance, plain, sure map[string]bool) error
 		var err error
 		p.active = true
 		p.settings, err = resolveSettings(p, pb, p.set, who)
-		return err
+		if err != nil {
+			return err
+		}
+		for _, inj := range p.injected {
+			if err := checkDeclared(pb, inj, who); err != nil {
+				return err
+			}
+			for _, f := range inj.features {
+				p.settings.features[f] = true
+			}
+			addInjectedArgs(p, pb, inj)
+		}
+		return nil
 	}
 	needs, err := t.needsOf(p, plain, sure)
 	if err != nil {
 		return err
 	}
-	if len(needs) == 0 {
+	if len(needs) == 0 && len(p.injected) == 0 {
 		p.settings = idleSettings(pb)
 		return nil
 	}
+	for _, inj := range p.injected {
+		if err := checkDeclared(pb, inj, who); err != nil {
+			return err
+		}
+	}
 	p.active, p.needs = true, needs
-	p.settings, err = resolveSettings(p, pb, mergeNeeds(needs), who)
+	p.settings, err = resolveSettings(p, pb, mergeNeeds(needs, p.injected), who)
 	if err != nil {
 		return err
 	}
+	for _, inj := range p.injected {
+		addInjectedArgs(p, pb, inj)
+	}
 	for _, n := range needs {
-		addArgs(p, n.set)
+		addNeedArgs(p, pb, n)
 	}
 	return nil
 }
@@ -384,7 +534,7 @@ func (t *Tree) needsOf(p *pkgInstance, plain, sure map[string]bool) ([]pkgNeed, 
 			if err := checkDeclared(p.file.block, set, who); err != nil {
 				return nil, err
 			}
-			needs = append(needs, pkgNeed{by: by, block: l.block, set: set})
+			needs = append(needs, pkgNeed{by: by, block: l.block, set: set, bound: l.bound})
 		}
 	}
 	return needs, nil
@@ -459,15 +609,27 @@ func (t *Tree) plainActive() map[string]bool {
 }
 
 // mergeNeeds joins the features the imports of a package outside the
-// entrypoint's top level pass.
-func mergeNeeds(needs []pkgNeed) *pkgSettings {
+// entrypoint's top level pass, plus any features injected via packages = {}.
+func mergeNeeds(needs []pkgNeed, injected []*pkgSettings) *pkgSettings {
 	on := map[string]bool{}
+	var at hcl.Range
+	for _, inj := range injected {
+		if at == (hcl.Range{}) {
+			at = inj.at
+		}
+		for _, f := range inj.features {
+			on[f] = true
+		}
+	}
 	for _, n := range needs {
+		if at == (hcl.Range{}) {
+			at = n.block.DefRange
+		}
 		for _, f := range n.set.features {
 			on[f] = true
 		}
 	}
-	return &pkgSettings{at: needs[0].block.DefRange, features: sortedKeys(on)}
+	return &pkgSettings{at: at, features: sortedKeys(on)}
 }
 
 // checkSatisfied reports a feature another importer needs and the
@@ -538,6 +700,24 @@ func resolveSettings(p *pkgInstance, pb *packageBlock, set *pkgSettings, who str
 func addArgs(p *pkgInstance, set *pkgSettings) {
 	for _, k := range sortedKeys(set.inputs) {
 		p.args[k] = append(p.args[k], set.inputs[k])
+	}
+}
+
+func addInjectedArgs(p *pkgInstance, pb *packageBlock, set *pkgSettings) {
+	for _, k := range sortedKeys(set.inputs) {
+		if _, isMap := pb.inputs[k].ty.(ztypes.Map); !isMap && len(p.args[k]) > 0 {
+			continue
+		}
+		p.args[k] = append(p.args[k], set.inputs[k])
+	}
+}
+
+func addNeedArgs(p *pkgInstance, pb *packageBlock, n pkgNeed) {
+	for _, k := range sortedKeys(n.set.inputs) {
+		if _, isMap := pb.inputs[k].ty.(ztypes.Map); !isMap && (n.bound || len(p.injected) > 0) && len(p.args[k]) > 0 {
+			continue
+		}
+		p.args[k] = append(p.args[k], n.set.inputs[k])
 	}
 }
 
@@ -692,7 +872,7 @@ func (t *Tree) pruneService(sb *serviceBlock, s *scopeSettings, module string) (
 			if !on {
 				filesChanged = true
 				t.off().files[ref+"/"+fb.Name] = offRecord{what: fmt.Sprintf("file %q", fb.Name), at: fb.EnabledRange}
-				t.disableNested(sb.Body, "", "file", fb.Name)
+				t.disableNested(sb.file, sb.Body, "", "file", fb.Name)
 				continue
 			}
 		}
@@ -710,7 +890,7 @@ func (t *Tree) pruneService(sb *serviceBlock, s *scopeSettings, module string) (
 				if !on {
 					provsChanged = true
 					t.off().provs[ref+"/"+pb.Name] = offRecord{what: fmt.Sprintf("provision %q", pb.Name), at: pb.EnabledRange}
-					t.disableNested(sb.Body, "runtime", "provision", pb.Name)
+					t.disableNested(sb.file, sb.Body, "runtime", "provision", pb.Name)
 					continue
 				}
 			}
@@ -727,7 +907,7 @@ func (t *Tree) pruneService(sb *serviceBlock, s *scopeSettings, module string) (
 			}
 			if !on {
 				sudosChanged = true
-				t.disableNested(sb.Body, "", "sudo", sd.Name)
+				t.disableNested(sb.file, sb.Body, "", "sudo", sd.Name)
 				continue
 			}
 		}
@@ -753,7 +933,10 @@ func (t *Tree) pruneService(sb *serviceBlock, s *scopeSettings, module string) (
 
 // disableNested records the source range of a nested block, optionally
 // inside a parent block, so static passes over the service body skip it.
-func (t *Tree) disableNested(body hcl.Body, parent, typ, label string) {
+func (t *Tree) disableNested(f *treeFile, body hcl.Body, parent, typ, label string) {
+	if f == nil {
+		return
+	}
 	sb, ok := body.(*hclsyntax.Body)
 	if !ok {
 		return
@@ -761,14 +944,14 @@ func (t *Tree) disableNested(body hcl.Body, parent, typ, label string) {
 	if parent != "" {
 		for _, blk := range sb.Blocks {
 			if blk.Type == parent {
-				t.disableNested(blk.Body, "", typ, label)
+				t.disableNested(f, blk.Body, "", typ, label)
 			}
 		}
 		return
 	}
 	for _, blk := range sb.Blocks {
 		if blk.Type == typ && len(blk.Labels) > 0 && blk.Labels[0] == label {
-			t.disabled = append(t.disabled, blk.Range())
+			f.disabled = append(f.disabled, blk.Range())
 		}
 	}
 }
@@ -804,7 +987,7 @@ func (t *Tree) checkGated() error {
 		ref := ServiceRef(sb.module, sb.Toolchain, sb.Name)
 		var found error
 		hclsyntax.VisitAll(body, func(n hclsyntax.Node) hcl.Diagnostics {
-			if found != nil || t.isDisabled(n.Range()) {
+			if found != nil || sb.file.isDisabled(n.Range()) {
 				return nil
 			}
 			st, ok := n.(*hclsyntax.ScopeTraversalExpr)
@@ -858,7 +1041,8 @@ func (t *Tree) gatedTarget(trav hcl.Traversal, module, selfRef string) (offRecor
 			return rec, true
 		}
 		if len(names) >= 7 && names[2] == "component" && names[4] == "service" {
-			rec, ok := o.services[ServiceRef(names[1]+"/"+names[3], names[5], names[6])]
+			pkgName := t.resolvePackageRef(module, names[1])
+			rec, ok := o.services[ServiceRef(pkgName+"/"+names[3], names[5], names[6])]
 			return rec, ok
 		}
 	}

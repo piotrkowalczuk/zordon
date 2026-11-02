@@ -747,15 +747,17 @@ type rootBlock struct {
 // package, and must be satisfied by the entrypoint when it does. Inputs are
 // joined from every import, as ztypes.Merge does.
 type importBlock struct {
-	Path         string         `hcl:"path,label"`
-	Modules      []string       `hcl:"components,optional"`
-	Inputs       hcl.Expression `hcl:"inputs,optional"`
-	InputsRange  hcl.Range      `hcl:"inputs,attr_range"`
-	Features     []string       `hcl:"features,optional"`
-	Enabled      hcl.Expression `hcl:"enabled,optional"`
-	EnabledRange hcl.Range      `hcl:"enabled,attr_range"`
-	Git          *gitBlock      `hcl:"git,block"`
-	DefRange     hcl.Range      `hcl:",def_range"`
+	Path          string         `hcl:"path,label"`
+	Modules       []string       `hcl:"components,optional"`
+	Inputs        hcl.Expression `hcl:"inputs,optional"`
+	InputsRange   hcl.Range      `hcl:"inputs,attr_range"`
+	Features      []string       `hcl:"features,optional"`
+	Packages      hcl.Expression `hcl:"packages,optional"`
+	PackagesRange hcl.Range      `hcl:"packages,attr_range"`
+	Enabled       hcl.Expression `hcl:"enabled,optional"`
+	EnabledRange  hcl.Range      `hcl:"enabled,attr_range"`
+	Git           *gitBlock      `hcl:"git,block"`
+	DefRange      hcl.Range      `hcl:",def_range"`
 
 	keyword string
 	// alias is the optional second label; HCL block schemas have a fixed

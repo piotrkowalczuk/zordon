@@ -129,7 +129,7 @@ func buildTree(levels []*level) map[string]any {
 				node["running"] = false
 			}
 			byTC := svcRoot
-			if p, m, inPkg := strings.Cut(s.Module, "/"); inPkg {
+			if p, m, inPkg := alphasfile.SplitPackageModule(s.Module); inPkg {
 				byTC = moduleServices(packageModules(pkgRoot, p), m)
 			} else if s.Module != alphasfile.DefaultModule {
 				byTC = moduleServices(modRoot, s.Module)

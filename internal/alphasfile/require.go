@@ -21,8 +21,12 @@ func AddRequire(afPath, repo, ref string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if sub != "" || inline != "" || r != repo {
-		return "", fmt.Errorf("%s: name the repository alone, such as %s", repo, r)
+	key := r
+	if sub != "" {
+		key = r + "/" + sub
+	}
+	if inline != "" || key != repo {
+		return "", fmt.Errorf("%s: name the repository alone, such as %s", repo, key)
 	}
 	if ref == "" {
 		return "", fmt.Errorf("%s: name a branch, tag or commit, such as %s@main", repo, repo)

@@ -98,9 +98,8 @@ func (p *Package) FollowedRef() string {
 // pins lists the repositories a load used, sorted.
 func (l *lockFile) pins() []LockPin {
 	pins := make([]LockPin, 0, len(l.used))
-	for repo := range l.used {
-		e := l.repos[repo]
-		pins = append(pins, LockPin{Repo: repo, Ref: e.ref, Commit: e.commit})
+	for k := range l.used {
+		pins = append(pins, LockPin{Repo: k.repo, Ref: k.ref, Commit: l.repos[k]})
 	}
 	return sortPins(pins)
 }
