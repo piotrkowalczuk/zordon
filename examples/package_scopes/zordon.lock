@@ -2,10 +2,10 @@
 
 repo "github.com/zordon-io/zordon-modules/caddy" {
   ref    = "caddy/v0.1.0"
-  commit = "95860e6b0b9c78bf0cc1553539e1d51330b6f644"
+  commit = "c46e941446fccd0b4f0093d220b5b6f351700dbd"
 }
 
 repo "github.com/zordon-io/zordon-modules/coredns" {
   ref    = "coredns/v0.1.0"
-  commit = "95860e6b0b9c78bf0cc1553539e1d51330b6f644"
+  commit = "c46e941446fccd0b4f0093d220b5b6f351700dbd"
 }

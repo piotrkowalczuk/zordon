@@ -333,6 +333,14 @@ func (s *identitySource) search(imp *importBlock, id string) (resolved, bool, er
 			hits = append(hits, hit{dir: dir, path: filepath.Join(dir, filepath.FromSlash(rest)), how: fmt.Sprintf("zordon.mod: module %q", mod)})
 			continue
 		}
+		if mod == "" {
+			if subPath, subMod, err := s.subModOf(dir, id); err != nil {
+				return resolved{}, false, err
+			} else if subMod != "" {
+				hits = append(hits, hit{dir: dir, path: subPath, how: fmt.Sprintf("zordon.mod: module %q", subMod)})
+				continue
+			}
+		}
 		if p := filepath.Join(dir, filepath.FromSlash(id)); zfs.Exists(p) {
 			hits = append(hits, hit{dir: dir, path: p, how: "path " + p})
 		}
@@ -356,6 +364,30 @@ func (s *identitySource) modOf(dir string) (string, error) {
 		return "", err
 	}
 	return mod.module, nil
+}
+
+func (s *identitySource) subModOf(dir, id string) (string, string, error) {
+	_, sub, _, err := source.SplitIdentity(id)
+	if err != nil || sub == "" {
+		return "", "", nil
+	}
+	for cur := sub; cur != ""; {
+		subDir := filepath.Join(dir, filepath.FromSlash(cur))
+		mod, err := s.modOf(subDir)
+		if err != nil {
+			return "", "", err
+		}
+		if mod != "" && (id == mod || strings.HasPrefix(id, mod+"/")) {
+			rest := strings.TrimPrefix(strings.TrimPrefix(id, mod), "/")
+			return filepath.Join(subDir, filepath.FromSlash(rest)), mod, nil
+		}
+		if i := strings.LastIndexByte(cur, '/'); i >= 0 {
+			cur = cur[:i]
+		} else {
+			cur = ""
+		}
+	}
+	return "", "", nil
 }
 
 // modIn reads dir/zordon.mod once; nil when the directory has none.

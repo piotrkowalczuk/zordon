@@ -589,6 +589,49 @@ func TestLoadTreeWith_remoteRelativeRequireInsideCheckout(t *testing.T) {
 	}
 }
 
+func TestLoadTreeWith_perModuleZordonModInSubdirectories(t *testing.T) {
+	infra := gitRepo(t, map[string]string{
+		"pkgs/db/zordon.mod":  "module = \"github.com/acme/infra/pkgs/db\"\n",
+		"pkgs/db/Alphasfile":  pkgDB,
+		"pkgs/web/zordon.mod": "module = \"github.com/acme/infra/pkgs/web\"\nrequire \"github.com/acme/infra/pkgs/db\" { ref = \"pkgs/db/v0.1.0\" }\n",
+		"pkgs/web/Alphasfile": pkgWebRequiring(`import "github.com/acme/infra/pkgs/db" {}`),
+	})
+	gitRun(t, infra, "tag", "pkgs/db/v0.1.0")
+	gitRun(t, infra, "tag", "pkgs/web/v0.1.0")
+
+	t.Run("remote fetch resolves module require from its own zordon.mod", func(t *testing.T) {
+		dir := t.TempDir()
+		root := writeTree(t, dir, map[string]string{
+			ModFileName:  "module = \"github.com/acme/app\"\nrequire \"github.com/acme/infra/pkgs/web\" { ref = \"pkgs/web/v0.1.0\" }\n",
+			"Alphasfile": `import "github.com/acme/infra/pkgs/web" {}` + "\n",
+		})
+		tree, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := serviceNames(resolveTree(t, tree)); !equalStrs(got, []string{"web/web/web", "db/db/db"}) {
+			t.Fatalf("services = %v", got)
+		}
+	})
+
+	t.Run("zordon.work search at repo root discovers subdirectory zordon.mod", func(t *testing.T) {
+		dir := t.TempDir()
+		root := writeTree(t, dir, map[string]string{
+			ModFileName:  "module = \"github.com/acme/app\"\nrequire \"github.com/acme/infra/pkgs/web\" { ref = \"pkgs/web/v0.1.0\" }\n",
+			"Alphasfile": `import "github.com/acme/infra/pkgs/web" {}` + "\n",
+		})
+		opts := remoteOpts(t, dir, nil)
+		opts.Search = []string{infra}
+		tree, err := LoadTreeWith(root, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := serviceNames(resolveTree(t, tree)); !equalStrs(got, []string{"web/web/web", "db/db/db"}) {
+			t.Fatalf("services = %v", got)
+		}
+	})
+}
+
 func TestReadWorkFile(t *testing.T) {
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{"code/infra/.keep": "", "zordon.work": "search \"./code/infra\" {}\n"})
