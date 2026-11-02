@@ -581,14 +581,320 @@ component "gw" {
 	}
 }
 
-func TestLoadTree_packageKeepsOneName(t *testing.T) {
+func TestOpen_multiplePackageInstancesByAlias(t *testing.T) {
+	pkgPG := `
+package "postgres" {
+  features = {
+    replica = { description = "Run read replica." }
+  }
+  inputs = {
+    port = {
+      description = "Port to listen on."
+      type        = number
+      default     = 5432
+    }
+  }
+  outputs = {
+    dsn = {
+      description = "Connection URL."
+      type        = string
+      value       = "postgres://127.0.0.1:${component.db.service.go.pg.vars.port}"
+    }
+  }
+  component "db" {
+    service "go" "pg" {
+      git { url = "github.com/x/pg" }
+      vars = { port = inputs.port }
+    }
+    service "go" "ro" {
+      enabled = features.replica
+      git { url = "github.com/x/pg" }
+      vars = { port = inputs.port + 1 }
+    }
+  }
+}
+`
 	root := writeTree(t, t.TempDir(), map[string]string{
-		"Alphasfile":     "import \"./db\" {}\nimport \"./app\" {}\n",
-		"db/Alphasfile":  `package "db" {}`,
-		"app/Alphasfile": "package \"app\" {\n  import \"../db\" \"pg\" {}\n}\n",
+		"Alphasfile": `
+import "./postgres" "pg14" {
+  inputs = { port = 5414 }
+}
+import "./postgres" "pg16" {
+  features = ["replica"]
+  inputs   = { port = 5416 }
+}
+service "go" "app" {
+  git { url = "github.com/x/app" }
+  vars = {
+    dsn14 = package.pg14.outputs.dsn
+    dsn16 = package.pg16.outputs.dsn
+  }
+}
+`,
+		"postgres/Alphasfile": pkgPG,
 	})
-	if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), `this package is already in the stack as "db"`) {
-		t.Fatalf("got %v", err)
+	af := openTree(t, root)
+	if got := serviceNames(af); !equalStrs(got, []string{"app", "pg14/db/pg", "pg16/db/pg", "pg16/db/ro"}) {
+		t.Fatalf("services = %v", got)
+	}
+	appVars := svcByName(af, "app").Runtime.Vars
+	if appVars["dsn14"] != "postgres://127.0.0.1:5414" || appVars["dsn16"] != "postgres://127.0.0.1:5416" {
+		t.Errorf("app vars = %v", appVars)
+	}
+}
+
+func TestOpen_packageBindShorthand(t *testing.T) {
+	pkgPG := `
+package "postgres" {
+  inputs = {
+    port = {
+      description = "Port to listen on."
+      type        = number
+      default     = 5432
+    }
+    databases = {
+      description = "Databases to provision."
+      type        = map(string)
+      default     = {}
+    }
+  }
+  outputs = {
+    port = {
+      description = "Bound port."
+      type        = number
+      value       = inputs.port
+    }
+  }
+  component "db" {
+    service "go" "pg" {
+      git { url = "github.com/x/pg" }
+      vars = {
+        port = inputs.port
+        dbs  = enc::json(inputs.databases)
+      }
+    }
+  }
+}
+`
+	pkgBilling := `
+package "billing" {
+  import "../postgres" {
+    inputs = {
+      port      = 5499
+      databases = { billing = "billing_db" }
+    }
+  }
+  component "api" {
+    service "go" "billing" {
+      git { url = "github.com/x/billing" }
+      vars = { db_port = package.postgres.outputs.port }
+    }
+  }
+}
+`
+	pkgCheckout := `
+package "checkout" {
+  import "../billing" {}
+  import "../postgres" {
+    inputs = {
+      databases = { checkout = "checkout_db" }
+    }
+  }
+  component "api" {
+    service "go" "checkout" {
+      git { url = "github.com/x/checkout" }
+      vars = { db_port = package.postgres.outputs.port }
+    }
+  }
+}
+`
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `
+import "./postgres" "pg14" {
+  inputs = {
+    port      = 5414
+    databases = { core = "core_db" }
+  }
+}
+import "./postgres" "pg16" {
+  inputs = {
+    port = 5416
+  }
+}
+import "./checkout" {
+  packages = {
+    postgres           = package.pg16
+    "billing/postgres" = package.pg14
+  }
+}
+`,
+		"postgres/Alphasfile": pkgPG,
+		"billing/Alphasfile":  pkgBilling,
+		"checkout/Alphasfile": pkgCheckout,
+	})
+	af := openTree(t, root)
+	if got := serviceNames(af); !equalStrs(got, []string{"pg14/db/pg", "pg16/db/pg", "checkout/api/checkout", "billing/api/billing"}) {
+		t.Fatalf("services = %v", got)
+	}
+	if got := fmt.Sprint(svcByName(af, "billing/api/billing").Runtime.Vars["db_port"]); got != "5414" {
+		t.Errorf("billing db_port = %s, want 5414", got)
+	}
+	if got := fmt.Sprint(svcByName(af, "checkout/api/checkout").Runtime.Vars["db_port"]); got != "5416" {
+		t.Errorf("checkout db_port = %s, want 5416", got)
+	}
+	dbs14 := fmt.Sprint(svcByName(af, "pg14/db/pg").Runtime.Vars["dbs"])
+	if !strings.Contains(dbs14, `"core": "core_db"`) || !strings.Contains(dbs14, `"billing": "billing_db"`) {
+		t.Errorf("pg14 dbs = %s", dbs14)
+	}
+	dbs16 := fmt.Sprint(svcByName(af, "pg16/db/pg").Runtime.Vars["dbs"])
+	if !strings.Contains(dbs16, `"checkout": "checkout_db"`) {
+		t.Errorf("pg16 dbs = %s", dbs16)
+	}
+}
+
+func TestOpen_packageScopedInjection(t *testing.T) {
+	pkgPG := `
+package "postgres" {
+  features = {
+    tls = { description = "Enable TLS." }
+  }
+  inputs = {
+    port = {
+      description = "Port to listen on."
+      type        = number
+      default     = 5432
+    }
+    databases = {
+      description = "Databases to provision."
+      type        = map(string)
+      default     = {}
+    }
+  }
+  outputs = {
+    port = {
+      description = "Bound port."
+      type        = number
+      value       = inputs.port
+    }
+  }
+  component "db" {
+    service "go" "pg" {
+      git { url = "github.com/x/pg" }
+      vars = {
+        port = inputs.port
+        dbs  = enc::json(inputs.databases)
+        tls  = features.tls
+      }
+    }
+  }
+}
+`
+	pkgBilling := `
+package "billing" {
+  import "../postgres" {
+    inputs = {
+      port      = 5432
+      databases = { billing = "billing_db" }
+    }
+  }
+  component "api" {
+    service "go" "billing" {
+      git { url = "github.com/x/billing" }
+      vars = { db_port = package.postgres.outputs.port }
+    }
+  }
+}
+`
+	pkgCheckout := `
+package "checkout" {
+  import "../billing" {}
+  import "../postgres" {
+    inputs = {
+      port      = 5430
+      databases = { checkout = "checkout_db" }
+    }
+  }
+  component "api" {
+    service "go" "checkout" {
+      git { url = "github.com/x/checkout" }
+      vars = { db_port = package.postgres.outputs.port }
+    }
+  }
+}
+`
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `
+import "./checkout" {
+  packages = {
+    "billing/postgres" = {
+      features = ["tls"]
+      inputs = {
+        port      = 5433
+        databases = { audit = "audit_db" }
+      }
+    }
+  }
+}
+`,
+		"postgres/Alphasfile": pkgPG,
+		"billing/Alphasfile":  pkgBilling,
+		"checkout/Alphasfile": pkgCheckout,
+	})
+	af := openTree(t, root)
+	if got := serviceNames(af); !equalStrs(got, []string{"checkout/api/checkout", "billing/api/billing", "billing/postgres/db/pg", "postgres/db/pg"}) {
+		t.Fatalf("services = %v", got)
+	}
+	billingPG := svcByName(af, "billing/postgres/db/pg").Runtime.Vars
+	if fmt.Sprint(billingPG["port"]) != "5433" || billingPG["tls"] != true {
+		t.Errorf("billing/postgres vars = %v", billingPG)
+	}
+	billingDBs := fmt.Sprint(billingPG["dbs"])
+	if !strings.Contains(billingDBs, `"billing": "billing_db"`) || !strings.Contains(billingDBs, `"audit": "audit_db"`) {
+		t.Errorf("billing/postgres dbs = %s", billingDBs)
+	}
+	sharedPG := svcByName(af, "postgres/db/pg").Runtime.Vars
+	if fmt.Sprint(sharedPG["port"]) != "5430" || sharedPG["tls"] != false {
+		t.Errorf("shared postgres vars = %v", sharedPG)
+	}
+}
+
+func TestLoadTree_packageRulesErrors(t *testing.T) {
+	cases := map[string]struct {
+		entry string
+		want  string
+	}{
+		"not an object": {
+			entry: `import "./app" { packages = "bad" }`,
+			want:  `packages must be an object`,
+		},
+		"invalid key": {
+			entry: `import "./app" { packages = { "bad key" = package.db } }`,
+			want:  `packages key must be a package name or path`,
+		},
+		"unknown target package": {
+			entry: `import "./app" { packages = { db = package.missing } }`,
+			want:  `package.missing is not imported in this scope`,
+		},
+		"unmatched key": {
+			entry: "import \"./db\" {}\nimport \"./app\" { packages = { other = package.db } }",
+			want:  `packages["other"] does not match any package imported by app`,
+		},
+		"unknown setting field": {
+			entry: `import "./app" { packages = { db = { unknown = 1 } } }`,
+			want:  `packages["db"] takes features and inputs only`,
+		},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			root := writeTree(t, t.TempDir(), map[string]string{
+				"Alphasfile":     c.entry + "\n",
+				"db/Alphasfile":  `package "db" {}`,
+				"app/Alphasfile": "package \"app\" {\n  import \"../db\" {}\n}\n",
+			})
+			if _, err := LoadTree(root); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("want %q, got %v", c.want, err)
+			}
+		})
 	}
 }
 

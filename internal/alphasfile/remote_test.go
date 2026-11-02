@@ -1,6 +1,7 @@
 package alphasfile
 
 import (
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -247,11 +248,10 @@ func TestLoadTreeWith_fileRequireUnderZordonMod(t *testing.T) {
 
 func TestLoadTreeWith_requireErrors(t *testing.T) {
 	cases := map[string]struct{ body, want string }{
-		"subdirectory": {`require "github.com/acme/infra/pkgs" { ref = "main" }`, `name the repository alone, such as "github.com/acme/infra"`},
-		"version":      {`require "github.com/acme/infra@v1" { ref = "main" }`, `name the repository alone`},
-		"empty ref":    {`require "github.com/acme/infra" { ref = "" }`, "ref names a branch, tag or commit and cannot be empty"},
-		"repeated":     {"require \"github.com/acme/infra\" { ref = \"a\" }\nrequire \"github.com/acme/infra\" { ref = \"b\" }", "repeats the require at"},
-		"no ref":       {`require "github.com/acme/infra" {}`, `The argument "ref" is required`},
+		"version":   {`require "github.com/acme/infra@v1" { ref = "main" }`, `name the repository alone`},
+		"empty ref": {`require "github.com/acme/infra" { ref = "" }`, "ref names a branch, tag or commit and cannot be empty"},
+		"repeated":  {"require \"github.com/acme/infra\" { ref = \"a\" }\nrequire \"github.com/acme/infra\" { ref = \"b\" }", "repeats the require at"},
+		"no ref":    {`require "github.com/acme/infra" {}`, `The argument "ref" is required`},
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
@@ -261,6 +261,71 @@ func TestLoadTreeWith_requireErrors(t *testing.T) {
 				t.Fatalf("want %q, got %v", c.want, err)
 			}
 		})
+	}
+}
+
+func TestLoadTreeWith_subpathRequireLongestPrefix(t *testing.T) {
+	infra, v1 := infraRepo(t)
+	v2 := commitFile(t, infra, "pkgs/web/Alphasfile", strings.Replace(pkgWeb, "8080", "9090", 1))
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{
+		"Alphasfile": `
+require "github.com/acme/infra" { ref = "` + v1 + `" }
+require "github.com/acme/infra/pkgs/web" { ref = "` + v2 + `" }
+import "github.com/acme/infra/pkgs/web" {}
+import "github.com/acme/infra/pkgs/db" {}
+`,
+	})
+	tree, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	af := resolveTree(t, tree)
+	if got := fmt.Sprint(svcByName(af, "web/web/web").Runtime.Vars["port"]); got != "9090" {
+		t.Errorf("web port = %s, want 9090 (from subpath require)", got)
+	}
+	if svcByName(af, "db/db/db") == nil {
+		t.Errorf("db service missing, services = %v", serviceNames(af))
+	}
+}
+
+func TestLoadTreeWith_subpackagePinnedToDifferentVersion(t *testing.T) {
+	infra, v1 := infraRepo(t)
+	v2 := commitFile(t, infra, "pkgs/web/Alphasfile", strings.Replace(pkgWeb, "8080", "9090", 1))
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{
+		"Alphasfile": `
+require "github.com/acme/infra/pkgs/web" { ref = "` + v2 + `" }
+import "github.com/acme/infra/pkgs/web" {}
+import "./billing" {}
+`,
+		"billing/Alphasfile": `
+package "billing" {
+  require "github.com/acme/infra/pkgs/web" { ref = "` + v1 + `" }
+  import "github.com/acme/infra/pkgs/web" {}
+
+  component "api" {
+    service "go" "api" {
+      git { url = "github.com/x/api" }
+      vars = { web_port = package.web.component.web.service.go.web.vars.port }
+    }
+  }
+}
+`,
+	})
+	tree, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	af := resolveTree(t, tree)
+	if got := fmt.Sprint(svcByName(af, "web/web/web").Runtime.Vars["port"]); got != "9090" {
+		t.Errorf("entry web port = %s, want 9090", got)
+	}
+	if got := fmt.Sprint(svcByName(af, "billing/web/web/web").Runtime.Vars["port"]); got != "8080" {
+		t.Errorf("billing/web port = %s, want 8080", got)
+	}
+	if got := fmt.Sprint(svcByName(af, "billing/api/api").Runtime.Vars["web_port"]); got != "8080" {
+		t.Errorf("billing api web_port = %s, want 8080", got)
 	}
 }
 

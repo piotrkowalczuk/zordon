@@ -102,7 +102,7 @@ func nodeID(svcID string, kind nodeKind, name string) string {
 // is a node too, which inputs.<n> in the package depends on, and so is
 // every value an import passes to it, which the input depends on. So is
 // every package output, which package.<p>.outputs.<n> depends on.
-func newGraph(services []*serviceBlock, vals *graphValues, parentKnown map[string]struct{}) (*graph, error) {
+func newGraph(services []*serviceBlock, vals *graphValues, tree *Tree, parentKnown map[string]struct{}) (*graph, error) {
 	g := &graph{
 		byID: map[string]*node{},
 		deps: map[string]map[string]struct{}{},
@@ -188,13 +188,13 @@ func newGraph(services []*serviceBlock, vals *graphValues, parentKnown map[strin
 					}
 					continue
 				}
-				if id, ok := outputNodeFromTrav(trav); ok {
+				if id, ok := outputNodeFromTrav(trav, n.scope, tree); ok {
 					if _, local := g.byID[id]; local && id != n.id {
 						g.deps[n.id][id] = struct{}{}
 					}
 					continue
 				}
-				_, depID, ok := producerNodeFromTrav(trav, n.svcID, n.scope)
+				_, depID, ok := producerNodeFromTrav(trav, n.svcID, n.scope, tree)
 				if !ok {
 					continue
 				}
@@ -215,7 +215,7 @@ func newGraph(services []*serviceBlock, vals *graphValues, parentKnown map[strin
 }
 
 // outputNodeFromTrav maps `package.<p>.outputs.<n>...` to its output node.
-func outputNodeFromTrav(t hcl.Traversal) (string, bool) {
+func outputNodeFromTrav(t hcl.Traversal, selfModule string, tree *Tree) (string, bool) {
 	if t.RootName() != "package" || len(t) < 4 {
 		return "", false
 	}
@@ -225,6 +225,7 @@ func outputNodeFromTrav(t hcl.Traversal) (string, bool) {
 	if !ok0 || !ok1 || !ok2 || kw != "outputs" {
 		return "", false
 	}
+	pkg = tree.resolvePackageRef(selfModule, pkg)
 	return (&output{pkg: pkg, name: name}).id(), true
 }
 
@@ -235,7 +236,7 @@ func outputNodeFromTrav(t hcl.Traversal) (string, bool) {
 // node id. Static traversals (barrier states under runtime/build, scalar
 // self.{name,toolchain,dir}, parent toolchain refs) and non-service roots
 // (fs::, cfg::, the `never` keyword, …) produce no edge.
-func producerNodeFromTrav(t hcl.Traversal, selfSvcID, selfModule string) (svc, id string, ok bool) {
+func producerNodeFromTrav(t hcl.Traversal, selfSvcID, selfModule string, tree *Tree) (svc, id string, ok bool) {
 	if len(t) < 2 {
 		return "", "", false
 	}
@@ -285,6 +286,7 @@ func producerNodeFromTrav(t hcl.Traversal, selfSvcID, selfModule string) (svc, i
 		if !ok0 || !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || kwm != "component" || kws != "service" {
 			return "", "", false
 		}
+		pkg = tree.resolvePackageRef(selfModule, pkg)
 		svc = ServiceRef(pkg+"/"+mod, tc, nm)
 		rest = t[7:]
 	default:

@@ -62,6 +62,19 @@ func TestServiceRef_package(t *testing.T) {
 	if m, n := SplitDisplayName(DisplayName("caddy/edge", "caddy")); m != "caddy/edge" || n != "caddy" {
 		t.Errorf("display round trip = (%q,%q)", m, n)
 	}
+	nested := ServiceRef("billing/postgres/db", "go", "pg")
+	if nested != "package.billing.package.postgres.component.db.service.go.pg" {
+		t.Fatalf("nested ServiceRef = %q", nested)
+	}
+	if m, tc, n, r, ok := ParseServiceRef(nested + ".runtime@ready"); !ok || m != "billing/postgres/db" || tc != "go" || n != "pg" || r != "runtime" {
+		t.Errorf("nested ParseServiceRef = (%q,%q,%q,%q,%v)", m, tc, n, r, ok)
+	}
+	if p, c, ok := SplitPackageModule("billing/postgres/db"); !ok || p != "billing/postgres" || c != "db" {
+		t.Errorf("SplitPackageModule = (%q,%q,%v)", p, c, ok)
+	}
+	if got := ShortName("billing/postgres/postgres", "pg"); got != "billing/postgres/pg" {
+		t.Errorf("ShortName = %q", got)
+	}
 }
 
 func TestToolchainRef_package(t *testing.T) {

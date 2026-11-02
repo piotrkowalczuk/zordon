@@ -27,8 +27,8 @@ func ServiceRef(module, toolchain, name string) string {
 // modulePath is the HCL path of a module id: component.<c>, or
 // package.<p>.component.<c> for a package's module.
 func modulePath(module string) string {
-	if p, m, ok := strings.Cut(module, "/"); ok {
-		return "package." + p + ".component." + m
+	if p, m, ok := SplitPackageModule(module); ok {
+		return "package." + strings.ReplaceAll(p, "/", ".package.") + ".component." + m
 	}
 	return "component." + module
 }
@@ -41,11 +41,17 @@ func parseModulePath(id string) (module, rest string, ok bool) {
 		if !found || p == "" {
 			return "", "", false
 		}
+		pkgs := strings.Split(p, ".package.")
+		for _, seg := range pkgs {
+			if seg == "" || strings.Contains(seg, ".") {
+				return "", "", false
+			}
+		}
 		m, rest, found := strings.Cut(after, ".")
 		if !found || m == "" {
 			return "", "", false
 		}
-		return p + "/" + m, rest, true
+		return strings.Join(pkgs, "/") + "/" + m, rest, true
 	}
 	if after, found := strings.CutPrefix(id, "component."); found {
 		m, rest, found := strings.Cut(after, ".")
@@ -104,16 +110,32 @@ func DisplayName(module, name string) string {
 // is named like the package: <p>/<svc> for <p>/<p>/<svc>. Package and
 // module names are unique across the stack, so it names one service.
 func ShortName(module, name string) string {
-	if p, m, ok := strings.Cut(module, "/"); ok && p == m {
-		return p + "/" + name
+	if p, m, ok := SplitPackageModule(module); ok {
+		last := p
+		if i := strings.LastIndexByte(p, '/'); i >= 0 {
+			last = p[i+1:]
+		}
+		if m == last {
+			return p + "/" + name
+		}
 	}
 	return DisplayName(module, name)
 }
 
-// PackageOf returns the package a module id belongs to: the part before '/'
-// of <package>/<module>.
+// SplitPackageModule splits a package module id ("<pkg>/<comp>" or
+// "<parent>/<pkg>/<comp>") into its package path and component name.
+func SplitPackageModule(module string) (pkg, comp string, ok bool) {
+	i := strings.LastIndexByte(module, '/')
+	if i <= 0 || i == len(module)-1 {
+		return "", "", false
+	}
+	return module[:i], module[i+1:], true
+}
+
+// PackageOf returns the package a module id belongs to: the part before the
+// last '/' of <package>/<module>.
 func PackageOf(module string) (string, bool) {
-	p, _, ok := strings.Cut(module, "/")
+	p, _, ok := SplitPackageModule(module)
 	return p, ok
 }
 
