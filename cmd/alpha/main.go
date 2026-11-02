@@ -2712,17 +2712,18 @@ func waitAfter(b *bringup, sc *serviceCtx, refs []string) bool {
 }
 
 // primaryKeyOf returns the cross-service-shareable key for a primary
-// (so monorepo services lock on the same string). Empty for services
-// without a workspaceable primary (crate / install).
+// (so monorepo services lock on the same string), chosen as NewPrimary
+// chooses: a present checkout before the git source it stands in for.
+// Empty for services without a workspaceable primary (crate / install).
 func primaryKeyOf(svc *alphasfile.Service) string {
 	if svc.Package == nil {
 		return ""
 	}
 	switch {
-	case svc.Package.Git != "":
-		return "git:" + svc.Package.Git
 	case svc.Package.Src != "":
 		return "src:" + svc.Package.Src
+	case svc.Package.Git != "":
+		return "git:" + svc.Package.Git
 	}
 	return ""
 }

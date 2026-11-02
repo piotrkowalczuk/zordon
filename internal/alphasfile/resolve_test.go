@@ -215,6 +215,18 @@ func TestResolveSrcPathWithGit_fallsBackToGit(t *testing.T) {
 	}
 }
 
+func TestResolveSrcPathWithGit_emptyURL(t *testing.T) {
+	_, err := Compile("t", []byte(`
+service "go" "x" {
+  git { url = " " }
+  src { path = "`+t.TempDir()+`" }
+}
+`), testInv(), nil, testCfgHash, TestConfig{})
+	if err == nil || !strings.Contains(err.Error(), "git{} requires url") {
+		t.Fatalf("want the empty url refused, got %v", err)
+	}
+}
+
 func srcWithGit(path string) string {
 	return `
 service "go" "x" {

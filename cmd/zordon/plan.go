@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -433,7 +434,7 @@ func renderSource(sb *hclwrite.Body, pkg *alphasfile.Package) {
 		if pkg.Rev != "" {
 			gb.SetAttributeValue("rev", cty.StringVal(pkg.Rev))
 		}
-		if path := pkg.Src + pkg.SrcMissing; pkg.Exe != "" || path != "" {
+		if path := cmp.Or(pkg.Src, pkg.SrcMissing); pkg.Exe != "" || path != "" {
 			srb := sb.AppendNewBlock("src", nil).Body()
 			if path != "" {
 				srb.SetAttributeValue("path", cty.StringVal(path))

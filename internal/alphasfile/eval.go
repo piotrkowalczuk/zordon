@@ -614,7 +614,7 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 		checkout := ""
 		var gitURL, srcPath, srcExeFromSB string
 		if sb.Git != nil {
-			gitURL = sb.Git.URL
+			gitURL = strings.TrimSpace(sb.Git.URL)
 		}
 		if sb.Src != nil {
 			// Empty srcDirs: src{path} is the input that *defines* the
@@ -1262,7 +1262,9 @@ func (r *resolver) finishService(st *svcState) error {
 
 	// Modes: use-only (install), remote-workspace (git block), or
 	// local-workspace (src{path}). git+src{exe} (no path) is allowed:
-	// src carries only the build subdir inside the cloned remote.
+	// src carries only the build subdir inside the cloned remote. So is
+	// git+src{path}: the checkout while it is there, git while it is not
+	// (prepareServices has already emptied st.srcPath in that case).
 	var srcGitURL, srcLocalPath, srcBranch, srcTag, srcRev, srcExe string
 	if sb.Git != nil {
 		srcGitURL = strings.TrimSpace(sb.Git.URL)
@@ -1275,6 +1277,8 @@ func (r *resolver) finishService(st *svcState) error {
 		srcExe = sb.Src.Exe
 	}
 	switch {
+	case sb.Git != nil && srcGitURL == "":
+		return fmt.Errorf("service %q: git{} requires url", sb.Name)
 	case sb.Src != nil && sb.Git == nil && srcLocalPath == "":
 		return fmt.Errorf("service %q: src{} without path requires a sibling git{} block", sb.Name)
 	case install != "" && (srcGitURL != "" || srcLocalPath != "" || (sb.Src != nil && srcExe != "")):

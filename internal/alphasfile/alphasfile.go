@@ -116,9 +116,10 @@ type RuntimeConfig struct {
 }
 
 // Package is the unified, toolchain-tagged source/build manifest. A
-// service's primary is exactly one of: Git (zordon-owned bare clone or
-// user-owned local checkout via Src), or Install (rust crate from a
-// registry / go module). Build overrides the per-toolchain default.
+// service's primary is Git (a zordon-owned bare clone), Src (a user-owned
+// local checkout), both (the checkout while it is there, git while it is
+// not; SrcMissing says which), or Install (rust crate from a registry /
+// go module). Build overrides the per-toolchain default.
 type Package struct {
 	Toolchain string `json:"toolchain"` // go|rust|ruby
 	Git       string `json:"git,omitempty"`
@@ -149,8 +150,9 @@ type Package struct {
 	BuildCmd  []string   `json:"build_cmd,omitempty"` // explicit build argv (from build{cmd}); empty ⇒ toolchain default
 	Cmd       string     `json:"cmd,omitempty"`       // Explicit execution argv if needed
 	Workspace *Workspace `json:"workspace,omitempty"`
-	// InPlace: src-only in the "main" workspace — build/run from src as-is,
-	// no git worktree add, no HEAD reset (the edit→start loop).
+	// InPlace: a present src{path} in the "main" workspace, with or without
+	// git{} beside it — build/run from src as-is, no git worktree add, no
+	// HEAD reset (the edit→start loop).
 	InPlace bool `json:"in_place,omitempty"`
 	// Editable: this (workspace, service) was picked at `workspace create` /
 	// `workspace service add`, so it gets its own editable git worktree on a
@@ -288,7 +290,7 @@ func ParseServicesWith(path string, opts LoadOptions) ([]*ServiceMeta, error) {
 			return nil, fmt.Errorf("service %q: crate {} cannot coexist with src{path}/git", sb.Name)
 		}
 		if sb.Git != nil {
-			pkg.Git = sb.Git.URL
+			pkg.Git = strings.TrimSpace(sb.Git.URL)
 			pkg.Branch = sb.Git.Branch
 			pkg.Tag = sb.Git.Tag
 			pkg.Rev = sb.Git.Rev
@@ -1022,9 +1024,10 @@ type gitBlock struct {
 
 // srcBlock describes the local view of the source. Standalone (no
 // sibling `git { }`) it IS the source — `path` is the local checkout
-// zordon uses in place. Alongside `git { }` it carries only `exe`,
-// the subdir within the cloned workspace to build. `path` is therefore
-// optional, but at least one of `path`/`exe` must be set.
+// zordon uses in place. Alongside `git { }`, `path` names the checkout
+// to prefer while it is there (git stands in while it is not) and `exe`
+// the subdir to build within either. `path` is therefore optional, but
+// at least one of `path`/`exe` must be set.
 //
 // `path` is an interpolated expression so it can derive the checkout
 // location from the host environment, e.g.

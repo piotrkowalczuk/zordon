@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -144,6 +145,22 @@ func TestReportServices_checkout(t *testing.T) {
 	got := reportServices(t.Context(), lv)
 
 	assertStatusServices(t, got, []StatusService{{Name: "shop/api", State: ServiceStopped, CheckoutPath: repo, Branch: "feature", SourceDir: repo + "/shop/api"}})
+}
+
+func TestCheckoutStatus_srcMissing(t *testing.T) {
+	ztest.AssertSystem(t)
+	repo := t.TempDir()
+	gitIn(t, repo, "init", "-q", "-b", "main")
+	gitIn(t, repo, "-c", "user.email=a@b", "-c", "user.name=z", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init")
+	svc := reportTestService("ui", "")
+	svc.Runtime.Checkout = repo
+	svc.Package = &alphasfile.Package{Toolchain: "go", Git: "github.com/acme/ui", SrcMissing: "/checkouts/ui"}
+
+	got := checkoutStatus(t.Context(), svc, invocation.MainWorkspace)
+
+	if want := "; src /checkouts/ui missing)"; !strings.HasPrefix(got, "checkout: ") || !strings.HasSuffix(got, want) {
+		t.Fatalf("checkoutStatus() = %q, want it to end with %q", got, want)
+	}
 }
 
 func TestStatusReport_logfmt(t *testing.T) {

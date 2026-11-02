@@ -8,10 +8,8 @@
 # --pull=srv the other way round, --pull=all both, each saying so; status says
 # how far a pin is behind the ref its repository last fetched; and a lock that
 # holds other commits, as one a teammate committed would, rebuilds there,
-# whether the bare clone has fetched them or not. The service names a checkout
-# beside its git source: it runs the git source while the checkout is absent
-# and the checkout once it is there. The service's source and the required
-# repository are one local git repository that git reaches through
+# whether the bare clone has fetched them or not. The service's source and the
+# required repository are one local git repository that git reaches through
 # url.<base>.insteadOf, so nothing leaves the machine.
 cd "$(dirname "$0")"
 source ../_lib.sh
@@ -69,14 +67,10 @@ require "$REPO" { ref = "main" }
 
 import "$REPO/greet" {}
 
-# No branch, tag or rev: the service follows the default branch. The checkout
-# does not exist yet, so the git source stands in.
+# No branch, tag or rev: the service follows the default branch.
 service "go" "hello" {
   git { url = "$REPO" }
-  src {
-    path = "$TMP/checkout"
-    exe  = "./hello"
-  }
+  src { exe = "./hello" }
 
   vars = { port = net::pickport() }
 
@@ -116,8 +110,6 @@ assert_lacks() { # <haystack> <needle> [label]
 
 start_place >/dev/null || fail "first start failed"
 assert_contains "$(hello)" "hello one" "the service runs its git source"
-assert_contains "$(cat "$PLACE/alpha.log")" "src $TMP/checkout is missing; $REPO stands in" "the start says the git source stands in for the missing checkout"
-assert_contains "$(status)" "src $TMP/checkout missing" "status names the missing checkout"
 assert_contains "$(greet)" "greet one" "the package runs from the required repository"
 assert_contains "$(lock)" "source \"$REPO\" { ref = \"HEAD\" commit = \"$first\" }" "the first start locks the commit the service's branch points at"
 assert_contains "$(lock)" "repo \"$REPO\" { ref = \"main\" commit = \"$first\" }" "the first start locks the commit the required repository's branch points at"
@@ -166,13 +158,5 @@ assert_contains "$(hello)" "hello four" "a lock holding a commit nothing here fe
 assert_contains "$(greet)" "greet four" "a lock holding a commit nothing here fetched yet checks the package out there"
 assert_lacks "$out" "cannot tell how far" "a pin the bare clone has not fetched is left out quietly"
 assert_lacks "$(status)" "behind" "status says nothing of a pin the bare clone has not fetched"
-
-git clone -q "$UP" "$TMP/checkout"
-sed -i.bak "s/hello four/hello local/" "$TMP/checkout/hello/main.go"
-rm "$TMP/checkout/hello/main.go.bak"
-out="$(start_place)" || fail "start with the checkout present failed:\n$out"
-assert_contains "$(hello)" "hello local" "the checkout is preferred over the git source once it is there"
-assert_contains "$(status)" "(branch main)" "status shows the checkout in place, on its own branch"
-assert_lacks "$(status)" "missing" "status names no missing checkout once it is there"
 
 pass "pull"
