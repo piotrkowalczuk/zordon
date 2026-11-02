@@ -433,10 +433,10 @@ func renderSource(sb *hclwrite.Body, pkg *alphasfile.Package) {
 		if pkg.Rev != "" {
 			gb.SetAttributeValue("rev", cty.StringVal(pkg.Rev))
 		}
-		if pkg.Exe != "" || pkg.Src != "" {
+		if path := pkg.Src + pkg.SrcMissing; pkg.Exe != "" || path != "" {
 			srb := sb.AppendNewBlock("src", nil).Body()
-			if pkg.Src != "" {
-				srb.SetAttributeValue("path", cty.StringVal(pkg.Src))
+			if path != "" {
+				srb.SetAttributeValue("path", cty.StringVal(path))
 			}
 			if pkg.Exe != "" {
 				srb.SetAttributeValue("exe", cty.StringVal(pkg.Exe))

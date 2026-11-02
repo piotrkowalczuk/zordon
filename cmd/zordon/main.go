@@ -909,15 +909,22 @@ func runStatus(ctx context.Context, log *zlog.Logger, out io.Writer, zordonHome 
 // with no source checkout (use-only / pkg) or whose checkout isn't a git tree.
 func checkoutStatus(ctx context.Context, s *alphasfile.Service, workspace string) string {
 	co, ok := checkoutOf(ctx, s, workspace)
-	switch {
-	case !ok:
+	if !ok {
 		return ""
-	case co.Ref == "":
-		return fmt.Sprintf("checkout: %s (detached @ %s)", co.Path, co.SHA)
-	case co.isDrifted():
-		return fmt.Sprintf("checkout: %s (branch %s ⚠ not %s — building your branch)", co.Path, co.Ref, co.Want)
 	}
-	return fmt.Sprintf("checkout: %s (branch %s)", co.Path, co.Ref)
+	var where string
+	switch {
+	case co.Ref == "":
+		where = "detached @ " + co.SHA
+	case co.isDrifted():
+		where = fmt.Sprintf("branch %s ⚠ not %s — building your branch", co.Ref, co.Want)
+	default:
+		where = "branch " + co.Ref
+	}
+	if s.Package.SrcMissing != "" {
+		where += "; src " + s.Package.SrcMissing + " missing"
+	}
+	return fmt.Sprintf("checkout: %s (%s)", co.Path, where)
 }
 
 // checkout is where a service's source sits and which revision it is on.

@@ -22,6 +22,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
 
 const (
@@ -122,9 +123,12 @@ type Package struct {
 	Toolchain string `json:"toolchain"` // go|rust|ruby
 	Git       string `json:"git,omitempty"`
 	Src       string `json:"src,omitempty"` // Relates to the local checkout path
-	Branch    string `json:"branch,omitempty"`
-	Tag       string `json:"tag,omitempty"`
-	Rev       string `json:"rev,omitempty"`
+	// SrcMissing is the src{path} that was not there when git{} stood in
+	// for it; empty otherwise.
+	SrcMissing string `json:"src_missing,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	Tag        string `json:"tag,omitempty"`
+	Rev        string `json:"rev,omitempty"`
 	// Locked is the commit zordon.lock holds for a git source that follows
 	// a branch, or the default branch when it names none. A checkout that
 	// was not picked is cloned at it rather than at the moving ref, so the
@@ -283,9 +287,6 @@ func ParseServicesWith(path string, opts LoadOptions) ([]*ServiceMeta, error) {
 		if sb.Crate != nil && (sb.Git != nil || srcPath != "") {
 			return nil, fmt.Errorf("service %q: crate {} cannot coexist with src{path}/git", sb.Name)
 		}
-		if sb.Git != nil && srcPath != "" {
-			return nil, fmt.Errorf("service %q: src{path} and git{} are mutually exclusive (src can only carry exe alongside git)", sb.Name)
-		}
 		if sb.Git != nil {
 			pkg.Git = sb.Git.URL
 			pkg.Branch = sb.Git.Branch
@@ -295,6 +296,9 @@ func ParseServicesWith(path string, opts LoadOptions) ([]*ServiceMeta, error) {
 		if sb.Src != nil {
 			pkg.Src = resolveSrcDir(base, srcPath)
 			pkg.Exe = sb.Src.Exe
+			if pkg.Git != "" && pkg.Src != "" && !zfs.Exists(pkg.Src) {
+				pkg.SrcMissing, pkg.Src = pkg.Src, ""
+			}
 		}
 		if sb.Crate != nil {
 			pkg.Install = strings.TrimSpace(sb.Crate.Name)

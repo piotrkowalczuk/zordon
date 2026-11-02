@@ -3703,6 +3703,9 @@ func prepareWorkspace(ctx context.Context, svc *alphasfile.Service, name, wsName
 		// (editable) service earns a real worktree on zordon/<ws>/<svc>.
 		// A source that follows a branch is cloned at the commit zordon.lock
 		// holds for it, so its code moves only when the lock does.
+		if svc.Package.SrcMissing != "" {
+			log.Info("alpha", "prepare %s: src %s is missing; %s stands in", name, svc.Package.SrcMissing, svc.Package.Git)
+		}
 		if !svc.Package.Editable {
 			ref := cmp.Or(svc.Package.Locked, svc.Ref())
 			log.Info("alpha", "prepare %s: clone -> %s @ %s (third-party, no worktree)", name, checkout, ref)
