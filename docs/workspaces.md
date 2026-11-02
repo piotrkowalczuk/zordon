@@ -61,6 +61,7 @@ Picking a service is what declares "I intend to edit this here":
 | local `src {}`, **not** picked | built from the live source tree in place — your uncommitted edits just work | — |
 | local `src {}` or `git {}`, **picked** | its own `git worktree` at `workspaces/<name>/src/<svc>`, so your IDE lists it and edits stay isolated | from `workspace { branch }`, by default `zordon/<name>/<svc>` |
 | `git {}`, **not** picked | third-party code: a plain `git clone` checked out at its ref — no branch, no worktree registration | — |
+| `src {}` beside `git {}` | the `src {}` rows while the checkout is there, the `git {}` rows while it is not; `zordon status` names the missing path | as above |
 | no source (`install` / `pkg`) | a prebuilt binary / mise package — nothing is checked out | — |
 
 The distinction that matters: an **unpicked** git-source service is third-party code you only run, so it is cloned, not worktree'd.

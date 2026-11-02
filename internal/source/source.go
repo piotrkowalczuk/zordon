@@ -50,27 +50,26 @@ type Workspace struct {
 	Sparse []string
 }
 
-// NewPrimary builds a Primary from a service's git/dir/ref fields. git and
-// dir are mutually exclusive; both empty ⇒ KindNone (not workspaceable).
+// NewPrimary builds a Primary from a service's git/dir/ref fields. dir wins
+// over git, as a service's local checkout does over the git source it falls
+// back to; both empty ⇒ KindNone (not workspaceable).
 // zordonHome is the resolved host-wide state root (caller's --home /
 // ZORDON_HOME, defaulted to ~/.zordon at startup) used for bare-clone
 // paths; pass "" only when no git primary is involved.
 func NewPrimary(zordonHome, git, dir, ref string, workspace *Workspace) (Primary, error) {
 	switch {
-	case git != "" && dir != "":
-		return Primary{}, errors.New("service declares both git and dir; pick one primary")
-	case git != "":
-		repo, err := normalizeGit(git)
-		if err != nil {
-			return Primary{}, err
-		}
-		return Primary{Kind: KindGit, Repo: repo, Ref: ref, Workspace: workspace, zordonHome: zordonHome}, nil
 	case dir != "":
 		abs, err := expandAbs(dir)
 		if err != nil {
 			return Primary{}, err
 		}
 		return Primary{Kind: KindDir, Repo: abs, Ref: ref, Workspace: workspace, zordonHome: zordonHome}, nil
+	case git != "":
+		repo, err := normalizeGit(git)
+		if err != nil {
+			return Primary{}, err
+		}
+		return Primary{Kind: KindGit, Repo: repo, Ref: ref, Workspace: workspace, zordonHome: zordonHome}, nil
 	default:
 		return Primary{Kind: KindNone, Ref: ref, Workspace: workspace, zordonHome: zordonHome}, nil
 	}

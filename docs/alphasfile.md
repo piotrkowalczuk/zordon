@@ -426,7 +426,7 @@ See [zordon.work, zordon.mod and zordon.lock](reference/files.md) for the three 
 
 ### Source: `git { }`, `src { }`, `crate { }`
 
-A service picks exactly one primary. The rest comes from toolchain
+A service picks one primary, and `src { path }` may name a checkout to prefer over its `git { }`. The rest comes from toolchain
 defaults — keep the manifest small.
 
 - **`git { url = "host/owner/repo" }`** — remote source. zordon
@@ -441,6 +441,10 @@ defaults — keep the manifest small.
   `src { path = "${os::env("MONOREPO")}/services/api" }`. Outside a live
   invocation (`zordon workspace`) only host-level helpers like `os::env`
   are available; `fs::`/`cfg::`/`self.*` need a running instance.
+- **`src { path = "/path" }` beside `git { url = "..." }`** — the checkout when it is there, the git source when it is not.
+  A committed file can name the checkout a developer may have without making every machine need it.
+  The git source is locked either way, so `zordon.lock` reads the same with or without the checkout.
+  `zordon start` logs when git stands in, and `zordon status` names the missing path next to the checkout it used.
 - **`src { exe = "..." }`** — the build target subdir (Go: the main
   package), relative to the source root. Default `.`. Can ride
   alongside `git { }` (subdir within the cloned workspace) **or**

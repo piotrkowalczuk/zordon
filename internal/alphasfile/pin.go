@@ -21,9 +21,10 @@ type LockPin struct {
 // ref, locking the commit the ref points at now when the lock holds none. With
 // pull it moves each of them to the newest commit instead. Services that build
 // from one repository and ref share its pin, so they never run different
-// commits of it. Picked and in-place checkouts are the developer's and are
-// left alone. It returns the lock entries it added or moved, and every pin it
-// set.
+// commits of it. A picked checkout is the developer's and is left alone; a
+// service running its local checkout keeps the git source it would fall back
+// to pinned, so the lock reads the same on a machine without the checkout. It
+// returns the lock entries it added or moved, and every pin it set.
 func PinSources(af *Alphasfile, opts LoadOptions, pull bool) ([]LockChange, []LockPin, error) {
 	release, err := lockPins(opts)
 	if err != nil {
@@ -38,7 +39,7 @@ func PinSources(af *Alphasfile, opts LoadOptions, pull bool) ([]LockChange, []Lo
 	pinned := map[sourceKey]string{}
 	for _, svc := range af.All() {
 		p := svc.Package
-		if p == nil || !p.FollowsBranch() || p.Editable || p.InPlace {
+		if p == nil || !p.FollowsBranch() || p.Editable {
 			continue
 		}
 		prim, err := source.NewPrimary(opts.Home, p.Git, "", "", nil)

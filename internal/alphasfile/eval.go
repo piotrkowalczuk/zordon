@@ -555,6 +555,8 @@ type svcState struct {
 	envMap   map[string]any
 	dirs     srcDirs // source locations the fs:: functions return for this service
 	srcPath  string  // evaluated src{path} (local checkout); empty when no src{path}
+	// srcMissing is the src{path} that was not there, when git{} stands in.
+	srcMissing string
 }
 
 // srcDirs carries a service's source locations for the fs:: functions during
@@ -612,7 +614,7 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 		checkout := ""
 		var gitURL, srcPath, srcExeFromSB string
 		if sb.Git != nil {
-			gitURL = sb.Git.URL
+			gitURL = strings.TrimSpace(sb.Git.URL)
 		}
 		if sb.Src != nil {
 			// Empty srcDirs: src{path} is the input that *defines* the
@@ -625,8 +627,16 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 			srcPath = p
 			srcExeFromSB = sb.Src.Exe
 		}
+		// A checkout named beside git{} is preferred when it is there; when
+		// it is not, git{} stands in and srcMissing says so. This is the one
+		// stat of resolution: the checkout decides what every fs:: function
+		// returns, so the decision cannot wait for alpha.
+		srcMissing := ""
+		if srcPath != "" && gitURL != "" && !zfs.Exists(r.resolveDir(sb, srcPath)) {
+			srcMissing, srcPath = r.resolveDir(sb, srcPath), ""
+		}
 		switch {
-		case srcPath != "" && gitURL == "" && !r.inv.OwnsService(display):
+		case srcPath != "" && !r.inv.OwnsService(display):
 			checkout = r.resolveDir(sb, srcPath)
 		case gitURL != "" || srcPath != "":
 			checkout = r.inv.CheckoutPath(display)
@@ -682,13 +692,14 @@ func (r *resolver) prepareServices(services []*serviceBlock) (map[string]*svcSta
 			varDir = filepath.Join(r.inv.StateDir, "var", display)
 		}
 		st := &svcState{
-			sb:       sb,
-			id:       sid,
-			dir:      dir,
-			self:     self,
-			fileVals: map[string]cty.Value{},
-			dirs:     srcDirs{root: checkout, exe: dir, etc: etcDir, vardir: varDir, module: sb.module},
-			srcPath:  srcPath,
+			sb:         sb,
+			id:         sid,
+			dir:        dir,
+			self:       self,
+			fileVals:   map[string]cty.Value{},
+			dirs:       srcDirs{root: checkout, exe: dir, etc: etcDir, vardir: varDir, module: sb.module},
+			srcPath:    srcPath,
+			srcMissing: srcMissing,
 		}
 		out[sid] = st
 		r.publishSelf(st)
@@ -1251,7 +1262,9 @@ func (r *resolver) finishService(st *svcState) error {
 
 	// Modes: use-only (install), remote-workspace (git block), or
 	// local-workspace (src{path}). git+src{exe} (no path) is allowed:
-	// src carries only the build subdir inside the cloned remote.
+	// src carries only the build subdir inside the cloned remote. So is
+	// git+src{path}: the checkout while it is there, git while it is not
+	// (prepareServices has already emptied st.srcPath in that case).
 	var srcGitURL, srcLocalPath, srcBranch, srcTag, srcRev, srcExe string
 	if sb.Git != nil {
 		srcGitURL = strings.TrimSpace(sb.Git.URL)
@@ -1264,8 +1277,8 @@ func (r *resolver) finishService(st *svcState) error {
 		srcExe = sb.Src.Exe
 	}
 	switch {
-	case sb.Src != nil && sb.Git != nil && srcLocalPath != "":
-		return fmt.Errorf("service %q: src{path} and git{} are mutually exclusive (src can only carry exe alongside git)", sb.Name)
+	case sb.Git != nil && srcGitURL == "":
+		return fmt.Errorf("service %q: git{} requires url", sb.Name)
 	case sb.Src != nil && sb.Git == nil && srcLocalPath == "":
 		return fmt.Errorf("service %q: src{} without path requires a sibling git{} block", sb.Name)
 	case install != "" && (srcGitURL != "" || srcLocalPath != "" || (sb.Src != nil && srcExe != "")):
@@ -1312,26 +1325,27 @@ func (r *resolver) finishService(st *svcState) error {
 		ToolchainKey: r.toolchainKeyFor(sb.module, sb.Toolchain),
 		Runtime:      rt,
 		Package: &Package{
-			Toolchain: sb.Toolchain,
-			Git:       pkgGit,
-			Src:       r.resolveDir(sb, srcLocalPath),
-			Branch:    pkgBranch,
-			Tag:       pkgTag,
-			Rev:       pkgRev,
-			Install:   install,
-			Version:   instVersion,
-			Index:     instIndex,
-			Registry:  instRegistry,
-			Features:  features,
-			Exe:       srcExe,
-			Bin:       sb.Bin,
-			BuildCmd:  buildCmd,
-			Cmd:       strings.Join(command, " "),
-			Workspace: workspace,
-			// In-place: src-only AND either main workspace, or a named
-			// workspace that did not pick this service (no per-workspace
-			// checkout under <wtdir>/src/<svc>). Alpha builds/runs from
-			// src as-is — no git worktree add, no HEAD reset.
+			Toolchain:  sb.Toolchain,
+			Git:        pkgGit,
+			Src:        r.resolveDir(sb, srcLocalPath),
+			SrcMissing: st.srcMissing,
+			Branch:     pkgBranch,
+			Tag:        pkgTag,
+			Rev:        pkgRev,
+			Install:    install,
+			Version:    instVersion,
+			Index:      instIndex,
+			Registry:   instRegistry,
+			Features:   features,
+			Exe:        srcExe,
+			Bin:        sb.Bin,
+			BuildCmd:   buildCmd,
+			Cmd:        strings.Join(command, " "),
+			Workspace:  workspace,
+			// In-place: a src checkout that is there AND either main
+			// workspace, or a named workspace that did not pick this service
+			// (no per-workspace checkout under <wtdir>/src/<svc>). Alpha
+			// builds/runs from src as-is — no git worktree add, no HEAD reset.
 			InPlace: srcLocalPath != "" && !r.inv.OwnsService(display),
 			// Editable: this (workspace, service) was picked, so it earns an
 			// editable git worktree on branch zordon/<ws>/<svc>. Unpicked

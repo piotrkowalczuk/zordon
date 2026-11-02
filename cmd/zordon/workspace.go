@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -243,6 +244,8 @@ func applyWorkspaceTo(log *zlog.Logger, out io.Writer, root string, ws invocatio
 // serviceSourceDirs lists the trees the services build from, so a generated
 // file can be kept out of them. In main those are the developer's own
 // directories, which no path convention can identify — only the manifest can.
+// A checkout that is absent, git{} standing in, counts too: a file written
+// there would conjure it, and the next start would build from it.
 func serviceSourceDirs(afPath, zordonHome string, kc zlock.GlobalKeychain) ([]string, error) {
 	metas, err := parseServices(zordonHome, kc, afPath)
 	if err != nil {
@@ -250,8 +253,11 @@ func serviceSourceDirs(afPath, zordonHome string, kc zlock.GlobalKeychain) ([]st
 	}
 	var out []string
 	for _, m := range metas {
-		if m.Package != nil && m.Package.Src != "" {
-			out = append(out, m.Package.Src)
+		if m.Package == nil {
+			continue
+		}
+		if src := cmp.Or(m.Package.Src, m.Package.SrcMissing); src != "" {
+			out = append(out, src)
 		}
 	}
 	return out, nil

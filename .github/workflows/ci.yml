@@ -196,6 +196,9 @@ jobs:
           - pick_groups
           # remote fetches a local repository through url.insteadOf: offline.
           - remote
+          # pull and src_git do the same for a service's git source: offline.
+          - pull
+          - src_git
           # package builds Caddy, CoreDNS and Hugo from source: network-bound.
           - package
           - gateway

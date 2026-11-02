@@ -191,18 +191,49 @@ service "go" "api" {
 	}
 }
 
-// src{path} + git{} together must be rejected — they're alternative
-// source primaries (local-only vs. remote-cloned).
-func TestResolveSrcPathExcludesGit(t *testing.T) {
+// src{path} beside git{} names the checkout to prefer: the service runs it
+// in place when it is there and falls back to the git source when it is not.
+func TestResolveSrcPathWithGit_prefersTheCheckout(t *testing.T) {
+	dir := t.TempDir()
+	s := svcByName(compile(t, srcWithGit(dir), nil), "x")
+	if s.Package.Src != dir || s.Package.Git != "github.com/a/x" || s.Package.SrcMissing != "" || !s.Package.InPlace {
+		t.Fatalf("want the checkout in place with the git source kept: %+v", s.Package)
+	}
+	if s.Runtime.Checkout != dir {
+		t.Errorf("checkout %q, want %s", s.Runtime.Checkout, dir)
+	}
+}
+
+func TestResolveSrcPathWithGit_fallsBackToGit(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "absent")
+	s := svcByName(compile(t, srcWithGit(dir), nil), "x")
+	if s.Package.Src != "" || s.Package.SrcMissing != dir || s.Package.Git != "github.com/a/x" || s.Package.InPlace {
+		t.Fatalf("want the git source with the missing checkout noted: %+v", s.Package)
+	}
+	if want := testInv().CheckoutPath("x"); s.Runtime.Checkout != want {
+		t.Errorf("checkout %q, want %s", s.Runtime.Checkout, want)
+	}
+}
+
+func TestResolveSrcPathWithGit_emptyURL(t *testing.T) {
 	_, err := Compile("t", []byte(`
 service "go" "x" {
-  git { url = "github.com/a/x" }
-  src { path = "../checkouts/x" }
+  git { url = " " }
+  src { path = "`+t.TempDir()+`" }
 }
 `), testInv(), nil, testCfgHash, TestConfig{})
-	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Fatalf("want src{path}/git mutual-exclusion error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "git{} requires url") {
+		t.Fatalf("want the empty url refused, got %v", err)
 	}
+}
+
+func srcWithGit(path string) string {
+	return `
+service "go" "x" {
+  git { url = "github.com/a/x" }
+  src { path = "` + path + `" }
+}
+`
 }
 
 func TestResolveNameCollision(t *testing.T) {

@@ -22,13 +22,14 @@ func TestPinSources_locksTheCommitTheRefPointsAt(t *testing.T) {
 		pinSvc("main", &Package{Git: "github.com/acme/ui", Branch: "main"}),
 		pinSvc("tagged", &Package{Git: "github.com/acme/ui", Tag: "v1"}),
 		pinSvc("picked", &Package{Git: "github.com/acme/ui", Editable: true}),
+		pinSvc("local", &Package{Git: "github.com/acme/ui", Src: "/checkouts/ui", InPlace: true}),
 	}}
 
 	changes, pins, err := PinSources(af, remoteOpts(t, dir, f), false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"merchant", "buyer", "main"} {
+	for _, name := range []string{"merchant", "buyer", "main", "local"} {
 		if got := pinnedTo(af, name); got != head {
 			t.Errorf("%s locked at %q, want %s", name, got, head)
 		}
