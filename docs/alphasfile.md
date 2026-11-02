@@ -177,10 +177,12 @@ An `import` block pulls a [package](#packages) into the stack by its directory.
 
 | rule | behavior |
 |---|---|
-| syntax | `import "<path>" "<alias>"? { inputs = {…}, features = [...] }`, repeatable |
+| syntax | `import "<path>" "<alias>"? { inputs = {…}, features = [...], packages = {…} }`, repeatable |
 | placement | the entrypoint's top level, a `component` block, and a `package` block |
 | path | a directory; starts with `./`, `../`, `/` or `~/` and resolves against the declaring file's directory; any other spelling is a [remote identity](#remote-imports) |
-| loading | every package loads once; imports of packages outside the stack are loaded and checked too |
+| `packages = { "<target>" = package.<name> }` | binds a direct or nested package import (`<pkg>` or `<parent>/<pkg>`) inside the imported subtree to an already-imported `package.<name>` instance from the current scope |
+| `packages = { "<target>" = { features = [...], inputs = {…} } }` | isolates the target dependency under `<parent>/<pkg>` and injects features and inputs from the outer scope |
+| loading | every package instance loads into its own scope; imports of packages outside the stack are loaded and checked too |
 | stack | the entrypoint's components and, repeated until nothing changes, the packages imported by anything already in the stack |
 | visibility | a package is visible where it is imported: `package.<p>.outputs.<n>` |
 | visibility error | names the expression and the missing `import` and where it goes |
@@ -323,7 +325,7 @@ import "./gateway" { inputs = { port = 8080 } }
 | `map(T)` from several imports | the entries of every import joined into one map; the entrypoint's import adds entries like any other |
 | key set twice | an error naming both imports |
 | `unique = ["<attr>", …]` | for a `map(object({ … }))`: the same value of the attribute in two entries is an error naming both; a null value is not compared |
-| any other type from several imports | an error naming where both imports set it, even when they give the same value; an import that passes `null` sets nothing |
+| any other type from several imports | an error naming where both imports set it, even when they give the same value; when an instance is bound or configured through `packages = {…}`, the bound target's or outer injection's scalar value takes precedence over inner importer values; an import that passes `null` sets nothing |
 | `default` | the value when no import sets the input, or every import sets it to `null`; a map's default is not joined with entries; without a default the input is required; it is evaluated in the package, so it may read the package's own services |
 | type check | a value that does not fit the type is an error naming the input, the import and where in the value it went wrong, such as `["orders"].prefix: a string is required` |
 | `inputs.<n>` | inside the package: the input's value; a map is sorted by key, each entry with defaults applied |
@@ -406,7 +408,7 @@ import "github.com/piotrkowalczuk/zordon/examples/package/caddy" {}
 | rule | behavior |
 |---|---|
 | identity | `<host>/<owner>/<repo>[/<path>]`; hosts github.com, gitlab.com and bitbucket.org; `@<ref>` in a path is an error that shows the `require` to write |
-| `require "<repo>" { ref = "<ref>" }` | pins a repository to a branch, a tag or a commit; the label is the repository alone |
+| `require "<repo>[/<path>]" { ref = "<ref>" }` | pins a repository or a subpath inside it to a branch, a tag or a commit, matched by longest prefix |
 | where requires live | in the nearest `zordon.mod` above the file; a file with no `zordon.mod` above it declares them itself, at its top level or inside its package block |
 | `require` under a `zordon.mod` | an error: the versions of a module live in its `zordon.mod` |
 | missing require | an error that names the file to add the require to; `zordon pkg get <repo>@<ref>` fixes it only when that file is the entrypoint or shares its `zordon.mod` |

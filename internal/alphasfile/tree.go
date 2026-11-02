@@ -1108,18 +1108,7 @@ func (t *Tree) packageVisible(scope, p string) bool {
 		return true
 	}
 	vis := t.scopes[scope]
-	if vis == nil {
-		return false
-	}
-	if vis.pkgs[p] != "" {
-		return true
-	}
-	for _, target := range vis.pkgs {
-		if target == p {
-			return true
-		}
-	}
-	return false
+	return vis != nil && vis.pkgs[p] != ""
 }
 
 func (f *treeFile) isDisabled(r hcl.Range) bool {

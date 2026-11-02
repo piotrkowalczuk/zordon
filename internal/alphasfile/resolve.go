@@ -203,7 +203,7 @@ func (s *identitySource) resolveRemote(importer *treeFile, imp *importBlock, raw
 			reqKey, req = entryKey, entryReq
 		}
 	}
-	if req == nil && entryReq != nil && (!s.entryDirect[entryKey] || sc == s.entry) {
+	if req == nil && entryReq != nil {
 		reqKey, req = entryKey, entryReq
 	}
 	if req == nil {

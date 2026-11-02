@@ -329,6 +329,42 @@ package "billing" {
 	}
 }
 
+func TestLoadTreeWith_nestedPackageWithoutRequireInheritsEntrypointPin(t *testing.T) {
+	infra, v1 := infraRepo(t)
+	dir := t.TempDir()
+	root := writeTree(t, dir, map[string]string{
+		"Alphasfile": `
+require "github.com/acme/infra/pkgs/web" { ref = "` + v1 + `" }
+import "github.com/acme/infra/pkgs/web" {}
+import "./orders" {
+  packages = {
+    web = package.web
+  }
+}
+`,
+		"orders/Alphasfile": `
+package "orders" {
+  import "github.com/acme/infra/pkgs/web" {}
+
+  component "api" {
+    service "go" "api" {
+      git { url = "github.com/x/api" }
+      vars = { web_port = package.web.component.web.service.go.web.vars.port }
+    }
+  }
+}
+`,
+	})
+	tree, err := LoadTreeWith(root, remoteOpts(t, dir, newRepoFetcher(map[string]string{remoteRepo: infra})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	af := resolveTree(t, tree)
+	if got := fmt.Sprint(svcByName(af, "orders/api/api").Runtime.Vars["web_port"]); got != "8080" {
+		t.Errorf("orders api web_port = %s, want 8080", got)
+	}
+}
+
 func TestLoadTreeWith_remoteFileImportsItsOwnRepository(t *testing.T) {
 	infra := gitRepo(t, map[string]string{
 		"pkgs/web/Alphasfile": pkgWebRequiring(`import "github.com/acme/infra/pkgs/db" {}`),
