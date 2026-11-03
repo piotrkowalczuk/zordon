@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -306,6 +307,54 @@ service "go" "svc1" {
 	wantTag := fmt.Sprintf("alpha[%d]", alphaPID1)
 	if !strings.Contains(string(logBytes), wantTag) {
 		t.Errorf("alpha.log missing PID-attributed tag %q:\n%s", wantTag, string(logBytes))
+	}
+
+	// Now launch concurrent stop and start operations against the running stack
+	// and verify the on-disk .env side effect stays consistent with the final
+	// daemon state (no orphaned .env when stopped, no missing/stale .env when running).
+	var wg sync.WaitGroup
+	var stopRes, startRes zordontest.ZordonResult
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		stopRes = p.Zordon("stop").WithTimeout(30 * time.Second).Run(t)
+	}()
+	go func() {
+		defer wg.Done()
+		time.Sleep(50 * time.Millisecond)
+		startRes = p.Zordon("start",
+			"--timeout", "120s",
+			"--alpha-log", p.AlphaLogPath(),
+		).WithTimeout(125 * time.Second).Run(t)
+	}()
+	wg.Wait()
+
+	if stopRes.ExitCode != 0 {
+		t.Fatalf("concurrent zordon stop: exit %d\nstderr: %s", stopRes.ExitCode, stopRes.Stderr)
+	}
+	if startRes.ExitCode != 0 {
+		t.Fatalf("concurrent zordon start: exit %d\nstderr: %s", startRes.ExitCode, startRes.Stderr)
+	}
+
+	// Whichever serialized operation ran second defines the expected state:
+	// if svc1 is running, .env must exist and match the live port; if stopped,
+	// .env must have been removed by shutdownAll.
+	statusRes := p.Zordon("status").WithTimeout(15 * time.Second).Run(t)
+	statusOut := statusRes.Stdout + "\n" + statusRes.Stderr
+	if strings.Contains(statusOut, "ready") {
+		livePort := p.Get(t, "service.go.svc1.vars.port").Int()
+		wantLiveEnv := fmt.Sprintf("PORT=%d\n", livePort)
+		gotLiveEnv, err := os.ReadFile(envPath)
+		if err != nil {
+			t.Fatalf("stack is ready after concurrent start/stop, but .env is missing: %v", err)
+		}
+		if string(gotLiveEnv) != wantLiveEnv {
+			t.Errorf(".env after concurrent start/stop = %q, want %q", string(gotLiveEnv), wantLiveEnv)
+		}
+	} else {
+		if _, err := os.Stat(envPath); !os.IsNotExist(err) {
+			t.Errorf("stack is stopped after concurrent start/stop, but .env still exists (err=%v)\nstatus:\n%s", err, statusOut)
+		}
 	}
 }
 

@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
 
@@ -222,5 +226,104 @@ func TestAlphaState_shutdownAll_ownerAwareFileCleanup(t *testing.T) {
 	gotModified, err := zfs.Read(modifiedPath)
 	if err != nil || string(gotModified) != "EDITED=2\n" {
 		t.Errorf("modified file = (%q, %v); want (\"EDITED=2\\n\", nil)", string(gotModified), err)
+	}
+}
+
+func TestAlphaState_concurrentCreateAndDestroy_consistentFileSideEffect(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	log := zlog.New(io.Discard, true)
+
+	const generations = 16
+	states := make([]*alphaState, generations)
+	svcRelease := make([]chan struct{}, generations)
+
+	// Create generations 0..generations-2 and start their shutdownAll in
+	// parallel while their supervised services are still draining.
+	var teardownWG sync.WaitGroup
+	for i := range generations - 1 {
+		st := &alphaState{shutdownCh: make(chan struct{})}
+		sc := newServiceCtx(fmt.Sprintf("svc-%d", i), "go")
+		st.addService(sc)
+		body := fmt.Sprintf("GEN=%d\n", i)
+		if err := materializeFiles([]*alphasfile.File{{Name: "dotenv", Path: envPath, Body: body}}, st, log); err != nil {
+			t.Fatalf("materializeFiles gen %d: %v", i, err)
+		}
+		states[i] = st
+		ch := make(chan struct{})
+		svcRelease[i] = ch
+		go func(sc *serviceCtx, release <-chan struct{}) {
+			<-sc.stopCh
+			<-release
+			close(sc.done)
+		}(sc, ch)
+
+		teardownWG.Add(1)
+		go func(st *alphaState) {
+			defer teardownWG.Done()
+			st.shutdownAll(log)
+		}(st)
+	}
+
+	// Create the final surviving alpha while all prior generations are mid-teardown.
+	finalState := &alphaState{shutdownCh: make(chan struct{})}
+	wantFinal := fmt.Sprintf("GEN=%d\n", generations-1)
+	if err := materializeFiles([]*alphasfile.File{{Name: "dotenv", Path: envPath, Body: wantFinal}}, finalState, log); err != nil {
+		t.Fatalf("materializeFiles final: %v", err)
+	}
+
+	// Unblock all prior generations' service exits concurrently so their file
+	// cleanup races against each other and against the final generation's file.
+	for i := range generations - 1 {
+		close(svcRelease[i])
+	}
+	teardownWG.Wait()
+
+	got, err := zfs.Read(envPath)
+	if err != nil {
+		t.Fatalf(".env missing after concurrent teardowns of older generations: %v", err)
+	}
+	if string(got) != wantFinal {
+		t.Fatalf(".env content = %q, want %q", string(got), wantFinal)
+	}
+
+	// Also verify serialized create/destroy cycles through WorkspaceKeychain.LockAlpha.
+	wsKC := zlock.NewGlobalKeychain(dir).ForWorkspace(dir)
+	var cycleWG sync.WaitGroup
+	for i := range 8 {
+		cycleWG.Add(1)
+		go func(id int) {
+			defer cycleWG.Done()
+			if err := wsKC.WaitUnlockedAlpha(t.Context()); err != nil {
+				t.Errorf("WaitUnlockedAlpha(%d): %v", id, err)
+				return
+			}
+			unlock, err := wsKC.LockAlpha(t.Context())
+			if err != nil {
+				t.Errorf("LockAlpha(%d): %v", id, err)
+				return
+			}
+			defer unlock()
+
+			st := &alphaState{shutdownCh: make(chan struct{})}
+			body := fmt.Sprintf("LOCKED_GEN=%d\n", id)
+			if err := materializeFiles([]*alphasfile.File{{Name: "dotenv", Path: envPath, Body: body}}, st, log); err != nil {
+				t.Errorf("materializeFiles(%d): %v", id, err)
+				return
+			}
+			gotInLock, err := zfs.Read(envPath)
+			if err != nil || string(gotInLock) != body {
+				t.Errorf("inside LockAlpha(%d): .env = (%q, %v), want %q", id, string(gotInLock), err, body)
+			}
+			st.shutdownAll(log)
+			if zfs.Exists(envPath) {
+				t.Errorf("inside LockAlpha(%d): .env still exists after shutdownAll", id)
+			}
+		}(i)
+	}
+	cycleWG.Wait()
+
+	if zfs.Exists(envPath) {
+		t.Fatalf(".env still exists after all locked alpha lifecycles destroyed")
 	}
 }
