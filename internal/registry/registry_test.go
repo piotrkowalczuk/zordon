@@ -248,8 +248,17 @@ func TestReapByFsHash_doesNotHoldLockDuringSignalPhase(t *testing.T) {
 			return
 		}
 		checked = true
-		if err := Remove(kc, home, "other", "peer"); err != nil {
-			t.Errorf("Remove during ReapByFsHash signal phase: %v", err)
+		done := make(chan error, 1)
+		go func() {
+			done <- Remove(kc, home, "other", "peer")
+		}()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Remove during ReapByFsHash signal phase: %v", err)
+			}
+		case <-time.After(1 * time.Second):
+			t.Errorf("Remove blocked during ReapByFsHash signal phase (registry.lock still held)")
 		}
 	})
 

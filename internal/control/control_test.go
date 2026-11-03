@@ -23,14 +23,14 @@ func TestIsNotRunning(t *testing.T) {
 		want bool
 	}{
 		"nil":          {err: nil, want: false},
-		"not exist":    {err: os.ErrNotExist, want: true},
+		"not-exist":    {err: os.ErrNotExist, want: true},
 		"eof":          {err: io.EOF, want: true},
-		"pipe closed":  {err: pipeReadErr, want: true},
+		"pipe-closed":  {err: pipeReadErr, want: true},
 		"econnreset":   {err: syscall.ECONNRESET, want: true},
 		"epipe":        {err: syscall.EPIPE, want: true},
-		"dial opErr":   {err: &net.OpError{Op: "dial", Net: "unix", Err: syscall.ECONNREFUSED}, want: true},
-		"read timeout": {err: &net.OpError{Op: "read", Net: "unix", Err: os.ErrDeadlineExceeded}, want: false},
-		"generic err":  {err: errors.New("boom"), want: false},
+		"dial-op-err":  {err: &net.OpError{Op: "dial", Net: "unix", Err: syscall.ECONNREFUSED}, want: true},
+		"read-timeout": {err: &net.OpError{Op: "read", Net: "unix", Err: os.ErrDeadlineExceeded}, want: false},
+		"generic-err":  {err: errors.New("boom"), want: false},
 	}
 
 	for hint, c := range cases {

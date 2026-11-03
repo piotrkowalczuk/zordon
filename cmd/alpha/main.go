@@ -1794,6 +1794,8 @@ func serveAlpha(ctx context.Context, rc runConfig, life *daemon.Lifeline) error 
 			return fmt.Errorf("alpha lock: %w", err)
 		}
 		defer unlockAlpha()
+	} else {
+		log.Info("alpha", "lifecycle lock disabled (--state-dir / ZORDON_STATE_DIR not set)")
 	}
 
 	// Reap orphans from a previous alpha for THIS fs_hash before binding the
@@ -2491,35 +2493,54 @@ func watchBringupProgress(done <-chan struct{}, bringupStart time.Time, services
 		case <-state.shutdownCh:
 			return
 		case <-ticker.C:
-			pending := describeBringupWait(services, serviceCtxs, provs)
-			if len(pending) == 0 {
+			now := time.Now()
+			pending := describeBringupWait(services, serviceCtxs, provs, bringupStart, now)
+			if pending == "" {
 				continue
 			}
 			msg := fmt.Sprintf("still bringing up (%s elapsed): waiting on %s",
-				time.Since(bringupStart).Round(time.Second), strings.Join(pending, ", "))
+				now.Sub(bringupStart).Round(time.Second), pending)
 			log.Info("alpha", "%s", msg)
 			stream.Send(&protocol.Event{Kind: protocol.EventLog, Service: "alpha", Stream: "stderr", Line: msg})
 		}
 	}
 }
 
-func describeBringupWait(services []*alphasfile.Service, serviceCtxs map[string]*serviceCtx, provs []provEntry) []string {
-	var pending []string
+type bringupWaitItem struct {
+	name  string
+	phase string
+	since time.Time
+}
+
+func describeBringupWait(services []*alphasfile.Service, serviceCtxs map[string]*serviceCtx, provs []provEntry, bringupStart, now time.Time) string {
+	var items []bringupWaitItem
+	counts := make(map[string]int)
 	for _, svc := range services {
 		sc := serviceCtxs[svc.Name()]
 		if sc == nil || sc.doneBar.Triggered() {
 			continue
 		}
+		phase := "starting"
+		since := bringupStart
 		switch {
 		case !sc.build.Reached("running"):
-			pending = append(pending, svc.Name()+" (waiting for dependencies)")
+			phase = "waiting for dependencies"
+			if t, ok := sc.lifecycle.ReachedAt("scheduled"); ok {
+				since = t
+			}
 		case !sc.buildDoneBar.Triggered():
-			pending = append(pending, svc.Name()+" (building)")
+			phase = "building"
+			if t, ok := sc.build.ReachedAt("running"); ok {
+				since = t
+			}
 		case sc.lifecycle.Reached("running"):
-			pending = append(pending, svc.Name()+" (probing readiness)")
-		default:
-			pending = append(pending, svc.Name()+" (starting)")
+			phase = "probing readiness"
+			if t, ok := sc.lifecycle.ReachedAt("running"); ok {
+				since = t
+			}
 		}
+		counts[phase]++
+		items = append(items, bringupWaitItem{name: svc.Name(), phase: phase, since: since})
 	}
 	for _, p := range provs {
 		if p.detached || p.pc.doneBar.Triggered() {
@@ -2529,13 +2550,43 @@ func describeBringupWait(services []*alphasfile.Service, serviceCtxs map[string]
 		if p.parent != nil {
 			label = p.parent.name + "/" + label
 		}
+		phase := "waiting for dependencies"
+		since := bringupStart
 		if p.pc.lifecycle.Reached("running") {
-			pending = append(pending, "provision "+label+" (running)")
-		} else {
-			pending = append(pending, "provision "+label+" (waiting for dependencies)")
+			phase = "running"
+			if t, ok := p.pc.lifecycle.ReachedAt("running"); ok {
+				since = t
+			}
+		}
+		counts[phase]++
+		items = append(items, bringupWaitItem{name: "provision " + label, phase: phase, since: since})
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	if len(items) <= 3 {
+		parts := make([]string, len(items))
+		for i, it := range items {
+			parts[i] = fmt.Sprintf("%s (%s)", it.name, it.phase)
+		}
+		return strings.Join(parts, ", ")
+	}
+	phaseOrder := []string{"building", "probing readiness", "running", "starting", "waiting for dependencies"}
+	var phaseParts []string
+	for _, ph := range phaseOrder {
+		if c := counts[ph]; c > 0 {
+			phaseParts = append(phaseParts, fmt.Sprintf("%d %s", c, ph))
 		}
 	}
-	return pending
+	slices.SortStableFunc(items, func(a, b bringupWaitItem) int {
+		return a.since.Compare(b.since)
+	})
+	var longest []string
+	for _, it := range items[:3] {
+		dur := max(now.Sub(it.since).Round(time.Second), 0)
+		longest = append(longest, fmt.Sprintf("%s (%s %s)", it.name, it.phase, dur))
+	}
+	return fmt.Sprintf("%d: %s; longest: %s", len(items), strings.Join(phaseParts, ", "), strings.Join(longest, ", "))
 }
 
 // provEntry pairs a provision with its parent service so the bringup

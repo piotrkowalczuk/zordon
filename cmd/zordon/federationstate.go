@@ -210,7 +210,11 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 	inv := lvl.inv
 	sock := inv.SocketPath()
 
+	oldPID := 0
+	oldHasLock := false
 	if old != nil {
+		oldPID = old.PID
+		oldHasLock = lvl.Keychain().IsAlphaLockedBy(oldPID)
 		reason := "restart requested"
 		if !lvl.IsLeaf() {
 			reason = "drift detected (config changed since alpha started)"
@@ -220,7 +224,7 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 			log.Error("zordon", "shutdown %s: %v", lvl.afPath, e)
 		}
 	}
-	if err := waitAlphaGone(ctx, lvl.Keychain(), sock, cfg.timeout, log); err != nil {
+	if err := waitAlphaGone(ctx, lvl.Keychain(), sock, oldPID, oldHasLock, cfg.timeout, log); err != nil {
 		return nil, fmt.Errorf("%s: waiting for old alpha to exit: %w", lvl.afPath, err)
 	}
 

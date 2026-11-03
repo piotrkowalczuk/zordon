@@ -166,6 +166,34 @@ func TestWatchBringupProgress_reportsPendingPhasesInSynctest(t *testing.T) {
 	})
 }
 
+func TestDescribeBringupWait_summarizesLargeStacks(t *testing.T) {
+	svc := func(name string) *alphasfile.Service {
+		return &alphasfile.Service{
+			Toolchain: "go",
+			Runtime:   &alphasfile.RuntimeConfig{Name: name},
+		}
+	}
+	start := time.Now()
+	var services []*alphasfile.Service
+	ctxs := make(map[string]*serviceCtx)
+
+	for i := range 5 {
+		name := fmt.Sprintf("svc-%d", i)
+		services = append(services, svc(name))
+		sc := newServiceCtx(name, "go")
+		if i < 3 {
+			sc.build.Reach("running")
+		}
+		ctxs[name] = sc
+	}
+
+	got := describeBringupWait(services, ctxs, nil, start, start.Add(15*time.Second))
+	want := "5: 3 building, 2 waiting for dependencies; longest: svc-0 (building 15s), svc-1 (building 15s), svc-2 (building 15s)"
+	if got != want {
+		t.Fatalf("describeBringupWait = %q, want %q", got, want)
+	}
+}
+
 func TestAlphaState_shutdownCtx(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		state := &alphaState{shutdownCh: make(chan struct{})}
