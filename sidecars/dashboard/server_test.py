@@ -248,11 +248,13 @@ class TestSidecarAndHooks(unittest.TestCase):
     def test_plugin_manifests_and_shell_entrypoints(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
 
-        # 1. Validate .antigravity-plugin/plugin.json
+        # 1. Validate .antigravity-plugin/plugin.json and .claude-plugin/plugin.json
         plugin_manifest = json.loads((repo_root / ".antigravity-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        claude_manifest = json.loads((repo_root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
         for key in ("name", "displayName", "version", "description", "suggestedPrompts"):
             self.assertIn(key, plugin_manifest)
         self.assertEqual(plugin_manifest["name"], "zordon")
+        self.assertEqual(plugin_manifest["version"], claude_manifest["version"])
         self.assertTrue(plugin_manifest["suggestedPrompts"])
 
         # 2. Validate root mcp_config.json and sandbox mcp_config.json
