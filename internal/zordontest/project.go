@@ -272,6 +272,14 @@ func (p *Project) StopFrom(relDir string) error {
 // drives the zordon CLI, not a service.
 func (p *Project) env() []string {
 	out := append([]string{}, os.Environ()...)
+	if filepath.IsAbs(p.binZ) {
+		binDir := filepath.Dir(p.binZ)
+		if cur := os.Getenv("PATH"); cur != "" {
+			out = setEnv(out, "PATH", binDir+string(os.PathListSeparator)+cur)
+		} else {
+			out = setEnv(out, "PATH", binDir)
+		}
+	}
 	out = setEnv(out, "ZORDON_HOME", p.home)
 	// Always-on test harness markers: every zordon CLI call this
 	// project makes runs with the test:: namespace unlocked and

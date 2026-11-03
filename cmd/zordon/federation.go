@@ -419,20 +419,18 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		}
 
 		// Leaf. Clean requires the stack to be down.
-		if old != nil {
-			if !waitStopped {
-				return fmt.Errorf("%s: alpha is running (pid=%d); run `zordon stop` first, or `zordon stop --clean`", lvl.Path(), old.PID)
-			}
-			if err := waitSocketGone(ctx, inv.SocketPath(), timeout); err != nil {
-				return fmt.Errorf("%s: waiting for alpha to stop before clean: %w", lvl.Path(), err)
-			}
-		}
-
 		unlock, err := lvl.Keychain().TryLockZordon()
 		if err != nil {
 			return err
 		}
 		defer unlock()
+
+		if old != nil && !waitStopped {
+			return fmt.Errorf("%s: alpha is running (pid=%d); run `zordon stop` first, or `zordon stop --clean`", lvl.Path(), old.PID)
+		}
+		if err := waitAlphaGone(ctx, lvl.Keychain(), inv.SocketPath(), timeout, log); err != nil {
+			return fmt.Errorf("%s: waiting for alpha to stop before clean: %w", lvl.Path(), err)
+		}
 
 		return cleanLeaf(ctx, lvl, af, parentDotenv, parentEnv, cfg, log)
 	}
@@ -465,9 +463,10 @@ func cleanLeaf(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, p
 
 	cleanErr := pushClean(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.agent)
 	// Always shut the transient alpha down, success or failure.
-	if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
+	if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil && !control.IsNotRunning(e) {
 		log.Error("zordon", "shutdown transient alpha: %v", e)
 	}
+	_ = waitAlphaGone(ctx, lvl.Keychain(), sock, cfg.timeout, nil)
 	if cleanErr != nil {
 		return fmt.Errorf("%s: %w", lvl.afPath, cleanErr)
 	}
@@ -553,23 +552,63 @@ func runSudoSteps(services []*alphasfile.Service, log *zlog.Logger) {
 	}
 }
 
-// waitSocketGone blocks until nothing answers on sock (old alpha exited) or
-// the timeout elapses.
-func waitSocketGone(ctx context.Context, sock string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
+// waitAlphaGone blocks until nothing answers on sock and the workspace's
+// alpha.lock is released (meaning old alpha's shutdownAll — including service
+// SIGTERM drain and generated-file cleanup — has finished), or timeout elapses.
+func waitAlphaGone(ctx context.Context, kc zlock.WorkspaceKeychain, sock string, timeout time.Duration, log *zlog.Logger) error {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	start := time.Now()
+	done := make(chan struct{})
+	defer close(done)
+	if log != nil {
+		go func() {
+			timer := time.NewTimer(1 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-done:
+				return
+			case <-waitCtx.Done():
+				return
+			case <-timer.C:
+				log.Warn("zordon", "waiting for old alpha to finish teardown (%s elapsed)", time.Since(start).Round(100*time.Millisecond))
+			}
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-waitCtx.Done():
+					return
+				case <-ticker.C:
+					log.Warn("zordon", "waiting for old alpha to finish teardown (%s elapsed)", time.Since(start).Round(100*time.Millisecond))
+				}
+			}
+		}()
+	}
+
+	if err := waitSocketGone(waitCtx, sock); err != nil {
+		return err
+	}
+	return kc.WaitUnlockedAlpha(waitCtx)
+}
+
+func waitSocketGone(ctx context.Context, sock string) error {
 	delay := 20 * time.Millisecond
 	for {
 		c, err := control.Dial(sock, 100*time.Millisecond)
 		if err != nil {
 			return nil
 		}
-		c.Close()
-		if time.Now().After(deadline) {
-			return errors.New("old alpha still listening")
-		}
+		_ = c.Close()
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return errors.New("old alpha still listening")
 		case <-time.After(delay):
 		}
 		if delay < 250*time.Millisecond {

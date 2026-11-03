@@ -115,18 +115,19 @@ func ListByFsHash(kc zlock.GlobalKeychain, zordonHome, fsHash string) ([]Entry, 
 	return out, err
 }
 
-// ReapByFsHash sends SIGTERM to every still-alive pgid registered
-// under fsHash, waits grace, escalates to SIGKILL on stragglers, then
-// removes those entries from the registry. Called at alpha startup
-// BEFORE binding the control socket so the new alpha doesn't collide
-// with squatters from the previous (dead) one.
+// ReapByFsHash removes every entry registered under fsHash under flock, then
+// sends SIGTERM → grace → SIGKILL outside the lock so the grace sleep never
+// starves concurrent Register / Remove calls from other instances. Called at
+// alpha startup BEFORE binding the control socket so the new alpha doesn't
+// collide with squatters from the previous (dead) one.
 //
 // Entries whose pgid is already gone (process exited cleanly between
 // registration and now) are removed without signal — there's nothing
 // to reap.
 func ReapByFsHash(kc zlock.GlobalKeychain, zordonHome, fsHash string, grace time.Duration, log Logger) error {
-	return withFile(kc, zordonHome, func(entries []Entry) ([]Entry, error) {
-		var ours, others []Entry
+	var ours []Entry
+	if err := withFile(kc, zordonHome, func(entries []Entry) ([]Entry, error) {
+		var others []Entry
 		for _, e := range entries {
 			if e.FsHash == fsHash {
 				ours = append(ours, e)
@@ -134,34 +135,36 @@ func ReapByFsHash(kc zlock.GlobalKeychain, zordonHome, fsHash string, grace time
 				others = append(others, e)
 			}
 		}
-		// SIGTERM pass: only groups that still exist.
-		var alive []Entry
-		for _, e := range ours {
-			if syscall.Kill(-e.PGID, 0) != nil {
-				continue // process group already gone
-			}
-			if log != nil {
-				log.Warn("registry", "orphan reaper: SIGTERM pgid=%d (%s on port %d)", e.PGID, e.Service, e.Port)
-			}
-			_ = syscall.Kill(-e.PGID, syscall.SIGTERM)
-			alive = append(alive, e)
-		}
-		if len(alive) > 0 {
-			time.Sleep(grace)
-			for _, e := range alive {
-				if syscall.Kill(-e.PGID, 0) != nil {
-					continue
-				}
-				if log != nil {
-					log.Warn("registry", "orphan reaper: SIGKILL pgid=%d (%s)", e.PGID, e.Service)
-				}
-				_ = syscall.Kill(-e.PGID, syscall.SIGKILL)
-			}
-		}
-		// Drop all our entries regardless of whether reap actually
-		// fired — the previous alpha is gone, those rows are stale.
 		return others, nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	var alive []Entry
+	for _, e := range ours {
+		if syscall.Kill(-e.PGID, 0) != nil {
+			continue
+		}
+		if log != nil {
+			log.Warn("registry", "orphan reaper: SIGTERM pgid=%d (%s on port %d)", e.PGID, e.Service, e.Port)
+		}
+		_ = syscall.Kill(-e.PGID, syscall.SIGTERM)
+		alive = append(alive, e)
+	}
+	if len(alive) == 0 {
+		return nil
+	}
+	time.Sleep(grace)
+	for _, e := range alive {
+		if syscall.Kill(-e.PGID, 0) != nil {
+			continue
+		}
+		if log != nil {
+			log.Warn("registry", "orphan reaper: SIGKILL pgid=%d (%s)", e.PGID, e.Service)
+		}
+		_ = syscall.Kill(-e.PGID, syscall.SIGKILL)
+	}
+	return nil
 }
 
 // dropByService returns entries minus any (fsHash, service) match.

@@ -1,10 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
+	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
 
 // buildStartSummary is the adapter between the live serviceCtx/provisionCtx
@@ -86,5 +94,133 @@ func TestBuildStartSummary(t *testing.T) {
 	}
 	if p := got.Provisions[0]; p.Name != "seed" || p.Service != "api" || p.Detached {
 		t.Errorf("provision = {name %q service %q detached %v}, want {seed api false}", p.Name, p.Service, p.Detached)
+	}
+}
+
+func TestWatchBringupProgress_reportsPendingPhasesInSynctest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc := func(name string) *alphasfile.Service {
+			return &alphasfile.Service{
+				Toolchain: "go",
+				Runtime:   &alphasfile.RuntimeConfig{Name: name},
+			}
+		}
+		db := svc("db")
+		api := svc("api")
+
+		dbCtx := newServiceCtx("db", "go")
+		dbCtx.build.Reach("running")
+		apiCtx := newServiceCtx("api", "go")
+		seed := newProvisionCtx("service.go.api", &alphasfile.ProvisionStep{Name: "seed"})
+
+		services := []*alphasfile.Service{db, api}
+		ctxs := map[string]*serviceCtx{"db": dbCtx, "api": apiCtx}
+		provs := []provEntry{{pc: seed, parent: apiCtx, detached: false}}
+
+		var logBuf, streamBuf bytes.Buffer
+		log := zlog.New(&logBuf, true)
+		stream := newSafeEncoder(protocol.NewEncoder(&streamBuf))
+		state := &alphaState{shutdownCh: make(chan struct{})}
+
+		done := make(chan struct{})
+		go watchBringupProgress(done, time.Now(), services, ctxs, provs, state, stream, log)
+
+		select {
+		case <-time.After(5 * time.Second):
+		case <-t.Context().Done():
+			t.Fatal(t.Context().Err())
+		}
+		synctest.Wait()
+		dbCtx.build.Reach("success")
+		dbCtx.lifecycle.Reach("ready")
+		apiCtx.build.Reach("success")
+		apiCtx.lifecycle.Reach("running")
+		seed.lifecycle.Reach("running")
+		synctest.Wait()
+
+		select {
+		case <-time.After(5 * time.Second):
+		case <-t.Context().Done():
+			t.Fatal(t.Context().Err())
+		}
+		synctest.Wait()
+		close(done)
+		apiCtx.lifecycle.Reach("ready")
+		seed.lifecycle.Reach("success")
+		synctest.Wait()
+
+		gotLog := logBuf.String()
+		if !strings.Contains(gotLog, "still bringing up (5s elapsed): waiting on db (building), api (waiting for dependencies), provision api/seed (waiting for dependencies)") {
+			t.Fatalf("log missing 5s progress report:\n%s", gotLog)
+		}
+		if !strings.Contains(gotLog, "still bringing up (10s elapsed): waiting on api (probing readiness), provision api/seed (running)") {
+			t.Fatalf("log missing 10s progress report:\n%s", gotLog)
+		}
+		if !strings.Contains(streamBuf.String(), "still bringing up (10s elapsed)") {
+			t.Fatalf("stream missing streamed EventLog progress:\n%s", streamBuf.String())
+		}
+	})
+}
+
+func TestAlphaState_shutdownCtx(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		state := &alphaState{shutdownCh: make(chan struct{})}
+		ctx1 := state.shutdownCtx()
+		ctx2 := state.shutdownCtx()
+		if ctx1 != ctx2 {
+			t.Fatal("shutdownCtx must return the same alpha-scoped context across calls")
+		}
+		if ctx1.Err() != nil {
+			t.Fatalf("shutdownCtx canceled before requestShutdown: %v", ctx1.Err())
+		}
+		state.requestShutdown("test shutdown")
+		synctest.Wait()
+		if ctx1.Err() == nil {
+			t.Fatal("shutdownCtx not canceled after requestShutdown")
+		}
+	})
+}
+
+func TestAlphaState_shutdownAll_ownerAwareFileCleanup(t *testing.T) {
+	dir := t.TempDir()
+	ownedPath := filepath.Join(dir, "owned.env")
+	replacedPath := filepath.Join(dir, "replaced.env")
+	modifiedPath := filepath.Join(dir, "modified.env")
+
+	state := &alphaState{shutdownCh: make(chan struct{})}
+	var logBuf bytes.Buffer
+	log := zlog.New(&logBuf, true)
+
+	err := materializeFiles([]*alphasfile.File{
+		{Name: "owned", Path: ownedPath, Body: "OWNED=1\n"},
+		{Name: "replaced", Path: replacedPath, Body: "OLD=1\n"},
+		{Name: "modified", Path: modifiedPath, Body: "ORIG=1\n"},
+	}, state, log)
+	if err != nil {
+		t.Fatalf("materializeFiles: %v", err)
+	}
+
+	// Simulate a newer alpha replacing replacedPath atomically (new inode).
+	if err := zfs.AtomicWrite(replacedPath, []byte("NEW=2\n")); err != nil {
+		t.Fatalf("AtomicWrite replacedPath: %v", err)
+	}
+
+	// Simulate an in-place edit on the same inode for modifiedPath.
+	if err := os.WriteFile(modifiedPath, []byte("EDITED=2\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile modifiedPath: %v", err)
+	}
+
+	state.shutdownAll(log)
+
+	if zfs.Exists(ownedPath) {
+		t.Errorf("owned file %s still exists after shutdownAll; want removed", ownedPath)
+	}
+	gotReplaced, err := zfs.Read(replacedPath)
+	if err != nil || string(gotReplaced) != "NEW=2\n" {
+		t.Errorf("replaced file = (%q, %v); want (\"NEW=2\\n\", nil)", string(gotReplaced), err)
+	}
+	gotModified, err := zfs.Read(modifiedPath)
+	if err != nil || string(gotModified) != "EDITED=2\n" {
+		t.Errorf("modified file = (%q, %v); want (\"EDITED=2\\n\", nil)", string(gotModified), err)
 	}
 }

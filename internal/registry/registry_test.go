@@ -220,3 +220,53 @@ func TestWriteEntries_producesParseableJSON(t *testing.T) {
 		t.Errorf("registry.json doesn't look like a JSON array: %q", string(data))
 	}
 }
+
+func TestReapByFsHash_doesNotHoldLockDuringSignalPhase(t *testing.T) {
+	home := t.TempDir()
+	kc := zlock.NewGlobalKeychain(home)
+
+	cmd := exec.Command("sleep", "60")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+
+	if err := Register(kc, home, Entry{Port: 1, FsHash: "reap-me", Service: "stuck", PGID: cmd.Process.Pid}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Register(kc, home, Entry{Port: 2, FsHash: "other", Service: "peer", PGID: 999991}); err != nil {
+		t.Fatal(err)
+	}
+
+	var checked bool
+	log := warnLoggerFunc(func(_, _ string, _ ...any) {
+		if checked {
+			return
+		}
+		checked = true
+		if err := Remove(kc, home, "other", "peer"); err != nil {
+			t.Errorf("Remove during ReapByFsHash signal phase: %v", err)
+		}
+	})
+
+	if err := ReapByFsHash(kc, home, "reap-me", time.Millisecond, log); err != nil {
+		t.Fatalf("ReapByFsHash: %v", err)
+	}
+	if !checked {
+		t.Fatal("expected ReapByFsHash to invoke logger during signal phase")
+	}
+}
+
+type warnLoggerFunc func(src, format string, args ...any)
+
+func (f warnLoggerFunc) Warn(src, format string, args ...any) {
+	f(src, format, args...)
+}
+
+func (f warnLoggerFunc) Error(src, format string, args ...any) {
+	f(src, format, args...)
+}
