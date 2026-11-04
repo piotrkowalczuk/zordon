@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,6 +81,8 @@ func toolchainEnv(toolchainLang string, state *alphaState, log *zlog.Logger) (ma
 	case <-tc.lifecycle.Barrier("ready").Wait():
 	case <-tc.lifecycle.Barrier(alphasfile.ToolchainTerminalFailure).Wait():
 		return nil, fmt.Errorf("toolchain %s@%s: install failed (see earlier `toolchain` log lines)", tc.lang, tc.version)
+	case <-state.shutdownCh:
+		return nil, fmt.Errorf("toolchain %s@%s: alpha shutting down", tc.lang, tc.version)
 	}
 	// toolchain.<lang>.env (userEnv) overrides mise's defaults — both
 	// are "toolchain initial envs", but the explicit `env { ... }`
@@ -106,6 +109,8 @@ func toolchainBinPaths(key string, state *alphaState, log *zlog.Logger) ([]strin
 	case <-tc.lifecycle.Barrier("ready").Wait():
 	case <-tc.lifecycle.Barrier(alphasfile.ToolchainTerminalFailure).Wait():
 		return nil, fmt.Errorf("toolchain %s@%s: install failed (see earlier `toolchain` log lines)", tc.lang, tc.version)
+	case <-state.shutdownCh:
+		return nil, fmt.Errorf("toolchain %s@%s: alpha shutting down", tc.lang, tc.version)
 	}
 	return tc.binPaths, nil
 }
@@ -306,6 +311,7 @@ type runConfig struct {
 	ShutdownGrace time.Duration
 	Home          zfs.DirName              // resolved zordon home (--home → ZORDON_HOME; "" ⇒ ~/.zordon)
 	Keychain      zlock.GlobalKeychain     // host-wide lock keychain rooted at Home
+	StateDir      zfs.DirName              // workspace state dir (--state-dir → ZORDON_STATE_DIR)
 	TommyBin      zfs.DirName              // tommy wrapper override (--tommy-bin → ZORDON_TOMMY_BIN)
 	Workspace     invocation.WorkspaceName // which workspace this alpha runs for (--workspace → ZORDON_WORKSPACE)
 	ReadyFD       zfs.FileDescriptor       // parent handshake fd (--ready-fd → ZORDON_READY_FD; 0 ⇒ no handshake)
@@ -333,9 +339,10 @@ func main() {
 	sockPath := runFlags.StringLong("socket", "", "control socket path (required; usually injected by zordon)")
 	stabilization := runFlags.DurationLong("stabilization", 1*time.Second, "how long a service must stay alive after spawn to be considered ready")
 	shutdownGrace := runFlags.DurationLong("shutdown-grace", 2*time.Second, "time given to children to exit on SIGTERM before SIGKILL")
-	var home, tommyBin zfs.DirName
+	var home, stateDir, tommyBin zfs.DirName
 	var workspace invocation.WorkspaceName
 	runFlags.Value(0, "home", &home, "directory holding shared mise install and toolchain cache (env: ZORDON_HOME; defaults to ~/.zordon)")
+	runFlags.Value(0, "state-dir", &stateDir, "workspace state directory (env: ZORDON_STATE_DIR)")
 	runFlags.Value(0, "tommy-bin", &tommyBin, "tommy wrapper binary path (env: ZORDON_TOMMY_BIN; defaults to alpha-sibling lookup)")
 	runFlags.Value(0, "workspace", &workspace, "workspace name this alpha runs for (env: ZORDON_WORKSPACE)")
 	var readyFD, parentFD zfs.FileDescriptor
@@ -355,6 +362,7 @@ func main() {
 				ShutdownGrace: *shutdownGrace,
 				Home:          zfs.DirName(zordonHome),
 				Keychain:      zlock.NewGlobalKeychain(zordonHome),
+				StateDir:      stateDir,
 				TommyBin:      tommyBin,
 				Workspace:     workspace,
 				ReadyFD:       readyFD,
@@ -376,6 +384,12 @@ func main() {
 	}
 }
 
+type writtenFile struct {
+	path string
+	info zfs.FileInfo
+	sum  [32]byte
+}
+
 type alphaState struct {
 	mu             sync.RWMutex
 	startedAt      time.Time
@@ -394,7 +408,7 @@ type alphaState struct {
 	provisions     map[string]*provisionCtx // keyed by provision ID ("service.<tc>.<svc>.runtime.provision.<name>")
 	toolchains     map[string]*toolchainCtx // keyed by lang ("go", "rust", "ruby")
 	readiness      map[string]string        // service name -> readiness state ("probing", "ready", "failed")
-	files          []string                 // absolute paths of file{} outputs to unlink on shutdown
+	files          []writtenFile            // file{} outputs written by this alpha to unlink on shutdown if still owned
 
 	// shutdownCh is closed exactly once to signal whole-alpha shutdown.
 	// Each service supervisor selects on it; the runAlpha main goroutine
@@ -406,9 +420,11 @@ type alphaState struct {
 	// is set INSIDE shutdownOnce, BEFORE the close, so any goroutine that
 	// observes the channel close sees the reason via channel-close
 	// release semantics — no mutex needed for the read.
-	shutdownCh     chan struct{}
-	shutdownOnce   sync.Once
-	shutdownReason string
+	shutdownCh      chan struct{}
+	shutdownOnce    sync.Once
+	shutdownReason  string
+	shutdownCtxOnce sync.Once
+	shutdownCtxVal  context.Context
 
 	// life binds alpha's lifetime to zordon (the spawner) until the commit
 	// point: a zordon death before then ends alpha via the daemon.
@@ -556,6 +572,18 @@ func (s *alphaState) requestShutdown(reason string) {
 	})
 }
 
+func (s *alphaState) shutdownCtx() context.Context {
+	s.shutdownCtxOnce.Do(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			<-s.shutdownCh
+			cancel()
+		}()
+		s.shutdownCtxVal = ctx
+	})
+	return s.shutdownCtxVal
+}
+
 func (s *alphaState) registerHandler() chan struct{} {
 	done := make(chan struct{})
 	s.handlersMu.Lock()
@@ -680,7 +708,7 @@ func (tc *toolchainCtx) TerminalFailure() *barrier.Barrier {
 // Idempotent enough that a federation level booting after a parent
 // has already materialized the same version will short-circuit on
 // the existing installs/locks and finish in milliseconds.
-func bringupToolchain(tc *toolchainCtx, zordonHome string, kc zlock.GlobalKeychain, log *zlog.Logger) {
+func bringupToolchain(ctx context.Context, tc *toolchainCtx, zordonHome string, kc zlock.GlobalKeychain, log *zlog.Logger) {
 	tc.lifecycle.Reach("installing")
 	log.Info("alpha", "toolchain %s@%s: installing", tc.lang, tc.version)
 
@@ -701,7 +729,7 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, kc zlock.GlobalKeycha
 	// below: multiple independent (ref, version) installs, each locked on
 	// its own key, rather than one interpreter with tools layered in.
 	if tc.pkgTools != nil {
-		bringupPkgTools(tc, bin, zordonHome, kc, log)
+		bringupPkgTools(ctx, tc, bin, zordonHome, kc, log)
 		return
 	}
 	// ResolveDataDir uses zordonHome as the walk-up anchor; the
@@ -710,7 +738,7 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, kc zlock.GlobalKeycha
 	// materialize toolchains BEFORE services run).
 	defaultDataDir := filepath.Join(zordonHome, "toolchain")
 	dataDir := tools.ResolveDataDir(zordonHome, defaultDataDir, tc.lang, tc.version)
-	release, err := kc.LockTool(context.Background(), tc.lang, tc.version)
+	release, err := kc.LockTool(ctx, tc.lang, tc.version)
 	if err != nil {
 		log.Error("alpha", "toolchain %s: lock tool: %v", tc.lang, err)
 		tc.lifecycle.Reach("failed")
@@ -772,12 +800,12 @@ func bringupToolchain(tc *toolchainCtx, zordonHome string, kc zlock.GlobalKeycha
 // installs, not one interpreter's layered tool world. Any install error
 // Reaches "failed" so waiters on toolchain.pkg@ready unblock rather than
 // deadlock.
-func bringupPkgTools(tc *toolchainCtx, bin, zordonHome string, kc zlock.GlobalKeychain, log *zlog.Logger) {
+func bringupPkgTools(ctx context.Context, tc *toolchainCtx, bin, zordonHome string, kc zlock.GlobalKeychain, log *zlog.Logger) {
 	defaultDataDir := filepath.Join(zordonHome, "toolchain")
 	var pooled []string
 	for ref, version := range tc.pkgTools {
 		dataDir := tools.ResolveDataDir(zordonHome, defaultDataDir, ref, version)
-		release, err := kc.LockTool(context.Background(), ref, version)
+		release, err := kc.LockTool(ctx, ref, version)
 		if err != nil {
 			log.Error("alpha", "toolchain pkg: lock tool %s@%s: %v", ref, version, err)
 			tc.lifecycle.Reach("failed")
@@ -1342,10 +1370,16 @@ func (s *alphaState) configure(path, fsHash, cfgHash string, parentDotenv []stri
 	s.readiness = make(map[string]string)
 }
 
-func (s *alphaState) addFile(p string) {
+func (s *alphaState) addFile(wf writtenFile) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.files = append(s.files, p)
+	for i := range s.files {
+		if s.files[i].path == wf.path {
+			s.files[i] = wf
+			return
+		}
+	}
+	s.files = append(s.files, wf)
 }
 
 func (s *alphaState) addService(sc *serviceCtx) {
@@ -1520,11 +1554,35 @@ func (s *alphaState) shutdownAll(log *zlog.Logger) {
 		<-pc.done
 	}
 
-	for _, p := range files {
-		if err := zfs.RemoveIfPresent(p); err != nil {
-			log.Error("alpha", "unlink %s: %v", p, err)
+	for _, wf := range files {
+		curInfo, err := zfs.Stat(wf.path)
+		if zfs.IsMissingErr(err) {
+			continue
+		}
+		if err != nil {
+			log.Error("alpha", "stat %s: %v", wf.path, err)
+			continue
+		}
+		if !zfs.SameFile(wf.info, curInfo) {
+			log.Info("alpha", "keeping file %s (replaced by another writer)", wf.path)
+			continue
+		}
+		curBody, err := zfs.Read(wf.path)
+		if zfs.IsMissingErr(err) {
+			continue
+		}
+		if err != nil {
+			log.Error("alpha", "read %s: %v", wf.path, err)
+			continue
+		}
+		if sha256.Sum256(curBody) != wf.sum {
+			log.Info("alpha", "keeping file %s (modified since written)", wf.path)
+			continue
+		}
+		if err := zfs.RemoveIfPresent(wf.path); err != nil {
+			log.Error("alpha", "unlink %s: %v", wf.path, err)
 		} else {
-			log.Info("alpha", "removed file %s", p)
+			log.Info("alpha", "removed file %s", wf.path)
 		}
 	}
 }
@@ -1587,11 +1645,20 @@ func materializeFiles(files []*alphasfile.File, state *alphaState, log *zlog.Log
 		if err := zfs.EnsureDir(dir); err != nil {
 			return err
 		}
-		if err := zfs.AtomicWrite(f.Path, []byte(f.Body)); err != nil {
+		body := []byte(f.Body)
+		if err := zfs.AtomicWrite(f.Path, body); err != nil {
 			return err
 		}
-		state.addFile(f.Path)
-		log.Info("alpha", "wrote file %s (%d bytes)", f.Path, len(f.Body))
+		info, err := zfs.Stat(f.Path)
+		if err != nil {
+			return err
+		}
+		state.addFile(writtenFile{
+			path: f.Path,
+			info: info,
+			sum:  sha256.Sum256(body),
+		})
+		log.Info("alpha", "wrote file %s (%d bytes)", f.Path, len(body))
 	}
 	return nil
 }
@@ -1718,8 +1785,18 @@ func serveAlpha(ctx context.Context, rc runConfig, life *daemon.Lifeline) error 
 	}
 	defer logF.Close()
 
-	log := zlog.New(logF, false)
+	log := zlog.New(logF, false).WithPID(os.Getpid())
 	log.Info("alpha", "starting pid=%d socket=%s", os.Getpid(), sockPath)
+
+	if zordonHome != "" && rc.StateDir.IsSet() {
+		unlockAlpha, err := rc.Keychain.ForWorkspace(rc.StateDir.Path()).LockAlpha(ctx)
+		if err != nil {
+			return fmt.Errorf("alpha lock: %w", err)
+		}
+		defer unlockAlpha()
+	} else {
+		log.Info("alpha", "lifecycle lock disabled (--state-dir / ZORDON_STATE_DIR not set)")
+	}
 
 	// Reap orphans from a previous alpha for THIS fs_hash before binding the
 	// control socket: a service binary from the prior run holding a TCP port
@@ -2034,9 +2111,10 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 	// runProvision's toolchainEnv blocks on the `ready` barrier, so spawning
 	// the goroutines here is enough — they short-circuit when the install is
 	// already cached in ZORDON_HOME.
+	ctx := state.shutdownCtx()
 	for _, tc := range pinnedToolchains(newConfig.Toolchain) {
 		state.addToolchain(tc)
-		go bringupToolchain(tc, state.zordonHome, state.keychain, log)
+		go bringupToolchain(ctx, tc, state.zordonHome, state.keychain, log)
 	}
 	pkgSeen := map[string]bool{}
 	for _, svc := range services {
@@ -2053,7 +2131,7 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 			tc.installEnv = svc.Runtime.BuildEnv
 		}
 		state.addToolchain(tc)
-		go bringupToolchain(tc, state.zordonHome, state.keychain, log)
+		go bringupToolchain(ctx, tc, state.zordonHome, state.keychain, log)
 	}
 
 	// Reverse order: services last-declared first, provisions within a
@@ -2247,9 +2325,10 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	// bringupToolchain goroutine short-circuits to Reach("ready") in
 	// microseconds when the install is a no-op, and other entities can
 	// always resolve `toolchain.X@ready` as a barrier.
+	ctx := state.shutdownCtx()
 	for _, tc := range pinnedToolchains(newConfig.Toolchain) {
 		state.addToolchain(tc)
-		go bringupToolchain(tc, state.zordonHome, state.keychain, log)
+		go bringupToolchain(ctx, tc, state.zordonHome, state.keychain, log)
 	}
 
 	// pkg services: each declares a native package (redis/postgres/…)
@@ -2273,7 +2352,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 			tc.installEnv = svc.Runtime.BuildEnv
 		}
 		state.addToolchain(tc)
-		go bringupToolchain(tc, state.zordonHome, state.keychain, log)
+		go bringupToolchain(ctx, tc, state.zordonHome, state.keychain, log)
 	}
 
 	// Pre-allocate every entity FIRST so cross-refs in `after` resolve
@@ -2337,6 +2416,10 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		go runProvision(b, p.pc, p.parent)
 	}
 
+	bringupDone := make(chan struct{})
+	defer close(bringupDone)
+	go watchBringupProgress(bringupDone, bringupStart, toBringup, serviceCtxs, provs, state, stream, log)
+
 	// Wait for every service to settle (ready ∪ failed). doneBar is the
 	// composed "outcome decided" barrier — fires regardless of which
 	// terminal state was reached.
@@ -2395,6 +2478,115 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		Summary: buildStartSummary(toBringup, serviceCtxs, provs, bringupStart, time.Now()),
 	})
 	log.Info("alpha", "bringup complete")
+}
+
+// watchBringupProgress periodically logs what handleConfigure is still waiting
+// on so a long or stuck build, readiness probe, toolchain install, or provision
+// never leaves the user facing a silent terminal.
+func watchBringupProgress(done <-chan struct{}, bringupStart time.Time, services []*alphasfile.Service, serviceCtxs map[string]*serviceCtx, provs []provEntry, state *alphaState, stream *safeEncoder, log *zlog.Logger) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-state.shutdownCh:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			pending := describeBringupWait(services, serviceCtxs, provs, bringupStart, now)
+			if pending == "" {
+				continue
+			}
+			msg := fmt.Sprintf("still bringing up (%s elapsed): waiting on %s",
+				now.Sub(bringupStart).Round(time.Second), pending)
+			log.Info("alpha", "%s", msg)
+			stream.Send(&protocol.Event{Kind: protocol.EventLog, Service: "alpha", Stream: "stderr", Line: msg})
+		}
+	}
+}
+
+type bringupWaitItem struct {
+	name  string
+	phase string
+	since time.Time
+}
+
+func describeBringupWait(services []*alphasfile.Service, serviceCtxs map[string]*serviceCtx, provs []provEntry, bringupStart, now time.Time) string {
+	var items []bringupWaitItem
+	counts := make(map[string]int)
+	for _, svc := range services {
+		sc := serviceCtxs[svc.Name()]
+		if sc == nil || sc.doneBar.Triggered() {
+			continue
+		}
+		phase := "starting"
+		since := bringupStart
+		switch {
+		case !sc.build.Reached("running"):
+			phase = "waiting for dependencies"
+			if t, ok := sc.lifecycle.ReachedAt("scheduled"); ok {
+				since = t
+			}
+		case !sc.buildDoneBar.Triggered():
+			phase = "building"
+			if t, ok := sc.build.ReachedAt("running"); ok {
+				since = t
+			}
+		case sc.lifecycle.Reached("running"):
+			phase = "probing readiness"
+			if t, ok := sc.lifecycle.ReachedAt("running"); ok {
+				since = t
+			}
+		}
+		counts[phase]++
+		items = append(items, bringupWaitItem{name: svc.Name(), phase: phase, since: since})
+	}
+	for _, p := range provs {
+		if p.detached || p.pc.doneBar.Triggered() {
+			continue
+		}
+		label := p.pc.step.Name
+		if p.parent != nil {
+			label = p.parent.name + "/" + label
+		}
+		phase := "waiting for dependencies"
+		since := bringupStart
+		if p.pc.lifecycle.Reached("running") {
+			phase = "running"
+			if t, ok := p.pc.lifecycle.ReachedAt("running"); ok {
+				since = t
+			}
+		}
+		counts[phase]++
+		items = append(items, bringupWaitItem{name: "provision " + label, phase: phase, since: since})
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	if len(items) <= 3 {
+		parts := make([]string, len(items))
+		for i, it := range items {
+			parts[i] = fmt.Sprintf("%s (%s)", it.name, it.phase)
+		}
+		return strings.Join(parts, ", ")
+	}
+	phaseOrder := []string{"building", "probing readiness", "running", "starting", "waiting for dependencies"}
+	var phaseParts []string
+	for _, ph := range phaseOrder {
+		if c := counts[ph]; c > 0 {
+			phaseParts = append(phaseParts, fmt.Sprintf("%d %s", c, ph))
+		}
+	}
+	slices.SortStableFunc(items, func(a, b bringupWaitItem) int {
+		return a.since.Compare(b.since)
+	})
+	var longest []string
+	for _, it := range items[:3] {
+		dur := max(now.Sub(it.since).Round(time.Second), 0)
+		longest = append(longest, fmt.Sprintf("%s (%s %s)", it.name, it.phase, dur))
+	}
+	return fmt.Sprintf("%d: %s; longest: %s", len(items), strings.Join(phaseParts, ", "), strings.Join(longest, ", "))
 }
 
 // provEntry pairs a provision with its parent service so the bringup
@@ -2662,7 +2854,7 @@ func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
 	}
 	sc.startedAt = time.Now()
 
-	bringupAndSuperviseStart(b, svc, sc, repoDir, agent)
+	bringupAndSuperviseStart(prepCtx, b, svc, sc, repoDir, agent)
 }
 
 // waitAfter blocks until every ref's barrier fires, recording when each did.
@@ -2733,7 +2925,7 @@ func primaryKeyOf(svc *alphasfile.Service) string {
 // races probe vs self-exit, then supervises the running process until
 // external stop or self-exit. Split out so the per-primary lock doesn't
 // have to wrap this much code.
-func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCtx, repoDir string, agent bool) {
+func bringupAndSuperviseStart(prepCtx context.Context, b *bringup, svc *alphasfile.Service, sc *serviceCtx, repoDir string, agent bool) {
 	state, cfg, stream, log, failfast := b.state, b.cfg, b.stream, b.log, b.failfast
 	name := svc.Name()
 
@@ -2911,7 +3103,7 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- cmd.Wait() }()
 
-	probeCtx, cancelProbe := context.WithCancel(context.Background())
+	probeCtx, cancelProbe := context.WithCancel(prepCtx)
 	defer cancelProbe()
 	readyCh := make(chan error, 1)
 	go func() { readyCh <- waitReady(probeCtx, svc, cfg.stabilization, log) }()
@@ -2920,8 +3112,10 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 	select {
 	case err := <-readyCh:
 		if err != nil {
-			state.setReadiness(name, protocol.ReadinessFailed)
-			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "readiness: " + err.Error()})
+			if prepCtx.Err() == nil {
+				state.setReadiness(name, protocol.ReadinessFailed)
+				stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "readiness: " + err.Error()})
+			}
 			log.Info("alpha", "SIGTERM %s pgid=%d (reason: readiness probe failed: %v)", name, cmd.Process.Pid, err)
 			_ = killGroup(cmd.Process.Pid, syscall.SIGTERM)
 			select {
@@ -2931,7 +3125,7 @@ func bringupAndSuperviseStart(b *bringup, svc *alphasfile.Service, sc *serviceCt
 				sc.exitErr = <-waitErr
 			}
 			sc.lifecycle.Reach("failed")
-			if failfast {
+			if failfast && prepCtx.Err() == nil {
 				state.requestShutdown(fmt.Sprintf("failfast: service %s readiness probe failed: %v", name, err))
 			}
 			return

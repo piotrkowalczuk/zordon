@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"path/filepath"
 	"strings"
 
@@ -100,6 +101,20 @@ func (k WorkspaceKeychain) LockAlpha(ctx context.Context) (UnlockFunc, error) {
 // WaitUnlockedAlpha blocks until no alpha daemon holds <workspaceDir>/alpha.lock or ctx expires.
 func (k WorkspaceKeychain) WaitUnlockedAlpha(ctx context.Context) error {
 	return zfs.WaitUnlocked(ctx, k.revealWorkspace(), "alpha")
+}
+
+// IsAlphaLockedBy reports whether <workspaceDir>/alpha.lock is currently held
+// by pid (or by any process when pid <= 0).
+func (k WorkspaceKeychain) IsAlphaLockedBy(pid int) bool {
+	unlock, err := zfs.TryLock(k.revealWorkspace(), "alpha")
+	if err == nil {
+		unlock()
+		return false
+	}
+	if lockErr, ok := errors.AsType[*LockError](err); ok {
+		return pid <= 0 || lockErr.HolderPID == pid || lockErr.HolderPID == 0
+	}
+	return false
 }
 
 func (k GlobalKeychain) revealHome() string {

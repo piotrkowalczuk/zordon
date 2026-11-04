@@ -3,6 +3,7 @@ package zlock
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"testing/synctest"
@@ -33,9 +34,18 @@ func TestWorkspaceKeychain_LockAlphaAndWaitUnlockedAlpha(t *testing.T) {
 	kc := NewGlobalKeychain(t.TempDir()).ForWorkspace(t.TempDir())
 
 	synctest.Test(t, func(t *testing.T) {
+		if kc.IsAlphaLockedBy(os.Getpid()) {
+			t.Fatal("IsAlphaLockedBy true before LockAlpha")
+		}
 		unlock, err := kc.LockAlpha(t.Context())
 		if err != nil {
 			t.Fatalf("LockAlpha: %v", err)
+		}
+		if !kc.IsAlphaLockedBy(os.Getpid()) {
+			t.Fatal("IsAlphaLockedBy(self) false while holding LockAlpha")
+		}
+		if kc.IsAlphaLockedBy(os.Getpid() + 100000) {
+			t.Fatal("IsAlphaLockedBy(otherPID) true while held by self")
 		}
 		go func() {
 			select {
@@ -47,6 +57,9 @@ func TestWorkspaceKeychain_LockAlphaAndWaitUnlockedAlpha(t *testing.T) {
 
 		if err := kc.WaitUnlockedAlpha(t.Context()); err != nil {
 			t.Fatalf("WaitUnlockedAlpha: %v", err)
+		}
+		if kc.IsAlphaLockedBy(os.Getpid()) {
+			t.Fatal("IsAlphaLockedBy true after unlock")
 		}
 	})
 }

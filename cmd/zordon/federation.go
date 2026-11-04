@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
@@ -419,20 +420,24 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		}
 
 		// Leaf. Clean requires the stack to be down.
-		if old != nil {
-			if !waitStopped {
-				return fmt.Errorf("%s: alpha is running (pid=%d); run `zordon stop` first, or `zordon stop --clean`", lvl.Path(), old.PID)
-			}
-			if err := waitSocketGone(ctx, inv.SocketPath(), timeout); err != nil {
-				return fmt.Errorf("%s: waiting for alpha to stop before clean: %w", lvl.Path(), err)
-			}
-		}
-
 		unlock, err := lvl.Keychain().TryLockZordon()
 		if err != nil {
 			return err
 		}
 		defer unlock()
+
+		if old != nil && !waitStopped {
+			return fmt.Errorf("%s: alpha is running (pid=%d); run `zordon stop` first, or `zordon stop --clean`", lvl.Path(), old.PID)
+		}
+		oldPID := 0
+		oldHasLock := false
+		if old != nil {
+			oldPID = old.PID
+			oldHasLock = lvl.Keychain().IsAlphaLockedBy(oldPID)
+		}
+		if err := waitAlphaGone(ctx, lvl.Keychain(), inv.SocketPath(), oldPID, oldHasLock, timeout, log); err != nil {
+			return fmt.Errorf("%s: waiting for alpha to stop before clean: %w", lvl.Path(), err)
+		}
 
 		return cleanLeaf(ctx, lvl, af, parentDotenv, parentEnv, cfg, log)
 	}
@@ -465,9 +470,10 @@ func cleanLeaf(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, p
 
 	cleanErr := pushClean(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.agent)
 	// Always shut the transient alpha down, success or failure.
-	if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
+	if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil && !control.IsNotRunning(e) {
 		log.Error("zordon", "shutdown transient alpha: %v", e)
 	}
+	_ = waitAlphaGone(ctx, lvl.Keychain(), sock, 0, true, cfg.timeout, nil)
 	if cleanErr != nil {
 		return fmt.Errorf("%s: %w", lvl.afPath, cleanErr)
 	}
@@ -553,27 +559,102 @@ func runSudoSteps(services []*alphasfile.Service, log *zlog.Logger) {
 	}
 }
 
-// waitSocketGone blocks until nothing answers on sock (old alpha exited) or
-// the timeout elapses.
-func waitSocketGone(ctx context.Context, sock string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
+// waitAlphaGone blocks until nothing answers on sock and the workspace's
+// alpha.lock is released (meaning old alpha's shutdownAll — including service
+// SIGTERM drain and generated-file cleanup — has finished), or timeout elapses.
+// When restarting over an older alpha that predates alpha.lock (!oldHasLock),
+// it falls back to polling syscall.Kill(oldPID, 0) until that process exits.
+func waitAlphaGone(ctx context.Context, kc zlock.WorkspaceKeychain, sock string, oldPID int, oldHasLock bool, timeout time.Duration, log *zlog.Logger) error {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	start := time.Now()
+	done := make(chan struct{})
+	defer close(done)
+	if log != nil {
+		go func() {
+			timer := time.NewTimer(1 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-done:
+				return
+			case <-waitCtx.Done():
+				return
+			case <-timer.C:
+				log.Warn("zordon", "waiting for old alpha to finish teardown (%s elapsed)", time.Since(start).Round(100*time.Millisecond))
+			}
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-waitCtx.Done():
+					return
+				case <-ticker.C:
+					log.Warn("zordon", "waiting for old alpha to finish teardown (%s elapsed)", time.Since(start).Round(100*time.Millisecond))
+				}
+			}
+		}()
+	}
+
+	if err := waitSocketGone(waitCtx, sock); err != nil {
+		return wrapAlphaTeardownErr(err, oldPID, timeout)
+	}
+	if err := kc.WaitUnlockedAlpha(waitCtx); err != nil {
+		return wrapAlphaTeardownErr(err, oldPID, timeout)
+	}
+	if oldPID > 0 && !oldHasLock && syscall.Kill(oldPID, 0) == nil {
+		if log != nil {
+			log.Info("zordon", "old alpha pid=%d predates alpha.lock, waiting for exit", oldPID)
+		}
+		if err := waitPIDGone(waitCtx, oldPID); err != nil {
+			return wrapAlphaTeardownErr(err, oldPID, timeout)
+		}
+	}
+	return nil
+}
+
+func wrapAlphaTeardownErr(err error, oldPID int, timeout time.Duration) error {
+	pid := oldPID
+	if lockErr, ok := errors.AsType[*zlock.LockError](err); ok && lockErr.HolderPID > 0 {
+		pid = lockErr.HolderPID
+	}
+	if pid > 0 {
+		return fmt.Errorf("old alpha (pid=%d) still tearing down after %s (rerun or raise --timeout): %w", pid, timeout, err)
+	}
+	return fmt.Errorf("old alpha still tearing down after %s (rerun or raise --timeout): %w", timeout, err)
+}
+
+func waitSocketGone(ctx context.Context, sock string) error {
 	delay := 20 * time.Millisecond
 	for {
 		c, err := control.Dial(sock, 100*time.Millisecond)
 		if err != nil {
 			return nil
 		}
-		c.Close()
-		if time.Now().After(deadline) {
-			return errors.New("old alpha still listening")
-		}
+		_ = c.Close()
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return errors.New("old alpha still listening")
 		case <-time.After(delay):
 		}
-		if delay < 250*time.Millisecond {
-			delay *= 2
-		}
+		delay = min(delay*2, 250*time.Millisecond)
 	}
+}
+
+func waitPIDGone(ctx context.Context, pid int) error {
+	delay := 20 * time.Millisecond
+	for syscall.Kill(pid, 0) == nil {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("old alpha pid=%d still alive: %w", pid, ctx.Err())
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, 250*time.Millisecond)
+	}
+	return nil
 }

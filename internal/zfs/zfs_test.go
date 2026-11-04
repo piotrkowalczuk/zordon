@@ -344,3 +344,32 @@ func TestLock_contextCancelled(t *testing.T) {
 		}
 	})
 }
+
+func TestSameFile_detectsAtomicReplacement(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".env")
+	if err := AtomicWrite(p, []byte("v1\n")); err != nil {
+		t.Fatal(err)
+	}
+	fi1, err := Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi1Again, err := Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !SameFile(fi1, fi1Again) {
+		t.Fatal("SameFile(fi1, fi1Again) = false; want true for unchanged file")
+	}
+
+	if err := AtomicWrite(p, []byte("v2\n")); err != nil {
+		t.Fatal(err)
+	}
+	fi2, err := Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if SameFile(fi1, fi2) {
+		t.Fatal("SameFile(fi1, fi2) = true after AtomicWrite rename; want false")
+	}
+}

@@ -121,7 +121,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	startFlags := ff.NewFlagSet("start").SetParent(rootFlags)
 	startAlphaBin := startFlags.StringLong("alpha", "alpha", "alpha binary (name on $PATH or absolute path)")
 	startAlphaLog := startFlags.StringLong("alpha-log", "", "log file for alpha (default: <tmpdir>/alpha-<workspace-hash>.log)")
-	startTimeout := startFlags.DurationLong("timeout", 30*time.Second, "max wait for alpha to become ready")
+	startTimeout := startFlags.DurationLong("timeout", 30*time.Second, "max wait for old alpha teardown and new alpha to become ready")
 	// Failfast defaults to true (the safe stance for local dev: surface
 	// the first failure rather than letting other services flap behind
 	// it). BoolLongDefault, unlike BoolLong + post-registration pointer
@@ -382,7 +382,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	cleanFlags := ff.NewFlagSet("clean").SetParent(rootFlags)
 	cleanAlphaBin := cleanFlags.StringLong("alpha", "alpha", "alpha binary (name on $PATH or absolute path)")
 	cleanAlphaLog := cleanFlags.StringLong("alpha-log", "", "log file for the transient alpha (default: <tmpdir>/alpha-<workspace-hash>.log)")
-	cleanTimeout := cleanFlags.DurationLong("timeout", 30*time.Second, "max wait for the transient alpha to become ready")
+	cleanTimeout := cleanFlags.DurationLong("timeout", 30*time.Second, "max wait for old alpha teardown and the transient alpha to become ready")
 	cleanCmd := &ff.Command{
 		Name:      "clean",
 		Usage:     "zordon clean [FLAGS]",

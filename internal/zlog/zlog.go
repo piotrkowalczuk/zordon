@@ -45,6 +45,7 @@ type Logger struct {
 	w         io.Writer
 	agent     bool
 	color     bool
+	pid       int
 	startedAt time.Time
 }
 
@@ -56,6 +57,21 @@ func New(w io.Writer, agent bool) *Logger {
 		agent:     agent,
 		color:     !agent && isTerminal(w),
 		startedAt: time.Now(),
+	}
+}
+
+// WithPID tags alpha's own log sources ("alpha", "registry") with [pid]
+// (e.g. "alpha[12345]") for shared append-only log files where multiple daemon
+// lifetimes interleave. Forwarded service output keeps its bare service name so
+// `svc1[pid]` is never misread as the child's PID and long service names don't
+// overflow the 15-char source column.
+func (l *Logger) WithPID(pid int) *Logger {
+	return &Logger{
+		w:         l.w,
+		agent:     l.agent,
+		color:     l.color,
+		pid:       pid,
+		startedAt: l.startedAt,
 	}
 }
 
@@ -97,12 +113,16 @@ func (l *Logger) Service(src, stream, line string) {
 func (l *Logger) emit(src, level, msg string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	displaySrc := src
+	if l.pid > 0 && (src == "alpha" || src == "registry") {
+		displaySrc = fmt.Sprintf("%s[%d]", src, l.pid)
+	}
 	if l.agent {
 		fmt.Fprintf(l.w, "%d %s %s %s\n",
-			time.Since(l.startedAt).Milliseconds(), src, level, msg)
+			time.Since(l.startedAt).Milliseconds(), displaySrc, level, msg)
 		return
 	}
-	srcCol := fmt.Sprintf("%-15s", src)
+	srcCol := fmt.Sprintf("%-15s", displaySrc)
 	tail := ""
 	if l.color {
 		srcCol = colorFor(src) + srcCol + ansiReset

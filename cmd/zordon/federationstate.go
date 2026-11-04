@@ -176,8 +176,14 @@ func canReuse(isLeaf bool, old *protocol.StateInfo, cfgHash string) bool {
 //	reused=false → af is freshly resolved; old (if non-nil) is a running alpha
 //	               the caller must stop before spawning the replacement.
 func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx *alphasfile.ParentContext, testCfg alphasfile.TestConfig) (af *alphasfile.Alphasfile, old *protocol.StateInfo, reused bool, err error) {
-	if resp, e := control.Roundtrip(ctx, lvl.inv.SocketPath(), &protocol.Request{Op: protocol.OpState}); e == nil && resp != nil && resp.State != nil {
+	stateCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	resp, stateErr := control.Roundtrip(stateCtx, lvl.inv.SocketPath(), &protocol.Request{Op: protocol.OpState})
+	switch {
+	case stateErr == nil && resp != nil && resp.State != nil:
 		old = resp.State
+	case stateErr != nil && !control.IsNotRunning(stateErr):
+		return nil, nil, false, fmt.Errorf("query running alpha state: %w", stateErr)
 	}
 	if canReuse(lvl.IsLeaf(), old, cfgHash) {
 		return nil, old, true, nil
@@ -204,18 +210,22 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 	inv := lvl.inv
 	sock := inv.SocketPath()
 
+	oldPID := 0
+	oldHasLock := false
 	if old != nil {
+		oldPID = old.PID
+		oldHasLock = lvl.Keychain().IsAlphaLockedBy(oldPID)
 		reason := "restart requested"
 		if !lvl.IsLeaf() {
 			reason = "drift detected (config changed since alpha started)"
 		}
 		log.Info("zordon", "%s [%s]: %s, restarting alpha pid=%d", lvl.afPath, inv.FsHash, reason, old.PID)
-		if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil {
+		if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil && !control.IsNotRunning(e) {
 			log.Error("zordon", "shutdown %s: %v", lvl.afPath, e)
 		}
-		if err := waitSocketGone(ctx, sock, cfg.timeout); err != nil {
-			return nil, fmt.Errorf("%s: waiting for old alpha to exit: %w", lvl.afPath, err)
-		}
+	}
+	if err := waitAlphaGone(ctx, lvl.Keychain(), sock, oldPID, oldHasLock, cfg.timeout, log); err != nil {
+		return nil, fmt.Errorf("%s: waiting for old alpha to exit: %w", lvl.afPath, err)
 	}
 
 	levelLog := inv.AlphaLogPath()

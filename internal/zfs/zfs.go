@@ -72,6 +72,10 @@ func (e *LockError) Unwrap() error {
 // importing "os". Methods come from *os.File.
 type File = os.File
 
+// FileInfo is a type alias so callers can hold a zfs.FileInfo without
+// importing "os".
+type FileInfo = os.FileInfo
+
 // dirPerm is the standard private-state directory mode used across
 // zordon (lock dirs, state dirs, tmp dirs, registry parent, ...).
 // Centralized so a future audit only has to touch this constant.
@@ -386,7 +390,12 @@ func IsMissingErr(err error) bool {
 // Stat is a thin chokepoint for stat(2). No convention to enforce;
 // exposed so business logic doesn't import "os" just for one call.
 // FileInfo is os.FileInfo (interface from io/fs).
-func Stat(path string) (os.FileInfo, error) { return os.Stat(path) }
+func Stat(path string) (FileInfo, error) { return os.Stat(path) }
+
+// SameFile reports whether fi1 and fi2 describe the same underlying file
+// (inode + device on Unix). Used by alpha's file teardown to verify a path has
+// not been atomically replaced by a newer writer before unlinking.
+func SameFile(fi1, fi2 FileInfo) bool { return os.SameFile(fi1, fi2) }
 
 // Read is a thin chokepoint for reading a whole file into memory.
 // Same reason as Stat: avoid `import "os"` in business logic. Use

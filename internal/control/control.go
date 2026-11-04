@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"syscall"
 	"time"
@@ -59,19 +60,26 @@ func Dial(path string, timeout time.Duration) (net.Conn, error) {
 	return net.DialTimeout("unix", path, timeout)
 }
 
-// IsNotRunning reports whether err means "no alpha is listening on this path".
+// IsNotRunning reports whether err means "no alpha is listening on this path"
+// (including a connection that was closed or reset while alpha tore down its
+// listener). A read/write timeout against a connected socket is NOT matched, so
+// callers can distinguish a wedged alpha from an absent or shutting-down one.
 func IsNotRunning(err error) bool {
 	if err == nil {
 		return false
 	}
-	if zfs.IsMissingErr(err) {
+	if zfs.IsMissingErr(err) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) {
 		return true
 	}
 	var opErr *net.OpError
-	return errors.As(err, &opErr)
+	return errors.As(err, &opErr) && opErr.Op == "dial"
 }
 
-// Roundtrip opens one connection, sends req, reads one Response.
+// Roundtrip opens one connection, sends req, reads one Response, and honors
+// ctx cancellation / deadlines.
 func Roundtrip(ctx context.Context, path string, req *protocol.Request) (*protocol.Response, error) {
 	conn, err := Dial(path, 1*time.Second)
 	if err != nil {
@@ -83,11 +91,27 @@ func Roundtrip(ctx context.Context, path string, req *protocol.Request) (*protoc
 		_ = conn.SetDeadline(dl)
 	}
 
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.SetDeadline(time.Now())
+		case <-done:
+		}
+	}()
+
 	if err := protocol.NewEncoder(conn).Write(req); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("send: %w", err)
 	}
 	var resp protocol.Response
 	if err := protocol.NewDecoder(conn).Read(&resp); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("recv: %w", err)
 	}
 	return &resp, nil
