@@ -80,9 +80,12 @@ func toolchainEnv(toolchainLang string, state *alphaState, log *zlog.Logger) (ma
 	select {
 	case <-tc.lifecycle.Barrier("ready").Wait():
 	case <-tc.lifecycle.Barrier(alphasfile.ToolchainTerminalFailure).Wait():
-		return nil, fmt.Errorf("toolchain %s@%s: install failed (see earlier `toolchain` log lines)", tc.lang, tc.version)
+		if err := tc.Err(); err != nil {
+			return nil, fmt.Errorf("%s: %w", tc.summaryLabel(), err)
+		}
+		return nil, fmt.Errorf("%s: install failed", tc.summaryLabel())
 	case <-state.shutdownCh:
-		return nil, fmt.Errorf("toolchain %s@%s: alpha shutting down", tc.lang, tc.version)
+		return nil, fmt.Errorf("%s: alpha shutting down", tc.summaryLabel())
 	}
 	// toolchain.<lang>.env (userEnv) overrides mise's defaults — both
 	// are "toolchain initial envs", but the explicit `env { ... }`
@@ -108,9 +111,12 @@ func toolchainBinPaths(key string, state *alphaState, log *zlog.Logger) ([]strin
 	select {
 	case <-tc.lifecycle.Barrier("ready").Wait():
 	case <-tc.lifecycle.Barrier(alphasfile.ToolchainTerminalFailure).Wait():
-		return nil, fmt.Errorf("toolchain %s@%s: install failed (see earlier `toolchain` log lines)", tc.lang, tc.version)
+		if err := tc.Err(); err != nil {
+			return nil, fmt.Errorf("%s: %w", tc.summaryLabel(), err)
+		}
+		return nil, fmt.Errorf("%s: install failed", tc.summaryLabel())
 	case <-state.shutdownCh:
-		return nil, fmt.Errorf("toolchain %s@%s: alpha shutting down", tc.lang, tc.version)
+		return nil, fmt.Errorf("%s: alpha shutting down", tc.summaryLabel())
 	}
 	return tc.binPaths, nil
 }
@@ -144,24 +150,76 @@ func resolveSvcBin(serviceID string, state *alphaState, log *zlog.Logger) []stri
 	return dirs
 }
 
-// logWriter adapts a zlog.Logger as an io.Writer so subprocess output
-// (mise install / cargo install progress) lands in alpha's log under
-// a recognizable source tag.
-type writeLog struct {
-	log *zlog.Logger
-	src string
+// toolchainStreamWriter line-buffers subprocess output during toolchain
+// materialization, writing each line to alpha's log AND streaming it live over
+// the control socket as EventLog attributed to entity (e.g. "toolchain/go").
+type toolchainStreamWriter struct {
+	mu         sync.Mutex
+	buf        []byte
+	entity     string
+	streamKind string
+	stream     *safeEncoder
+	log        *zlog.Logger
 }
 
-func (w *writeLog) Write(p []byte) (int, error) {
-	for line := range strings.SplitSeq(strings.TrimRight(string(p), "\n"), "\n") {
-		if line != "" {
-			w.log.Info(w.src, "%s", line)
+func newToolchainStreamWriter(entity, streamKind string, stream *safeEncoder, log *zlog.Logger) *toolchainStreamWriter {
+	return &toolchainStreamWriter{
+		entity:     entity,
+		streamKind: streamKind,
+		stream:     stream,
+		log:        log,
+	}
+}
+
+func (w *toolchainStreamWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf = append(w.buf, p...)
+	for {
+		idx := bytes.IndexByte(w.buf, '\n')
+		if idx < 0 {
+			if len(w.buf) > 64*1024 {
+				w.emitLocked(w.buf)
+				w.buf = w.buf[:0]
+			}
+			break
 		}
+		w.emitLocked(w.buf[:idx])
+		w.buf = w.buf[idx+1:]
 	}
 	return len(p), nil
 }
 
-func logWriter(log *zlog.Logger, src string) io.Writer { return &writeLog{log: log, src: src} }
+func (w *toolchainStreamWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.buf) > 0 {
+		w.emitLocked(w.buf)
+		w.buf = w.buf[:0]
+	}
+}
+
+func (w *toolchainStreamWriter) emitLocked(raw []byte) {
+	raw = bytes.TrimRight(raw, "\r")
+	if i := bytes.LastIndexByte(raw, '\r'); i >= 0 {
+		raw = raw[i+1:]
+	}
+	line := strings.TrimRight(string(raw), " \t")
+	if line == "" {
+		return
+	}
+	if w.log != nil {
+		w.log.Service(w.entity, w.streamKind, line)
+	}
+	if w.stream != nil && !w.stream.IsClosed() {
+		w.stream.Send(&protocol.Event{
+			Kind:    protocol.EventLog,
+			Service: w.entity,
+			Stream:  w.streamKind,
+			Line:    line,
+		})
+	}
+}
 
 // fsHashFromSocket extracts the fs_hash segment from an alpha socket
 // path of the form `<tmpdir>/zordon-<fsHash>/alpha.sock`. Empty
@@ -314,6 +372,7 @@ type runConfig struct {
 	StateDir      zfs.DirName              // workspace state dir (--state-dir → ZORDON_STATE_DIR)
 	TommyBin      zfs.DirName              // tommy wrapper override (--tommy-bin → ZORDON_TOMMY_BIN)
 	Workspace     invocation.WorkspaceName // which workspace this alpha runs for (--workspace → ZORDON_WORKSPACE)
+	MiseVersion   tools.MiseVersion        // mise binary version override (--mise.version → ZORDON_MISE_VERSION)
 	ReadyFD       zfs.FileDescriptor       // parent handshake fd (--ready-fd → ZORDON_READY_FD; 0 ⇒ no handshake)
 	ParentFD      zfs.FileDescriptor       // parent-death pipe fd (--parent-fd → ZORDON_PARENT_FD; 0 ⇒ standalone)
 }
@@ -341,10 +400,12 @@ func main() {
 	shutdownGrace := runFlags.DurationLong("shutdown-grace", 2*time.Second, "time given to children to exit on SIGTERM before SIGKILL")
 	var home, stateDir, tommyBin zfs.DirName
 	var workspace invocation.WorkspaceName
+	var miseVersion tools.MiseVersion
 	runFlags.Value(0, "home", &home, "directory holding shared mise install and toolchain cache (env: ZORDON_HOME; defaults to ~/.zordon)")
 	runFlags.Value(0, "state-dir", &stateDir, "workspace state directory (env: ZORDON_STATE_DIR)")
 	runFlags.Value(0, "tommy-bin", &tommyBin, "tommy wrapper binary path (env: ZORDON_TOMMY_BIN; defaults to alpha-sibling lookup)")
 	runFlags.Value(0, "workspace", &workspace, "workspace name this alpha runs for (env: ZORDON_WORKSPACE)")
+	runFlags.Value(0, "mise.version", &miseVersion, "mise version to bootstrap and run (env: ZORDON_MISE_VERSION)")
 	var readyFD, parentFD zfs.FileDescriptor
 	runFlags.Value(0, "ready-fd", &readyFD, "fd to signal READY=1 on once listening (env: ZORDON_READY_FD; 0 ⇒ no handshake)")
 	runFlags.Value(0, "parent-fd", &parentFD, "inherited read-end fd of the parent-death pipe (env: ZORDON_PARENT_FD; 0 ⇒ standalone)")
@@ -365,6 +426,7 @@ func main() {
 				StateDir:      stateDir,
 				TommyBin:      tommyBin,
 				Workspace:     workspace,
+				MiseVersion:   miseVersion,
 				ReadyFD:       readyFD,
 				ParentFD:      parentFD,
 			})
@@ -400,6 +462,7 @@ type alphaState struct {
 	keychain       zlock.GlobalKeychain // host-wide lock keychain rooted at zordonHome
 	tommyBin       string               // path to the tommy wrapper interposed before every service (empty ⇒ spawn unwrapped)
 	workspace      string               // workspace name this alpha runs for (== invocation.MainWorkspace by default)
+	miseVersion    tools.MiseVersion    // mise version for EnsureMise (zero ⇒ tools.DefaultMiseVersion)
 	parentDotenv   []string             // file-level dotenv paths inherited from federation parents
 	parentEnv      map[string]string    // file-level inline env inherited from federation parents (deeper ancestor wins)
 	agentMode      bool                 // configured via `zordon --agent`: apply agent{} env overlay
@@ -669,6 +732,9 @@ type toolchainCtx struct {
 	installEnv zenv.EnvironmentVariables
 	lifecycle  *lifecycle.Instance
 	doneBar    *barrier.Barrier // Any(ready, failed)
+	mu         sync.Mutex
+	phase      string
+	err        error
 }
 
 func newToolchainCtx(lang, version string, toolsMap map[string]string, userEnv zenv.EnvironmentVariables) *toolchainCtx {
@@ -697,30 +763,99 @@ func (tc *toolchainCtx) TerminalFailure() *barrier.Barrier {
 	return tc.lifecycle.Barrier(alphasfile.ToolchainTerminalFailure)
 }
 
+func (tc *toolchainCtx) displayName() string {
+	return "toolchain/" + cmp.Or(tc.key, tc.lang)
+}
+
+func (tc *toolchainCtx) summaryLabel() string {
+	switch {
+	case tc.pkgTools != nil:
+		return "toolchain pkg"
+	case tc.isPkg:
+		return fmt.Sprintf("package %s@%s", tc.lang, tc.version)
+	default:
+		return fmt.Sprintf("toolchain %s@%s", tc.lang, tc.version)
+	}
+}
+
+func (tc *toolchainCtx) setPhase(phase string) {
+	tc.mu.Lock()
+	tc.phase = phase
+	tc.mu.Unlock()
+}
+
+func (tc *toolchainCtx) Phase() string {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.phase
+}
+
+func (tc *toolchainCtx) setErr(err error) {
+	tc.mu.Lock()
+	tc.err = err
+	tc.mu.Unlock()
+}
+
+func (tc *toolchainCtx) Err() error {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	return tc.err
+}
+
+func (tc *toolchainCtx) waitStatus() string {
+	return fmt.Sprintf("%s: %s", tc.summaryLabel(), cmp.Or(tc.Phase(), "installing"))
+}
+
 // bringupToolchain runs the install side-effects for one pinned
-// toolchain on a dedicated goroutine: EnsureMise (cargo install if
-// first run) → kc.LockTool (per-(lang,version) flock) →
-// EnsureTools (gem install bundler, etc.) → MiseEnv (read PATH/etc.
-// in JSON). On success: cache env, Reach("ready"). On any error:
-// Reach("failed") so service goroutines waiting on toolchain@ready
-// unblock via terminal-failure pairing rather than deadlocking.
-//
-// Idempotent enough that a federation level booting after a parent
-// has already materialized the same version will short-circuit on
-// the existing installs/locks and finish in milliseconds.
-func bringupToolchain(ctx context.Context, tc *toolchainCtx, zordonHome string, kc zlock.GlobalKeychain, log *zlog.Logger) {
+// toolchain on a dedicated goroutine: EnsureMise (release download, cargo
+// fallback) → kc.LockTool (per-(lang,version) flock) → EnsureToolchain →
+// EnsureTools (gem install bundler, etc.) → MiseEnv (read PATH/etc. in JSON).
+// Subprocess output streams live over b.stream so `zordon start` shows
+// bootstrap/install progress and captures tail lines on failure.
+func bringupToolchain(ctx context.Context, b *bringup, tc *toolchainCtx) {
+	state, stream, log, failfast := b.state, b.stream, b.log, b.failfast
+	zordonHome, kc := state.zordonHome, state.keychain
+	entity := tc.displayName()
+	out := newToolchainStreamWriter(entity, "stderr", stream, log)
+	defer out.Flush()
+
+	failTC := func(err error) {
+		out.Flush()
+		tc.setErr(err)
+		select {
+		case <-state.shutdownCh:
+			tc.lifecycle.Reach("failed")
+			return
+		default:
+		}
+		log.Error("alpha", "%s: %v", entity, err)
+		if stream != nil {
+			stream.Send(&protocol.Event{
+				Kind:    protocol.EventServiceFail,
+				Service: entity,
+				Error:   err.Error(),
+			})
+		}
+		if failfast {
+			state.requestShutdown(fmt.Sprintf("failfast: %s: %v", entity, err))
+		}
+		tc.lifecycle.Reach("failed")
+	}
+
+	tc.setPhase("installing mise")
 	tc.lifecycle.Reach("installing")
-	log.Info("alpha", "toolchain %s@%s: installing", tc.lang, tc.version)
+	log.Info("alpha", "%s: installing", tc.summaryLabel())
 
 	if zordonHome == "" {
-		log.Error("alpha", "toolchain %s: zordon home not configured", tc.lang)
-		tc.lifecycle.Reach("failed")
+		failTC(errors.New("zordon home not configured"))
 		return
 	}
-	bin, err := tools.EnsureMise(kc, zordonHome, logWriter(log, "mise-install"))
+	state.mu.RLock()
+	miseVer := state.miseVersion
+	state.mu.RUnlock()
+	bin, err := tools.EnsureMise(ctx, kc, zordonHome, miseVer, out)
 	if err != nil {
-		log.Error("alpha", "toolchain %s: ensure mise: %v", tc.lang, err)
-		tc.lifecycle.Reach("failed")
+		failTC(fmt.Errorf("ensure mise: %w", err))
 		return
 	}
 	// pkg pseudo-toolchain: install each standalone CLI (aqua:ariga/atlas,
@@ -729,7 +864,7 @@ func bringupToolchain(ctx context.Context, tc *toolchainCtx, zordonHome string, 
 	// below: multiple independent (ref, version) installs, each locked on
 	// its own key, rather than one interpreter with tools layered in.
 	if tc.pkgTools != nil {
-		bringupPkgTools(ctx, tc, bin, zordonHome, kc, log)
+		bringupPkgTools(ctx, tc, bin, zordonHome, kc, out, failTC, log)
 		return
 	}
 	// ResolveDataDir uses zordonHome as the walk-up anchor; the
@@ -737,37 +872,43 @@ func bringupToolchain(ctx context.Context, tc *toolchainCtx, zordonHome string, 
 	// have a per-service cwd to pivot from at this stage (we
 	// materialize toolchains BEFORE services run).
 	defaultDataDir := filepath.Join(zordonHome, "toolchain")
-	dataDir := tools.ResolveDataDir(zordonHome, defaultDataDir, tc.lang, tc.version)
+	tc.setPhase("waiting for lock")
 	release, err := kc.LockTool(ctx, tc.lang, tc.version)
 	if err != nil {
-		log.Error("alpha", "toolchain %s: lock tool: %v", tc.lang, err)
-		tc.lifecycle.Reach("failed")
+		failTC(fmt.Errorf("lock tool: %w", err))
 		return
 	}
 	defer release()
+	dataDir := tools.ResolveDataDir(zordonHome, defaultDataDir, tc.lang, tc.version)
 
 	// Tools must be installed before MiseEnv because mise env's
 	// PATH lists the per-version bin dir — but the gem/bundler
 	// binaries land under `installs/<lang>/<version>/lib/.../gems/...`
 	// only after gem install runs.
-	envWriter := logWriter(log, "mise-tool")
 	if tc.isPkg {
-		// pkg: install the package itself (mise install <tool>@<ver>);
-		// there are no language-native tools to layer in.
-		if err := tools.EnsurePackage(bin, dataDir, tc.lang, tc.version, tc.installEnv, envWriter); err != nil {
-			log.Error("alpha", "package %s: install: %v", tc.lang, err)
-			tc.lifecycle.Reach("failed")
+		tc.setPhase("installing")
+		if err := tools.EnsurePackage(bin, dataDir, tc.lang, tc.version, tc.installEnv, out); err != nil {
+			failTC(err)
 			return
 		}
-	} else if err := tools.EnsureTools(bin, dataDir, tc.lang, tc.version, tc.tools, envWriter); err != nil {
-		log.Error("alpha", "toolchain %s: ensure tools: %v", tc.lang, err)
-		tc.lifecycle.Reach("failed")
-		return
+	} else {
+		tc.setPhase("installing")
+		if err := tools.EnsureToolchain(bin, dataDir, tc.lang, tc.version, out); err != nil {
+			failTC(err)
+			return
+		}
+		if len(tc.tools) > 0 {
+			tc.setPhase("installing tools")
+			if err := tools.EnsureTools(bin, dataDir, tc.lang, tc.version, tc.tools, out); err != nil {
+				failTC(err)
+				return
+			}
+		}
 	}
-	env, binDirs, err := tools.MiseEnvWithBinDirs(bin, dataDir, tc.lang, tc.version, logWriter(log, "mise"))
+	tc.setPhase("resolving env")
+	env, binDirs, err := tools.MiseEnvWithBinDirs(bin, dataDir, tc.lang, tc.version, out)
 	if err != nil {
-		log.Error("alpha", "toolchain %s: mise env: %v", tc.lang, err)
-		tc.lifecycle.Reach("failed")
+		failTC(err)
 		return
 	}
 	tools.PostMiseEnv(tc.lang, env)
@@ -778,17 +919,19 @@ func bringupToolchain(ctx context.Context, tc *toolchainCtx, zordonHome string, 
 	// pnpm/yarn invocations through `<pm> install` find the managed
 	// shims rather than node's own bundled corepack.
 	if tc.lang == alphasfile.ToolchainNode {
-		if err := tools.EnsureNodeCorepack(bin, dataDir, tc.version, env, logWriter(log, "corepack")); err != nil {
-			log.Error("alpha", "toolchain %s: corepack: %v", tc.lang, err)
-			tc.lifecycle.Reach("failed")
+		tc.setPhase("refreshing corepack")
+		if err := tools.EnsureNodeCorepack(bin, dataDir, tc.version, env, out); err != nil {
+			failTC(fmt.Errorf("corepack: %w", err))
 			return
 		}
 	}
 
+	out.Flush()
+	tc.setPhase("ready")
 	tc.env = env
 	tc.binPaths = binDirs
 	tc.lifecycle.Reach("ready")
-	log.Info("alpha", "toolchain %s@%s: ready", tc.lang, tc.version)
+	log.Info("alpha", "%s: ready", tc.summaryLabel())
 }
 
 // bringupPkgTools materializes the `toolchain { pkg { tools } }`
@@ -797,36 +940,35 @@ func bringupToolchain(ctx context.Context, tc *toolchainCtx, zordonHome string, 
 // fs::toolchain::bin(toolchain.pkg) hands every declared tool's binaries
 // to a provision that env::prepends it. Unlike the language path, each
 // tool takes its own per-(ref, version) lock — they're independent
-// installs, not one interpreter's layered tool world. Any install error
-// Reaches "failed" so waiters on toolchain.pkg@ready unblock rather than
-// deadlock.
-func bringupPkgTools(ctx context.Context, tc *toolchainCtx, bin, zordonHome string, kc zlock.GlobalKeychain, log *zlog.Logger) {
+// installs, not one interpreter's layered tool world.
+func bringupPkgTools(ctx context.Context, tc *toolchainCtx, bin, zordonHome string, kc zlock.GlobalKeychain, out *toolchainStreamWriter, failTC func(error), log *zlog.Logger) {
 	defaultDataDir := filepath.Join(zordonHome, "toolchain")
 	var pooled []string
-	for ref, version := range tc.pkgTools {
-		dataDir := tools.ResolveDataDir(zordonHome, defaultDataDir, ref, version)
+	for _, ref := range slices.Sorted(maps.Keys(tc.pkgTools)) {
+		version := tc.pkgTools[ref]
+		tc.setPhase(fmt.Sprintf("installing %s@%s", ref, version))
 		release, err := kc.LockTool(ctx, ref, version)
 		if err != nil {
-			log.Error("alpha", "toolchain pkg: lock tool %s@%s: %v", ref, version, err)
-			tc.lifecycle.Reach("failed")
+			failTC(fmt.Errorf("lock tool %s@%s: %w", ref, version, err))
 			return
 		}
+		dataDir := tools.ResolveDataDir(zordonHome, defaultDataDir, ref, version)
 		log.Info("alpha", "toolchain pkg: installing %s@%s", ref, version)
-		if err := tools.EnsurePackage(bin, dataDir, ref, version, nil, logWriter(log, "mise-tool")); err != nil {
+		if err := tools.EnsurePackage(bin, dataDir, ref, version, nil, out); err != nil {
 			release()
-			log.Error("alpha", "toolchain pkg: install %s@%s: %v", ref, version, err)
-			tc.lifecycle.Reach("failed")
+			failTC(err)
 			return
 		}
-		_, binDirs, err := tools.MiseEnvWithBinDirs(bin, dataDir, ref, version, logWriter(log, "mise"))
+		_, binDirs, err := tools.MiseEnvWithBinDirs(bin, dataDir, ref, version, out)
 		release()
 		if err != nil {
-			log.Error("alpha", "toolchain pkg: mise env %s@%s: %v", ref, version, err)
-			tc.lifecycle.Reach("failed")
+			failTC(err)
 			return
 		}
 		pooled = append(pooled, binDirs...)
 	}
+	out.Flush()
+	tc.setPhase("ready")
 	tc.binPaths = pooled
 	tc.lifecycle.Reach("ready")
 	log.Info("alpha", "toolchain pkg: ready (%d tools)", len(tc.pkgTools))
@@ -1357,7 +1499,7 @@ func (sc *serviceCtx) TerminalFailure() *barrier.Barrier {
 // lifecycle. cmd.Wait has exactly one owner across the whole codebase,
 // which keeps "exec: Wait was already called" from being expressible.)
 
-func (s *alphaState) configure(path, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, agent bool, af *alphasfile.Alphasfile) {
+func (s *alphaState) configure(path, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, agent bool, miseVersion tools.MiseVersion, af *alphasfile.Alphasfile) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.alphasfilePath = path
@@ -1366,6 +1508,9 @@ func (s *alphaState) configure(path, fsHash, cfgHash string, parentDotenv []stri
 	s.parentDotenv = parentDotenv
 	s.parentEnv = parentEnv
 	s.agentMode = agent
+	if miseVersion != "" {
+		s.miseVersion = miseVersion
+	}
 	s.config = af
 	s.readiness = make(map[string]string)
 }
@@ -1414,6 +1559,60 @@ func (s *alphaState) addToolchain(tc *toolchainCtx) {
 	for _, alias := range tc.aliases {
 		s.toolchains[alias] = tc
 	}
+}
+
+func (s *alphaState) toolchainFor(svc *alphasfile.Service) *toolchainCtx {
+	if s == nil || svc == nil {
+		return nil
+	}
+	key := toolchainKey(svc)
+	s.mu.RLock()
+	tc := s.toolchains[key]
+	s.mu.RUnlock()
+	return tc
+}
+
+func (s *alphaState) unreadyToolchains() []*toolchainCtx {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.toolchains) == 0 {
+		return nil
+	}
+	seen := make(map[*toolchainCtx]bool, len(s.toolchains))
+	var out []*toolchainCtx
+	for _, key := range slices.Sorted(maps.Keys(s.toolchains)) {
+		tc := s.toolchains[key]
+		if tc == nil || seen[tc] || tc.doneBar.Triggered() {
+			continue
+		}
+		seen[tc] = true
+		out = append(out, tc)
+	}
+	return out
+}
+
+func (s *alphaState) depFailureDetail(ref string) string {
+	if s == nil {
+		return ""
+	}
+	at := strings.LastIndexByte(ref, '@')
+	if at < 0 {
+		return ""
+	}
+	key, ok := alphasfile.ParseToolchainRef(ref[:at])
+	if !ok {
+		return ""
+	}
+	s.mu.RLock()
+	tc := s.toolchains[key]
+	s.mu.RUnlock()
+	if tc == nil || tc.Err() == nil {
+		return ""
+	}
+	return tc.Err().Error()
 }
 
 // pinnedToolchains allocates the toolchainCtx of the pins in the resolved
@@ -1822,14 +2021,15 @@ func serveAlpha(ctx context.Context, rc runConfig, life *daemon.Lifeline) error 
 	}
 
 	state := &alphaState{
-		startedAt:  time.Now(),
-		fsHash:     fsHash,
-		zordonHome: zordonHome,
-		keychain:   rc.Keychain,
-		tommyBin:   tommyBin,
-		workspace:  rc.Workspace.Name(),
-		shutdownCh: make(chan struct{}),
-		life:       life,
+		startedAt:   time.Now(),
+		fsHash:      fsHash,
+		zordonHome:  zordonHome,
+		keychain:    rc.Keychain,
+		tommyBin:    tommyBin,
+		workspace:   rc.Workspace.Name(),
+		miseVersion: rc.MiseVersion,
+		shutdownCh:  make(chan struct{}),
+		life:        life,
 	}
 
 	// signalReady means only "alpha is listening", NOT "zordon may detach":
@@ -2088,8 +2288,15 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 	}
 	args := req.Configure
 	newConfig := args.Alphasfile
+	var miseVer tools.MiseVersion
+	if args.MiseVersion != "" {
+		if err := miseVer.Set(args.MiseVersion); err != nil {
+			stream.Send(&protocol.Event{Kind: protocol.EventError, Error: "clean: " + err.Error()})
+			return
+		}
+	}
 
-	state.configure(args.AlphasfilePath, args.FsHash, args.CfgHash, args.ParentDotenv, args.ParentEnv, args.Agent, newConfig)
+	state.configure(args.AlphasfilePath, args.FsHash, args.CfgHash, args.ParentDotenv, args.ParentEnv, args.Agent, miseVer, newConfig)
 	services := newConfig.All()
 	log.Info("alpha", "clean: configured from %s (%d services)", args.AlphasfilePath, len(services))
 
@@ -2114,7 +2321,7 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 	ctx := state.shutdownCtx()
 	for _, tc := range pinnedToolchains(newConfig.Toolchain) {
 		state.addToolchain(tc)
-		go bringupToolchain(ctx, tc, state.zordonHome, state.keychain, log)
+		go bringupToolchain(ctx, b, tc)
 	}
 	pkgSeen := map[string]bool{}
 	for _, svc := range services {
@@ -2131,7 +2338,7 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 			tc.installEnv = svc.Runtime.BuildEnv
 		}
 		state.addToolchain(tc)
-		go bringupToolchain(ctx, tc, state.zordonHome, state.keychain, log)
+		go bringupToolchain(ctx, b, tc)
 	}
 
 	// Reverse order: services last-declared first, provisions within a
@@ -2259,6 +2466,13 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 
 	failfast := req.Configure.Failfast
 	newConfig := req.Configure.Alphasfile
+	var miseVer tools.MiseVersion
+	if req.Configure.MiseVersion != "" {
+		if err := miseVer.Set(req.Configure.MiseVersion); err != nil {
+			_ = enc.Write(&protocol.Event{Kind: protocol.EventError, Error: "configure: " + err.Error()})
+			return
+		}
+	}
 
 	// Determine services to stop: those running but missing or changed in newConfig
 	toStop := make(map[string]bool)
@@ -2292,7 +2506,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		state.stopServices(toStop)
 	}
 
-	state.configure(req.Configure.AlphasfilePath, req.Configure.FsHash, req.Configure.CfgHash, req.Configure.ParentDotenv, req.Configure.ParentEnv, req.Configure.Agent, newConfig)
+	state.configure(req.Configure.AlphasfilePath, req.Configure.FsHash, req.Configure.CfgHash, req.Configure.ParentDotenv, req.Configure.ParentEnv, req.Configure.Agent, miseVer, newConfig)
 	services := newConfig.All()
 	files := newConfig.AllFiles()
 	log.Info("alpha", "configured from %s (%d services, %d files, failfast=%v), starting bringup",
@@ -2326,9 +2540,11 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	// microseconds when the install is a no-op, and other entities can
 	// always resolve `toolchain.X@ready` as a barrier.
 	ctx := state.shutdownCtx()
+	var configuredToolchains []*toolchainCtx
 	for _, tc := range pinnedToolchains(newConfig.Toolchain) {
 		state.addToolchain(tc)
-		go bringupToolchain(ctx, tc, state.zordonHome, state.keychain, log)
+		configuredToolchains = append(configuredToolchains, tc)
+		go bringupToolchain(ctx, b, tc)
 	}
 
 	// pkg services: each declares a native package (redis/postgres/…)
@@ -2352,7 +2568,8 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 			tc.installEnv = svc.Runtime.BuildEnv
 		}
 		state.addToolchain(tc)
-		go bringupToolchain(ctx, tc, state.zordonHome, state.keychain, log)
+		configuredToolchains = append(configuredToolchains, tc)
+		go bringupToolchain(ctx, b, tc)
 	}
 
 	// Pre-allocate every entity FIRST so cross-refs in `after` resolve
@@ -2427,6 +2644,9 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		select {
 		case <-sc.doneBar.Wait():
 		case <-state.shutdownCh:
+			if reason := state.shutdownReason; reason != "" {
+				stream.Send(&protocol.Event{Kind: protocol.EventError, Error: reason})
+			}
 			return
 		}
 	}
@@ -2450,6 +2670,9 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		select {
 		case <-p.pc.doneBar.Wait():
 		case <-state.shutdownCh:
+			if reason := state.shutdownReason; reason != "" {
+				stream.Send(&protocol.Event{Kind: protocol.EventError, Error: reason})
+			}
 			return
 		}
 	}
@@ -2459,6 +2682,25 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		}
 		if !p.pc.lifecycle.Reached("success") && failfast {
 			reason := fmt.Sprintf("failfast: provision %s failed", p.pc.id)
+			stream.Send(&protocol.Event{Kind: protocol.EventError, Error: reason})
+			state.requestShutdown(reason)
+			return
+		}
+	}
+
+	for _, tc := range configuredToolchains {
+		select {
+		case <-tc.doneBar.Wait():
+		case <-state.shutdownCh:
+			if reason := state.shutdownReason; reason != "" {
+				stream.Send(&protocol.Event{Kind: protocol.EventError, Error: reason})
+			}
+			return
+		}
+	}
+	for _, tc := range configuredToolchains {
+		if !tc.lifecycle.Reached("ready") && failfast {
+			reason := fmt.Sprintf("failfast: %s failed during bringup", tc.displayName())
 			stream.Send(&protocol.Event{Kind: protocol.EventError, Error: reason})
 			state.requestShutdown(reason)
 			return
@@ -2494,7 +2736,7 @@ func watchBringupProgress(done <-chan struct{}, bringupStart time.Time, services
 			return
 		case <-ticker.C:
 			now := time.Now()
-			pending := describeBringupWait(services, serviceCtxs, provs, bringupStart, now)
+			pending := describeBringupWait(services, serviceCtxs, provs, state, bringupStart, now)
 			if pending == "" {
 				continue
 			}
@@ -2512,9 +2754,10 @@ type bringupWaitItem struct {
 	since time.Time
 }
 
-func describeBringupWait(services []*alphasfile.Service, serviceCtxs map[string]*serviceCtx, provs []provEntry, bringupStart, now time.Time) string {
+func describeBringupWait(services []*alphasfile.Service, serviceCtxs map[string]*serviceCtx, provs []provEntry, state *alphaState, bringupStart, now time.Time) string {
 	var items []bringupWaitItem
 	counts := make(map[string]int)
+	seenTC := make(map[*toolchainCtx]bool)
 	for _, svc := range services {
 		sc := serviceCtxs[svc.Name()]
 		if sc == nil || sc.doneBar.Triggered() {
@@ -2527,6 +2770,13 @@ func describeBringupWait(services []*alphasfile.Service, serviceCtxs map[string]
 			phase = "waiting for dependencies"
 			if t, ok := sc.lifecycle.ReachedAt("scheduled"); ok {
 				since = t
+			}
+			if tc := state.toolchainFor(svc); tc != nil && !tc.doneBar.Triggered() {
+				seenTC[tc] = true
+				phase = tc.waitStatus()
+				if t, ok := tc.lifecycle.ReachedAt("installing"); ok {
+					since = t
+				}
 			}
 		case !sc.buildDoneBar.Triggered():
 			phase = "building"
@@ -2541,6 +2791,18 @@ func describeBringupWait(services []*alphasfile.Service, serviceCtxs map[string]
 		}
 		counts[phase]++
 		items = append(items, bringupWaitItem{name: svc.Name(), phase: phase, since: since})
+	}
+	for _, tc := range state.unreadyToolchains() {
+		if seenTC[tc] {
+			continue
+		}
+		phase := cmp.Or(tc.Phase(), "installing")
+		since := bringupStart
+		if t, ok := tc.lifecycle.ReachedAt("installing"); ok {
+			since = t
+		}
+		counts[phase]++
+		items = append(items, bringupWaitItem{name: tc.displayName(), phase: phase, since: since})
 	}
 	for _, p := range provs {
 		if p.detached || p.pc.doneBar.Triggered() {
@@ -2572,10 +2834,17 @@ func describeBringupWait(services []*alphasfile.Service, serviceCtxs map[string]
 		return strings.Join(parts, ", ")
 	}
 	phaseOrder := []string{"building", "probing readiness", "running", "starting", "waiting for dependencies"}
+	seenPhase := make(map[string]bool, len(phaseOrder))
 	var phaseParts []string
 	for _, ph := range phaseOrder {
+		seenPhase[ph] = true
 		if c := counts[ph]; c > 0 {
 			phaseParts = append(phaseParts, fmt.Sprintf("%d %s", c, ph))
+		}
+	}
+	for _, ph := range slices.Sorted(maps.Keys(counts)) {
+		if !seenPhase[ph] && counts[ph] > 0 {
+			phaseParts = append(phaseParts, fmt.Sprintf("%d %s", counts[ph], ph))
 		}
 	}
 	slices.SortStableFunc(items, func(a, b bringupWaitItem) int {
@@ -2885,12 +3154,21 @@ func waitAfter(b *bringup, sc *serviceCtx, refs []string) bool {
 			at, _ := bt.target.FiredAt()
 			sc.deps = append(sc.deps, depSat{ref: ref, at: at})
 		case <-bt.fail.Wait():
-			// The first failure in the bringup chain is the one that triggers
-			// shutdown; this is just the chain unwinding, so don't fire
-			// requestShutdown again (idempotent, but the log noise misleads).
-			log.Error("alpha", "service[%s]: dep %s reached terminal failure", name, ref)
 			fail()
-			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: "dep " + ref + " failed"})
+			// Under failfast, the upstream entity that actually failed already
+			// emitted EventServiceFail and closed shutdownCh; don't bury the
+			// culprit under secondary "(no service output captured)" entries.
+			select {
+			case <-state.shutdownCh:
+				return false
+			default:
+			}
+			depErr := "dep " + ref + " failed"
+			if detail := state.depFailureDetail(ref); detail != "" {
+				depErr = fmt.Sprintf("dep %s failed: %s", ref, detail)
+			}
+			log.Error("alpha", "service[%s]: %s", name, depErr)
+			stream.Send(&protocol.Event{Kind: protocol.EventServiceFail, Service: name, Error: depErr})
 			return false
 		case <-sc.stopCh:
 			fail()

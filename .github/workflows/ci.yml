@@ -154,12 +154,12 @@ jobs:
         # breaks go build's VCS stamping.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Pre-place mise
-        # EnsureMise no-ops when <ZORDON_HOME>/bin/mise exists; the
-        # suite's ZORDON_HOME is <repo>/.zordon. Beats `cargo install`
-        # mise on every distro.
+        # EnsureMise reuses <ZORDON_HOME>/bin/mise when its version matches
+        # DefaultMiseVersion; the suite's ZORDON_HOME is <repo>/.zordon.
         run: |
+          MISE_VER="$(sed -n 's/^const DefaultMiseVersion = "\(.*\)"/\1/p' internal/tools/mise_bootstrap.go)"
           mkdir -p .zordon/bin
-          curl --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 -fsSL https://mise.jdx.dev/mise-latest-linux-x64 -o .zordon/bin/mise
+          curl --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 -fsSL "https://mise.jdx.dev/v${MISE_VER}/mise-v${MISE_VER}-linux-x64" -o .zordon/bin/mise
           chmod +x .zordon/bin/mise
           .zordon/bin/mise --version
       - name: Run conformance (${{ matrix.toolchain }})
@@ -207,6 +207,7 @@ jobs:
           # real (heavy, network-bound) JVM build per distro. The wrapper
           # downloads Maven + deps into HOME's ~/.m2 on a cold cache.
           - java
+          - toolchain_bootstrap
     container:
       image: ${{ matrix.distro }}
       # tini as pid 1 to reap zombies; GitHub's bare `tail` pid 1
@@ -273,12 +274,12 @@ jobs:
         # breaks go build's VCS stamping.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Pre-place mise
-        # EnsureMise no-ops when <ZORDON_HOME>/bin/mise exists; the
-        # suite's ZORDON_HOME is <repo>/.zordon. Beats `cargo install`
-        # mise on every distro.
+        # EnsureMise reuses <ZORDON_HOME>/bin/mise when its version matches
+        # DefaultMiseVersion; the suite's ZORDON_HOME is <repo>/.zordon.
         run: |
+          MISE_VER="$(sed -n 's/^const DefaultMiseVersion = "\(.*\)"/\1/p' internal/tools/mise_bootstrap.go)"
           mkdir -p .zordon/bin
-          curl --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 -fsSL https://mise.jdx.dev/mise-latest-linux-x64 -o .zordon/bin/mise
+          curl --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 -fsSL "https://mise.jdx.dev/v${MISE_VER}/mise-v${MISE_VER}-linux-x64" -o .zordon/bin/mise
           chmod +x .zordon/bin/mise
           .zordon/bin/mise --version
       - name: Run unit tests

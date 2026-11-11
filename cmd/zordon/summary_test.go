@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/piotrkowalczuk/zordon/internal/ring"
 	"github.com/piotrkowalczuk/zordon/internal/summary"
+	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
 
 func TestPrintStartSummary(t *testing.T) {
@@ -55,5 +57,45 @@ func TestPrintStartSummary(t *testing.T) {
 	const rule = "------------------------------------------------------------"
 	if got := strings.Count(out, rule); got != 2 {
 		t.Errorf("want exactly two %d-dash rules, got %d\n%s", len(rule), got, out)
+	}
+}
+
+func TestPrintFailureSummary(t *testing.T) {
+	tail := ring.New(10)
+	tail.Push("[stderr] downloading mise v2026.11.6...")
+	tail.Push("[stderr] sha256 mismatch")
+
+	var withLogBuf bytes.Buffer
+	printFailureSummary(
+		zlog.New(&withLogBuf, true),
+		[]failure{
+			{service: "toolchain/go", err: "ensure mise: checksum failed"},
+			{service: "api", err: "exited before ready"},
+		},
+		map[string]*ring.Buffer{"toolchain/go": tail},
+		"/tmp/project/.zordon/alpha.log",
+	)
+	gotWithLog := withLogBuf.String()
+	for _, want := range []string{
+		"Bringup failed: 2 service(s)",
+		"[toolchain/go] error: ensure mise: checksum failed",
+		"[toolchain/go] last 2 line(s):",
+		"[stderr] sha256 mismatch",
+		"[api] (no service output captured; see alpha log /tmp/project/.zordon/alpha.log)",
+	} {
+		if !strings.Contains(gotWithLog, want) {
+			t.Errorf("summary missing %q:\n%s", want, gotWithLog)
+		}
+	}
+
+	var withoutLogBuf bytes.Buffer
+	printFailureSummary(
+		zlog.New(&withoutLogBuf, true),
+		[]failure{{service: "api", err: "exited before ready"}},
+		nil,
+		"",
+	)
+	if !strings.Contains(withoutLogBuf.String(), "[api] (no service output captured)") {
+		t.Errorf("expected fallback message when alphaLog is empty, got:\n%s", withoutLogBuf.String())
 	}
 }

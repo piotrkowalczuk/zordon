@@ -373,3 +373,18 @@ func TestSameFile_detectsAtomicReplacement(t *testing.T) {
 		t.Fatal("SameFile(fi1, fi2) = true after AtomicWrite rename; want false")
 	}
 }
+
+func TestAtomicWriteExecutable(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "mise")
+	if err := AtomicWriteExecutable(bin, strings.NewReader("#!/bin/sh\nexit 0\n")); err != nil {
+		t.Fatalf("AtomicWriteExecutable: %v", err)
+	}
+	if !IsExecutableFile(bin) {
+		t.Fatalf("IsExecutableFile(%s) = false; want executable", bin)
+	}
+	got, err := Read(bin)
+	if err != nil || string(got) != "#!/bin/sh\nexit 0\n" {
+		t.Fatalf("Read(%s) = (%q, %v)", bin, string(got), err)
+	}
+}

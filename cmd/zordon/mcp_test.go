@@ -3,10 +3,26 @@ package main
 import (
 	"io"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/peterbourgon/ff/v4"
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
+	"github.com/piotrkowalczuk/zordon/internal/tools"
 )
+
+func TestRootCommand_miseVersionFlagValidation(t *testing.T) {
+	root, _ := buildRootCommand(commandIO{Stdout: io.Discard, Stderr: io.Discard})
+	err := root.Parse([]string{"--mise.version=latest", "status"}, ff.WithEnvVarPrefix("ZORDON"))
+	if err == nil || !strings.Contains(err.Error(), "invalid mise version") {
+		t.Fatalf("Parse(--mise.version=latest) err = %v, want invalid mise version error", err)
+	}
+
+	rootOK, _ := buildRootCommand(commandIO{Stdout: io.Discard, Stderr: io.Discard})
+	if err := rootOK.Parse([]string{"start", "--mise.version=2026.10.4"}, ff.WithEnvVarPrefix("ZORDON")); err != nil {
+		t.Fatalf("Parse(start --mise.version=2026.10.4): %v", err)
+	}
+}
 
 // TestCommandToolSubcommands pins the MCP command surface to the CLI surface:
 // every subcommand except `mcp` becomes a tool. If a command is added or
@@ -37,20 +53,22 @@ func TestCommandToolSubcommands(t *testing.T) {
 
 func TestCommandArgv(t *testing.T) {
 	cases := map[string]struct {
-		home    string
-		agent   bool
-		testCfg alphasfile.TestConfig
-		name    string
-		args    []string
-		want    []string
+		home        string
+		miseVersion tools.MiseVersion
+		agent       bool
+		testCfg     alphasfile.TestConfig
+		name        string
+		args        []string
+		want        []string
 	}{
 		"full root context": {
-			home:    "/x",
-			agent:   true,
-			testCfg: alphasfile.TestConfig{Harness: true, LogPath: "/l"},
-			name:    "status",
-			args:    []string{"--foo"},
-			want:    []string{"--home", "/x", "--agent", "--test-harness", "--test-log", "/l", "status", "--foo"},
+			home:        "/x",
+			miseVersion: "2026.10.4",
+			agent:       true,
+			testCfg:     alphasfile.TestConfig{Harness: true, LogPath: "/l"},
+			name:        "status",
+			args:        []string{"--foo"},
+			want:        []string{"--home", "/x", "--mise.version", "2026.10.4", "--agent", "--test-harness", "--test-log", "/l", "status", "--foo"},
 		},
 		"minimal": {
 			name: "get",
@@ -65,7 +83,7 @@ func TestCommandArgv(t *testing.T) {
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
-			got := commandArgv(c.home, c.agent, c.testCfg, c.name, c.args)
+			got := commandArgv(c.home, c.miseVersion, c.agent, c.testCfg, c.name, c.args)
 			if !slices.Equal(got, c.want) {
 				t.Errorf("commandArgv = %v; want %v", got, c.want)
 			}

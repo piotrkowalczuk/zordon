@@ -25,6 +25,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/ring"
 	"github.com/piotrkowalczuk/zordon/internal/summary"
+	"github.com/piotrkowalczuk/zordon/internal/tools"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
@@ -96,7 +97,9 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	agent := rootFlags.BoolLong("agent", "agent mode: machine-friendly logs '<ms-since-start> <src> <LEVEL> <msg>' and --format=agent unless --format is given")
 	format := rootFlags.StringLong("format", "", "output format of commands that report: text, agent or json (default: agent under --agent, else text)")
 	var home, testLog zfs.DirName
+	var miseVersion tools.MiseVersion
 	rootFlags.Value(0, "home", &home, "directory holding zordon's host-wide state (env: ZORDON_HOME; defaults to ~/.zordon)")
+	rootFlags.Value(0, "mise.version", &miseVersion, "mise version to bootstrap and run (env: ZORDON_MISE_VERSION)")
 	testHarness := rootFlags.BoolLong("test-harness", "enable test:: HCL functions (env: ZORDON_TEST_HARNESS; conformance harness use only)")
 	rootFlags.Value(0, "test-log", &testLog, "path test::log() writes to (env: ZORDON_TEST_LOG; only used when --test-harness)")
 	rootCmd := &ff.Command{
@@ -141,7 +144,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 			zordonHome, kc := homeAndKeychain()
 			return runStart(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent, *startSummary,
 				startPull, parsePicks(append(strings.Fields(*startServices), args...)),
-				zordonHome, kc,
+				zordonHome, kc, miseVersion,
 				testCfg())
 		},
 	}
@@ -184,7 +187,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 				return err
 			}
 			if *stopClean {
-				return runClean(ctx, log, *stopAlphaBin, *stopAlphaLog, *stopTimeout, *verbose, *agent, true, zordonHome, kc, testCfg())
+				return runClean(ctx, log, *stopAlphaBin, *stopAlphaLog, *stopTimeout, *verbose, *agent, true, zordonHome, kc, miseVersion, testCfg())
 			}
 			return nil
 		},
@@ -367,13 +370,14 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 			}
 			zordonHome, kc := homeAndKeychain()
 			return runMCP(ctx, stdio, mcpConfig{
-				Transport:  *mcpTransport,
-				Listen:     listen,
-				AllowHosts: *mcpAllowHost,
-				Home:       zordonHome,
-				Keychain:   kc,
-				Agent:      *agent,
-				Test:       testCfg(),
+				Transport:   *mcpTransport,
+				Listen:      listen,
+				AllowHosts:  *mcpAllowHost,
+				Home:        zordonHome,
+				Keychain:    kc,
+				MiseVersion: miseVersion,
+				Agent:       *agent,
+				Test:        testCfg(),
 			})
 		},
 	}
@@ -390,7 +394,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		Flags:     cleanFlags,
 		Exec: func(ctx context.Context, args []string) error {
 			zordonHome, kc := homeAndKeychain()
-			return runClean(ctx, zlog.New(stdio.Stderr, *agent), *cleanAlphaBin, *cleanAlphaLog, *cleanTimeout, *verbose, *agent, false, zordonHome, kc, testCfg())
+			return runClean(ctx, zlog.New(stdio.Stderr, *agent), *cleanAlphaBin, *cleanAlphaLog, *cleanTimeout, *verbose, *agent, false, zordonHome, kc, miseVersion, testCfg())
 		},
 	}
 
@@ -454,7 +458,7 @@ func walkUp() (string, error) {
 // NOT render the summary: rendering waits until the whole log stream is done
 // (see runStart), so the summary lands as a clean block after the logs, not
 // mid-stream.
-func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent bool) (*summary.StartSummary, error) {
+func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent bool, miseVersion tools.MiseVersion, alphaLog string) (*summary.StartSummary, error) {
 	log.Info("alpha", "Understood, Zordon!")
 
 	conn, err := control.Dial(sock, 1*time.Second)
@@ -476,6 +480,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 			Alphasfile:     af,
 			Failfast:       failfast,
 			Agent:          agent,
+			MiseVersion:    miseVersion.Version(),
 			FsHash:         fsHash,
 			CfgHash:        cfgHash,
 			ParentDotenv:   parentDotenv,
@@ -513,7 +518,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 	// or an unexpected stream close.
 	finish := func(streamErr error) error {
 		if len(failures) > 0 {
-			printFailureSummary(log, failures, tails)
+			printFailureSummary(log, failures, tails, alphaLog)
 		}
 		switch {
 		case streamErr != nil:
@@ -569,7 +574,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 // its teardown output. Simpler than pushConfigure: clean never starts
 // services, so there are no per-service ready/fail events or failure
 // summary — just log lines until EventDone (success) or EventError.
-func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, agent bool) error {
+func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, agent bool, miseVersion tools.MiseVersion) error {
 	conn, err := control.Dial(sock, 1*time.Second)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
@@ -588,6 +593,7 @@ func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgH
 			AlphasfilePath: afPath,
 			Alphasfile:     af,
 			Agent:          agent,
+			MiseVersion:    miseVersion.Version(),
 			FsHash:         fsHash,
 			CfgHash:        cfgHash,
 			ParentDotenv:   parentDotenv,
@@ -642,7 +648,7 @@ func formatTailLine(stream, line string) string {
 // Goes through the standard zlog so test capture and the user's
 // terminal both see it on stderr alongside the rest of zordon's
 // chatter. No ANSI, no emoji — runs into CI / agent / piped contexts.
-func printFailureSummary(log *zlog.Logger, failures []failure, tails map[string]*ring.Buffer) {
+func printFailureSummary(log *zlog.Logger, failures []failure, tails map[string]*ring.Buffer, alphaLog string) {
 	bar := strings.Repeat("-", 60)
 	log.Error("zordon", "%s", bar)
 	log.Error("zordon", "Bringup failed: %d service(s)", len(failures))
@@ -651,7 +657,11 @@ func printFailureSummary(log *zlog.Logger, failures []failure, tails map[string]
 		log.Error("zordon", "  [%s] error: %s", f.service, f.err)
 		buf, ok := tails[f.service]
 		if !ok || buf.Len() == 0 {
-			log.Error("zordon", "  [%s] (no service output captured)", f.service)
+			if alphaLog != "" {
+				log.Error("zordon", "  [%s] (no service output captured; see alpha log %s)", f.service, alphaLog)
+			} else {
+				log.Error("zordon", "  [%s] (no service output captured)", f.service)
+			}
 			continue
 		}
 		lines := buf.Dump()
@@ -745,7 +755,7 @@ var pinnedFiles []*os.File
 
 func keepAlive(f *os.File) { pinnedFiles = append(pinnedFiles, f) }
 
-func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose bool, log *zlog.Logger, extraEnv map[string]string) error {
+func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose bool, miseVersion tools.MiseVersion, log *zlog.Logger, extraEnv map[string]string) error {
 	logf := func(format string, a ...any) { log.Info("zordon", format, a...) }
 	readyR, readyW, err := os.Pipe()
 	if err != nil {
@@ -765,7 +775,7 @@ func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose 
 		return fmt.Errorf("parent pipe: %w", err)
 	}
 
-	cmd := exec.Command(alphaBin, "run", "--socket", sock, "--log-file", alphaLog)
+	cmd := exec.Command(alphaBin, "run", "--socket", sock, "--log-file", alphaLog, "--mise.version", miseVersion.Version())
 	cmd.ExtraFiles = []*os.File{readyW}
 	cmd.Env = append(os.Environ(), "ZORDON_READY_FD="+strconv.Itoa(2+len(cmd.ExtraFiles)))
 	parentwatch.Attach(cmd, parentR, "ZORDON_PARENT_FD")

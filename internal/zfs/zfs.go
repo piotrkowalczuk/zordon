@@ -705,6 +705,51 @@ func Copy(src, dst string) error {
 	return nil
 }
 
+// CreateTemp creates a new temporary file in dir with mode 0o600.
+func CreateTemp(dir, pattern string) (*File, error) {
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return nil, fmt.Errorf("zfs: tempfile in %s: %w", dir, err)
+	}
+	return f, nil
+}
+
+// AtomicWriteExecutable streams r into path with mode 0o755 via temp+sync+rename
+// in the same directory so readers never observe a partial binary or ETXTBSY.
+func AtomicWriteExecutable(path string, r io.Reader) error {
+	if path == "" || r == nil {
+		panic("zfs: AtomicWriteExecutable requires non-empty path and non-nil reader")
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("zfs: tempfile in %s: %w", dir, err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := io.Copy(tmp, r); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("zfs: write %s: %w", tmpPath, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("zfs: sync %s: %w", tmpPath, err)
+	}
+	if err := tmp.Chmod(execFilePerm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("zfs: chmod %s: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("zfs: close %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("zfs: rename %s -> %s: %w", tmpPath, path, err)
+	}
+	return nil
+}
+
+const execFilePerm os.FileMode = 0o755
+
 func sanitizeLockName(name string) string {
 	s := strings.NewReplacer("/", "-", ":", "-", "\\", "-").Replace(strings.TrimSpace(name))
 	return strings.TrimLeft(s, ".-")

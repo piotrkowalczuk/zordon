@@ -1,0 +1,44 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+toolchain {
+  pkg {
+    tools = {
+      "aqua:jqlang/jq" = "1.7.1"
+    }
+  }
+}
+
+service "go" "app" {
+  src {
+    path = "../.."
+  }
+
+  vars = {
+    port  = net::pickport()
+    stamp = "${fs::state()}/stamp.json"
+  }
+
+  build {
+    cmd = ["go", "build", "-o", "${fs::bin()}/app", "./examples/go/src/app"]
+  }
+
+  runtime {
+    after = [self.runtime.provision.stamp.success]
+
+    provision "stamp" {
+      env = { PATH = env::prepend(fs::toolchain::bin(toolchain.pkg)) }
+      cmd = "jq -nc '{bootstrapped: true}' > ${self.vars.stamp}"
+    }
+
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
