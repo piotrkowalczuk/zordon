@@ -2,10 +2,84 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, UiOpenResult } from 'claude-code'
 
 import { registerDiff } from './diff'
-import type { Checkout, McpCall, ZordonService, ZordonSnapshot, ZordonWorkspace } from '../types'
+import type {
+  Checkout,
+  McpCall,
+  UpdateAction,
+  UpdateInfo,
+  UpdateMethod,
+  ZordonService,
+  ZordonSnapshot,
+  ZordonWorkspace,
+} from '../types'
+
+export const PLUGIN_VERSION = '0.29.1'
+
+export type Semver = {
+  major: number
+  minor: number
+  patch: number
+  pre: string | null
+}
 
 const POLL_MS = 5000
 const SIZE_EVERY_MS = 60_000
+const VERSION_EVERY_MS = 60_000
+const UPDATE_EVERY_MS = 6 * 60 * 60_000
+const UPDATE_RETRY_MS = 15 * 60_000
+const RELEASE_API_URL = 'https://api.github.com/repos/piotrkowalczuk/zordon/releases/latest'
+const RELEASE_TAG_BASE = 'https://github.com/piotrkowalczuk/zordon/releases/tag/v'
+const CLAUDE_PLUGIN_UPGRADE_CMD = 'claude plugin update zordon@zordon'
+const BREW_UPGRADE_CMD = 'brew upgrade piotrkowalczuk/tap/zordon'
+const UPGRADE_TARBALL_SH = `
+ver="$1"
+os="$2"
+arch="$3"
+dest="$4"
+base="\${5:-https://github.com/piotrkowalczuk/zordon/releases/download}"
+if [ -z "$dest" ] || [ ! -d "$dest" ] || [ ! -w "$dest" ]; then
+  dest="$HOME/.local/bin"
+  mkdir -p "$dest"
+fi
+stage="$(mktemp -d "$dest/.zordon-upgrade.XXXXXX")"
+trap 'rm -rf "$stage"' EXIT
+archive="zordon_\${ver}_\${os}_\${arch}.tar.gz"
+curl -fsSL --max-time 30 "\${base}/v\${ver}/checksums.txt" -o "$stage/checksums.txt"
+expected="$(awk -v f="$archive" '$2 == f || $2 == "*"f { print tolower($1); exit }' "$stage/checksums.txt")"
+case "$expected" in
+  [0-9a-f][0-9a-f]*) ;;
+  *) echo "checksum not found for $archive" >&2; exit 1 ;;
+esac
+if [ "\${#expected}" -ne 64 ]; then
+  echo "invalid checksum length for $archive" >&2
+  exit 1
+fi
+curl -fsSL --max-time 120 "\${base}/v\${ver}/\${archive}" -o "$stage/$archive"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$stage/$archive" | awk '{ print tolower($1) }')"
+else
+  actual="$(shasum -a 256 "$stage/$archive" | awk '{ print tolower($1) }')"
+fi
+if [ "$actual" != "$expected" ]; then
+  echo "SHA-256 mismatch for $archive" >&2
+  exit 1
+fi
+tar -xzf "$stage/$archive" -C "$stage" zordon alpha tommy
+for bin in tommy alpha zordon; do
+  if [ ! -f "$stage/$bin" ] || [ -L "$stage/$bin" ]; then
+    echo "archive missing regular file $bin" >&2
+    exit 1
+  fi
+  chmod 0755 "$stage/$bin"
+done
+if [ "$os" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
+  xattr -dr com.apple.quarantine "$stage/tommy" "$stage/alpha" "$stage/zordon" 2>/dev/null || true
+fi
+for bin in tommy alpha zordon; do
+  mv -f "$stage/$bin" "$dest/$bin"
+done
+printf '%s\\n' "$dest"
+`
 
 const snapshot = atom(
   { plugin: 'zordon', key: 'snapshot' } as const,
@@ -21,6 +95,12 @@ const checkouts = atom({ plugin: 'zordon', key: 'checkouts' } as const, [] as Ch
 // and a service's details show its print and the rest whole, wrapped.
 const openService = atom({ plugin: 'zordon', key: 'openService' } as const, null as string | null)
 const openCall = atom({ plugin: 'zordon', key: 'openCall' } as const, null as string | null)
+const updateInfo = atom({ plugin: 'zordon', key: 'update' } as const, null as UpdateInfo | null)
+const dismissedUpdate = atom({ plugin: 'zordon', key: 'dismissedUpdate' } as const, null as string | null)
+const updateAction = atom(
+  { plugin: 'zordon', key: 'updateAction' } as const,
+  { state: 'idle', message: null } as UpdateAction,
+)
 
 let sessionCwd = '.'
 
@@ -227,6 +307,177 @@ export function formatSize(kb: number): string {
   return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
 }
 
+export function parseSemver(raw: string): Semver | null {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(raw.trim())
+  if (!m) return null
+  const major = Number(m[1])
+  const minor = Number(m[2])
+  const patch = Number(m[3])
+  if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor) || !Number.isSafeInteger(patch)) return null
+
+  return { major, minor, patch, pre: m[4] ?? null }
+}
+
+export function compareSemver(a: Semver, b: Semver): number {
+  if (a.major !== b.major) return a.major - b.major
+  if (a.minor !== b.minor) return a.minor - b.minor
+  if (a.patch !== b.patch) return a.patch - b.patch
+  if (a.pre === b.pre) return 0
+  if (a.pre === null) return 1
+  if (b.pre === null) return -1
+
+  const ap = a.pre.split('.')
+  const bp = b.pre.split('.')
+  const len = Math.max(ap.length, bp.length)
+  for (let i = 0; i < len; i += 1) {
+    const ai = ap[i]
+    const bi = bp[i]
+    if (ai === undefined) return -1
+    if (bi === undefined) return 1
+    if (ai === bi) continue
+    const aNum = /^\d+$/.test(ai)
+    const bNum = /^\d+$/.test(bi)
+    if (aNum && bNum) return Number(ai) - Number(bi)
+    if (aNum) return -1
+    if (bNum) return 1
+
+    return ai < bi ? -1 : 1
+  }
+
+  return 0
+}
+
+export function parseZordonVersion(stdout: string): string | null {
+  const first = stdout.split('\n').map(l => l.trim()).find(Boolean)
+  if (!first) return null
+  const m = /^zordon\s+(\S+)/.exec(first)
+  if (!m?.[1]) return null
+  const token = m[1]
+  if (token === '(devel)') return '(devel)'
+
+  return parseSemver(token) ? token.replace(/^v/, '') : null
+}
+
+export function parseLatestRelease(stdout: string): { version: string; url: string } | null {
+  let obj: { tag_name?: unknown; html_url?: unknown; draft?: unknown; prerelease?: unknown }
+  try {
+    obj = JSON.parse(stdout) as typeof obj
+  } catch {
+    return null
+  }
+  if (typeof obj !== 'object' || obj === null || obj.draft === true || obj.prerelease === true) return null
+  if (typeof obj.tag_name !== 'string') return null
+  const sv = parseSemver(obj.tag_name)
+  if (!sv || sv.pre !== null) return null
+  const version = `${sv.major}.${sv.minor}.${sv.patch}`
+  const fallbackUrl = new URL(`${RELEASE_TAG_BASE}${version}`).href
+  if (typeof obj.html_url === 'string' && obj.html_url.startsWith('https://github.com/piotrkowalczuk/zordon/releases/')) {
+    try {
+      return { version, url: new URL(obj.html_url).href }
+    } catch {
+      return { version, url: fallbackUrl }
+    }
+  }
+
+  return { version, url: fallbackUrl }
+}
+
+export function isBrewBinary(binPath: string | null, resolvedPath?: string | null | undefined): boolean {
+  const combined = `${binPath ?? ''}\0${resolvedPath ?? ''}`.toLowerCase()
+
+  return (
+    combined.includes('homebrew') ||
+    combined.includes('cellar') ||
+    combined.includes('caskroom') ||
+    combined.includes('linuxbrew')
+  )
+}
+
+export function parseUname(stdout: string): { os: 'darwin' | 'linux'; arch: 'arm64' | 'amd64' } | null {
+  const parts = stdout.trim().split(/\s+/)
+  const rawOs = (parts[0] ?? '').toLowerCase()
+  const rawArch = (parts[1] ?? '').toLowerCase()
+  const os = rawOs === 'darwin' ? 'darwin' : rawOs === 'linux' ? 'linux' : null
+  const arch =
+    rawArch === 'arm64' || rawArch === 'aarch64' ? 'arm64' : rawArch === 'x86_64' || rawArch === 'amd64' ? 'amd64' : null
+  if (!os || !arch) return null
+
+  return { os, arch }
+}
+
+export function binaryUpgradePlan(
+  binPath: string | null,
+  resolvedPath?: string | null | undefined,
+): { method: UpdateMethod; targetDir: string; label: string } {
+  const targetDir = binPath ? dirname(binPath) : ''
+  if (isBrewBinary(binPath, resolvedPath)) {
+    return { method: 'brew', targetDir, label: BREW_UPGRADE_CMD }
+  }
+  const shownDir = targetDir || '~/.local/bin'
+
+  return { method: 'download', targetDir, label: `download release → ${shownDir}` }
+}
+
+export function computeUpdate(opts: {
+  binaryVersion: string | null
+  pluginVersion: string
+  latestRelease: { version: string; url: string } | null
+  binPath?: string | null | undefined
+  resolvedBinPath?: string | null | undefined
+  pluginUpgradeCmd?: string | undefined
+}): UpdateInfo | null {
+  const pluginSv = parseSemver(opts.pluginVersion)
+  if (!pluginSv) return null
+
+  const binSv = opts.binaryVersion && opts.binaryVersion !== '(devel)' ? parseSemver(opts.binaryVersion) : null
+  const relSv = opts.latestRelease ? parseSemver(opts.latestRelease.version) : null
+
+  const isBinaryOutdated = binSv !== null && relSv !== null && compareSemver(binSv, relSv) < 0
+
+  let pluginTargetSv: Semver | null = relSv
+  if (binSv !== null && binSv.pre === null && (pluginTargetSv === null || compareSemver(binSv, pluginTargetSv) > 0)) {
+    pluginTargetSv = binSv
+  }
+  const isPluginOutdated = pluginTargetSv !== null && compareSemver(pluginSv, pluginTargetSv) < 0
+
+  if (!isBinaryOutdated && !isPluginOutdated) return null
+
+  const targetSv =
+    relSv !== null && (pluginTargetSv === null || compareSemver(relSv, pluginTargetSv) >= 0) ? relSv : pluginTargetSv
+  if (!targetSv) return null
+
+  const latest = `${targetSv.major}.${targetSv.minor}.${targetSv.patch}`
+  const releaseUrl =
+    opts.latestRelease && opts.latestRelease.version === latest
+      ? new URL(opts.latestRelease.url).href
+      : new URL(`${RELEASE_TAG_BASE}${latest}`).href
+  const plan = binaryUpgradePlan(opts.binPath ?? null, opts.resolvedBinPath ?? null)
+
+  return {
+    latest,
+    releaseUrl,
+    binaryVersion: opts.binaryVersion,
+    pluginVersion: opts.pluginVersion.replace(/^v/, ''),
+    isBinaryOutdated,
+    isPluginOutdated,
+    binaryMethod: plan.method,
+    binaryTargetDir: plan.targetDir,
+    binaryUpgradeCmd: plan.label,
+    pluginUpgradeCmd: opts.pluginUpgradeCmd ?? CLAUDE_PLUGIN_UPGRADE_CMD,
+  }
+}
+
+export function updatePromptLine(u: UpdateInfo): string {
+  if (u.isBinaryOutdated && u.isPluginOutdated) {
+    return `↑ zordon v${u.latest} available (cli v${u.binaryVersion}, plugin ${u.pluginVersion})`
+  }
+  if (u.isBinaryOutdated) {
+    return `↑ zordon v${u.latest} available (cli v${u.binaryVersion})`
+  }
+
+  return `↑ zordon plugin ${u.latest} available (installed ${u.pluginVersion})`
+}
+
 function summary(s: ZordonSnapshot): string | undefined {
   switch (s.kind) {
     case 'loading':
@@ -373,7 +624,174 @@ async function pullRequest($: EngineInterface, dir: string, branch: string, prs:
   return pr
 }
 
-async function refresh($: EngineInterface, sizes: SizeCache, prs: PrCache): Promise<ZordonSnapshot> {
+type VersionCache = {
+  binaryVersion: string | null
+  binPath: string | null
+  resolvedBinPath: string | null
+  pluginVersion: string
+  binaryCheckedAt: number | null
+  latestRelease: { version: string; url: string } | null
+  releaseCheckedAt: number | null
+}
+
+async function refreshUpdate($: EngineInterface, verCache: VersionCache): Promise<void> {
+  const now = await $.clock.now()
+  if (verCache.binaryCheckedAt === null || now - verCache.binaryCheckedAt >= VERSION_EVERY_MS) {
+    try {
+      const verRun = await $.process.run(['zordon', '--version'], { timeoutMs: 5_000 })
+      verCache.binaryVersion = verRun.exitCode === 0 ? parseZordonVersion(verRun.stdout) : null
+    } catch {
+      verCache.binaryVersion = null
+    }
+    try {
+      const whichRun = await $.process.run(['which', 'zordon'], { timeoutMs: 5_000 })
+      verCache.binPath = whichRun.exitCode === 0 ? (whichRun.stdout.trim().split('\n')[0] || null) : null
+    } catch {
+      verCache.binPath = null
+    }
+    verCache.resolvedBinPath = null
+    if (verCache.binPath !== null) {
+      try {
+        const linkRun = await $.process.run(['readlink', verCache.binPath], { timeoutMs: 2_000 })
+        if (linkRun.exitCode === 0) verCache.resolvedBinPath = linkRun.stdout.trim() || null
+      } catch {
+        verCache.resolvedBinPath = null
+      }
+    }
+    verCache.binaryCheckedAt = now
+  }
+
+  const relTtl = verCache.latestRelease !== null ? UPDATE_EVERY_MS : UPDATE_RETRY_MS
+  if (verCache.releaseCheckedAt === null || now - verCache.releaseCheckedAt >= relTtl) {
+    try {
+      const relRun = await $.process.run(
+        ['curl', '-fsSL', '--max-time', '3', '-H', 'Accept: application/vnd.github+json', RELEASE_API_URL],
+        { timeoutMs: 5_000 },
+      )
+      if (relRun.exitCode === 0) {
+        const parsed = parseLatestRelease(relRun.stdout)
+        if (parsed !== null) verCache.latestRelease = parsed
+      }
+    } catch {
+      // curl unavailable or network blocked
+    }
+    verCache.releaseCheckedAt = now
+  }
+
+  const nextUpdate = computeUpdate({
+    binaryVersion: verCache.binaryVersion,
+    pluginVersion: verCache.pluginVersion,
+    latestRelease: verCache.latestRelease,
+    binPath: verCache.binPath,
+    resolvedBinPath: verCache.resolvedBinPath,
+  })
+  const prevUpdate = await read($, updateInfo)
+  if (JSON.stringify(prevUpdate) !== JSON.stringify(nextUpdate)) {
+    await update($, updateInfo, () => nextUpdate)
+  }
+}
+
+function firstErrorLine(stderr: string, stdout: string, fallback: string): string {
+  const raw = stderr.trim() || stdout.trim()
+  if (!raw) return fallback
+
+  return raw.split('\n').pop() ?? fallback
+}
+
+async function runUpdate($: EngineInterface, verCache: VersionCache): Promise<void> {
+  if ((await read($, updateAction)).state === 'running') return
+  const upd = await read($, updateInfo)
+  if (!upd || !/^\d+\.\d+\.\d+$/.test(upd.latest)) return
+
+  if (upd.isBinaryOutdated) {
+    if (upd.binaryMethod === 'brew') {
+      await update($, updateAction, () => ({ state: 'running', message: `Upgrading CLI via Homebrew to v${upd.latest}…` }))
+      try {
+        const brewRun = await $.process.run(['brew', 'upgrade', 'piotrkowalczuk/tap/zordon'], { timeoutMs: 180_000 })
+        if (brewRun.exitCode !== 0) {
+          const msg = firstErrorLine(brewRun.stderr, brewRun.stdout, 'brew upgrade failed')
+          await update($, updateAction, () => ({ state: 'error', message: msg }))
+          $.ui.toast(`zordon update failed: ${msg}`)
+
+          return
+        }
+      } catch (err) {
+        const msg = `brew failed: ${String(err)}`
+        await update($, updateAction, () => ({ state: 'error', message: msg }))
+        $.ui.toast(`zordon update failed: ${msg}`)
+
+        return
+      }
+    } else {
+      await update($, updateAction, () => ({ state: 'running', message: `Downloading zordon v${upd.latest}…` }))
+      let platform: { os: 'darwin' | 'linux'; arch: 'arm64' | 'amd64' } | null = null
+      try {
+        const unameRun = await $.process.run(['uname', '-sm'], { timeoutMs: 5_000 })
+        if (unameRun.exitCode === 0) platform = parseUname(unameRun.stdout)
+      } catch {
+        platform = null
+      }
+      if (!platform) {
+        await update($, updateAction, () => ({ state: 'error', message: 'Unsupported OS or CPU architecture' }))
+        $.ui.toast('zordon update failed: unsupported platform')
+
+        return
+      }
+      try {
+        const dlRun = await $.process.run(
+          ['sh', '-euc', UPGRADE_TARBALL_SH, 'sh', upd.latest, platform.os, platform.arch, upd.binaryTargetDir],
+          { timeoutMs: 120_000 },
+        )
+        if (dlRun.exitCode !== 0) {
+          const msg = firstErrorLine(dlRun.stderr, dlRun.stdout, 'release download failed')
+          await update($, updateAction, () => ({ state: 'error', message: msg }))
+          $.ui.toast(`zordon update failed: ${msg}`)
+
+          return
+        }
+      } catch (err) {
+        const msg = `download failed: ${String(err)}`
+        await update($, updateAction, () => ({ state: 'error', message: msg }))
+        $.ui.toast(`zordon update failed: ${msg}`)
+
+        return
+      }
+    }
+    verCache.binaryCheckedAt = null
+  }
+
+  if (upd.isPluginOutdated) {
+    await update($, updateAction, () => ({ state: 'running', message: `Updating plugin zordon@zordon…` }))
+    try {
+      const plugRun = await $.process.run(['claude', 'plugin', 'update', 'zordon@zordon'], { timeoutMs: 60_000 })
+      if (plugRun.exitCode !== 0) {
+        await refreshUpdate($, verCache)
+        const msg = 'Run /plugin update zordon@zordon to finish plugin update'
+        await update($, updateAction, () => ({ state: 'error', message: msg }))
+        $.ui.toast(`zordon: ${msg}`)
+
+        return
+      }
+      verCache.pluginVersion = upd.latest
+    } catch {
+      await refreshUpdate($, verCache)
+      const msg = 'Run /plugin update zordon@zordon to finish plugin update'
+      await update($, updateAction, () => ({ state: 'error', message: msg }))
+      $.ui.toast(`zordon: ${msg}`)
+
+      return
+    }
+  }
+
+  await refreshUpdate($, verCache)
+  const doneMsg = upd.isPluginOutdated
+    ? `Updated to v${upd.latest} — restart session to reload plugin`
+    : `Updated CLI to v${upd.latest}`
+  await update($, updateAction, () => ({ state: 'done', message: doneMsg }))
+  $.ui.toast(`zordon: ${doneMsg}`)
+}
+
+async function refresh($: EngineInterface, sizes: SizeCache, prs: PrCache, verCache: VersionCache): Promise<ZordonSnapshot> {
   let next: ZordonSnapshot
   try {
     // The session's directory now, so a /cd moves what the pane watches.
@@ -392,6 +810,8 @@ async function refresh($: EngineInterface, sizes: SizeCache, prs: PrCache): Prom
     // workspace".
     next = { kind: 'error', message: `cannot run zordon: ${String(err)}`, workspace: null }
   }
+
+  await refreshUpdate($, verCache)
 
   const ws0 = workspaceOf(next)
   if (ws0 && next.kind !== 'loading' && next.kind !== 'inactive') {
@@ -479,7 +899,7 @@ type RenderEvent = Parameters<EngineInterface['ui']['resolve']>[0]
 // own: the workspace and the git checkouts under its src/, every service its run brings up,
 // and the zordon MCP calls Claude made this session. With no workspace a
 // single box says so instead.
-async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) {
+async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot, verCache: VersionCache) {
   const { Box, Text, Link, Markdown, Button, Code } = $.ui.resolve(e)
   const colors = await palette($)
   const collapsed = await read($, isCollapsed)
@@ -596,6 +1016,53 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
   const ws = workspaceOf(s)
   const services = s.kind === 'running' || s.kind === 'stopped' ? s.services : []
   const checkedOut = await read($, checkouts)
+  const upd = await read($, updateInfo)
+  const dismissed = await read($, dismissedUpdate)
+  const act = await read($, updateAction)
+  const shownUpdate = upd !== null && dismissed !== upd.latest ? upd : null
+  const updateBox = shownUpdate ? (
+    <Box key="update" flexDirection="column" borderStyle="round" borderColor="yellow" marginTop={1}>
+      <Box justifyContent="space-between" backgroundColor={colors.sub} paddingX={1}>
+        <Text bold color="yellow">
+          Update · v{shownUpdate.latest}
+        </Text>
+        <Box gap={1}>
+          <Button
+            key="run-update-pane"
+            label={act.state === 'running' ? 'Updating…' : 'Update'}
+            variant="primary"
+            onPress={() => runUpdate($, verCache)}
+          />
+          <Link href={shownUpdate.releaseUrl} label="release" />
+          <Button
+            key="dismiss-update-pane"
+            plain
+            label="×"
+            onPress={() => update($, dismissedUpdate, () => shownUpdate.latest)}
+          />
+        </Box>
+      </Box>
+      <Box flexDirection="column" paddingX={1}>
+        {shownUpdate.isBinaryOutdated ? (
+          <Text wrap="wrap">
+            <Text dimColor>cli v{shownUpdate.binaryVersion} → v{shownUpdate.latest}: </Text>
+            {shownUpdate.binaryUpgradeCmd}
+          </Text>
+        ) : null}
+        {shownUpdate.isPluginOutdated ? (
+          <Text wrap="wrap">
+            <Text dimColor>plugin {shownUpdate.pluginVersion} → {shownUpdate.latest}: </Text>
+            {shownUpdate.pluginUpgradeCmd}
+          </Text>
+        ) : null}
+        {act.message ? (
+          <Text color={act.state === 'error' ? 'red' : act.state === 'done' ? 'green' : 'yellow'} wrap="wrap">
+            {act.message}
+          </Text>
+        ) : null}
+      </Box>
+    </Box>
+  ) : null
 
   // No workspace: one box saying so, in place of Workspace, Runtime and Logs.
   // Before zordon first answered: no verdict on the tree yet.
@@ -603,6 +1070,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
     return (
       <Box flexDirection="column">
         {header}
+        {updateBox}
         <Box borderStyle="round" borderColor="gray" marginTop={1} paddingX={1}>
           <Text dimColor>Reading the stack…</Text>
         </Box>
@@ -614,6 +1082,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
     return (
       <Box flexDirection="column">
         {header}
+        {updateBox}
         <Box flexDirection="column" borderStyle="round" borderColor="gray" marginTop={1} paddingX={1}>
           <Text>
             <Text color="gray">○ </Text>
@@ -714,6 +1183,7 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
   return (
     <Box flexDirection="column">
       {header}
+      {updateBox}
       {panel({
         key: 'workspace',
         title: 'Workspace',
@@ -756,6 +1226,15 @@ async function stackView($: EngineInterface, e: RenderEvent, s: ZordonSnapshot) 
 export const register: Register = on => {
   const sizes: SizeCache = new Map()
   const prs: PrCache = new Map()
+  const verCache: VersionCache = {
+    binaryVersion: null,
+    binPath: null,
+    resolvedBinPath: null,
+    pluginVersion: PLUGIN_VERSION,
+    binaryCheckedAt: null,
+    latestRelease: null,
+    releaseCheckedAt: null,
+  }
 
   registerDiff(on)
 
@@ -800,7 +1279,7 @@ export const register: Register = on => {
       if (isPolling) return
       isPolling = true
       try {
-        await refresh($, sizes, prs)
+        await refresh($, sizes, prs, verCache)
       } finally {
         isPolling = false
       }
@@ -824,7 +1303,7 @@ export const register: Register = on => {
       return { text: 'zordon dashboard hidden' }
     }
 
-    await refresh($, sizes, prs)
+    await refresh($, sizes, prs, verCache)
     const s = await current($)
     const opened = await openPane($, true)
     const where = opened.isPlaced ? 'shown' : `waits: ${opened.reason}`
@@ -837,27 +1316,53 @@ export const register: Register = on => {
   on('ui.render', { component: 'CommandOutput', props: { command: DASHBOARD } }, async ($, e, next) => {
     if (e.props.isErrored || e.props.text.endsWith('hidden')) return next(e)
 
-    return stackView($, e, await current($))
+    return stackView($, e, await current($), verCache)
   })
 
   // The stack's view: a pane, docked beside the transcript in fullscreen
   // (inline above the prompt otherwise); the arrows scroll it once focused.
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => stackView($, e, await current($)))
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => stackView($, e, await current($), verCache))
 
-  // Above the prompt only while something is wrong, one line pointing at the pane.
+  // Above the prompt: errors first, otherwise an update notice in active workspaces.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) {
+      return next(e)
+    }
+
     const s = await current($)
     const isBad = s.kind === 'error' || (s.kind === 'running' && s.services.some(x => x.isFailed))
-    if (e.props.hasSurvey || !isBad) {
+    if (isBad) {
+      const { Box, Button, Text } = $.ui.resolve(e)
+
+      return (
+        <Box>
+          <Text color="red">{summary(s)} </Text>
+          <Button key="open" label="Show" onPress={() => openPane($, true)} />
+        </Box>
+      )
+    }
+
+    const upd = await read($, updateInfo)
+    const dismissed = await read($, dismissedUpdate)
+    const act = await read($, updateAction)
+    if (s.kind === 'loading' || s.kind === 'inactive' || upd === null || dismissed === upd.latest) {
       return next(e)
     }
 
     const { Box, Button, Text } = $.ui.resolve(e)
 
     return (
-      <Box>
-        <Text color="red">{summary(s)} </Text>
-        <Button key="open" label="Show" onPress={() => openPane($, true)} />
+      <Box gap={1}>
+        <Text color={act.state === 'error' ? 'red' : 'yellow'}>
+          {act.state === 'running' && act.message ? act.message : updatePromptLine(upd)}
+        </Text>
+        <Button
+          key="run-update"
+          label={act.state === 'running' ? 'Updating…' : 'Update'}
+          onPress={() => runUpdate($, verCache)}
+        />
+        <Button key="open-update" plain label="Show" onPress={() => openPane($, true)} />
+        <Button key="dismiss-update" plain label="Dismiss" onPress={() => update($, dismissedUpdate, () => upd.latest)} />
       </Box>
     )
   })

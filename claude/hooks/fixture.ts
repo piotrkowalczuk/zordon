@@ -61,17 +61,54 @@ export const PANE = {
 // Stands for the host beneath the plugin: zordon answering `status` with
 // `stack`, du sizing the workspace, a surface seating the pane. Register it
 // before the test first calls $.
-export function host(on: On, stack: string, pane: { isShown: boolean } = { isShown: true }) {
+export function host(
+  on: On,
+  stack: string,
+  pane: { isShown: boolean } = { isShown: true },
+  versions?: {
+    cli?: string | undefined
+    latestTag?: string | undefined
+    binPath?: string | undefined
+    resolvedBinPath?: string | undefined
+    uname?: string | undefined
+    ran?: string[][] | undefined
+  },
+) {
   const clock = mock.clock(on, { now: 1_000 })
+  let currentCli = versions?.cli
   const done = (stdout: string, exitCode = 0) => ({
     value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   })
   on('fs.exists', ($, e) => ({ value: e.path in TREE || Object.values(TREE).some(dirs => dirs.some(d => `${d}/.git` === e.path)) }))
   on('fs.list', ($, e) => ({ value: (TREE[e.path] ?? []).map(d => ({ name: d.split('/').pop() ?? d, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })) }))
   on('process.run', ($, e) => {
+    versions?.ran?.push([...e.argv])
     if (e.argv[0] === 'git') return done(`zordon/feature/${e.argv[2]?.split('/').pop()}\n`)
     if (e.argv[0] === 'gh') return done(e.init?.cwd?.endsWith('/api') ? JSON.stringify([PR]) : '[]')
+    if (e.argv[0] === 'zordon' && e.argv[1] === '--version' && currentCli) return done(`zordon ${currentCli}\n`)
     if (e.argv[0] === 'zordon') return { value: { exitCode: 0, stdout: `${stack}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (e.argv[0] === 'which' && e.argv[1] === 'zordon' && versions?.binPath) return done(`${versions.binPath}\n`)
+    if (e.argv[0] === 'readlink' && versions?.resolvedBinPath) return done(`${versions.resolvedBinPath}\n`)
+    if (e.argv[0] === 'uname' && e.argv[1] === '-sm') return done(`${versions?.uname ?? 'Darwin arm64'}\n`)
+    if (e.argv[0] === 'brew' && e.argv[1] === 'upgrade' && versions?.latestTag) {
+      currentCli = versions.latestTag
+
+      return done('upgraded\n')
+    }
+    if (e.argv[0] === 'sh' && e.argv[1] === '-euc' && versions?.latestTag) {
+      currentCli = `v${e.argv[4] ?? ''}`
+
+      return done(`${e.argv[7] || '/Users/dev/.local/bin'}\n`)
+    }
+    if (e.argv[0] === 'claude' && e.argv[1] === 'plugin' && e.argv[2] === 'update') return done('updated\n')
+    if (e.argv[0] === 'curl' && versions?.latestTag) {
+      return done(
+        JSON.stringify({
+          tag_name: versions.latestTag,
+          html_url: `https://github.com/piotrkowalczuk/zordon/releases/tag/${versions.latestTag}`,
+        }),
+      )
+    }
     if (e.argv[0] === 'du') return { value: { exitCode: 0, stdout: `1363148\t${e.argv[2]}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
 
     return { value: { exitCode: 127, stdout: '', stderr: `${e.argv[0]}: not found`, isStdoutTruncated: false, isStderrTruncated: false } }

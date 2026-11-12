@@ -27,4 +27,7 @@ No `.mcp.json` or `CLAUDE.md` editing is needed.
 To verify the server is connected, run `/mcp` from any project with an `Alphasfile`.
 Ask the agent: *"what's the status of this project's stack?"* — it should reach for the `status` MCP tool, not Bash.
 
+When the plugin prompts that a newer release is available, press **Update** above the prompt or inside `/zordon:dashboard` to upgrade the `zordon` CLI and the plugin automatically.
+Restart Claude Code after a plugin update so the new hooks load, or run `/plugin update zordon@zordon` manually at any time.
+
 For details on what each tool does, see the [`zordon mcp` reference](../reference/mcp.md).

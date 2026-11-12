@@ -150,3 +150,59 @@ test('a service opens to its details: the whole print, wrapped, and where its co
   expect(await ui.find({ type: 'Text', text: /^source / })).toBeUndefined()
   await ui.unmount()
 })
+
+test('shows an Update box in the pane when a newer release exists, and hides it when dismissed', async ($, on) => {
+  host(on, FEATURE, { isShown: true }, { cli: 'v0.28.0', latestTag: 'v99.0.0', binPath: '/Users/dev/go/bin/zordon' })
+  await openStack($)
+  const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
+
+  expect(await ui.find({ type: 'Text', text: /Update · v99\.0\.0/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /cli v0\.28\.0 → v99\.0\.0/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /download release → \/Users\/dev\/go\/bin/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /claude plugin update zordon@zordon/ })).toBeDefined()
+  expect((await ui.find({ key: 'run-update-pane' }))?.props.label).toBe('Update')
+  expect((await ui.find({ type: 'Link', text: 'release' }))?.props.href).toBe(
+    'https://github.com/piotrkowalczuk/zordon/releases/tag/v99.0.0',
+  )
+
+  await ui.press({ key: 'dismiss-update-pane' })
+  expect(await ui.find({ type: 'Text', text: /Update · v99\.0\.0/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('pressing Update downloads the release tarball for non-Homebrew installs and updates the plugin', async ($, on) => {
+  const ran: string[][] = []
+  host(on, FEATURE, { isShown: true }, { cli: 'v0.28.0', latestTag: 'v99.0.0', binPath: '/Users/dev/go/bin/zordon', ran })
+  await openStack($)
+  const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
+
+  await ui.press({ key: 'run-update-pane' })
+  expect(await ui.find({ type: 'Text', text: /Update · v99\.0\.0/ })).toBeUndefined()
+  expect(ran.some(argv => argv[0] === 'sh' && argv[4] === '99.0.0' && argv[5] === 'darwin' && argv[6] === 'arm64' && argv[7] === '/Users/dev/go/bin')).toBe(true)
+  expect(ran.some(argv => argv[0] === 'claude' && argv[1] === 'plugin' && argv[2] === 'update' && argv[3] === 'zordon@zordon')).toBe(true)
+  expect(ran.some(argv => argv[0] === 'brew')).toBe(false)
+  await ui.unmount()
+})
+
+test('pressing Update uses Homebrew when the installed binary is managed by brew', async ($, on) => {
+  const ran: string[][] = []
+  host(on, FEATURE, { isShown: true }, { cli: 'v0.28.0', latestTag: 'v99.0.0', binPath: '/opt/homebrew/bin/zordon', ran })
+  await openStack($)
+  const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
+
+  await ui.press({ key: 'run-update-pane' })
+  expect(await ui.find({ type: 'Text', text: /Update · v99\.0\.0/ })).toBeUndefined()
+  expect(ran.some(argv => argv[0] === 'brew' && argv[1] === 'upgrade' && argv[2] === 'piotrkowalczuk/tap/zordon')).toBe(true)
+  expect(ran.some(argv => argv[0] === 'sh')).toBe(false)
+  await ui.unmount()
+})
+
+test('shows the Update box in an opened dashboard pane even outside a workspace', async ($, on) => {
+  host(on, '{"state":"no-alphasfile"}', { isShown: true }, { cli: 'v0.28.0', latestTag: 'v99.0.0' })
+  await openStack($)
+  const ui = await $.ui.mount({ plugin: 'zordon', surface: 'terminal', ...PANE })
+
+  expect(await ui.find({ type: 'Text', text: /Not a workspace/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Update · v99\.0\.0/ })).toBeDefined()
+  await ui.unmount()
+})

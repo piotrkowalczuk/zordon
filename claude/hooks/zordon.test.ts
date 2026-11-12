@@ -1,6 +1,21 @@
 import { expect, test } from 'claude-code/testing'
 
-import { byStateThenName, formatSize, groupCheckouts, parseStatus, splitScope } from './register'
+import {
+  binaryUpgradePlan,
+  byStateThenName,
+  compareSemver,
+  computeUpdate,
+  formatSize,
+  groupCheckouts,
+  isBrewBinary,
+  parseLatestRelease,
+  parseSemver,
+  parseStatus,
+  parseUname,
+  parseZordonVersion,
+  splitScope,
+  updatePromptLine,
+} from './register'
 
 const RUNNING = `# [3aec45fbd85ea76f] /x/Alphasfile (invocation, workspace=main)
   alpha pid=4242 started=2026-10-04T17:00:00Z
@@ -134,4 +149,99 @@ test('in main, services whose code is in the project\'s src/ show under their mo
   expect(groupCheckouts([svc('a', '/repo/proj/src/a'), svc('tool', '/repo/tools/x')], '/repo/proj')).toEqual([
     { path: '/repo', label: 'repo', branch: 'main', apps: [{ name: 'a', dir: 'proj/src/a' }] },
   ])
+})
+
+test('parses zordon --version lines and ignores unrelated output', () => {
+  expect(parseZordonVersion('zordon v0.29.0 (9b4437bd1c2e, 2026-07-23T20:00:00Z, go1.26.5)\n')).toBe('0.29.0')
+  expect(parseZordonVersion('zordon v0.29.1-0.20261112184434-cbc6427e35b4\n')).toBe('0.29.1-0.20261112184434-cbc6427e35b4')
+  expect(parseZordonVersion('zordon (devel) (7c826464877e, go1.26.5)\n')).toBe('(devel)')
+  expect(parseZordonVersion('{"workspace":"feature","state":"running"}')).toBeNull()
+})
+
+test('compares semver including prereleases and Go pseudo-versions', () => {
+  const a = parseSemver('0.29.0')
+  const b = parseSemver('v0.29.1-0.20261112184434-cbc6427e35b4')
+  const c = parseSemver('v0.29.1')
+  if (!a || !b || !c) throw new Error('expected valid semver')
+  expect(compareSemver(a, b)).toBeLessThan(0)
+  expect(compareSemver(b, c)).toBeLessThan(0)
+  expect(compareSemver(c, c)).toBe(0)
+})
+
+test('parses GitHub latest release JSON and rejects drafts or prereleases', () => {
+  expect(
+    parseLatestRelease(
+      JSON.stringify({
+        tag_name: 'v0.30.0',
+        html_url: 'https://github.com/piotrkowalczuk/zordon/releases/tag/v0.30.0',
+        draft: false,
+        prerelease: false,
+      }),
+    ),
+  ).toEqual({
+    version: '0.30.0',
+    url: 'https://github.com/piotrkowalczuk/zordon/releases/tag/v0.30.0',
+  })
+  expect(parseLatestRelease(JSON.stringify({ tag_name: 'v0.30.0-rc.1', prerelease: true }))).toBeNull()
+  expect(parseLatestRelease('not json')).toBeNull()
+})
+
+test('computes update targets across CLI, plugin, brew vs tarball download, offline skew, and devel builds', () => {
+  const rel30 = { version: '0.30.0', url: 'https://github.com/piotrkowalczuk/zordon/releases/tag/v0.30.0' }
+
+  expect(computeUpdate({ binaryVersion: '0.30.0', pluginVersion: '0.30.0', latestRelease: rel30 })).toBeNull()
+
+  const both = computeUpdate({ binaryVersion: '0.29.0', pluginVersion: '0.29.0', latestRelease: rel30 })
+  expect(both?.isBinaryOutdated).toBe(true)
+  expect(both?.isPluginOutdated).toBe(true)
+  expect(both?.binaryMethod).toBe('download')
+  expect(both?.pluginUpgradeCmd).toBe('claude plugin update zordon@zordon')
+  expect(both && updatePromptLine(both)).toBe('↑ zordon v0.30.0 available (cli v0.29.0, plugin 0.29.0)')
+
+  const cliDownload = computeUpdate({
+    binaryVersion: '0.29.0',
+    pluginVersion: '0.30.0',
+    latestRelease: rel30,
+    binPath: '/Users/dev/go/bin/zordon',
+  })
+  expect(cliDownload?.isBinaryOutdated).toBe(true)
+  expect(cliDownload?.isPluginOutdated).toBe(false)
+  expect(cliDownload?.binaryMethod).toBe('download')
+  expect(cliDownload?.binaryTargetDir).toBe('/Users/dev/go/bin')
+  expect(cliDownload?.binaryUpgradeCmd).toBe('download release → /Users/dev/go/bin')
+
+  const cliBrew = computeUpdate({
+    binaryVersion: '0.29.0',
+    pluginVersion: '0.30.0',
+    latestRelease: rel30,
+    binPath: '/usr/local/bin/zordon',
+    resolvedBinPath: '../Caskroom/zordon/0.29.0/zordon',
+  })
+  expect(cliBrew?.binaryMethod).toBe('brew')
+  expect(cliBrew?.binaryUpgradeCmd).toBe('brew upgrade piotrkowalczuk/tap/zordon')
+
+  const pluginOffline = computeUpdate({ binaryVersion: '0.30.0', pluginVersion: '0.29.0', latestRelease: null })
+  expect(pluginOffline?.isBinaryOutdated).toBe(false)
+  expect(pluginOffline?.isPluginOutdated).toBe(true)
+  expect(pluginOffline?.latest).toBe('0.30.0')
+
+  expect(computeUpdate({ binaryVersion: '(devel)', pluginVersion: '0.30.0', latestRelease: rel30 })).toBeNull()
+  const develPluginBehind = computeUpdate({ binaryVersion: '(devel)', pluginVersion: '0.29.0', latestRelease: rel30 })
+  expect(develPluginBehind?.isBinaryOutdated).toBe(false)
+  expect(develPluginBehind?.isPluginOutdated).toBe(true)
+
+  expect(isBrewBinary('/opt/homebrew/bin/zordon')).toBe(true)
+  expect(isBrewBinary('/usr/local/bin/zordon')).toBe(false)
+  expect(isBrewBinary('/usr/local/bin/zordon', '/usr/local/Caskroom/zordon/0.29.0/zordon')).toBe(true)
+  expect(binaryUpgradePlan(null)).toEqual({
+    method: 'download',
+    targetDir: '',
+    label: 'download release → ~/.local/bin',
+  })
+
+  expect(parseUname('Darwin arm64\n')).toEqual({ os: 'darwin', arch: 'arm64' })
+  expect(parseUname('Darwin x86_64\n')).toEqual({ os: 'darwin', arch: 'amd64' })
+  expect(parseUname('Linux aarch64\n')).toEqual({ os: 'linux', arch: 'arm64' })
+  expect(parseUname('Linux x86_64\n')).toEqual({ os: 'linux', arch: 'amd64' })
+  expect(parseUname('MINGW64_NT x86_64\n')).toBeNull()
 })

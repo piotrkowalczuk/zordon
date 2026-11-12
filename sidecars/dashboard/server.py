@@ -14,25 +14,42 @@ for Antigravity:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import html
 import json
 import os
+import platform
 import re
+import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 POLL_MS = 5000
 SIZE_EVERY_S = 60.0
 PR_EVERY_S = 60.0
+VERSION_EVERY_S = 60.0
+UPDATE_TTL_S = 6 * 3600.0
+UPDATE_FAIL_TTL_S = 15 * 60.0
 MAX_CALLS = 30
 MAX_OUTPUT = 4000
 CODE_LIMIT = 10_000
 MAX_FILES = 40
+RELEASE_API_URL = "https://api.github.com/repos/piotrkowalczuk/zordon/releases/latest"
+RELEASE_TAG_BASE = "https://github.com/piotrkowalczuk/zordon/releases/tag/v"
+RELEASE_DOWNLOAD_BASE = "https://github.com/piotrkowalczuk/zordon/releases/download"
+BREW_UPGRADE_CMD = "brew upgrade piotrkowalczuk/tap/zordon"
+AGY_PLUGIN_UPGRADE_CMD = "agy plugin install <path-to-zordon>"
+REQUIRED_BINARIES = ("tommy", "alpha", "zordon")
 
 HEADER_LINE = re.compile(r"^# \[[0-9a-f]+\] (.+?) \(invocation, workspace=([^)]+)\)$")
 LEVEL_LINE = re.compile(r"^# \[[0-9a-f]+\] ")
@@ -43,9 +60,15 @@ CHECKOUT_LINE = re.compile(r"^checkout: (.+?) \((?:branch (\S+)[^)]*|detached @ 
 ERROR_LINE = re.compile(r"\[ERROR\]\s*-?\s*(.*)$")
 MCP_TOOL_RE = re.compile(r"^mcp__?(?:plugin_zordon_)?(?:zordon_)?zordon__?(.+)$")
 FILE_HEADER_RE = re.compile(r"^diff --git a/.+? b/(.+)$")
+SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
+ZORDON_VER_RE = re.compile(r"^zordon\s+(\S+)")
+
+SemverTuple = tuple[int, int, int, tuple[int | str, ...] | None]
 
 _size_cache: dict[str, tuple[int | None, float]] = {}
 _pr_cache: dict[str, tuple[dict[str, Any] | None, float]] = {}
+_version_cache: dict[str, tuple[str | None, str | None, float]] = {}
+_upgrade_lock = threading.Lock()
 
 
 def state_file_path() -> Path:
@@ -68,10 +91,12 @@ def load_state(path: Path | None = None) -> dict[str, Any]:
                 "cwd": data.get("cwd") if isinstance(data.get("cwd"), str) else "",
                 "workspaces": data.get("workspaces") if isinstance(data.get("workspaces"), list) else [],
                 "calls": data.get("calls") if isinstance(data.get("calls"), list) else [],
+                "updateCache": data.get("updateCache") if isinstance(data.get("updateCache"), dict) else {},
+                "dismissedUpdate": data.get("dismissedUpdate") if isinstance(data.get("dismissedUpdate"), str) else "",
             }
     except Exception:
         pass
-    return {"cwd": "", "workspaces": [], "calls": []}
+    return {"cwd": "", "workspaces": [], "calls": [], "updateCache": {}, "dismissedUpdate": ""}
 
 
 def save_state(state: dict[str, Any], path: Path | None = None) -> None:
@@ -564,6 +589,441 @@ def extract_cwd(payload: dict[str, Any]) -> str:
     return ""
 
 
+def parse_semver(raw: str) -> SemverTuple | None:
+    m = SEMVER_RE.match(raw.strip())
+    if not m:
+        return None
+    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    pre_raw = m.group(4)
+    if not pre_raw:
+        return (major, minor, patch, None)
+    segs: tuple[int | str, ...] = tuple(int(s) if s.isdigit() else s for s in pre_raw.split("."))
+    return (major, minor, patch, segs)
+
+
+def compare_semver(a: SemverTuple, b: SemverTuple) -> int:
+    if a[:3] != b[:3]:
+        return -1 if a[:3] < b[:3] else 1
+    ap, bp = a[3], b[3]
+    if ap == bp:
+        return 0
+    if ap is None:
+        return 1
+    if bp is None:
+        return -1
+    for ai, bi in zip(ap, bp):
+        if ai == bi:
+            continue
+        if isinstance(ai, int) and isinstance(bi, int):
+            return -1 if ai < bi else 1
+        if isinstance(ai, int):
+            return -1
+        if isinstance(bi, int):
+            return 1
+        return -1 if str(ai) < str(bi) else 1
+    if len(ap) == len(bp):
+        return 0
+    return -1 if len(ap) < len(bp) else 1
+
+
+def parse_zordon_version(stdout: str) -> str | None:
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = ZORDON_VER_RE.match(stripped)
+        if not m:
+            return None
+        token = m.group(1)
+        if token == "(devel)":
+            return "(devel)"
+        return token.lstrip("v") if parse_semver(token) is not None else None
+    return None
+
+
+def parse_latest_release(raw: str) -> dict[str, str] | None:
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(obj, dict) or obj.get("draft") is True or obj.get("prerelease") is True:
+        return None
+    tag_name = obj.get("tag_name")
+    if not isinstance(tag_name, str):
+        return None
+    sv = parse_semver(tag_name)
+    if sv is None or sv[3] is not None:
+        return None
+    version = f"{sv[0]}.{sv[1]}.{sv[2]}"
+    html_url = obj.get("html_url")
+    if isinstance(html_url, str) and html_url.startswith("https://github.com/piotrkowalczuk/zordon/releases/"):
+        return {"version": version, "url": html_url}
+    return {"version": version, "url": f"{RELEASE_TAG_BASE}{version}"}
+
+
+def plugin_root_path() -> Path:
+    env_root = os.environ.get("PLUGIN_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).resolve()
+    return Path(__file__).resolve().parents[2]
+
+
+def read_plugin_version(plugin_root: Path | None = None) -> str:
+    root = plugin_root or plugin_root_path()
+    for rel in (Path(".antigravity-plugin/plugin.json"), Path("plugin.json"), Path(".claude-plugin/plugin.json")):
+        candidate = root / rel
+        if not candidate.is_file():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+            ver = data.get("version")
+            if isinstance(ver, str) and ver.strip():
+                return ver.strip().lstrip("v")
+        except Exception:
+            continue
+    return "0.0.0"
+
+
+def is_brew_binary(bin_path: str | None) -> bool:
+    if not bin_path:
+        return False
+    candidates = [bin_path]
+    try:
+        resolved = os.path.realpath(bin_path)
+        if resolved != bin_path:
+            candidates.append(resolved)
+    except Exception:
+        pass
+    combined = " ".join(candidates).lower()
+    return any(k in combined for k in ("homebrew", "cellar", "caskroom", "linuxbrew"))
+
+
+def binary_upgrade_plan(bin_path: str | None) -> tuple[str, str, str]:
+    target_dir = str(Path(bin_path).parent) if bin_path else ""
+    if is_brew_binary(bin_path):
+        return ("brew", target_dir, BREW_UPGRADE_CMD)
+    shown_dir = target_dir or "~/.local/bin"
+    return ("download", target_dir, f"download release → {shown_dir}")
+
+
+def detect_platform(sys_platform: str | None = None, machine: str | None = None) -> tuple[str, str] | None:
+    sp = (sys_platform or sys.platform).lower()
+    mc = (machine or platform.machine()).lower()
+    goos = "darwin" if sp.startswith("darwin") else ("linux" if sp.startswith("linux") else None)
+    goarch = "arm64" if mc in ("arm64", "aarch64") else ("amd64" if mc in ("x86_64", "amd64") else None)
+    if goos is None or goarch is None:
+        return None
+    return (goos, goarch)
+
+
+def parse_checksum(checksums_text: str, archive_name: str) -> str | None:
+    for line in checksums_text.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        digest = parts[0].lower()
+        fname = parts[1].lstrip("*")
+        if fname == archive_name and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest):
+            return digest
+    return None
+
+
+def perform_binary_upgrade(
+    latest: str,
+    bin_path: str | None = None,
+    download_base_url: str | None = None,
+    plat: tuple[str, str] | None = None,
+) -> dict[str, Any]:
+    if not re.match(r"^\d+\.\d+\.\d+$", latest):
+        return {"ok": False, "error": f"invalid target version: {latest}"}
+
+    if bin_path is None:
+        _, bin_path = query_zordon_version()
+
+    if is_brew_binary(bin_path):
+        brew_bin = os.environ.get("ZORDON_BREW_BIN", "").strip() or "brew"
+        try:
+            res = subprocess.run(
+                [brew_bin, "upgrade", "piotrkowalczuk/tap/zordon"],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"brew failed: {exc}"}
+        if res.returncode != 0:
+            err = (res.stderr.strip() or res.stdout.strip() or "brew upgrade failed").splitlines()[-1]
+            return {"ok": False, "error": err}
+        _version_cache.clear()
+        new_ver, _ = query_zordon_version()
+        return {
+            "ok": True,
+            "method": "brew",
+            "version": new_ver or latest,
+            "message": f"Upgraded zordon via Homebrew to v{latest}",
+        }
+
+    resolved_plat = plat or detect_platform()
+    if resolved_plat is None:
+        return {"ok": False, "error": f"unsupported platform: {sys.platform}/{platform.machine()}"}
+    goos, goarch = resolved_plat
+
+    target_dir: Path | None = None
+    if bin_path:
+        parent = Path(bin_path).parent
+        if parent.is_dir() and os.access(parent, os.W_OK):
+            target_dir = parent
+    if target_dir is None:
+        target_dir = Path(os.environ.get("ZORDON_INSTALL_DIR", "").strip() or Path.home() / ".local" / "bin")
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            return {"ok": False, "error": f"cannot create {target_dir}: {exc}"}
+
+    base = (download_base_url or os.environ.get("ZORDON_RELEASE_DOWNLOAD_BASE", "").strip() or RELEASE_DOWNLOAD_BASE).rstrip("/")
+    if not _allowed_release_api_url(base):
+        return {"ok": False, "error": "disallowed download base URL"}
+
+    archive_name = f"zordon_{latest}_{goos}_{goarch}.tar.gz"
+    checksums_url = f"{base}/v{latest}/checksums.txt"
+    archive_url = f"{base}/v{latest}/{archive_name}"
+
+    try:
+        req_cs = Request(checksums_url, headers={"User-Agent": "zordon-plugin"})
+        with urlopen(req_cs, timeout=15) as resp:
+            checksums_txt = resp.read(262_144).decode("utf-8", errors="replace")
+    except Exception as exc:
+        return {"ok": False, "error": f"failed to fetch checksums.txt: {exc}"}
+
+    expected_sha = parse_checksum(checksums_txt, archive_name)
+    if expected_sha is None:
+        return {"ok": False, "error": f"checksum not found for {archive_name}"}
+
+    stage_dir = Path(tempfile.mkdtemp(prefix=".zordon-upgrade-", dir=str(target_dir)))
+    try:
+        archive_path = stage_dir / archive_name
+        hasher = hashlib.sha256()
+        try:
+            req_ar = Request(archive_url, headers={"User-Agent": "zordon-plugin"})
+            with urlopen(req_ar, timeout=60) as resp, archive_path.open("wb") as out_f:
+                remaining = 200 * 1024 * 1024
+                while remaining > 0:
+                    chunk = resp.read(min(65_536, remaining))
+                    if not chunk:
+                        break
+                    hasher.update(chunk)
+                    out_f.write(chunk)
+                    remaining -= len(chunk)
+        except Exception as exc:
+            return {"ok": False, "error": f"failed to download {archive_name}: {exc}"}
+
+        actual_sha = hasher.hexdigest().lower()
+        if not hmac.compare_digest(actual_sha, expected_sha):
+            return {"ok": False, "error": f"SHA-256 mismatch for {archive_name}"}
+
+        try:
+            with tarfile.open(archive_path, "r:gz") as tf:
+                found: set[str] = set()
+                for member in tf.getmembers():
+                    clean_name = member.name.lstrip("./")
+                    if clean_name not in REQUIRED_BINARIES or not member.isfile():
+                        continue
+                    extracted = tf.extractfile(member)
+                    if extracted is None:
+                        continue
+                    dest_bin = stage_dir / clean_name
+                    with extracted, dest_bin.open("wb") as bin_out:
+                        shutil.copyfileobj(extracted, bin_out)
+                    os.chmod(dest_bin, 0o755)
+                    found.add(clean_name)
+        except Exception as exc:
+            return {"ok": False, "error": f"failed to unpack {archive_name}: {exc}"}
+
+        missing = [b for b in REQUIRED_BINARIES if b not in found]
+        if missing:
+            return {"ok": False, "error": f"archive missing binaries: {', '.join(missing)}"}
+
+        if goos == "darwin":
+            try:
+                subprocess.run(
+                    ["xattr", "-dr", "com.apple.quarantine", *[str(stage_dir / b) for b in REQUIRED_BINARIES]],
+                    capture_output=True,
+                    timeout=5,
+                )
+            except Exception:
+                pass
+
+        for b in REQUIRED_BINARIES:
+            (stage_dir / b).replace(target_dir / b)
+    finally:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+
+    _version_cache.clear()
+    new_ver, _ = query_zordon_version()
+    return {
+        "ok": True,
+        "method": "download",
+        "targetDir": str(target_dir),
+        "version": new_ver or latest,
+        "message": f"Installed zordon v{latest} into {target_dir}",
+    }
+
+
+def compute_update(
+    binary_version: str | None,
+    plugin_version: str,
+    latest_release: dict[str, str] | None,
+    bin_path: str | None = None,
+    plugin_upgrade_cmd: str = AGY_PLUGIN_UPGRADE_CMD,
+) -> dict[str, Any] | None:
+    plugin_sv = parse_semver(plugin_version)
+    if plugin_sv is None:
+        return None
+    bin_sv = parse_semver(binary_version) if (binary_version and binary_version != "(devel)") else None
+    rel_sv = parse_semver(latest_release["version"]) if latest_release else None
+
+    is_binary_outdated = bin_sv is not None and rel_sv is not None and compare_semver(bin_sv, rel_sv) < 0
+
+    plugin_target_sv = rel_sv
+    if bin_sv is not None and bin_sv[3] is None:
+        if plugin_target_sv is None or compare_semver(bin_sv, plugin_target_sv) > 0:
+            plugin_target_sv = bin_sv
+    is_plugin_outdated = plugin_target_sv is not None and compare_semver(plugin_sv, plugin_target_sv) < 0
+
+    if not is_binary_outdated and not is_plugin_outdated:
+        return None
+
+    target_sv = (
+        rel_sv
+        if (rel_sv is not None and (plugin_target_sv is None or compare_semver(rel_sv, plugin_target_sv) >= 0))
+        else plugin_target_sv
+    )
+    if target_sv is None:
+        return None
+
+    latest = f"{target_sv[0]}.{target_sv[1]}.{target_sv[2]}"
+    release_url = (
+        latest_release["url"]
+        if (latest_release and latest_release.get("version") == latest and latest_release.get("url"))
+        else f"{RELEASE_TAG_BASE}{latest}"
+    )
+    method, target_dir, bin_label = binary_upgrade_plan(bin_path)
+    return {
+        "latest": latest,
+        "releaseUrl": release_url,
+        "binaryVersion": binary_version,
+        "pluginVersion": plugin_version.lstrip("v"),
+        "isBinaryOutdated": is_binary_outdated,
+        "isPluginOutdated": is_plugin_outdated,
+        "binaryMethod": method,
+        "binaryTargetDir": target_dir,
+        "binaryUpgradeCmd": bin_label,
+        "pluginUpgradeCmd": plugin_upgrade_cmd,
+    }
+
+
+def query_zordon_version() -> tuple[str | None, str | None]:
+    zordon_bin = os.environ.get("ZORDON_BIN", "zordon")
+    now = time.monotonic()
+    cached = _version_cache.get(zordon_bin)
+    if cached and (now - cached[2]) < VERSION_EVERY_S:
+        return cached[0], cached[1]
+    ver: str | None = None
+    bin_path = shutil.which(zordon_bin) or (zordon_bin if "/" in zordon_bin else None)
+    try:
+        res = subprocess.run([zordon_bin, "--version"], capture_output=True, text=True, timeout=5)
+        if res.returncode == 0:
+            ver = parse_zordon_version(res.stdout)
+    except Exception:
+        ver = None
+    _version_cache[zordon_bin] = (ver, bin_path, now)
+    return ver, bin_path
+
+
+def resolve_update_info(
+    state: dict[str, Any],
+    plugin_root: Path | None = None,
+) -> tuple[dict[str, Any] | None, bool]:
+    cache = state.get("updateCache") if isinstance(state.get("updateCache"), dict) else {}
+    cached_rel: dict[str, str] | None = None
+    if isinstance(cache.get("latestVersion"), str) and parse_semver(cache["latestVersion"]) is not None:
+        ver_clean = cache["latestVersion"].lstrip("v")
+        url_clean = cache.get("releaseUrl")
+        if not (isinstance(url_clean, str) and url_clean.startswith("https://github.com/piotrkowalczuk/zordon/releases/")):
+            url_clean = f"{RELEASE_TAG_BASE}{ver_clean}"
+        cached_rel = {"version": ver_clean, "url": url_clean}
+
+    mutated = False
+    check_enabled = os.environ.get("ZORDON_UPDATE_CHECK", "1").strip().lower() not in ("0", "false", "no")
+    checked_at = float(cache.get("checkedAt") or 0.0) if isinstance(cache.get("checkedAt"), (int, float)) else 0.0
+    ttl = UPDATE_TTL_S if cached_rel is not None else UPDATE_FAIL_TTL_S
+    now = time.time()
+
+    if check_enabled and (now - checked_at) >= ttl:
+        api_url = os.environ.get("ZORDON_RELEASE_API_URL", "").strip() or RELEASE_API_URL
+        if _allowed_release_api_url(api_url):
+            try:
+                req = Request(
+                    api_url,
+                    headers={"Accept": "application/vnd.github+json", "User-Agent": "zordon-plugin"},
+                )
+                with urlopen(req, timeout=2.5) as resp:
+                    raw = resp.read(65536).decode("utf-8", errors="replace")
+                parsed = parse_latest_release(raw)
+                if parsed is not None:
+                    cached_rel = parsed
+            except Exception:
+                pass
+        new_cache: dict[str, Any] = {"checkedAt": now}
+        if cached_rel is not None:
+            new_cache["latestVersion"] = cached_rel["version"]
+            new_cache["releaseUrl"] = cached_rel["url"]
+        state["updateCache"] = new_cache
+        mutated = True
+
+    bin_ver, bin_path = query_zordon_version()
+    plugin_ver = read_plugin_version(plugin_root)
+    upd = compute_update(bin_ver, plugin_ver, cached_rel, bin_path)
+    return upd, mutated
+
+
+def format_update_markdown(upd: dict[str, Any]) -> str:
+    latest = upd["latest"]
+    url = upd["releaseUrl"]
+    bin_v = upd.get("binaryVersion")
+    plug_v = upd.get("pluginVersion")
+    plug_cmd = upd["pluginUpgradeCmd"]
+    if upd.get("isBinaryOutdated") and upd.get("isPluginOutdated"):
+        return (
+            f"⬆️ **Zordon [v{latest}]({url}) is available** "
+            f"(CLI `v{bin_v}`, plugin `{plug_v}`) — "
+            f"click **Update** in [Zordon](sidecar://zordon/dashboard/) to upgrade the CLI, "
+            f"and update the plugin with `{plug_cmd}` (or `/plugin`)."
+        )
+    if upd.get("isBinaryOutdated"):
+        return (
+            f"⬆️ **Zordon CLI [v{latest}]({url}) is available** "
+            f"(installed `v{bin_v}`) — click **Update** in [Zordon](sidecar://zordon/dashboard/) to upgrade automatically."
+        )
+    return (
+        f"⬆️ **Zordon plugin [{latest}]({url}) is available** "
+        f"(installed `{plug_v}`) — update with `{plug_cmd}` (or `/plugin`)."
+    )
+
+
+def format_update_text(upd: dict[str, Any]) -> str:
+    latest = upd["latest"]
+    bin_v = upd.get("binaryVersion")
+    plug_v = upd.get("pluginVersion")
+    bin_cmd = upd["binaryUpgradeCmd"]
+    plug_cmd = upd["pluginUpgradeCmd"]
+    if upd.get("isBinaryOutdated") and upd.get("isPluginOutdated"):
+        return f"↑ zordon v{latest} available (cli v{bin_v}, plugin {plug_v}) — {bin_cmd} · {plug_cmd}"
+    if upd.get("isBinaryOutdated"):
+        return f"↑ zordon v{latest} available (cli v{bin_v}) — {bin_cmd}"
+    return f"↑ zordon plugin {latest} available (installed {plug_v}) — {plug_cmd}"
+
+
 def format_session_message(snap: dict[str, Any]) -> str:
     kind = snap.get("kind")
     if kind in ("inactive", "loading", None):
@@ -606,15 +1066,36 @@ def handle_hook(event: str, raw_stdin: str, state_path: Path | None = None) -> t
         record_workspace(state, cwd)
 
     if event == "session-start":
-        save_state(state, state_path)
         target_cwd = cwd or state.get("cwd") or os.getcwd()
         snap, _ = query_snapshot(target_cwd, with_extras=False)
         msg = format_session_message(snap)
-        if not msg:
-            return ("{}\n" if agy else "", 0)
+        upd: dict[str, Any] | None = None
+        if snap.get("kind") not in ("inactive", "loading", None):
+            upd, _ = resolve_update_info(state)
+        save_state(state, state_path)
+
+        dismissed = state.get("dismissedUpdate") or ""
+        shown_upd = upd if (upd and upd.get("latest") != dismissed) else None
+
         if agy:
-            return (json.dumps({"injectSteps": [{"systemMessage": {"systemMessage": msg}}]}) + "\n", 0)
-        return (msg + "\n", 0)
+            steps: list[dict[str, Any]] = []
+            if msg:
+                steps.append({"systemMessage": {"systemMessage": msg}})
+            if shown_upd:
+                steps.append(
+                    {
+                        "systemMessage": {
+                            "systemMessage": "",
+                            "metadata": {"user_markdown": format_update_markdown(shown_upd)},
+                        }
+                    }
+                )
+            if not steps:
+                return ("{}\n", 0)
+            return (json.dumps({"injectSteps": steps}) + "\n", 0)
+
+        parts = [p for p in (msg, format_update_text(shown_upd) if shown_upd else "") if p]
+        return ("\n\n".join(parts) + "\n" if parts else "", 0)
 
     if event == "pre-tool":
         call_info = extract_mcp_call(payload)
@@ -731,6 +1212,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       color: #fff;
       border-color: var(--accent-fg);
     }
+    .upd-btn {
+      background: var(--yellow);
+      color: #111;
+      border: none;
+      border-radius: 4px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      padding: 2px 8px;
+    }
+    .upd-btn:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
     .panel {
       margin-top: 10px;
       border: 1px solid var(--bdr);
@@ -740,6 +1235,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     .panel.border-green { border-color: var(--green); }
     .panel.border-red { border-color: var(--red); }
+    .panel.border-yellow { border-color: var(--yellow); }
     .panel.border-gray { border-color: var(--gray); }
     .panel-head, .panel-foot {
       display: flex;
@@ -799,7 +1295,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       dir: new URLSearchParams(location.search).get('dir') || '',
       data: null,
       diff: null,
-      diffApp: ''
+      diffApp: '',
+      updateStatus: null
     };
 
     function esc(s) {
@@ -1035,6 +1532,50 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       `;
     }
 
+    function renderUpdate(d) {
+      const u = d && d.update;
+      const st = state.updateStatus;
+      if ((!u || d.dismissedUpdate === u.latest) && (!st || st.kind !== 'done')) return '';
+      if ((!u || d.dismissedUpdate === u.latest) && st && st.kind === 'done') {
+        return `
+          <div class="panel border-green">
+            <div class="panel-head">
+              <span class="panel-title dot-green">✓ ${esc(st.message)}</span>
+              <button class="fold-btn" title="Close" onclick="clearUpdateStatus()">×</button>
+            </div>
+          </div>
+        `;
+      }
+      const rows = [];
+      if (u.isBinaryOutdated) {
+        rows.push(`<div><span class="muted">cli v${esc(u.binaryVersion)} → v${esc(u.latest)}: </span><code>${esc(u.binaryUpgradeCmd)}</code></div>`);
+      }
+      if (u.isPluginOutdated) {
+        rows.push(`<div><span class="muted">plugin ${esc(u.pluginVersion)} → ${esc(u.latest)}: </span><code>${esc(u.pluginUpgradeCmd)}</code></div>`);
+      }
+      if (st && st.message) {
+        const cls = st.kind === 'error' ? 'dot-red' : (st.kind === 'done' ? 'dot-green' : 'dot-yellow');
+        rows.push(`<div class="${cls}">${esc(st.message)}</div>`);
+      }
+      const isRunning = st && st.kind === 'running';
+      const updBtn = u.isBinaryOutdated
+        ? `<button class="upd-btn" ${isRunning ? 'disabled' : ''} onclick="triggerUpdate()">${isRunning ? 'Updating…' : 'Update'}</button>`
+        : '';
+      return `
+        <div class="panel border-yellow">
+          <div class="panel-head">
+            <span class="panel-title dot-yellow">Update · v${esc(u.latest)}</span>
+            <span class="bar-right">
+              ${updBtn}
+              <a href="${esc(u.releaseUrl)}" target="_blank">release</a>
+              <button class="fold-btn" title="Dismiss" onclick="dismissUpdate('${esc(u.latest)}')">×</button>
+            </span>
+          </div>
+          <div class="panel-body">${rows.join('')}</div>
+        </div>
+      `;
+    }
+
     function render() {
       const d = state.data;
       const sum = d && d.summary ? d.summary.replace(/^zordon\\s+/, '') : '';
@@ -1054,13 +1595,45 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <button class="fold-btn" onclick="toggleFold('collapsed')">${state.collapsed ? '+' : '−'}</button>
           </span>
         </div>
-        ${state.collapsed ? '' : wsSelect + (state.tab === 'stack' ? renderStack() : renderDiff())}
+        ${state.collapsed ? '' : renderUpdate(d) + wsSelect + (state.tab === 'stack' ? renderStack() : renderDiff())}
       `;
     }
 
     window.toggleFold = k => { state[k] = !state[k]; render(); };
     window.toggleService = n => { state.openService = state.openService === n ? null : n; render(); };
     window.toggleCall = id => { state.openCall = state.openCall === id ? null : id; render(); };
+    window.dismissUpdate = async ver => {
+      state.updateStatus = null;
+      if (state.data) state.data.dismissedUpdate = ver;
+      render();
+      try {
+        await fetch('/api/dismiss-update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ version: ver })
+        });
+      } catch {}
+    };
+    window.clearUpdateStatus = () => { state.updateStatus = null; render(); };
+    window.triggerUpdate = async () => {
+      if (state.updateStatus && state.updateStatus.kind === 'running') return;
+      state.updateStatus = { kind: 'running', message: 'Upgrading zordon CLI…' };
+      render();
+      try {
+        const res = await fetch('/api/update', { method: 'POST' });
+        const body = await res.json();
+        if (body && body.ok) {
+          state.updateStatus = { kind: 'done', message: body.message || 'Updated zordon CLI' };
+          await fetchSnapshot();
+        } else {
+          state.updateStatus = { kind: 'error', message: (body && body.error) || 'Update failed' };
+          render();
+        }
+      } catch (err) {
+        state.updateStatus = { kind: 'error', message: String(err) };
+        render();
+      }
+    };
     window.switchTab = t => {
       state.tab = t;
       if (t === 'diff' && !state.diff) fetchDiff('');
@@ -1091,6 +1664,9 @@ def resolve_target_cwd(query_dir: str = "", state_path: Path | None = None) -> t
 def build_snapshot_payload(query_dir: str = "", state_path: Path | None = None) -> dict[str, Any]:
     cwd, state = resolve_target_cwd(query_dir, state_path)
     snap, checkouts = query_snapshot(cwd, with_extras=True)
+    upd, mutated = resolve_update_info(state)
+    if mutated:
+        save_state(state, state_path)
     services = sort_services(snap.get("services") or []) if snap.get("kind") in ("running", "stopped") else []
     return {
         "cwd": cwd,
@@ -1100,6 +1676,8 @@ def build_snapshot_payload(query_dir: str = "", state_path: Path | None = None) 
         "checkouts": checkouts,
         "calls": state.get("calls") or [],
         "summary": summary_line(snap),
+        "update": upd,
+        "dismissedUpdate": state.get("dismissedUpdate") or "",
     }
 
 
@@ -1143,6 +1721,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         self._send_json(404, {"error": "not found"})
 
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/dismiss-update":
+            length = min(int(self.headers.get("Content-Length") or "0"), 4096)
+            raw = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else "{}"
+            try:
+                body = json.loads(raw)
+            except Exception:
+                body = {}
+            ver = body.get("version") if isinstance(body, dict) else ""
+            state = load_state()
+            state["dismissedUpdate"] = str(ver or "").strip()
+            save_state(state)
+            self._send_json(200, {"ok": True, "dismissedUpdate": state["dismissedUpdate"]})
+            return
+
+        if parsed.path == "/api/update":
+            with _upgrade_lock:
+                state = load_state()
+                upd, mutated = resolve_update_info(state)
+                if mutated:
+                    save_state(state)
+                if not upd or not upd.get("isBinaryOutdated"):
+                    self._send_json(200, {"ok": False, "error": "zordon CLI is already up to date"})
+                    return
+                _, bin_path = query_zordon_version()
+                result = perform_binary_upgrade(upd["latest"], bin_path=bin_path)
+                self._send_json(200, result)
+            return
+
+        self._send_json(404, {"error": "not found"})
+
 
 def serve_dashboard(host: str, port: int) -> None:
     srv = ThreadingHTTPServer((host, port), DashboardHandler)
@@ -1177,6 +1787,10 @@ def main() -> int:
         port = int(raw_port)
     serve_dashboard(args.host, port)
     return 0
+
+
+def _allowed_release_api_url(url: str) -> bool:
+    return url.startswith("https://") or url.startswith("http://127.0.0.1:") or url.startswith("http://localhost:")
 
 
 if __name__ == "__main__":
