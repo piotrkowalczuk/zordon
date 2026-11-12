@@ -386,7 +386,7 @@ func TestBootstrapMise_checksumMismatchFallsBackToCargo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantArgs := fmt.Sprintf("install --root %s --locked --version %s mise", home, DefaultMiseVersion)
+	wantArgs := fmt.Sprintf("install --root %s --locked --force --version %s mise", home, DefaultMiseVersion)
 	if strings.TrimSpace(string(gotArgs)) != wantArgs {
 		t.Fatalf("cargo args = %q, want %q", strings.TrimSpace(string(gotArgs)), wantArgs)
 	}

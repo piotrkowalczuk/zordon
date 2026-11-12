@@ -473,7 +473,7 @@ func cargoInstallMise(ctx context.Context, cfg miseBootstrapConfig, zordonHome, 
 		return fmt.Errorf("cargo not found on PATH (install cargo to compile mise v%s from source)", cfg.version)
 	}
 	_, _ = fmt.Fprintf(logOut, "compiling mise v%s from source via cargo install --locked --version %s mise\n", cfg.version, cfg.version)
-	cmd := exec.CommandContext(ctx, cargoPath, "install", "--root", zordonHome, "--locked", "--version", cfg.version, "mise")
+	cmd := exec.CommandContext(ctx, cargoPath, "install", "--root", zordonHome, "--locked", "--force", "--version", cfg.version, "mise")
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
 	if err := cmd.Run(); err != nil {
