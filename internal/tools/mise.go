@@ -3,9 +3,11 @@
 //
 // The contract:
 //
-//   - mise binary lives at <zordonHome>/bin/mise; if missing, we
-//     bootstrap via `cargo install` (rust is already required for any
-//     zordon-managed crate service, so cargo's reasonable to require).
+//   - mise binary lives at <zordonHome>/bin/mise at the requested version
+//     (DefaultMiseVersion unless overridden via --mise.version); if missing or
+//     a different version, EnsureMise downloads and SHA-256-verifies the
+//     release archive for the platform, falling back only to `cargo install
+//     --locked --version <ver>`.
 //   - tool installs live under <some>/.zordon/toolchain/installs/...,
 //     where <some> is the nearest directory in the walk-up chain that
 //     already has the requested version installed, or <zordonHome>
@@ -24,7 +26,6 @@
 package tools
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,60 +35,7 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
-	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
-
-// EnsureMise returns the path to the zordon-owned mise binary at
-// <zordonHome>/bin/mise. If it isn't installed yet, it bootstraps via
-// `cargo install --root <zordonHome> --locked mise`. Subsequent calls
-// are no-ops once the binary exists.
-//
-// stderr from cargo install is piped to logOut so the user sees
-// progress on a slow first run.
-func EnsureMise(kc zlock.GlobalKeychain, zordonHome string, logOut io.Writer) (string, error) {
-	bin := filepath.Join(zordonHome, "bin", "mise")
-	if zfs.Exists(bin) {
-		return bin, nil
-	}
-	if _, err := exec.LookPath("cargo"); err != nil {
-		return "", fmt.Errorf("zordon needs mise to materialize declared toolchains; "+
-			"install cargo so zordon can `cargo install` it to %s, "+
-			"or pre-place a mise binary there yourself", bin)
-	}
-	if err := zfs.EnsureDir(filepath.Join(zordonHome, "bin")); err != nil {
-		return "", err
-	}
-	// Serialize cargo install so two alphas starting at the same time
-	// don't try to write the same binary. Re-check existence under the
-	// lock — the other waiter just did it for us.
-	release, err := kc.LockMise(context.Background())
-	if err != nil {
-		return "", err
-	}
-	defer release()
-	if zfs.Exists(bin) {
-		return bin, nil
-	}
-	cmd := exec.Command("cargo", "install", "--root", zordonHome, "--locked", "mise")
-	cmd.Stdout = logOut
-	cmd.Stderr = logOut
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("cargo install mise: %w", err)
-	}
-	return bin, nil
-}
-
-// miseToolName maps the zordon-side language label to mise's tool
-// name. Mostly identity; "nodejs" → "node" because mise installs node
-// under installs/node/<ver> and `mise env --json node@<ver>` is the
-// canonical spec. (Mise accepts "nodejs@<ver>" as an alias, but the
-// on-disk path is "node", which the walk-up cache lookup must match.)
-func miseToolName(lang string) string {
-	if lang == "nodejs" {
-		return "node"
-	}
-	return lang
-}
 
 // ResolveDataDir walks up from `from`, picking the nearest ancestor
 // that already has `installs/<tool>/<version>` under its
@@ -130,69 +78,19 @@ func ResolveDataDir(from, defaultDataDir, tool, version string) string {
 	}
 }
 
-// isolatedEnv returns the env-var slice that pins mise to a zordon-
-// owned location regardless of user's home mise installation. The
-// mise binary's dir is also prepended to PATH so subprocesses that
-// reach back to call `mise` resolve to the zordon-owned binary.
-//
-// The recursive-mise case is real: when mise installs node, it
-// replaces node's `npm` script with a wrapper that runs `mise reshim`
-// post-install. Without mise on PATH, that hook fails with exit 127
-// ("mise: command not found"). Whether the same wrapping happens for
-// other toolchains (ruby's gem, python's pip) is mise-internal and
-// version-dependent, so this is unconditional rather than gated per
-// language — the PATH addition is harmless when nothing in the
-// subprocess tree ever invokes mise.
-//
-// alpha's host PATH may not have ~/.zordon/bin on it (zordon installs
-// mise into its own bin dir, not a system location), which is why we
-// inject it here rather than relying on the parent environment.
-func isolatedEnv(dataDir, miseBin string) []string {
-	cfgRoot := filepath.Dir(dataDir) // e.g. ~/.zordon
-	// Drop every host MISE_* first so a developer's MISE_ENV / MISE_*_DIR /
-	// MISE_IDIOMATIC_* can neither leak into nor duplicate the controlled set
-	// below — os.Environ() can carry a host MISE_DATA_DIR that would otherwise
-	// survive as an earlier (winning) duplicate of ours.
-	var env []string
-	for _, kv := range zenv.Environ() {
-		if strings.HasPrefix(kv, "MISE_") {
-			continue
-		}
-		env = append(env, kv)
-	}
-	env = append(env,
-		"MISE_DATA_DIR="+dataDir,
-		"MISE_CONFIG_DIR="+filepath.Join(cfgRoot, "mise-config"),
-		"MISE_STATE_DIR="+filepath.Join(cfgRoot, "mise-state"),
-		"MISE_CACHE_DIR="+filepath.Join(cfgRoot, "mise-cache"),
-	)
-	if miseBin == "" {
-		return env
-	}
-	miseDir := filepath.Dir(miseBin)
-	for i, kv := range env {
-		if strings.HasPrefix(kv, "PATH=") {
-			env[i] = "PATH=" + miseDir + string(zfs.PathListSeparator) + kv[len("PATH="):]
-			return env
-		}
-	}
-	return append(env, "PATH="+miseDir)
+// IsInstalled reports whether tool@version is already materialized under dataDir.
+func IsInstalled(dataDir, tool, version string) bool {
+	return zfs.Exists(filepath.Join(dataDir, "installs", miseToolName(tool), version))
 }
 
-// miseCommand builds an *exec.Cmd for a mise subcommand with zordon's
-// hermetic defaults: the leading `--no-config` global flag so mise never
-// reads a discovered config file — a stray mise.toml next to the Alphasfile
-// (e.g. left by `mise use`), any ancestor mise.toml walked up to /, the
-// global ~/.config/mise/*, or ~/.tool-versions. zordon supplies every
-// tool@version explicitly on the CLI, so no config is ever needed, and a
-// discovered one would only pollute toolchain resolution. Env is pinned to
-// zordon-owned MISE_*_DIR locations via isolatedEnv. Callers set
-// Stdout/Stderr and may append to cmd.Env.
-func miseCommand(binPath, dataDir string, args ...string) *exec.Cmd {
-	full := append([]string{"--no-config"}, args...)
-	cmd := exec.Command(binPath, full...)
-	cmd.Env = isolatedEnv(dataDir, binPath)
-	return cmd
+// EnsureToolchain materializes a language runtime version under dataDir via
+// `mise install <lang>@<version>` when not yet installed, streaming progress to
+// logOut. Callers hold the per-(lang, version) GlobalKeychain.LockTool lock.
+func EnsureToolchain(binPath, dataDir, lang, version string, logOut io.Writer) error {
+	if IsInstalled(dataDir, lang, version) {
+		return nil
+	}
+	return EnsurePackage(binPath, dataDir, miseToolName(lang), version, nil, logOut)
 }
 
 // MiseEnv runs `mise env --json <tool>@<version>` with the resolved
@@ -240,10 +138,6 @@ func MiseEnvWithBinDirs(binPath, dataDir, tool, version string, logOut io.Writer
 			break
 		}
 	}
-	// The bin-dir delta is layout knowledge, so it lives on zfs.Resolver
-	// (zordon's single home for derived paths). isolatedEnv is the only
-	// place that knows the base PATH mise saw; we scope a resolver to this
-	// toolchain's resolved/base PATHs and let it answer.
 	dirs := zfs.NewResolver("", "").ForToolchain(env["PATH"], basePATH).ToolBinDirs()
 	return env, dirs, nil
 }
@@ -252,17 +146,17 @@ func MiseEnvWithBinDirs(binPath, dataDir, tool, version string, logOut io.Writer
 // (`mise install <name>@<version>`). name is the mise tool ref:
 // backend-qualified (e.g. "aqua:etcd-io/etcd") or a bare name that
 // mise's registry resolves to a backend (redis → vfox→asdf). Idempotent
-// — mise no-ops when the version is already present under dataDir.
+// — a version `mise where` already reports under dataDir is skipped, so a
+// warm start stays silent.
 // Download/compile progress goes to logOut (some backends build from
 // source on first install). Callers hold the per-(name, version)
 // GlobalKeychain.LockTool lock, since the install writes under dataDir.
 func EnsurePackage(binPath, dataDir, name, version string, buildEnv zenv.EnvironmentVariables, logOut io.Writer) error {
 	spec := name + "@" + version
+	if miseCommand(binPath, dataDir, "where", spec).Run() == nil {
+		return nil
+	}
 	cmd := miseCommand(binPath, dataDir, "install", spec)
-	// buildEnv (the pkg service's `build { env }`) overlays the install
-	// environment — configure flags / build vars a source-compiled
-	// backend needs, e.g. POSTGRES_EXTRA_CONFIGURE_OPTIONS=--without-icu
-	// or PKG_CONFIG_PATH. Appended last so it wins over the host env.
 	for k, v := range buildEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -307,38 +201,71 @@ func EnsureTools(binPath, dataDir, toolchain, version string, items map[string]s
 	return nil
 }
 
-// toolInstallCmd builds the `mise exec` line for one language-native
-// tool install. The actual install verb is per-toolchain because each
-// language has its own package-manager idiom.
+// miseToolName maps the zordon-side language label to mise's tool
+// name. Mostly identity; "nodejs" → "node" because mise installs node
+// under installs/node/<ver> and `mise env --json node@<ver>` is the
+// canonical spec.
+func miseToolName(lang string) string {
+	if lang == "nodejs" {
+		return "node"
+	}
+	return lang
+}
+
+// isolatedEnv returns the env-var slice that pins mise to a zordon-
+// owned location regardless of user's home mise installation. The
+// mise binary's dir is also prepended to PATH so subprocesses that
+// reach back to call `mise` resolve to the zordon-owned binary.
+func isolatedEnv(dataDir, miseBin string) []string {
+	cfgRoot := filepath.Dir(dataDir)
+	var env []string
+	for _, kv := range zenv.Environ() {
+		if strings.HasPrefix(kv, "MISE_") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env,
+		"MISE_DATA_DIR="+dataDir,
+		"MISE_CONFIG_DIR="+filepath.Join(cfgRoot, "mise-config"),
+		"MISE_STATE_DIR="+filepath.Join(cfgRoot, "mise-state"),
+		"MISE_CACHE_DIR="+filepath.Join(cfgRoot, "mise-cache"),
+	)
+	if miseBin == "" {
+		return env
+	}
+	miseDir := filepath.Dir(miseBin)
+	for i, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			env[i] = "PATH=" + miseDir + string(zfs.PathListSeparator) + kv[len("PATH="):]
+			return env
+		}
+	}
+	return append(env, "PATH="+miseDir)
+}
+
+func miseCommand(binPath, dataDir string, args ...string) *exec.Cmd {
+	full := append([]string{"--no-config"}, args...)
+	cmd := exec.Command(binPath, full...)
+	cmd.Env = isolatedEnv(dataDir, binPath)
+	return cmd
+}
+
 func toolInstallCmd(binPath, dataDir, toolchain, version, name, ver string) (*exec.Cmd, error) {
 	spec := miseToolName(toolchain) + "@" + version
 	var argv []string
 	switch toolchain {
 	case "ruby":
-		// --no-document skips docs (faster install, fewer files).
 		argv = []string{"gem", "install", name, "--version", ver, "--no-document"}
 	case "python":
 		argv = []string{"pip", "install", name + "==" + ver}
 	case "rust":
 		argv = []string{"cargo", "install", name, "--version", ver, "--locked"}
 	case "go":
-		// Go's "tools" aren't gems-like, but `go install pkg@ver`
-		// drops a binary in GOBIN — useful for dlv, golangci-lint, etc.
 		argv = []string{"go", "install", name + "@" + ver}
 	case "nodejs":
-		// npm's default global prefix resolves from where `node` lives,
-		// which under `mise exec` is the per-version install dir
-		// (installs/node/<ver>) — so installed globals stay isolated
-		// per pinned node, mirroring gem/cargo's per-version tool world.
-		// --no-fund/--no-audit silences npm's nag banners (the runtime
-		// env's NPM_CONFIG_FUND/AUDIT in postMiseNode covers the same
-		// at service-spawn time; here we still need the flag because
-		// that env isn't applied at tool-install).
 		argv = []string{"npm", "install", "-g", "--no-fund", "--no-audit", name + "@" + ver}
 	case "java":
-		// The JDK has no per-toolchain tool world (no gem/npm-global
-		// analog). Build tools come from the project's Maven/Gradle
-		// wrapper, not from toolchain.java.tools.
 		return nil, fmt.Errorf("toolchain java: no tool installer — Maven/Gradle come from the project wrapper (./mvnw / ./gradlew), not toolchain.java.tools")
 	default:
 		return nil, fmt.Errorf("toolchain %q: no tool installer wired", toolchain)
@@ -347,9 +274,6 @@ func toolInstallCmd(binPath, dataDir, toolchain, version, name, ver string) (*ex
 	return miseCommand(binPath, dataDir, full...), nil
 }
 
-// toolPresentCmd builds a command that succeeds when name@ver is already
-// installed in the pinned interpreter's tool world, or nil for a toolchain
-// whose installer is a no-op on an installed version anyway.
 func toolPresentCmd(binPath, dataDir, toolchain, version, name, ver string) *exec.Cmd {
 	var argv []string
 	switch toolchain {

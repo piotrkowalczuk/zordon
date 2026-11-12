@@ -187,7 +187,7 @@ func TestDescribeBringupWait_summarizesLargeStacks(t *testing.T) {
 		ctxs[name] = sc
 	}
 
-	got := describeBringupWait(services, ctxs, nil, start, start.Add(15*time.Second))
+	got := describeBringupWait(services, ctxs, nil, nil, start, start.Add(15*time.Second))
 	want := "5: 3 building, 2 waiting for dependencies; longest: svc-0 (building 15s), svc-1 (building 15s), svc-2 (building 15s)"
 	if got != want {
 		t.Fatalf("describeBringupWait = %q, want %q", got, want)

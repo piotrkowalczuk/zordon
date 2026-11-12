@@ -152,6 +152,42 @@ func TestEnsureTools_skipsAToolAlreadyInstalled(t *testing.T) {
 	}
 }
 
+func TestEnsurePackage_skipsAPackageAlreadyInstalled(t *testing.T) {
+	cases := map[string]struct {
+		present     bool
+		wantInstall bool
+	}{
+		"present": {true, false},
+		"missing": {false, true},
+	}
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
+			dir := t.TempDir()
+			calls := filepath.Join(dir, "calls")
+			whereExit := 1
+			if c.present {
+				whereExit = 0
+			}
+			bin := filepath.Join(dir, "mise")
+			script := "#!/bin/sh\necho \"$@\" >> '" + calls + "'\ncase \"$*\" in *' where '*) exit " + strconv.Itoa(whereExit) + ";; esac\nexit 0\n"
+			if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := EnsurePackage(bin, dir, "aqua:jqlang/jq", "1.7.1", nil, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(calls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if installed := strings.Contains(string(got), " install aqua:jqlang/jq@1.7.1"); installed != c.wantInstall {
+				t.Errorf("installed = %v, want %v; mise was called with:\n%s", installed, c.wantInstall, got)
+			}
+		})
+	}
+}
+
 func mustMkdir(t *testing.T, p string) {
 	t.Helper()
 	if err := os.MkdirAll(p, 0o755); err != nil {

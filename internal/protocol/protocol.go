@@ -62,6 +62,9 @@ type ConfigureArgs struct {
 	// Agent mirrors `zordon --agent`: when set, each service's
 	// `agent { env {} }` overlay is applied on top of build and run env.
 	Agent bool `json:"agent,omitempty"`
+	// MiseVersion overrides tools.DefaultMiseVersion when set via
+	// --mise.version / ZORDON_MISE_VERSION.
+	MiseVersion string `json:"mise_version,omitempty"`
 	// FsHash is the filesystem-location identity of this invocation (depends
 	// only on the directory). Sent for symmetry / verification; the socket
 	// path already encodes it.

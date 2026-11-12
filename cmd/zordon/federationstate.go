@@ -12,6 +12,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
 	"github.com/piotrkowalczuk/zordon/internal/summary"
+	"github.com/piotrkowalczuk/zordon/internal/tools"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
@@ -149,12 +150,13 @@ func adoptedBlock(st *protocol.StateInfo) alphasfile.BlockComputedState {
 // startConfig bundles the spawn/configure knobs reconcileAlpha needs so the
 // per-level effect call doesn't thread six loose arguments.
 type startConfig struct {
-	alphaBin string
-	alphaLog string
-	timeout  time.Duration
-	failfast bool
-	verbose  bool
-	agent    bool
+	alphaBin    string
+	alphaLog    string
+	timeout     time.Duration
+	failfast    bool
+	verbose     bool
+	agent       bool
+	miseVersion tools.MiseVersion
 }
 
 // canReuse is the pure multi-agent-invariant decision: a running level may be
@@ -243,13 +245,13 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 
 	ctxLevel, cancel := context.WithTimeout(ctx, cfg.timeout)
 	defer cancel()
-	if err := spawnAlpha(cfg.alphaBin, levelLog, sock, cfg.timeout, cfg.verbose, log, inv.Env); err != nil {
+	if err := spawnAlpha(cfg.alphaBin, levelLog, sock, cfg.timeout, cfg.verbose, cfg.miseVersion, log, inv.Env); err != nil {
 		return nil, fmt.Errorf("%s: %w", lvl.afPath, err)
 	}
 	if err := control.WaitListening(ctxLevel, sock); err != nil {
 		return nil, fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
-	sum, err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent)
+	sum, err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent, cfg.miseVersion, levelLog)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", lvl.afPath, err)
 	}

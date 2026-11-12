@@ -32,7 +32,7 @@ func TestCorepackMatrix(t *testing.T) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	bin, err := EnsureMise(kc, zordonHome, os.Stderr)
+	bin, err := EnsureMise(t.Context(), kc, zordonHome, "", os.Stderr)
 	if err != nil {
 		t.Fatalf("EnsureMise: %v", err)
 	}

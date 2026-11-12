@@ -24,6 +24,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/mcpserver"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
+	"github.com/piotrkowalczuk/zordon/internal/tools"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
 )
@@ -68,7 +69,7 @@ func runMCP(ctx context.Context, stdio commandIO, cfg mcpConfig) error {
 		&mcp.ServerOptions{Instructions: serverInstructions},
 	)
 
-	registerCommandTools(srv, cfg.Home, cfg.Agent, cfg.Test)
+	registerCommandTools(srv, cfg.Home, cfg.MiseVersion, cfg.Agent, cfg.Test)
 	registerProvisionTools(ctx, srv, log, cfg.Home, cfg.Keychain, cfg.Test)
 
 	if cfg.Transport == transportHTTP {
@@ -82,13 +83,14 @@ func runMCP(ctx context.Context, stdio commandIO, cfg mcpConfig) error {
 // at flag-parse time from a flag, its ZORDON_-prefixed env var, or the
 // documented default; nothing below main reads the environment again.
 type mcpConfig struct {
-	Transport  string
-	Listen     string   // resolved bind address; empty under stdio
-	AllowHosts []string // extra Host headers accepted on a loopback listener
-	Home       string
-	Keychain   zlock.GlobalKeychain
-	Agent      bool
-	Test       alphasfile.TestConfig
+	Transport   string
+	Listen      string   // resolved bind address; empty under stdio
+	AllowHosts  []string // extra Host headers accepted on a loopback listener
+	Home        string
+	Keychain    zlock.GlobalKeychain
+	MiseVersion tools.MiseVersion
+	Agent       bool
+	Test        alphasfile.TestConfig
 }
 
 const (
@@ -261,7 +263,7 @@ func hostOnly(hostport string) string {
 	return strings.Trim(hostport, "[]")
 }
 
-func registerCommandTools(srv *mcp.Server, zordonHome string, agent bool, testCfg alphasfile.TestConfig) {
+func registerCommandTools(srv *mcp.Server, zordonHome string, miseVersion tools.MiseVersion, agent bool, testCfg alphasfile.TestConfig) {
 	root, _ := buildRootCommand(commandIO{Stdout: nil, Stderr: nil}) // introspection only
 	for _, sub := range commandToolSubcommands(root) {
 		name := sub.Name
@@ -269,7 +271,7 @@ func registerCommandTools(srv *mcp.Server, zordonHome string, agent bool, testCf
 			Name:        name,
 			Description: commandToolDescription(sub),
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, in commandToolInput) (*mcp.CallToolResult, any, error) {
-			return runCommandTool(ctx, zordonHome, agent, testCfg, name, in.Args)
+			return runCommandTool(ctx, zordonHome, miseVersion, agent, testCfg, name, in.Args)
 		})
 	}
 }
@@ -300,11 +302,11 @@ func commandToolDescription(sub *ff.Command) string {
 // runCommandTool re-runs one subcommand against capture buffers and returns its
 // output as text. Output stays in the buffers — it must never reach os.Stdout,
 // which is the JSON-RPC channel.
-func runCommandTool(ctx context.Context, zordonHome string, agent bool, testCfg alphasfile.TestConfig, name string, args []string) (*mcp.CallToolResult, any, error) {
+func runCommandTool(ctx context.Context, zordonHome string, miseVersion tools.MiseVersion, agent bool, testCfg alphasfile.TestConfig, name string, args []string) (*mcp.CallToolResult, any, error) {
 	var out, errBuf bytes.Buffer
 	root, _ := buildRootCommand(commandIO{Stdout: &out, Stderr: &errBuf})
 
-	argv := commandArgv(zordonHome, agent, testCfg, name, args)
+	argv := commandArgv(zordonHome, miseVersion, agent, testCfg, name, args)
 	err := root.ParseAndRun(ctx, argv, ff.WithEnvVarPrefix("ZORDON"))
 
 	text := joinOutput(out.String(), errBuf.String())
@@ -330,10 +332,13 @@ func runCommandTool(ctx context.Context, zordonHome string, agent bool, testCfg 
 // commandArgv reconstructs the root flags the MCP server itself resolved so the
 // rebuilt tree sees the same home / test-harness context, then appends the
 // subcommand and its tool args.
-func commandArgv(zordonHome string, agent bool, testCfg alphasfile.TestConfig, name string, args []string) []string {
+func commandArgv(zordonHome string, miseVersion tools.MiseVersion, agent bool, testCfg alphasfile.TestConfig, name string, args []string) []string {
 	var argv []string
 	if zordonHome != "" {
 		argv = append(argv, "--home", zordonHome)
+	}
+	if miseVersion != "" {
+		argv = append(argv, "--mise.version", string(miseVersion))
 	}
 	if agent {
 		argv = append(argv, "--agent")
