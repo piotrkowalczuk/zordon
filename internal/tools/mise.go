@@ -146,12 +146,16 @@ func MiseEnvWithBinDirs(binPath, dataDir, tool, version string, logOut io.Writer
 // (`mise install <name>@<version>`). name is the mise tool ref:
 // backend-qualified (e.g. "aqua:etcd-io/etcd") or a bare name that
 // mise's registry resolves to a backend (redis → vfox→asdf). Idempotent
-// — mise no-ops when the version is already present under dataDir.
+// — a version `mise where` already reports under dataDir is skipped, so a
+// warm start stays silent.
 // Download/compile progress goes to logOut (some backends build from
 // source on first install). Callers hold the per-(name, version)
 // GlobalKeychain.LockTool lock, since the install writes under dataDir.
 func EnsurePackage(binPath, dataDir, name, version string, buildEnv zenv.EnvironmentVariables, logOut io.Writer) error {
 	spec := name + "@" + version
+	if miseCommand(binPath, dataDir, "where", spec).Run() == nil {
+		return nil
+	}
 	cmd := miseCommand(binPath, dataDir, "install", spec)
 	for k, v := range buildEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
