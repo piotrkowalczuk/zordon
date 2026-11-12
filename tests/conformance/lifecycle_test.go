@@ -13,8 +13,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -358,6 +360,154 @@ service "go" "svc1" {
 	}
 }
 
+// TestLifecycle_staleLockPIDAfterAlphaSIGKILL reproduces issue #139:
+// after SIGKILL on alpha, <workspace>/alpha.lock keeps the dead alpha's PID on
+// disk while the kernel releases its flock. When another open file description
+// holds that lock (or races before overwriting the PID), a waiting zordon start
+// must report the recorded PID as stale and held by another process rather than
+// blaming the dead alpha as still tearing down or holding the lock; once free,
+// flock-based takeover must succeed and overwrite alpha.lock with the new PID.
+func TestLifecycle_staleLockPIDAfterAlphaSIGKILL(t *testing.T) {
+	p := zordontest.NewProject(t, zordontest.WithExpectedLeftovers())
+	p.CopyTree("golden/go/echo", "src/svc1")
+	port := zordontest.FreePort(t)
+
+	p.WriteFile("Alphasfile", fmt.Sprintf(`
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "svc1" {
+  src {
+    path = "./src/svc1"
+    exe = "."
+  }
+
+  vars = { port = %d }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 100
+  }
+}
+`, port))
+
+	start1 := p.Zordon("start",
+		"--timeout", "120s",
+		"--alpha-log", p.AlphaLogPath(),
+	).WithTimeout(125 * time.Second).Run(t)
+	if start1.ExitCode != 0 {
+		t.Fatalf("first zordon start: exit %d\nstdout: %s\nstderr: %s", start1.ExitCode, start1.Stdout, start1.Stderr)
+	}
+	alphaPID1, groupPID1 := pidsFromAlphaLog(t, p.AlphaLogPath(), "svc1")
+
+	alphaLockPath := filepath.Join(p.Dir(), "workspaces", "main", "alpha.lock")
+	if got := readTrimmedFile(t, alphaLockPath); got != strconv.Itoa(alphaPID1) {
+		t.Fatalf("alpha.lock while alpha running = %q, want %d", got, alphaPID1)
+	}
+
+	if err := syscall.Kill(alphaPID1, syscall.SIGKILL); err != nil {
+		t.Fatalf("SIGKILL alpha pid %d: %v", alphaPID1, err)
+	}
+	if err := waitGone(func() bool { return !pidAlive(alphaPID1) }, 5*time.Second); err != nil {
+		t.Fatalf("alpha pid %d still alive after SIGKILL: %v", alphaPID1, err)
+	}
+	if err := waitGone(func() bool { return groupGone(groupPID1) }, 10*time.Second); err != nil {
+		t.Fatalf("service group %d still alive after alpha SIGKILL: %v", groupPID1, err)
+	}
+
+	// Post-SIGKILL state from #139: alpha is not running, yet alpha.lock still
+	// holds the dead alpha's PID on disk.
+	status := p.Zordon("status").WithTimeout(10 * time.Second).Run(t)
+	if !strings.Contains(status.Stdout+status.Stderr, "not running") {
+		t.Fatalf("expected status to report alpha not running after SIGKILL, got:\nstdout: %s\nstderr: %s", status.Stdout, status.Stderr)
+	}
+	if got := readTrimmedFile(t, alphaLockPath); got != strconv.Itoa(alphaPID1) {
+		t.Fatalf("alpha.lock after SIGKILL = %q, want dead pid %d", got, alphaPID1)
+	}
+
+	// Hold an exclusive flock on alpha.lock without overwriting its bytes,
+	// reproducing contention while the recorded PID in the lock file is dead.
+	heldFD, err := os.OpenFile(alphaLockPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", alphaLockPath, err)
+	}
+	if err := syscall.Flock(int(heldFD.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = heldFD.Close()
+		t.Fatalf("flock %s after alpha SIGKILL: %v", alphaLockPath, err)
+	}
+	released := false
+	releaseHeld := func() {
+		if released {
+			return
+		}
+		released = true
+		_ = syscall.Flock(int(heldFD.Fd()), syscall.LOCK_UN)
+		_ = heldFD.Close()
+	}
+	t.Cleanup(releaseHeld)
+
+	contended := p.Zordon("start",
+		"--timeout", "600ms",
+		"--alpha-log", p.AlphaLogPath(),
+	).WithTimeout(15 * time.Second).Run(t)
+	if contended.ExitCode == 0 {
+		t.Fatalf("zordon start unexpectedly succeeded while alpha.lock was held\nstdout: %s\nstderr: %s", contended.Stdout, contended.Stderr)
+	}
+
+	notWantTeardown := fmt.Sprintf("old alpha (pid=%d) still tearing down", alphaPID1)
+	if strings.Contains(contended.Stderr, notWantTeardown) {
+		t.Errorf("stderr falsely reports dead alpha as still tearing down:\n%s", contended.Stderr)
+	}
+	notWantHeld := fmt.Sprintf("held by pid=%d", alphaPID1)
+	if strings.Contains(contended.Stderr, notWantHeld) {
+		t.Errorf("stderr falsely reports dead alpha as lock holder:\n%s", contended.Stderr)
+	}
+	wantStale := fmt.Sprintf("stale pid=%d", alphaPID1)
+	if !strings.Contains(contended.Stderr, wantStale) || !strings.Contains(contended.Stderr, "held by another process") {
+		t.Errorf("stderr missing stale-PID diagnostic (%q / \"held by another process\"):\n%s", wantStale, contended.Stderr)
+	}
+
+	// Release contention and verify flock-based takeover succeeds and overwrites
+	// alpha.lock with the replacement alpha's PID.
+	releaseHeld()
+
+	start2 := p.Zordon("start",
+		"--timeout", "120s",
+		"--alpha-log", p.AlphaLogPath(),
+	).WithTimeout(125 * time.Second).Run(t)
+	if start2.ExitCode != 0 {
+		t.Fatalf("second zordon start after lock release: exit %d\nstdout: %s\nstderr: %s", start2.ExitCode, start2.Stdout, start2.Stderr)
+	}
+	alphaPID2 := lastAlphaPIDFromLog(t, p.AlphaLogPath())
+	if alphaPID2 <= 0 || alphaPID2 == alphaPID1 || !pidAlive(alphaPID2) {
+		t.Fatalf("unexpected replacement alpha pid=%d (prev=%d, alive=%v)", alphaPID2, alphaPID1, pidAlive(alphaPID2))
+	}
+	if got := readTrimmedFile(t, alphaLockPath); got != strconv.Itoa(alphaPID2) {
+		t.Errorf("alpha.lock after replacement start = %q, want %d", got, alphaPID2)
+	}
+
+	stop := p.Zordon("stop").WithTimeout(10 * time.Second).Run(t)
+	if stop.ExitCode != 0 {
+		t.Fatalf("zordon stop: exit %d\nstderr: %s", stop.ExitCode, stop.Stderr)
+	}
+	if err := waitGone(func() bool { return !pidAlive(alphaPID2) }, 5*time.Second); err != nil {
+		t.Fatalf("replacement alpha pid %d still alive after stop: %v", alphaPID2, err)
+	}
+	p.AssertNoLeftovers(t)
+}
+
 // waitGone polls a predicate until it returns true or the deadline
 // hits. Cheap wrapper to keep tests readable.
 func waitGone(pred func() bool, within time.Duration) error {
@@ -388,3 +538,12 @@ func parseSocketPath(t *testing.T, logPath string) string {
 
 // reAlphaListen matches alpha's listening line in the log.
 var reAlphaListen = regexp.MustCompile(`listening on (\S+)`)
+
+func readTrimmedFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return strings.TrimSpace(string(b))
+}
