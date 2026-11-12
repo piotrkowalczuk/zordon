@@ -106,13 +106,16 @@ func (k WorkspaceKeychain) WaitUnlockedAlpha(ctx context.Context) error {
 // IsAlphaLockedBy reports whether <workspaceDir>/alpha.lock is currently held
 // by pid (or by any process when pid <= 0).
 func (k WorkspaceKeychain) IsAlphaLockedBy(pid int) bool {
+	if pid > 0 && !zfs.ProcessAlive(pid) {
+		return false
+	}
 	unlock, err := zfs.TryLock(k.revealWorkspace(), "alpha")
 	if err == nil {
 		unlock()
 		return false
 	}
 	if lockErr, ok := errors.AsType[*LockError](err); ok {
-		return pid <= 0 || lockErr.HolderPID == pid || lockErr.HolderPID == 0
+		return pid <= 0 || lockErr.HolderPID == pid
 	}
 	return false
 }

@@ -44,6 +44,7 @@ var ErrLocked = errors.New("lock held by another process")
 type LockError struct {
 	Path      string
 	HolderPID int
+	StalePID  int
 	Cause     error
 }
 
@@ -52,10 +53,16 @@ func (e *LockError) Error() string {
 		if e.HolderPID > 0 {
 			return fmt.Sprintf("lock %s held by pid=%d: %v", e.Path, e.HolderPID, e.Cause)
 		}
+		if e.StalePID > 0 {
+			return fmt.Sprintf("lock %s held by another process (stale pid=%d): %v", e.Path, e.StalePID, e.Cause)
+		}
 		return fmt.Sprintf("lock %s held by another process: %v", e.Path, e.Cause)
 	}
 	if e.HolderPID > 0 {
 		return fmt.Sprintf("lock %s held by pid=%d", e.Path, e.HolderPID)
+	}
+	if e.StalePID > 0 {
+		return fmt.Sprintf("lock %s held by another process (stale pid=%d)", e.Path, e.StalePID)
 	}
 	return fmt.Sprintf("lock %s held by another process", e.Path)
 }
@@ -223,13 +230,9 @@ func TryLock(stateDir, name string) (UnlockFunc, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("zfs: flock %s: %w", lockPath, err)
 	}
-	pid := readLockPID(f)
-	if pid == 0 {
-		time.Sleep(10 * time.Millisecond)
-		pid = readLockPID(f)
-	}
+	holderPID, stalePID := resolveLockHolder(f)
 	_ = f.Close()
-	return nil, &LockError{Path: lockPath, HolderPID: pid}
+	return nil, &LockError{Path: lockPath, HolderPID: holderPID, StalePID: stalePID}
 }
 
 // Lock takes a process-wide exclusive flock on <stateDir>/<name>.lock, waiting
@@ -248,9 +251,15 @@ func Lock(ctx context.Context, stateDir, name string) (UnlockFunc, error) {
 	for {
 		select {
 		case <-ctx.Done():
+			holderPID, stalePID := lastErr.HolderPID, lastErr.StalePID
+			if holderPID > 0 && !ProcessAlive(holderPID) {
+				stalePID = holderPID
+				holderPID = 0
+			}
 			return nil, &LockError{
 				Path:      lastErr.Path,
-				HolderPID: lastErr.HolderPID,
+				HolderPID: holderPID,
+				StalePID:  stalePID,
 				Cause:     ctx.Err(),
 			}
 		case <-time.After(50 * time.Millisecond):
@@ -260,8 +269,16 @@ func Lock(ctx context.Context, stateDir, name string) (UnlockFunc, error) {
 			return unlock, err
 		}
 		if cur, ok := errors.AsType[*LockError](err); ok {
-			if cur.HolderPID > 0 {
+			switch {
+			case cur.HolderPID > 0:
 				lastErr.HolderPID = cur.HolderPID
+				lastErr.StalePID = 0
+			case cur.StalePID > 0:
+				lastErr.HolderPID = 0
+				lastErr.StalePID = cur.StalePID
+			case lastErr.HolderPID > 0 && !ProcessAlive(lastErr.HolderPID):
+				lastErr.StalePID = lastErr.HolderPID
+				lastErr.HolderPID = 0
 			}
 		}
 	}
@@ -275,6 +292,15 @@ func WaitUnlocked(ctx context.Context, stateDir, name string) error {
 	}
 	unlock()
 	return nil
+}
+
+// ProcessAlive reports whether a process with the given positive PID exists.
+func ProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // AtomicWrite replaces path's contents with data via temp+sync+rename
@@ -763,9 +789,27 @@ func unlockClosure(f *os.File) UnlockFunc {
 	}
 }
 
+func resolveLockHolder(f *os.File) (holderPID, stalePID int) {
+	pid := readLockPID(f)
+	if pid > 0 && ProcessAlive(pid) {
+		return pid, 0
+	}
+	time.Sleep(10 * time.Millisecond)
+	pid = readLockPID(f)
+	if pid <= 0 {
+		return 0, 0
+	}
+	if ProcessAlive(pid) {
+		return pid, 0
+	}
+	return 0, pid
+}
+
 func writeLockPID(f *os.File) {
-	_ = f.Truncate(0)
-	_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+	b := []byte(strconv.Itoa(os.Getpid()) + "\n")
+	if _, err := f.WriteAt(b, 0); err == nil {
+		_ = f.Truncate(int64(len(b)))
+	}
 }
 
 func readLockPID(f *os.File) int {
@@ -774,7 +818,8 @@ func readLockPID(f *os.File) int {
 	if n <= 0 {
 		return 0
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	line, _, _ := strings.Cut(string(buf[:n]), "\n")
+	pid, err := strconv.Atoi(strings.TrimSpace(line))
 	if err != nil || pid <= 0 {
 		return 0
 	}

@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
@@ -610,7 +609,7 @@ func waitAlphaGone(ctx context.Context, kc zlock.WorkspaceKeychain, sock string,
 	if err := kc.WaitUnlockedAlpha(waitCtx); err != nil {
 		return wrapAlphaTeardownErr(err, oldPID, timeout)
 	}
-	if oldPID > 0 && !oldHasLock && syscall.Kill(oldPID, 0) == nil {
+	if oldPID > 0 && !oldHasLock && zfs.ProcessAlive(oldPID) {
 		if log != nil {
 			log.Info("zordon", "old alpha pid=%d predates alpha.lock, waiting for exit", oldPID)
 		}
@@ -622,12 +621,20 @@ func waitAlphaGone(ctx context.Context, kc zlock.WorkspaceKeychain, sock string,
 }
 
 func wrapAlphaTeardownErr(err error, oldPID int, timeout time.Duration) error {
-	pid := oldPID
-	if lockErr, ok := errors.AsType[*zlock.LockError](err); ok && lockErr.HolderPID > 0 {
-		pid = lockErr.HolderPID
+	if lockErr, ok := errors.AsType[*zlock.LockError](err); ok {
+		if lockErr.HolderPID > 0 && zfs.ProcessAlive(lockErr.HolderPID) {
+			return fmt.Errorf("old alpha (pid=%d) still tearing down after %s (rerun or raise --timeout): %w", lockErr.HolderPID, timeout, err)
+		}
+		if oldPID > 0 && zfs.ProcessAlive(oldPID) {
+			return fmt.Errorf("old alpha (pid=%d) still tearing down after %s (rerun or raise --timeout): %w", oldPID, timeout, err)
+		}
+		if oldPID > 0 && lockErr.StalePID == 0 {
+			return fmt.Errorf("alpha lock still held after %s (stale pid=%d; rerun or raise --timeout): %w", timeout, oldPID, err)
+		}
+		return fmt.Errorf("alpha lock still held after %s (rerun or raise --timeout): %w", timeout, err)
 	}
-	if pid > 0 {
-		return fmt.Errorf("old alpha (pid=%d) still tearing down after %s (rerun or raise --timeout): %w", pid, timeout, err)
+	if oldPID > 0 && zfs.ProcessAlive(oldPID) {
+		return fmt.Errorf("old alpha (pid=%d) still tearing down after %s (rerun or raise --timeout): %w", oldPID, timeout, err)
 	}
 	return fmt.Errorf("old alpha still tearing down after %s (rerun or raise --timeout): %w", timeout, err)
 }
@@ -651,7 +658,7 @@ func waitSocketGone(ctx context.Context, sock string) error {
 
 func waitPIDGone(ctx context.Context, pid int) error {
 	delay := 20 * time.Millisecond
-	for syscall.Kill(pid, 0) == nil {
+	for zfs.ProcessAlive(pid) {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("old alpha pid=%d still alive: %w", pid, ctx.Err())
