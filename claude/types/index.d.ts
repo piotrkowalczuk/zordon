@@ -55,6 +55,27 @@ export type McpCall = {
   output: string
 }
 
+export type UpdateMethod = 'brew' | 'download'
+
+export type UpdateInfo = {
+  latest: string
+  releaseUrl: string
+  binaryVersion: string | null
+  pluginVersion: string
+  isBinaryOutdated: boolean
+  isPluginOutdated: boolean
+  binaryMethod: UpdateMethod
+  binaryTargetDir: string
+  binaryUpgradeCmd: string
+  pluginUpgradeCmd: string
+}
+
+export type UpdateAction =
+  | { state: 'idle'; message: string | null }
+  | { state: 'running'; message: string }
+  | { state: 'done'; message: string }
+  | { state: 'error'; message: string }
+
 export type ZordonSnapshot =
   | { kind: 'loading' }
   | { kind: 'inactive' }
@@ -64,6 +85,6 @@ export type ZordonSnapshot =
 
 declare module 'claude-code' {
   interface PluginState {
-    'zordon': { snapshot: ZordonSnapshot; diff: DiffView; isCollapsed: boolean; isScopeCollapsed: boolean; isRuntimeCollapsed: boolean; isLogCollapsed: boolean; calls: McpCall[]; openCall: string | null; checkouts: Checkout[]; openService: string | null }
+    'zordon': { snapshot: ZordonSnapshot; diff: DiffView; isCollapsed: boolean; isScopeCollapsed: boolean; isRuntimeCollapsed: boolean; isLogCollapsed: boolean; calls: McpCall[]; openCall: string | null; checkouts: Checkout[]; openService: string | null; update: UpdateInfo | null; dismissedUpdate: string | null; updateAction: UpdateAction }
   }
 }

@@ -3,15 +3,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
+import re
 import subprocess
+import tarfile
 import tempfile
 import threading
+import time
 import unittest
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import server
 
@@ -174,8 +179,10 @@ class TestSidecarAndHooks(unittest.TestCase):
 
             old_bin = os.environ.get("ZORDON_BIN")
             old_state = os.environ.get("ZORDON_AGY_STATE")
+            old_upd = os.environ.get("ZORDON_UPDATE_CHECK")
             os.environ["ZORDON_BIN"] = str(fake_zordon)
             os.environ["ZORDON_AGY_STATE"] = str(state_path)
+            os.environ["ZORDON_UPDATE_CHECK"] = "0"
             try:
                 # 1. Antigravity SessionStart hook
                 out, code = server.handle_hook(
@@ -232,6 +239,91 @@ class TestSidecarAndHooks(unittest.TestCase):
                         diff_data = json.loads(r.read().decode())
                         self.assertEqual(diff_data["app"], "api")
                         self.assertEqual([f["path"] for f in diff_data["files"]], ["hello.go", "untracked.txt"])
+                    dismiss_req = Request(
+                        f"http://127.0.0.1:{port}/api/dismiss-update",
+                        data=json.dumps({"version": "99.0.0"}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urlopen(dismiss_req) as r:
+                        self.assertEqual(json.loads(r.read().decode()), {"ok": True, "dismissedUpdate": "99.0.0"})
+
+                    # 4. Verify POST /api/update against a loopback release server (bad checksum rejected, valid tarball installed)
+                    plat = server.detect_platform()
+                    assert plat is not None
+                    archive_name = f"zordon_99.0.0_{plat[0]}_{plat[1]}.tar.gz"
+                    tar_bytes, good_sha = _build_release_tarball("99.0.0")
+                    served = {"checksum": "0" * 64}
+
+                    class ReleaseHandler(BaseHTTPRequestHandler):
+                        def log_message(self, format: str, *args: object) -> None:
+                            return
+
+                        def do_GET(self) -> None:
+                            if self.path == "/v99.0.0/checksums.txt":
+                                payload = f"{served['checksum']}  {archive_name}\n".encode("utf-8")
+                            elif self.path == f"/v99.0.0/{archive_name}":
+                                payload = tar_bytes
+                            else:
+                                self.send_response(404)
+                                self.end_headers()
+                                return
+                            self.send_response(200)
+                            self.send_header("Content-Length", str(len(payload)))
+                            self.end_headers()
+                            self.wfile.write(payload)
+
+                    rel_httpd = ThreadingHTTPServer(("127.0.0.1", 0), ReleaseHandler)
+                    rel_port = rel_httpd.server_address[1]
+                    rel_t = threading.Thread(target=rel_httpd.serve_forever, daemon=True)
+                    rel_t.start()
+                    old_dl_base = os.environ.get("ZORDON_RELEASE_DOWNLOAD_BASE")
+                    try:
+                        bin_dir = tmp_path / "install-bin"
+                        bin_dir.mkdir()
+                        target_zordon = bin_dir / "zordon"
+                        target_zordon.write_text(
+                            '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "zordon v0.28.0"; exit 0; fi\n',
+                            encoding="utf-8",
+                        )
+                        target_zordon.chmod(0o755)
+                        os.environ["ZORDON_BIN"] = str(target_zordon)
+                        os.environ["ZORDON_RELEASE_DOWNLOAD_BASE"] = f"http://127.0.0.1:{rel_port}"
+                        server._version_cache.clear()
+
+                        st = server.load_state(state_path)
+                        st["updateCache"] = {
+                            "checkedAt": time.time(),
+                            "latestVersion": "99.0.0",
+                            "releaseUrl": "https://github.com/piotrkowalczuk/zordon/releases/tag/v99.0.0",
+                        }
+                        st["dismissedUpdate"] = ""
+                        server.save_state(st, state_path)
+
+                        bad_req = Request(f"http://127.0.0.1:{port}/api/update", data=b"", method="POST")
+                        with urlopen(bad_req) as r:
+                            bad_res = json.loads(r.read().decode())
+                        self.assertFalse(bad_res["ok"])
+                        self.assertIn("SHA-256 mismatch", bad_res["error"])
+                        self.assertIn("v0.28.0", target_zordon.read_text(encoding="utf-8"))
+
+                        served["checksum"] = good_sha
+                        good_req = Request(f"http://127.0.0.1:{port}/api/update", data=b"", method="POST")
+                        with urlopen(good_req) as r:
+                            good_res = json.loads(r.read().decode())
+                        self.assertTrue(good_res["ok"])
+                        self.assertEqual(good_res["method"], "download")
+                        self.assertEqual(good_res["version"], "99.0.0")
+                        for b in ("zordon", "alpha", "tommy"):
+                            self.assertTrue((bin_dir / b).is_file())
+                            self.assertTrue(os.access(bin_dir / b, os.X_OK))
+                    finally:
+                        rel_httpd.shutdown()
+                        rel_httpd.server_close()
+                        if old_dl_base is None:
+                            os.environ.pop("ZORDON_RELEASE_DOWNLOAD_BASE", None)
+                        else:
+                            os.environ["ZORDON_RELEASE_DOWNLOAD_BASE"] = old_dl_base
                 finally:
                     httpd.shutdown()
                     httpd.server_close()
@@ -244,17 +336,257 @@ class TestSidecarAndHooks(unittest.TestCase):
                     os.environ.pop("ZORDON_AGY_STATE", None)
                 else:
                     os.environ["ZORDON_AGY_STATE"] = old_state
+                if old_upd is None:
+                    os.environ.pop("ZORDON_UPDATE_CHECK", None)
+                else:
+                    os.environ["ZORDON_UPDATE_CHECK"] = old_upd
+
+    def test_semver_and_compute_update(self) -> None:
+        self.assertEqual(
+            server.parse_zordon_version("zordon v0.29.0 (9b4437bd1c2e, 2026-07-23T20:00:00Z, go1.26.5)\n"),
+            "0.29.0",
+        )
+        self.assertEqual(
+            server.parse_zordon_version("zordon v0.29.1-0.20261112184434-cbc6427e35b4\n"),
+            "0.29.1-0.20261112184434-cbc6427e35b4",
+        )
+        self.assertEqual(server.parse_zordon_version("zordon (devel) (7c8264, go1.26.5)\n"), "(devel)")
+        self.assertIsNone(server.parse_zordon_version('{"state":"running"}'))
+
+        sv_29 = server.parse_semver("0.29.0")
+        sv_pseudo = server.parse_semver("v0.29.1-0.20261112184434-cbc6427e35b4")
+        sv_291 = server.parse_semver("v0.29.1")
+        assert sv_29 is not None and sv_pseudo is not None and sv_291 is not None
+        self.assertLess(server.compare_semver(sv_29, sv_pseudo), 0)
+        self.assertLess(server.compare_semver(sv_pseudo, sv_291), 0)
+        self.assertEqual(server.compare_semver(sv_291, sv_291), 0)
+
+        rel = server.parse_latest_release(
+            json.dumps(
+                {
+                    "tag_name": "v0.30.0",
+                    "html_url": "https://evil.example/phish",
+                    "draft": False,
+                    "prerelease": False,
+                }
+            )
+        )
+        self.assertEqual(
+            rel,
+            {"version": "0.30.0", "url": "https://github.com/piotrkowalczuk/zordon/releases/tag/v0.30.0"},
+        )
+        self.assertIsNone(server.parse_latest_release(json.dumps({"tag_name": "v0.30.0-rc.1", "prerelease": True})))
+
+        self.assertIsNone(server.compute_update("0.30.0", "0.30.0", rel))
+
+        both = server.compute_update("0.29.0", "0.29.0", rel, "/opt/homebrew/bin/zordon")
+        assert both is not None
+        self.assertTrue(both["isBinaryOutdated"])
+        self.assertTrue(both["isPluginOutdated"])
+        self.assertEqual(both["binaryMethod"], "brew")
+        self.assertEqual(both["binaryUpgradeCmd"], "brew upgrade piotrkowalczuk/tap/zordon")
+        self.assertIn("agy plugin install", server.format_update_markdown(both))
+
+        cli_only = server.compute_update("0.29.0", "0.30.0", rel, "/Users/dev/go/bin/zordon")
+        assert cli_only is not None
+        self.assertTrue(cli_only["isBinaryOutdated"])
+        self.assertFalse(cli_only["isPluginOutdated"])
+        self.assertEqual(cli_only["binaryMethod"], "download")
+        self.assertEqual(cli_only["binaryTargetDir"], "/Users/dev/go/bin")
+        self.assertEqual(cli_only["binaryUpgradeCmd"], "download release → /Users/dev/go/bin")
+        self.assertIn("sidecar://zordon/dashboard/", server.format_update_markdown(cli_only))
+
+        offline_skew = server.compute_update("0.30.0", "0.29.0", None)
+        assert offline_skew is not None
+        self.assertFalse(offline_skew["isBinaryOutdated"])
+        self.assertTrue(offline_skew["isPluginOutdated"])
+        self.assertEqual(offline_skew["latest"], "0.30.0")
+
+        self.assertIsNone(server.compute_update("(devel)", "0.30.0", rel))
+        devel_plugin_old = server.compute_update("(devel)", "0.29.0", rel)
+        assert devel_plugin_old is not None
+        self.assertFalse(devel_plugin_old["isBinaryOutdated"])
+        self.assertTrue(devel_plugin_old["isPluginOutdated"])
+
+        self.assertEqual(server.detect_platform("darwin", "arm64"), ("darwin", "arm64"))
+        self.assertEqual(server.detect_platform("linux", "aarch64"), ("linux", "arm64"))
+        self.assertEqual(server.detect_platform("linux", "x86_64"), ("linux", "amd64"))
+        self.assertIsNone(server.detect_platform("win32", "AMD64"))
+
+        digest = "a" * 64
+        self.assertEqual(
+            server.parse_checksum(f"{digest}  zordon_0.30.0_darwin_arm64.tar.gz\n", "zordon_0.30.0_darwin_arm64.tar.gz"),
+            digest,
+        )
+        self.assertIsNone(server.parse_checksum("short  zordon_0.30.0_darwin_arm64.tar.gz\n", "zordon_0.30.0_darwin_arm64.tar.gz"))
+        self.assertFalse(server.perform_binary_upgrade("0.30.0", "/tmp/zordon", download_base_url="file:///etc")["ok"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_p = Path(tmp)
+            cask_dir = tmp_p / "Caskroom" / "zordon" / "0.28.0"
+            cask_dir.mkdir(parents=True)
+            real_bin = cask_dir / "zordon"
+            real_bin.write_text('#!/bin/sh\necho "zordon v0.28.0"\n', encoding="utf-8")
+            real_bin.chmod(0o755)
+            usr_bin = tmp_p / "bin"
+            usr_bin.mkdir()
+            link_bin = usr_bin / "zordon"
+            link_bin.symlink_to(real_bin)
+
+            brew_log = tmp_p / "brew.log"
+            fake_brew = tmp_p / "fake-brew"
+            fake_brew.write_text(
+                f'#!/bin/sh\necho "$@" > "{brew_log}"\nprintf \'#!/bin/sh\\necho "zordon v0.30.0"\\n\' > "{real_bin}"\n',
+                encoding="utf-8",
+            )
+            fake_brew.chmod(0o755)
+
+            old_brew = os.environ.get("ZORDON_BREW_BIN")
+            old_zbin = os.environ.get("ZORDON_BIN")
+            os.environ["ZORDON_BREW_BIN"] = str(fake_brew)
+            os.environ["ZORDON_BIN"] = str(link_bin)
+            try:
+                res_brew = server.perform_binary_upgrade("0.30.0", str(link_bin))
+                self.assertTrue(res_brew["ok"])
+                self.assertEqual(res_brew["method"], "brew")
+                self.assertEqual(res_brew["version"], "0.30.0")
+                self.assertEqual(brew_log.read_text(encoding="utf-8").strip(), "upgrade piotrkowalczuk/tap/zordon")
+            finally:
+                if old_brew is None:
+                    os.environ.pop("ZORDON_BREW_BIN", None)
+                else:
+                    os.environ["ZORDON_BREW_BIN"] = old_brew
+                if old_zbin is None:
+                    os.environ.pop("ZORDON_BIN", None)
+                else:
+                    os.environ["ZORDON_BIN"] = old_zbin
+
+    def test_session_start_update_prompt_and_dismiss(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_path = tmp_path / "state.json"
+            ws_dir = tmp_path / "ws"
+            ws_dir.mkdir()
+
+            fake_active = tmp_path / "zordon-active"
+            fake_active.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "--version" ]; then echo "zordon v0.28.0 (abc, go1.27.0)"; exit 0; fi\n'
+                f'echo \'{{"workspace":"main","alphasfile":"/proj/Alphasfile","state_dir":"{ws_dir}","state":"stopped","services":[]}}\'\n',
+                encoding="utf-8",
+            )
+            fake_active.chmod(0o755)
+
+            fake_inactive = tmp_path / "zordon-inactive"
+            fake_inactive.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "--version" ]; then echo "zordon v0.28.0 (abc, go1.27.0)"; exit 0; fi\n'
+                'echo \'{"state":"no-alphasfile"}\'\n',
+                encoding="utf-8",
+            )
+            fake_inactive.chmod(0o755)
+
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "cwd": str(ws_dir),
+                        "workspaces": [str(ws_dir)],
+                        "calls": [],
+                        "updateCache": {
+                            "checkedAt": time.time(),
+                            "latestVersion": "99.0.0",
+                            "releaseUrl": "https://github.com/piotrkowalczuk/zordon/releases/tag/v99.0.0",
+                        },
+                        "dismissedUpdate": "",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            old_bin = os.environ.get("ZORDON_BIN")
+            old_state = os.environ.get("ZORDON_AGY_STATE")
+            old_upd = os.environ.get("ZORDON_UPDATE_CHECK")
+            os.environ["ZORDON_AGY_STATE"] = str(state_path)
+            os.environ["ZORDON_UPDATE_CHECK"] = "0"
+            try:
+                # 1. Active workspace prompts via user_markdown (with empty model systemMessage)
+                os.environ["ZORDON_BIN"] = str(fake_active)
+                out_agy, code = server.handle_hook(
+                    "session-start",
+                    json.dumps({"conversationId": "c1", "workspacePaths": [str(ws_dir)]}),
+                    state_path,
+                )
+                self.assertEqual(code, 0)
+                steps = json.loads(out_agy)["injectSteps"]
+                self.assertEqual(len(steps), 2)
+                self.assertEqual(steps[1]["systemMessage"]["systemMessage"], "")
+                user_md = steps[1]["systemMessage"]["metadata"]["user_markdown"]
+                self.assertIn("v99.0.0", user_md)
+                self.assertIn("agy plugin install", user_md)
+
+                # 2. Non-Antigravity plain text fallback includes update line
+                out_claude, _ = server.handle_hook(
+                    "session-start",
+                    json.dumps({"session_id": "s1", "cwd": str(ws_dir)}),
+                    state_path,
+                )
+                self.assertIn("↑ zordon v99.0.0 available", out_claude)
+
+                # 3. Dismissing 99.0.0 silences SessionStart for 99.0.0
+                st = server.load_state(state_path)
+                st["dismissedUpdate"] = "99.0.0"
+                server.save_state(st, state_path)
+                out_dismissed, _ = server.handle_hook(
+                    "session-start",
+                    json.dumps({"conversationId": "c1", "workspacePaths": [str(ws_dir)]}),
+                    state_path,
+                )
+                self.assertEqual(len(json.loads(out_dismissed)["injectSteps"]), 1)
+
+                # 4. Inactive repo (no Alphasfile) stays silent on SessionStart,
+                #    while dashboard snapshot still carries the update payload.
+                st["dismissedUpdate"] = ""
+                server.save_state(st, state_path)
+                os.environ["ZORDON_BIN"] = str(fake_inactive)
+                out_inactive, _ = server.handle_hook(
+                    "session-start",
+                    json.dumps({"conversationId": "c2", "workspacePaths": [str(ws_dir)]}),
+                    state_path,
+                )
+                self.assertEqual(json.loads(out_inactive), {})
+                snap_payload = server.build_snapshot_payload(str(ws_dir), state_path)
+                self.assertEqual(snap_payload["snapshot"]["kind"], "inactive")
+                self.assertEqual(snap_payload["update"]["latest"], "99.0.0")
+            finally:
+                if old_bin is None:
+                    os.environ.pop("ZORDON_BIN", None)
+                else:
+                    os.environ["ZORDON_BIN"] = old_bin
+                if old_state is None:
+                    os.environ.pop("ZORDON_AGY_STATE", None)
+                else:
+                    os.environ["ZORDON_AGY_STATE"] = old_state
+                if old_upd is None:
+                    os.environ.pop("ZORDON_UPDATE_CHECK", None)
+                else:
+                    os.environ["ZORDON_UPDATE_CHECK"] = old_upd
 
     def test_plugin_manifests_and_shell_entrypoints(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
 
-        # 1. Validate .antigravity-plugin/plugin.json and .claude-plugin/plugin.json
+        # 1. Validate .antigravity-plugin/plugin.json, .claude-plugin/plugin.json, and register.tsx PLUGIN_VERSION
         plugin_manifest = json.loads((repo_root / ".antigravity-plugin" / "plugin.json").read_text(encoding="utf-8"))
         claude_manifest = json.loads((repo_root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        register_tsx = (repo_root / "claude" / "hooks" / "register.tsx").read_text(encoding="utf-8")
+        ver_match = re.search(r"export const PLUGIN_VERSION = '([^']+)'", register_tsx)
+        self.assertIsNotNone(ver_match)
+        assert ver_match is not None
         for key in ("name", "displayName", "version", "description", "suggestedPrompts"):
             self.assertIn(key, plugin_manifest)
         self.assertEqual(plugin_manifest["name"], "zordon")
         self.assertEqual(plugin_manifest["version"], claude_manifest["version"])
+        self.assertEqual(ver_match.group(1), claude_manifest["version"])
+        self.assertEqual(server.read_plugin_version(repo_root), plugin_manifest["version"])
         self.assertTrue(plugin_manifest["suggestedPrompts"])
 
         # 2. Validate root mcp_config.json and sandbox mcp_config.json
@@ -349,6 +681,19 @@ class TestSidecarAndHooks(unittest.TestCase):
                 check=True,
             )
             self.assertIn("zordon MCP is NOT reachable", res_claude.stdout)
+
+
+def _build_release_tarball(version: str) -> tuple[bytes, str]:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name in ("zordon", "alpha", "tommy"):
+            script = f'#!/bin/sh\nif [ "$1" = "--version" ]; then echo "{name} v{version}"; exit 0; fi\n'.encode("utf-8")
+            info = tarfile.TarInfo(name=name)
+            info.size = len(script)
+            info.mode = 0o755
+            tf.addfile(info, io.BytesIO(script))
+    raw = buf.getvalue()
+    return raw, hashlib.sha256(raw).hexdigest()
 
 
 if __name__ == "__main__":

@@ -28,4 +28,7 @@ Restart your Antigravity session after installing so the newly registered plugin
 
 To verify the server is connected, ask the agent: *"what's the status of this project's stack?"* — it should reach for the `status` MCP tool, not Bash.
 
+When the plugin prompts that a newer release is available, click **Update** in the **Zordon** sidecar pane to upgrade the `zordon` CLI automatically, then pull the latest checkout and re-run `agy plugin install /path/to/zordon` if the plugin itself changed.
+To disable automatic release checks, set `ZORDON_UPDATE_CHECK=0` in your environment.
+
 For details on what each tool does, see the [`zordon mcp` reference](../reference/mcp.md).
