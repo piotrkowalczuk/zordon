@@ -8,8 +8,29 @@ import (
 
 	"github.com/peterbourgon/ff/v4"
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
+	"github.com/piotrkowalczuk/zordon/internal/buildquota"
 	"github.com/piotrkowalczuk/zordon/internal/tools"
 )
+
+func TestRootCommand_buildMaxCPUFlagAndEnv(t *testing.T) {
+	rootNeg, _ := buildRootCommand(commandIO{Stdout: io.Discard, Stderr: io.Discard})
+	err := rootNeg.Parse([]string{"--build.maxcpu=-1", "status"}, ff.WithEnvVarPrefix("ZORDON"))
+	if err == nil || !strings.Contains(err.Error(), "invalid build.maxcpu") {
+		t.Fatalf("Parse(--build.maxcpu=-1) err = %v, want invalid build.maxcpu error", err)
+	}
+
+	rootOK, _ := buildRootCommand(commandIO{Stdout: io.Discard, Stderr: io.Discard})
+	if err := rootOK.Parse([]string{"start", "--build.maxcpu=4"}, ff.WithEnvVarPrefix("ZORDON")); err != nil {
+		t.Fatalf("Parse(start --build.maxcpu=4): %v", err)
+	}
+
+	t.Setenv("ZORDON_BUILD_MAXCPU", "bad")
+	rootEnv, _ := buildRootCommand(commandIO{Stdout: io.Discard, Stderr: io.Discard})
+	err = rootEnv.Parse([]string{"status"}, ff.WithEnvVarPrefix("ZORDON"))
+	if err == nil || !strings.Contains(err.Error(), "invalid build.maxcpu") {
+		t.Fatalf("Parse(ZORDON_BUILD_MAXCPU=bad) err = %v, want invalid build.maxcpu error", err)
+	}
+}
 
 func TestRootCommand_miseVersionFlagValidation(t *testing.T) {
 	root, _ := buildRootCommand(commandIO{Stdout: io.Discard, Stderr: io.Discard})
@@ -55,6 +76,7 @@ func TestCommandArgv(t *testing.T) {
 	cases := map[string]struct {
 		home        string
 		miseVersion tools.MiseVersion
+		buildMaxCPU buildquota.MaxCPU
 		agent       bool
 		testCfg     alphasfile.TestConfig
 		name        string
@@ -64,11 +86,12 @@ func TestCommandArgv(t *testing.T) {
 		"full root context": {
 			home:        "/x",
 			miseVersion: "2026.10.4",
+			buildMaxCPU: 4,
 			agent:       true,
 			testCfg:     alphasfile.TestConfig{Harness: true, LogPath: "/l"},
 			name:        "status",
 			args:        []string{"--foo"},
-			want:        []string{"--home", "/x", "--mise.version", "2026.10.4", "--agent", "--test-harness", "--test-log", "/l", "status", "--foo"},
+			want:        []string{"--home", "/x", "--mise.version", "2026.10.4", "--build.maxcpu", "4", "--agent", "--test-harness", "--test-log", "/l", "status", "--foo"},
 		},
 		"minimal": {
 			name: "get",
@@ -83,7 +106,7 @@ func TestCommandArgv(t *testing.T) {
 	}
 	for hint, c := range cases {
 		t.Run(hint, func(t *testing.T) {
-			got := commandArgv(c.home, c.miseVersion, c.agent, c.testCfg, c.name, c.args)
+			got := commandArgv(c.home, c.miseVersion, c.buildMaxCPU, c.agent, c.testCfg, c.name, c.args)
 			if !slices.Equal(got, c.want) {
 				t.Errorf("commandArgv = %v; want %v", got, c.want)
 			}

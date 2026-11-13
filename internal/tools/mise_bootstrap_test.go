@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piotrkowalczuk/zordon/internal/buildquota"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zhttp"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
@@ -135,7 +136,7 @@ func TestEnsureMise_reusesMatchingVersionBinary(t *testing.T) {
 	wantBin := writeFakeMiseVersionBin(t, filepath.Join(home, "bin", "mise"), DefaultMiseVersion)
 
 	var logBuf bytes.Buffer
-	gotBin, err := EnsureMise(t.Context(), zlock.NewGlobalKeychain(home), home, "", &logBuf)
+	gotBin, err := EnsureMise(t.Context(), zlock.NewGlobalKeychain(home), &buildquota.Limiter{}, nil, home, "", &logBuf)
 	if err != nil {
 		t.Fatalf("EnsureMise: %v", err)
 	}
@@ -469,7 +470,7 @@ func TestEnsureToolchain_skipsWhenAlreadyInstalled(t *testing.T) {
 	if !IsInstalled(dataDir, "nodejs", "22.14.0") {
 		t.Fatal("expected IsInstalled(nodejs@22.14.0) to map nodejs -> node and return true")
 	}
-	if err := EnsureToolchain("/nonexistent/mise", dataDir, "nodejs", "22.14.0", nil); err != nil {
+	if err := EnsureToolchain(t.Context(), &buildquota.Limiter{}, nil, "/nonexistent/mise", dataDir, "nodejs", "22.14.0", nil); err != nil {
 		t.Fatalf("EnsureToolchain warm install invoked nonexistent mise binary: %v", err)
 	}
 }

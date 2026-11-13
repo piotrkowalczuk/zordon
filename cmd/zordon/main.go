@@ -19,6 +19,7 @@ import (
 	"github.com/peterbourgon/ff/v4/ffhelp"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
+	"github.com/piotrkowalczuk/zordon/internal/buildquota"
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/parentwatch"
@@ -98,8 +99,10 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 	format := rootFlags.StringLong("format", "", "output format of commands that report: text, agent or json (default: agent under --agent, else text)")
 	var home, testLog zfs.DirName
 	var miseVersion tools.MiseVersion
+	var buildMaxCPU buildquota.MaxCPU
 	rootFlags.Value(0, "home", &home, "directory holding zordon's host-wide state (env: ZORDON_HOME; defaults to ~/.zordon)")
 	rootFlags.Value(0, "mise.version", &miseVersion, "mise version to bootstrap and run (env: ZORDON_MISE_VERSION)")
+	rootFlags.Value(0, "build.maxcpu", &buildMaxCPU, "max CPU cores per build or toolchain compilation step; 0 = auto (cpus-2 when >4 cores, else cpus) (env: ZORDON_BUILD_MAXCPU)")
 	testHarness := rootFlags.BoolLong("test-harness", "enable test:: HCL functions (env: ZORDON_TEST_HARNESS; conformance harness use only)")
 	rootFlags.Value(0, "test-log", &testLog, "path test::log() writes to (env: ZORDON_TEST_LOG; only used when --test-harness)")
 	rootCmd := &ff.Command{
@@ -144,7 +147,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 			zordonHome, kc := homeAndKeychain()
 			return runStart(ctx, zlog.New(stdio.Stderr, *agent), stdio.Stdout, *startAlphaBin, *startAlphaLog, *startTimeout, *startFailfast, *verbose, *agent, *startSummary,
 				startPull, parsePicks(append(strings.Fields(*startServices), args...)),
-				zordonHome, kc, miseVersion,
+				zordonHome, kc, miseVersion, buildMaxCPU,
 				testCfg())
 		},
 	}
@@ -187,7 +190,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 				return err
 			}
 			if *stopClean {
-				return runClean(ctx, log, *stopAlphaBin, *stopAlphaLog, *stopTimeout, *verbose, *agent, true, zordonHome, kc, miseVersion, testCfg())
+				return runClean(ctx, log, *stopAlphaBin, *stopAlphaLog, *stopTimeout, *verbose, *agent, true, zordonHome, kc, miseVersion, buildMaxCPU, testCfg())
 			}
 			return nil
 		},
@@ -376,6 +379,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 				Home:        zordonHome,
 				Keychain:    kc,
 				MiseVersion: miseVersion,
+				BuildMaxCPU: buildMaxCPU,
 				Agent:       *agent,
 				Test:        testCfg(),
 			})
@@ -394,7 +398,7 @@ func buildRootCommand(stdio commandIO) (*ff.Command, *bool) {
 		Flags:     cleanFlags,
 		Exec: func(ctx context.Context, args []string) error {
 			zordonHome, kc := homeAndKeychain()
-			return runClean(ctx, zlog.New(stdio.Stderr, *agent), *cleanAlphaBin, *cleanAlphaLog, *cleanTimeout, *verbose, *agent, false, zordonHome, kc, miseVersion, testCfg())
+			return runClean(ctx, zlog.New(stdio.Stderr, *agent), *cleanAlphaBin, *cleanAlphaLog, *cleanTimeout, *verbose, *agent, false, zordonHome, kc, miseVersion, buildMaxCPU, testCfg())
 		},
 	}
 
@@ -458,7 +462,7 @@ func walkUp() (string, error) {
 // NOT render the summary: rendering waits until the whole log stream is done
 // (see runStart), so the summary lands as a clean block after the logs, not
 // mid-stream.
-func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent bool, miseVersion tools.MiseVersion, alphaLog string) (*summary.StartSummary, error) {
+func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, failfast, agent bool, miseVersion tools.MiseVersion, buildMaxCPU buildquota.MaxCPU, alphaLog string) (*summary.StartSummary, error) {
 	log.Info("alpha", "Understood, Zordon!")
 
 	conn, err := control.Dial(sock, 1*time.Second)
@@ -481,6 +485,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 			Failfast:       failfast,
 			Agent:          agent,
 			MiseVersion:    miseVersion.Version(),
+			BuildMaxCPU:    buildMaxCPU.Int(),
 			FsHash:         fsHash,
 			CfgHash:        cfgHash,
 			ParentDotenv:   parentDotenv,
@@ -574,7 +579,7 @@ func pushConfigure(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, 
 // its teardown output. Simpler than pushConfigure: clean never starts
 // services, so there are no per-service ready/fail events or failure
 // summary — just log lines until EventDone (success) or EventError.
-func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, agent bool, miseVersion tools.MiseVersion) error {
+func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, af *alphasfile.Alphasfile, agent bool, miseVersion tools.MiseVersion, buildMaxCPU buildquota.MaxCPU) error {
 	conn, err := control.Dial(sock, 1*time.Second)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
@@ -594,6 +599,7 @@ func pushClean(ctx context.Context, log *zlog.Logger, sock, afPath, fsHash, cfgH
 			Alphasfile:     af,
 			Agent:          agent,
 			MiseVersion:    miseVersion.Version(),
+			BuildMaxCPU:    buildMaxCPU.Int(),
 			FsHash:         fsHash,
 			CfgHash:        cfgHash,
 			ParentDotenv:   parentDotenv,
@@ -755,7 +761,7 @@ var pinnedFiles []*os.File
 
 func keepAlive(f *os.File) { pinnedFiles = append(pinnedFiles, f) }
 
-func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose bool, miseVersion tools.MiseVersion, log *zlog.Logger, extraEnv map[string]string) error {
+func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose bool, miseVersion tools.MiseVersion, buildMaxCPU buildquota.MaxCPU, log *zlog.Logger, extraEnv map[string]string) error {
 	logf := func(format string, a ...any) { log.Info("zordon", format, a...) }
 	readyR, readyW, err := os.Pipe()
 	if err != nil {
@@ -775,7 +781,7 @@ func spawnAlpha(alphaBin, alphaLog, sock string, timeout time.Duration, verbose 
 		return fmt.Errorf("parent pipe: %w", err)
 	}
 
-	cmd := exec.Command(alphaBin, "run", "--socket", sock, "--log-file", alphaLog, "--mise.version", miseVersion.Version())
+	cmd := exec.Command(alphaBin, "run", "--socket", sock, "--log-file", alphaLog, "--mise.version", miseVersion.Version(), "--build.maxcpu", buildMaxCPU.String())
 	cmd.ExtraFiles = []*os.File{readyW}
 	cmd.Env = append(os.Environ(), "ZORDON_READY_FD="+strconv.Itoa(2+len(cmd.ExtraFiles)))
 	parentwatch.Attach(cmd, parentR, "ZORDON_PARENT_FD")

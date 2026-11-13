@@ -26,13 +26,19 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
+	"github.com/piotrkowalczuk/zordon/internal/buildquota"
+	"github.com/piotrkowalczuk/zordon/internal/daemon"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
@@ -86,11 +92,17 @@ func IsInstalled(dataDir, tool, version string) bool {
 // EnsureToolchain materializes a language runtime version under dataDir via
 // `mise install <lang>@<version>` when not yet installed, streaming progress to
 // logOut. Callers hold the per-(lang, version) GlobalKeychain.LockTool lock.
-func EnsureToolchain(binPath, dataDir, lang, version string, logOut io.Writer) error {
+func EnsureToolchain(ctx context.Context, limiter *buildquota.Limiter, setPhase func(string), binPath, dataDir, lang, version string, logOut io.Writer) error {
+	if ctx == nil {
+		panic("tools: EnsureToolchain requires non-nil context")
+	}
+	if limiter == nil {
+		panic("tools: EnsureToolchain requires non-nil limiter")
+	}
 	if IsInstalled(dataDir, lang, version) {
 		return nil
 	}
-	return EnsurePackage(binPath, dataDir, miseToolName(lang), version, nil, logOut)
+	return EnsurePackage(ctx, limiter, setPhase, binPath, dataDir, miseToolName(lang), version, nil, logOut)
 }
 
 // MiseEnv runs `mise env --json <tool>@<version>` with the resolved
@@ -151,18 +163,31 @@ func MiseEnvWithBinDirs(binPath, dataDir, tool, version string, logOut io.Writer
 // Download/compile progress goes to logOut (some backends build from
 // source on first install). Callers hold the per-(name, version)
 // GlobalKeychain.LockTool lock, since the install writes under dataDir.
-func EnsurePackage(binPath, dataDir, name, version string, buildEnv zenv.EnvironmentVariables, logOut io.Writer) error {
+func EnsurePackage(ctx context.Context, limiter *buildquota.Limiter, setPhase func(string), binPath, dataDir, name, version string, buildEnv zenv.EnvironmentVariables, logOut io.Writer) error {
+	if ctx == nil {
+		panic("tools: EnsurePackage requires non-nil context")
+	}
+	if limiter == nil {
+		panic("tools: EnsurePackage requires non-nil limiter")
+	}
 	spec := name + "@" + version
 	if miseCommand(binPath, dataDir, "where", spec).Run() == nil {
 		return nil
 	}
-	cmd := miseCommand(binPath, dataDir, "install", spec)
-	for k, v := range buildEnv {
-		cmd.Env = append(cmd.Env, k+"="+v)
+	release, quota, err := limiter.AcquireWithPhase(ctx, setPhase, "waiting for build slot", "installing")
+	if err != nil {
+		return err
 	}
+	defer release()
+
+	cmd := miseCommand(binPath, dataDir, "install", spec)
+	for _, k := range slices.Sorted(maps.Keys(buildEnv)) {
+		cmd.Env = setEnvKey(cmd.Env, k, buildEnv[k])
+	}
+	cmd.Env = buildquota.WithBuildEnv(cmd.Env, quota)
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
-	if err := cmd.Run(); err != nil {
+	if err := daemon.RunGroup(ctx, 2*time.Second, cmd); err != nil {
 		return fmt.Errorf("mise install %s (data dir %s): %w", spec, dataDir, err)
 	}
 	return nil
@@ -180,11 +205,18 @@ func EnsurePackage(binPath, dataDir, name, version string, buildEnv zenv.Environ
 //
 // Returns the first install error or nil. Output (progress, warnings)
 // goes to logOut so the user can see what's happening on first run.
-func EnsureTools(binPath, dataDir, toolchain, version string, items map[string]string, logOut io.Writer) error {
+func EnsureTools(ctx context.Context, limiter *buildquota.Limiter, setPhase func(string), binPath, dataDir, toolchain, version string, items map[string]string, logOut io.Writer) error {
+	if ctx == nil {
+		panic("tools: EnsureTools requires non-nil context")
+	}
+	if limiter == nil {
+		panic("tools: EnsureTools requires non-nil limiter")
+	}
 	if len(items) == 0 {
 		return nil
 	}
-	for name, ver := range items {
+	for _, name := range slices.Sorted(maps.Keys(items)) {
+		ver := items[name]
 		if check := toolPresentCmd(binPath, dataDir, toolchain, version, name, ver); check != nil && check.Run() == nil {
 			continue
 		}
@@ -192,10 +224,17 @@ func EnsureTools(binPath, dataDir, toolchain, version string, items map[string]s
 		if err != nil {
 			return err
 		}
+		release, quota, err := limiter.AcquireWithPhase(ctx, setPhase, "waiting for build slot", "installing tools")
+		if err != nil {
+			return err
+		}
+		cmd.Env = buildquota.WithBuildEnv(cmd.Env, quota)
 		cmd.Stdout = logOut
 		cmd.Stderr = logOut
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("install %s tool %s@%s into %s@%s: %w", toolchain, name, ver, toolchain, version, err)
+		runErr := daemon.RunGroup(ctx, 2*time.Second, cmd)
+		release()
+		if runErr != nil {
+			return fmt.Errorf("install %s tool %s@%s into %s@%s: %w", toolchain, name, ver, toolchain, version, runErr)
 		}
 	}
 	return nil
@@ -219,7 +258,7 @@ func miseToolName(lang string) string {
 func isolatedEnv(dataDir, miseBin string) []string {
 	cfgRoot := filepath.Dir(dataDir)
 	var env []string
-	for _, kv := range zenv.Environ() {
+	for _, kv := range withoutMakeJobserverEnv(zenv.Environ()) {
 		if strings.HasPrefix(kv, "MISE_") {
 			continue
 		}
@@ -286,4 +325,28 @@ func toolPresentCmd(binPath, dataDir, toolchain, version, name, ver string) *exe
 	}
 	full := append([]string{"exec", miseToolName(toolchain) + "@" + version, "--"}, argv...)
 	return miseCommand(binPath, dataDir, full...)
+}
+
+func setEnvKey(env []string, key, val string) []string {
+	prefix := key + "="
+	for i, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			env[i] = prefix + val
+			return env
+		}
+	}
+	return append(env, prefix+val)
+}
+
+func withoutMakeJobserverEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "MAKEFLAGS=") ||
+			strings.HasPrefix(kv, "MFLAGS=") ||
+			strings.HasPrefix(kv, "MAKELEVEL=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }

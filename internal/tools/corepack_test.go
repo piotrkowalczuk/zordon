@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/piotrkowalczuk/zordon/internal/buildquota"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
 	"github.com/piotrkowalczuk/zordon/internal/ztest"
@@ -32,7 +33,7 @@ func TestCorepackMatrix(t *testing.T) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	bin, err := EnsureMise(t.Context(), kc, zordonHome, "", os.Stderr)
+	bin, err := EnsureMise(t.Context(), kc, &buildquota.Limiter{}, nil, zordonHome, "", os.Stderr)
 	if err != nil {
 		t.Fatalf("EnsureMise: %v", err)
 	}

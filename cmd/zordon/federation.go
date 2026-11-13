@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
+	"github.com/piotrkowalczuk/zordon/internal/buildquota"
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
@@ -212,7 +213,7 @@ func walkChain(zordonHome string, kc zlock.GlobalKeychain, resolve func(*level) 
 	return out, nil
 }
 
-func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, wantSummary bool, pull pullFlag, picks []string, zordonHome string, kc zlock.GlobalKeychain, miseVersion tools.MiseVersion, testCfg alphasfile.TestConfig) error {
+func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, alphaLog string, timeout time.Duration, failfast, verbose, agent, wantSummary bool, pull pullFlag, picks []string, zordonHome string, kc zlock.GlobalKeychain, miseVersion tools.MiseVersion, buildMaxCPU buildquota.MaxCPU, testCfg alphasfile.TestConfig) error {
 	log.Warn("zordon", "Rangers, you must act swiftly, the development environment is in grave danger!")
 
 	fed, err := NewFederationState(zordonHome, kc)
@@ -250,6 +251,7 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 		verbose:     verbose,
 		agent:       agent,
 		miseVersion: miseVersion,
+		buildMaxCPU: buildMaxCPU,
 	}
 
 	// The summary is a report, not progress: collect one per brought-up
@@ -380,7 +382,7 @@ func logLockChanges(log *zlog.Logger, changes []alphasfile.LockChange) {
 // waitStopped is set (the `zordon stop --clean` path) a still-running leaf
 // alpha is waited out rather than rejected; otherwise a running stack is an
 // error directing the user to stop first.
-func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, verbose, agent, waitStopped bool, zordonHome string, kc zlock.GlobalKeychain, miseVersion tools.MiseVersion, testCfg alphasfile.TestConfig) error {
+func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, timeout time.Duration, verbose, agent, waitStopped bool, zordonHome string, kc zlock.GlobalKeychain, miseVersion tools.MiseVersion, buildMaxCPU buildquota.MaxCPU, testCfg alphasfile.TestConfig) error {
 	fed, err := NewFederationState(zordonHome, kc)
 	if err != nil {
 		return err
@@ -393,6 +395,7 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		verbose:     verbose,
 		agent:       agent,
 		miseVersion: miseVersion,
+		buildMaxCPU: buildMaxCPU,
 	}
 
 	var parents alphasfile.GlobalComputedState
@@ -463,14 +466,14 @@ func cleanLeaf(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, p
 
 	ctxLevel, cancel := context.WithTimeout(ctx, cfg.timeout)
 	defer cancel()
-	if err := spawnAlpha(cfg.alphaBin, levelLog, sock, cfg.timeout, cfg.verbose, cfg.miseVersion, log, inv.Env); err != nil {
+	if err := spawnAlpha(cfg.alphaBin, levelLog, sock, cfg.timeout, cfg.verbose, cfg.miseVersion, cfg.buildMaxCPU, log, inv.Env); err != nil {
 		return fmt.Errorf("%s: %w", lvl.afPath, err)
 	}
 	if err := control.WaitListening(ctxLevel, sock); err != nil {
 		return fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
 
-	cleanErr := pushClean(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.agent, cfg.miseVersion)
+	cleanErr := pushClean(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.agent, cfg.miseVersion, cfg.buildMaxCPU)
 	// Always shut the transient alpha down, success or failure.
 	if _, e := control.Roundtrip(ctx, sock, &protocol.Request{Op: protocol.OpShutdown}); e != nil && !control.IsNotRunning(e) {
 		log.Error("zordon", "shutdown transient alpha: %v", e)

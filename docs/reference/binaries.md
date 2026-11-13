@@ -78,3 +78,11 @@ zordon relies on POSIX process groups, signals and `flock`, which have no direct
 
 Release binaries are built with `CGO_ENABLED=0`, so macOS builds use Go's pure-Go DNS resolver.
 Readiness probes target loopback addresses, so this has no practical effect.
+
+## Process priority
+
+On startup, `alpha` unconditionally lowers its own POSIX scheduling priority to `nice` value `10` via `setpriority` and logs `nice=<N>`.
+Every child process `alpha` spawns — toolchain installations, `git` checkouts, service builds, provisions, `tommy`, and service runtimes — inherits that lowered `nice` value automatically across `fork` and `exec`.
+If `alpha` is started with a `nice` value already greater than or equal to `10`, the existing value is preserved.
+If the operating system or sandbox rejects `setpriority` with `EPERM` or `EACCES`, `alpha` ignores the error and continues startup.
+CPU quota and build-slot serialization are configured separately via [`--build.maxcpu`](build-maxcpu.md).

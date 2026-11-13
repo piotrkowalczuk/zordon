@@ -29,6 +29,7 @@ import (
 	"github.com/peterbourgon/ff/v4/ffhelp"
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/barrier"
+	"github.com/piotrkowalczuk/zordon/internal/buildquota"
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/daemon"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
@@ -373,6 +374,7 @@ type runConfig struct {
 	TommyBin      zfs.DirName              // tommy wrapper override (--tommy-bin → ZORDON_TOMMY_BIN)
 	Workspace     invocation.WorkspaceName // which workspace this alpha runs for (--workspace → ZORDON_WORKSPACE)
 	MiseVersion   tools.MiseVersion        // mise binary version override (--mise.version → ZORDON_MISE_VERSION)
+	BuildMaxCPU   buildquota.MaxCPU        // max CPU cores per build step (--build.maxcpu → ZORDON_BUILD_MAXCPU; 0 ⇒ auto)
 	ReadyFD       zfs.FileDescriptor       // parent handshake fd (--ready-fd → ZORDON_READY_FD; 0 ⇒ no handshake)
 	ParentFD      zfs.FileDescriptor       // parent-death pipe fd (--parent-fd → ZORDON_PARENT_FD; 0 ⇒ standalone)
 }
@@ -401,11 +403,13 @@ func main() {
 	var home, stateDir, tommyBin zfs.DirName
 	var workspace invocation.WorkspaceName
 	var miseVersion tools.MiseVersion
+	var buildMaxCPU buildquota.MaxCPU
 	runFlags.Value(0, "home", &home, "directory holding shared mise install and toolchain cache (env: ZORDON_HOME; defaults to ~/.zordon)")
 	runFlags.Value(0, "state-dir", &stateDir, "workspace state directory (env: ZORDON_STATE_DIR)")
 	runFlags.Value(0, "tommy-bin", &tommyBin, "tommy wrapper binary path (env: ZORDON_TOMMY_BIN; defaults to alpha-sibling lookup)")
 	runFlags.Value(0, "workspace", &workspace, "workspace name this alpha runs for (env: ZORDON_WORKSPACE)")
 	runFlags.Value(0, "mise.version", &miseVersion, "mise version to bootstrap and run (env: ZORDON_MISE_VERSION)")
+	runFlags.Value(0, "build.maxcpu", &buildMaxCPU, "max CPU cores per build or toolchain compilation step; 0 = auto (cpus-2 when >4 cores, else cpus) (env: ZORDON_BUILD_MAXCPU)")
 	var readyFD, parentFD zfs.FileDescriptor
 	runFlags.Value(0, "ready-fd", &readyFD, "fd to signal READY=1 on once listening (env: ZORDON_READY_FD; 0 ⇒ no handshake)")
 	runFlags.Value(0, "parent-fd", &parentFD, "inherited read-end fd of the parent-death pipe (env: ZORDON_PARENT_FD; 0 ⇒ standalone)")
@@ -427,6 +431,7 @@ func main() {
 				TommyBin:      tommyBin,
 				Workspace:     workspace,
 				MiseVersion:   miseVersion,
+				BuildMaxCPU:   buildMaxCPU,
 				ReadyFD:       readyFD,
 				ParentFD:      parentFD,
 			})
@@ -463,6 +468,7 @@ type alphaState struct {
 	tommyBin       string               // path to the tommy wrapper interposed before every service (empty ⇒ spawn unwrapped)
 	workspace      string               // workspace name this alpha runs for (== invocation.MainWorkspace by default)
 	miseVersion    tools.MiseVersion    // mise version for EnsureMise (zero ⇒ tools.DefaultMiseVersion)
+	buildLimiter   buildquota.Limiter   // serializes heavy builds and propagates the CPU quota
 	parentDotenv   []string             // file-level dotenv paths inherited from federation parents
 	parentEnv      map[string]string    // file-level inline env inherited from federation parents (deeper ancestor wins)
 	agentMode      bool                 // configured via `zordon --agent`: apply agent{} env overlay
@@ -853,7 +859,7 @@ func bringupToolchain(ctx context.Context, b *bringup, tc *toolchainCtx) {
 	state.mu.RLock()
 	miseVer := state.miseVersion
 	state.mu.RUnlock()
-	bin, err := tools.EnsureMise(ctx, kc, zordonHome, miseVer, out)
+	bin, err := tools.EnsureMise(ctx, kc, &state.buildLimiter, tc.setPhase, zordonHome, miseVer, out)
 	if err != nil {
 		failTC(fmt.Errorf("ensure mise: %w", err))
 		return
@@ -864,7 +870,7 @@ func bringupToolchain(ctx context.Context, b *bringup, tc *toolchainCtx) {
 	// below: multiple independent (ref, version) installs, each locked on
 	// its own key, rather than one interpreter with tools layered in.
 	if tc.pkgTools != nil {
-		bringupPkgTools(ctx, tc, bin, zordonHome, kc, out, failTC, log)
+		bringupPkgTools(ctx, tc, bin, zordonHome, kc, &state.buildLimiter, out, failTC, log)
 		return
 	}
 	// ResolveDataDir uses zordonHome as the walk-up anchor; the
@@ -887,19 +893,19 @@ func bringupToolchain(ctx context.Context, b *bringup, tc *toolchainCtx) {
 	// only after gem install runs.
 	if tc.isPkg {
 		tc.setPhase("installing")
-		if err := tools.EnsurePackage(bin, dataDir, tc.lang, tc.version, tc.installEnv, out); err != nil {
+		if err := tools.EnsurePackage(ctx, &state.buildLimiter, tc.setPhase, bin, dataDir, tc.lang, tc.version, tc.installEnv, out); err != nil {
 			failTC(err)
 			return
 		}
 	} else {
 		tc.setPhase("installing")
-		if err := tools.EnsureToolchain(bin, dataDir, tc.lang, tc.version, out); err != nil {
+		if err := tools.EnsureToolchain(ctx, &state.buildLimiter, tc.setPhase, bin, dataDir, tc.lang, tc.version, out); err != nil {
 			failTC(err)
 			return
 		}
 		if len(tc.tools) > 0 {
 			tc.setPhase("installing tools")
-			if err := tools.EnsureTools(bin, dataDir, tc.lang, tc.version, tc.tools, out); err != nil {
+			if err := tools.EnsureTools(ctx, &state.buildLimiter, tc.setPhase, bin, dataDir, tc.lang, tc.version, tc.tools, out); err != nil {
 				failTC(err)
 				return
 			}
@@ -941,12 +947,13 @@ func bringupToolchain(ctx context.Context, b *bringup, tc *toolchainCtx) {
 // to a provision that env::prepends it. Unlike the language path, each
 // tool takes its own per-(ref, version) lock — they're independent
 // installs, not one interpreter's layered tool world.
-func bringupPkgTools(ctx context.Context, tc *toolchainCtx, bin, zordonHome string, kc zlock.GlobalKeychain, out *toolchainStreamWriter, failTC func(error), log *zlog.Logger) {
+func bringupPkgTools(ctx context.Context, tc *toolchainCtx, bin, zordonHome string, kc zlock.GlobalKeychain, limiter *buildquota.Limiter, out *toolchainStreamWriter, failTC func(error), log *zlog.Logger) {
 	defaultDataDir := filepath.Join(zordonHome, "toolchain")
 	var pooled []string
 	for _, ref := range slices.Sorted(maps.Keys(tc.pkgTools)) {
 		version := tc.pkgTools[ref]
-		tc.setPhase(fmt.Sprintf("installing %s@%s", ref, version))
+		installPhase := fmt.Sprintf("installing %s@%s", ref, version)
+		tc.setPhase(installPhase)
 		release, err := kc.LockTool(ctx, ref, version)
 		if err != nil {
 			failTC(fmt.Errorf("lock tool %s@%s: %w", ref, version, err))
@@ -954,7 +961,14 @@ func bringupPkgTools(ctx context.Context, tc *toolchainCtx, bin, zordonHome stri
 		}
 		dataDir := tools.ResolveDataDir(zordonHome, defaultDataDir, ref, version)
 		log.Info("alpha", "toolchain pkg: installing %s@%s", ref, version)
-		if err := tools.EnsurePackage(bin, dataDir, ref, version, nil, out); err != nil {
+		setInstallPhase := func(p string) {
+			if p == "installing" {
+				tc.setPhase(installPhase)
+				return
+			}
+			tc.setPhase(p)
+		}
+		if err := tools.EnsurePackage(ctx, limiter, setInstallPhase, bin, dataDir, ref, version, nil, out); err != nil {
 			release()
 			failTC(err)
 			return
@@ -1052,6 +1066,8 @@ type serviceCtx struct {
 	// moment the prepare step finishes (Pass-like behavior).
 	build        *lifecycle.Instance
 	buildDoneBar *barrier.Barrier // Any(build.success, build.failure)
+	phaseMu      sync.Mutex
+	buildPhase   string
 
 	// exitErr is the result of cmd.Wait. Written by supervisor before
 	// closing done; the close is the happens-before edge for any reader
@@ -1116,6 +1132,18 @@ func (sc *serviceCtx) BuildBarrier(s lifecycle.State) *barrier.Barrier {
 // when a build fails.
 func (sc *serviceCtx) BuildTerminalFailure() *barrier.Barrier {
 	return sc.build.Barrier(alphasfile.BuildTerminalFailure)
+}
+
+func (sc *serviceCtx) setBuildPhase(phase string) {
+	sc.phaseMu.Lock()
+	sc.buildPhase = phase
+	sc.phaseMu.Unlock()
+}
+
+func (sc *serviceCtx) BuildPhase() string {
+	sc.phaseMu.Lock()
+	defer sc.phaseMu.Unlock()
+	return sc.buildPhase
 }
 
 // requestStop closes this service's stopCh once and records why.
@@ -1499,7 +1527,7 @@ func (sc *serviceCtx) TerminalFailure() *barrier.Barrier {
 // lifecycle. cmd.Wait has exactly one owner across the whole codebase,
 // which keeps "exec: Wait was already called" from being expressible.)
 
-func (s *alphaState) configure(path, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, agent bool, miseVersion tools.MiseVersion, af *alphasfile.Alphasfile) {
+func (s *alphaState) configure(path, fsHash, cfgHash string, parentDotenv []string, parentEnv map[string]string, agent bool, miseVersion tools.MiseVersion, buildMaxCPU buildquota.MaxCPU, af *alphasfile.Alphasfile) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.alphasfilePath = path
@@ -1510,6 +1538,9 @@ func (s *alphaState) configure(path, fsHash, cfgHash string, parentDotenv []stri
 	s.agentMode = agent
 	if miseVersion != "" {
 		s.miseVersion = miseVersion
+	}
+	if buildMaxCPU > 0 {
+		s.buildLimiter.SetMaxCPU(buildMaxCPU)
 	}
 	s.config = af
 	s.readiness = make(map[string]string)
@@ -1985,7 +2016,14 @@ func serveAlpha(ctx context.Context, rc runConfig, life *daemon.Lifeline) error 
 	defer logF.Close()
 
 	log := zlog.New(logF, false).WithPID(os.Getpid())
-	log.Info("alpha", "starting pid=%d socket=%s", os.Getpid(), sockPath)
+	if err := daemon.LowerSelfPriority(); err != nil && !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
+		log.Warn("alpha", "lower priority: %v", err)
+	}
+	if nice, err := daemon.ProcessNice(os.Getpid()); err == nil {
+		log.Info("alpha", "starting pid=%d socket=%s nice=%d", os.Getpid(), sockPath, nice)
+	} else {
+		log.Info("alpha", "starting pid=%d socket=%s", os.Getpid(), sockPath)
+	}
 
 	if zordonHome != "" && rc.StateDir.IsSet() {
 		unlockAlpha, err := rc.Keychain.ForWorkspace(rc.StateDir.Path()).LockAlpha(ctx)
@@ -2031,6 +2069,7 @@ func serveAlpha(ctx context.Context, rc runConfig, life *daemon.Lifeline) error 
 		shutdownCh:  make(chan struct{}),
 		life:        life,
 	}
+	state.buildLimiter.SetMaxCPU(rc.BuildMaxCPU)
 
 	// signalReady means only "alpha is listening", NOT "zordon may detach":
 	// zordon blocks in pushConfigure until EventDone, and the Lifeline stays
@@ -2295,8 +2334,12 @@ func handleClean(req *protocol.Request, state *alphaState, cfg bringupConfig, en
 			return
 		}
 	}
+	if args.BuildMaxCPU < 0 {
+		stream.Send(&protocol.Event{Kind: protocol.EventError, Error: fmt.Sprintf("clean: invalid build.maxcpu %d", args.BuildMaxCPU)})
+		return
+	}
 
-	state.configure(args.AlphasfilePath, args.FsHash, args.CfgHash, args.ParentDotenv, args.ParentEnv, args.Agent, miseVer, newConfig)
+	state.configure(args.AlphasfilePath, args.FsHash, args.CfgHash, args.ParentDotenv, args.ParentEnv, args.Agent, miseVer, buildquota.MaxCPU(args.BuildMaxCPU), newConfig)
 	services := newConfig.All()
 	log.Info("alpha", "clean: configured from %s (%d services)", args.AlphasfilePath, len(services))
 
@@ -2473,6 +2516,10 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 			return
 		}
 	}
+	if req.Configure.BuildMaxCPU < 0 {
+		_ = enc.Write(&protocol.Event{Kind: protocol.EventError, Error: fmt.Sprintf("configure: invalid build.maxcpu %d", req.Configure.BuildMaxCPU)})
+		return
+	}
 
 	// Determine services to stop: those running but missing or changed in newConfig
 	toStop := make(map[string]bool)
@@ -2506,11 +2553,11 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 		state.stopServices(toStop)
 	}
 
-	state.configure(req.Configure.AlphasfilePath, req.Configure.FsHash, req.Configure.CfgHash, req.Configure.ParentDotenv, req.Configure.ParentEnv, req.Configure.Agent, miseVer, newConfig)
+	state.configure(req.Configure.AlphasfilePath, req.Configure.FsHash, req.Configure.CfgHash, req.Configure.ParentDotenv, req.Configure.ParentEnv, req.Configure.Agent, miseVer, buildquota.MaxCPU(req.Configure.BuildMaxCPU), newConfig)
 	services := newConfig.All()
 	files := newConfig.AllFiles()
-	log.Info("alpha", "configured from %s (%d services, %d files, failfast=%v), starting bringup",
-		req.Configure.AlphasfilePath, len(services), len(files), failfast)
+	log.Info("alpha", "configured from %s (%d services, %d files, failfast=%v, build.maxcpu=%d), starting bringup",
+		req.Configure.AlphasfilePath, len(services), len(files), failfast, state.buildLimiter.Quota())
 
 	stream := newSafeEncoder(enc)
 	b := &bringup{state: state, cfg: cfg, stream: stream, log: log, failfast: failfast}
@@ -2779,7 +2826,7 @@ func describeBringupWait(services []*alphasfile.Service, serviceCtxs map[string]
 				}
 			}
 		case !sc.buildDoneBar.Triggered():
-			phase = "building"
+			phase = cmp.Or(sc.BuildPhase(), "building")
 			if t, ok := sc.build.ReachedAt("running"); ok {
 				since = t
 			}
@@ -2833,7 +2880,7 @@ func describeBringupWait(services []*alphasfile.Service, serviceCtxs map[string]
 		}
 		return strings.Join(parts, ", ")
 	}
-	phaseOrder := []string{"building", "probing readiness", "running", "starting", "waiting for dependencies"}
+	phaseOrder := []string{"building", "waiting for build slot", "probing readiness", "running", "starting", "waiting for dependencies"}
 	seenPhase := make(map[string]bool, len(phaseOrder))
 	var phaseParts []string
 	for _, ph := range phaseOrder {
@@ -3093,7 +3140,7 @@ func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
 		prepareFail(err)
 		return
 	}
-	if err := prepareBuild(prepCtx, svc, name, repoDir, agent, state, stream, log); err != nil {
+	if err := prepareBuild(prepCtx, svc, sc, name, repoDir, agent, state, stream, log); err != nil {
 		prepareFail(err)
 		return
 	}
@@ -4219,10 +4266,10 @@ func prepareWorkspace(ctx context.Context, svc *alphasfile.Service, name, wsName
 
 // prepareBuild runs the service's build step in dest (the worktree from
 // prepareWorkspace, or "" for use-only `cargo install` / `go install`).
-// Safe to run concurrently across services: each writes to its own
-// dest and bin dir; the per-primary lock is released BEFORE this step,
-// so monorepo siblings build in parallel.
-func prepareBuild(ctx context.Context, svc *alphasfile.Service, name, dest string, agent bool, state *alphaState, stream *safeEncoder, log *zlog.Logger) error {
+// Each service writes to its own dest and bin dir; the per-primary lock is
+// released BEFORE this step, while heavy compiler execution serializes on
+// state.buildLimiter.
+func prepareBuild(ctx context.Context, svc *alphasfile.Service, sc *serviceCtx, name, dest string, agent bool, state *alphaState, stream *safeEncoder, log *zlog.Logger) error {
 	if svc.Package == nil || !svc.Buildable() {
 		return nil
 	}
@@ -4293,6 +4340,22 @@ func prepareBuild(ctx context.Context, svc *alphasfile.Service, name, dest strin
 	if err := relookupPath(c); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
+	var setPhase func(string)
+	if sc != nil {
+		setPhase = func(p string) {
+			sc.setBuildPhase(p)
+			if p == "waiting for build slot" {
+				log.Info("alpha", "prepare %s: waiting for build slot", name)
+			}
+		}
+		defer sc.setBuildPhase("")
+	}
+	release, quota, err := state.buildLimiter.AcquireWithPhase(ctx, setPhase, "waiting for build slot", "building")
+	if err != nil {
+		return fmt.Errorf("build: %w", err)
+	}
+	defer release()
+	c.Env = buildquota.WithBuildEnv(c.Env, quota)
 	if err := runner(ctx, c); err != nil {
 		return fmt.Errorf("build: %w", err)
 	}

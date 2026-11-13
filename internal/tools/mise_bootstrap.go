@@ -18,6 +18,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/piotrkowalczuk/zordon/internal/buildquota"
+	"github.com/piotrkowalczuk/zordon/internal/daemon"
+	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zhttp"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
@@ -69,9 +72,12 @@ func (v MiseVersion) Version() string {
 //     <zordonHome>/bin/mise.
 //  3. Only when no prebuilt release exists or download fails, fall back to
 //     compiling that exact version via `cargo install --locked --version <ver> mise`.
-func EnsureMise(ctx context.Context, kc zlock.GlobalKeychain, zordonHome string, reqVersion MiseVersion, logOut io.Writer) (string, error) {
+func EnsureMise(ctx context.Context, kc zlock.GlobalKeychain, limiter *buildquota.Limiter, setPhase func(string), zordonHome string, reqVersion MiseVersion, logOut io.Writer) (string, error) {
 	if ctx == nil {
 		panic("tools: EnsureMise requires non-nil context")
+	}
+	if limiter == nil {
+		panic("tools: EnsureMise requires non-nil limiter")
 	}
 	ver := reqVersion.Version()
 	if _, err := normalizeMiseVersion(ver); err != nil {
@@ -80,7 +86,10 @@ func EnsureMise(ctx context.Context, kc zlock.GlobalKeychain, zordonHome string,
 	if logOut == nil {
 		logOut = io.Discard
 	}
-	return ensureMiseWithConfig(ctx, kc, defaultMiseBootstrapConfig(ver), zordonHome, logOut)
+	cfg := defaultMiseBootstrapConfig(ver)
+	cfg.limiter = limiter
+	cfg.setPhase = setPhase
+	return ensureMiseWithConfig(ctx, kc, cfg, zordonHome, logOut)
 }
 
 const (
@@ -106,6 +115,8 @@ type miseBootstrapConfig struct {
 	pinnedSHA256s map[misePlatform]string
 	client        *zhttp.Client
 	lookPath      func(string) (string, error)
+	limiter       *buildquota.Limiter
+	setPhase      func(string)
 }
 
 var misePlatformTargets = map[misePlatform]string{
@@ -472,11 +483,22 @@ func cargoInstallMise(ctx context.Context, cfg miseBootstrapConfig, zordonHome, 
 	if err != nil {
 		return fmt.Errorf("cargo not found on PATH (install cargo to compile mise v%s from source)", cfg.version)
 	}
+	lim := cfg.limiter
+	if lim == nil {
+		lim = &buildquota.Limiter{}
+	}
+	release, quota, err := lim.AcquireWithPhase(ctx, cfg.setPhase, "waiting for build slot", "installing mise")
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	_, _ = fmt.Fprintf(logOut, "compiling mise v%s from source via cargo install --locked --version %s mise\n", cfg.version, cfg.version)
-	cmd := exec.CommandContext(ctx, cargoPath, "install", "--root", zordonHome, "--locked", "--force", "--version", cfg.version, "mise")
+	cmd := exec.Command(cargoPath, "install", "--root", zordonHome, "--locked", "--force", "--version", cfg.version, "mise")
+	cmd.Env = buildquota.WithBuildEnv(withoutMakeJobserverEnv(zenv.Environ()), quota)
 	cmd.Stdout = logOut
 	cmd.Stderr = logOut
-	if err := cmd.Run(); err != nil {
+	if err := daemon.RunGroup(ctx, 2*time.Second, cmd); err != nil {
 		if _, cmakeErr := lookPath("cmake"); cmakeErr != nil {
 			return fmt.Errorf("cargo install mise@%s: %w (cmake was not found on PATH and mise native dependencies require it)", cfg.version, err)
 		}
