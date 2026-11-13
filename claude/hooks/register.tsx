@@ -13,7 +13,7 @@ import type {
   ZordonWorkspace,
 } from '../types'
 
-export const PLUGIN_VERSION = '0.29.1'
+export const PLUGIN_VERSION = '0.29.2'
 
 export type Semver = {
   major: number

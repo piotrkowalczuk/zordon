@@ -3,9 +3,13 @@ package zfs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -387,4 +391,110 @@ func TestAtomicWriteExecutable(t *testing.T) {
 	if err != nil || string(got) != "#!/bin/sh\nexit 0\n" {
 		t.Fatalf("Read(%s) = (%q, %v)", bin, string(got), err)
 	}
+}
+
+func TestTryLock_staleHolderPID(t *testing.T) {
+	dir := t.TempDir()
+	deadPID := reapedChildPID(t)
+	lockPath := filepath.Join(dir, "alpha.lock")
+	holdRawLockWithPID(t, lockPath, deadPID)
+
+	_, err := TryLock(dir, "alpha")
+	if !errors.Is(err, ErrLocked) {
+		t.Fatalf("TryLock = %v, want ErrLocked", err)
+	}
+	var lockErr *LockError
+	if !errors.As(err, &lockErr) {
+		t.Fatalf("TryLock error %T does not unwrap to *LockError", err)
+	}
+	if lockErr.HolderPID != 0 {
+		t.Errorf("LockError.HolderPID = %d for dead process, want 0", lockErr.HolderPID)
+	}
+	msg := err.Error()
+	wantStale := fmt.Sprintf("stale pid=%d", deadPID)
+	if !strings.Contains(msg, wantStale) || !strings.Contains(msg, "held by another process") {
+		t.Errorf("error %q missing stale-holder diagnostic (%q / \"held by another process\")", msg, wantStale)
+	}
+	notWant := fmt.Sprintf("held by pid=%d", deadPID)
+	if strings.Contains(msg, notWant) {
+		t.Errorf("error %q falsely blames dead process (%q)", msg, notWant)
+	}
+}
+
+func TestLock_holderDiesMidWait(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "alpha.lock")
+
+	cmd := exec.Command("/bin/sh", "-c", "sleep 60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	childPID := cmd.Process.Pid
+	holdRawLockWithPID(t, lockPath, childPID)
+
+	reaped := make(chan struct{})
+	go func() {
+		defer close(reaped)
+		time.Sleep(60 * time.Millisecond)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-reaped
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 220*time.Millisecond)
+	defer cancel()
+
+	_, err := Lock(ctx, dir, "alpha")
+	if !errors.Is(err, ErrLocked) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Lock = %v, want ErrLocked and DeadlineExceeded", err)
+	}
+	var lockErr *LockError
+	if !errors.As(err, &lockErr) {
+		t.Fatalf("Lock error %T does not unwrap to *LockError", err)
+	}
+	if lockErr.HolderPID != 0 {
+		t.Errorf("LockError.HolderPID = %d after holder died mid-wait, want 0", lockErr.HolderPID)
+	}
+	msg := err.Error()
+	wantStale := fmt.Sprintf("stale pid=%d", childPID)
+	if !strings.Contains(msg, wantStale) || !strings.Contains(msg, "held by another process") {
+		t.Errorf("error %q missing stale-holder diagnostic (%q / \"held by another process\")", msg, wantStale)
+	}
+}
+
+func reapedChildPID(t *testing.T) int {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	cmd := exec.Command(exe, "-test.run=^$")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run no-op child: %v", err)
+	}
+	return cmd.Process.Pid
+}
+
+func holdRawLockWithPID(t *testing.T, lockPath string, pid int) {
+	t.Helper()
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatalf("open %s: %v", lockPath, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		t.Fatalf("flock %s: %v", lockPath, err)
+	}
+	if _, err := f.WriteAt([]byte(strconv.Itoa(pid)+"\n"), 0); err != nil {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+		t.Fatalf("write pid to %s: %v", lockPath, err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	})
 }
