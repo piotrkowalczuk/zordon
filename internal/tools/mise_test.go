@@ -1,12 +1,17 @@
 package tools
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/piotrkowalczuk/zordon/internal/buildquota"
+	"github.com/piotrkowalczuk/zordon/internal/zenv"
 )
 
 // ResolveDataDir is the only piece of the package that's pure-Go (no
@@ -137,7 +142,7 @@ func TestEnsureTools_skipsAToolAlreadyInstalled(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if err := EnsureTools(bin, dir, c.toolchain, "1.0.0", map[string]string{"tool": "2.0.0"}, io.Discard); err != nil {
+			if err := EnsureTools(t.Context(), &buildquota.Limiter{}, nil, bin, dir, c.toolchain, "1.0.0", map[string]string{"tool": "2.0.0"}, io.Discard); err != nil {
 				t.Fatal(err)
 			}
 			got, err := os.ReadFile(calls)
@@ -174,7 +179,7 @@ func TestEnsurePackage_skipsAPackageAlreadyInstalled(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if err := EnsurePackage(bin, dir, "aqua:jqlang/jq", "1.7.1", nil, io.Discard); err != nil {
+			if err := EnsurePackage(t.Context(), &buildquota.Limiter{}, nil, bin, dir, "aqua:jqlang/jq", "1.7.1", nil, io.Discard); err != nil {
 				t.Fatal(err)
 			}
 			got, err := os.ReadFile(calls)
@@ -188,9 +193,89 @@ func TestEnsurePackage_skipsAPackageAlreadyInstalled(t *testing.T) {
 	}
 }
 
+func TestEnsurePackage_warmStartSkipsHeldLimiterAndColdInjectsBuildEnv(t *testing.T) {
+	for _, k := range []string{"CARGO_BUILD_JOBS", "BUNDLE_JOBS", "MAKEFLAGS", "CMAKE_BUILD_PARALLEL_LEVEL", "GOMAXPROCS"} {
+		osUnsetForTest(t, k)
+	}
+	dir := t.TempDir()
+	envOut := filepath.Join(dir, "env.txt")
+	bin := filepath.Join(dir, "mise")
+	script := "#!/bin/sh\ncase \"$*\" in\n" +
+		"  *' where warm@1.0.0') exit 0;;\n" +
+		"  *' where cold@1.0.0') exit 1;;\n" +
+		"  *' install cold@1.0.0') printf 'CARGO=%s\\nMAKE=%s\\nBUNDLE=%s\\nCMAKE=%s\\nGO=%s\\n' \"$CARGO_BUILD_JOBS\" \"$MAKEFLAGS\" \"$BUNDLE_JOBS\" \"$CMAKE_BUILD_PARALLEL_LEVEL\" \"$GOMAXPROCS\" > '" + envOut + "'; exit 0;;\n" +
+		"esac\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	lim := buildquota.NewLimiter(3)
+	rel, _, ok := lim.TryAcquire()
+	if !ok {
+		t.Fatal("TryAcquire failed")
+	}
+
+	shortCtx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	if err := EnsurePackage(shortCtx, lim, nil, bin, dir, "warm", "1.0.0", nil, io.Discard); err != nil {
+		t.Fatalf("warm EnsurePackage blocked on held limiter or failed: %v", err)
+	}
+
+	var phases []string
+	waiting := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- EnsurePackage(t.Context(), lim, func(p string) {
+			phases = append(phases, p)
+			if p == "waiting for build slot" {
+				close(waiting)
+			}
+		}, bin, dir, "cold", "1.0.0", zenv.EnvironmentVariables{"BUNDLE_JOBS": "1"}, io.Discard)
+	}()
+
+	select {
+	case <-waiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for cold EnsurePackage to reach build-slot queue")
+	}
+	rel()
+	if err := <-done; err != nil {
+		t.Fatalf("cold EnsurePackage: %v", err)
+	}
+
+	rawEnv, err := os.ReadFile(envOut)
+	if err != nil {
+		t.Fatalf("read env output: %v", err)
+	}
+	gotEnv := string(rawEnv)
+	for _, want := range []string{"CARGO=3", "MAKE=-j3", "BUNDLE=1", "CMAKE=3", "GO=3"} {
+		if !strings.Contains(gotEnv, want) {
+			t.Errorf("install env missing %q in:\n%s", want, gotEnv)
+		}
+	}
+	if len(phases) != 2 || phases[0] != "waiting for build slot" || phases[1] != "installing" {
+		t.Errorf("phases = %v, want [waiting for build slot, installing]", phases)
+	}
+}
+
 func mustMkdir(t *testing.T, p string) {
 	t.Helper()
 	if err := os.MkdirAll(p, 0o755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func osUnsetForTest(t *testing.T, key string) {
+	t.Helper()
+	prev, had := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(key, prev)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
 }

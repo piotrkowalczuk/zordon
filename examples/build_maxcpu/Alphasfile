@@ -1,0 +1,71 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+# Demonstrates `--build.maxcpu` / `ZORDON_BUILD_MAXCPU`:
+#   1. Heavy service builds serialize on a single build slot so each compiler
+#      receives the full CPU quota instead of thrashing cores in parallel.
+#   2. Quota variables (CARGO_BUILD_JOBS, BUNDLE_JOBS, MAKEFLAGS,
+#      CMAKE_BUILD_PARALLEL_LEVEL, GOMAXPROCS) are injected unless overridden
+#      explicitly in `build.env`.
+
+service "go" "svc1" {
+  src {
+    path = "../.."
+    exe  = "./examples/build_maxcpu/src/app"
+  }
+
+  build {
+    cmd = [
+      "/bin/sh",
+      "-c",
+      "echo svc1:enter >> \"${fs::state()}/timeline.log\"; sleep 0.3; go run . -probe > \"${fs::state()}/svc1-build.env\"; go build -o \"${fs::bin()}/svc1\" .; echo svc1:exit >> \"${fs::state()}/timeline.log\"",
+    ]
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc1", "-addr", "127.0.0.1:${self.vars.port}", "-name", self.name]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+
+service "go" "svc2" {
+  src {
+    path = "../.."
+    exe  = "./examples/build_maxcpu/src/app"
+  }
+
+  build {
+    env = {
+      CARGO_BUILD_JOBS = "1"
+    }
+    cmd = [
+      "/bin/sh",
+      "-c",
+      "echo svc2:enter >> \"${fs::state()}/timeline.log\"; sleep 0.3; go run . -probe > \"${fs::state()}/svc2-build.env\"; go build -o \"${fs::bin()}/svc2\" .; echo svc2:exit >> \"${fs::state()}/timeline.log\"",
+    ]
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/svc2", "-addr", "127.0.0.1:${self.vars.port}", "-name", self.name]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

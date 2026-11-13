@@ -21,6 +21,7 @@ import (
 	"github.com/peterbourgon/ff/v4/ffhelp"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
+	"github.com/piotrkowalczuk/zordon/internal/buildquota"
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/mcpserver"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
@@ -69,7 +70,7 @@ func runMCP(ctx context.Context, stdio commandIO, cfg mcpConfig) error {
 		&mcp.ServerOptions{Instructions: serverInstructions},
 	)
 
-	registerCommandTools(srv, cfg.Home, cfg.MiseVersion, cfg.Agent, cfg.Test)
+	registerCommandTools(srv, cfg.Home, cfg.MiseVersion, cfg.BuildMaxCPU, cfg.Agent, cfg.Test)
 	registerProvisionTools(ctx, srv, log, cfg.Home, cfg.Keychain, cfg.Test)
 
 	if cfg.Transport == transportHTTP {
@@ -89,6 +90,7 @@ type mcpConfig struct {
 	Home        string
 	Keychain    zlock.GlobalKeychain
 	MiseVersion tools.MiseVersion
+	BuildMaxCPU buildquota.MaxCPU
 	Agent       bool
 	Test        alphasfile.TestConfig
 }
@@ -263,7 +265,7 @@ func hostOnly(hostport string) string {
 	return strings.Trim(hostport, "[]")
 }
 
-func registerCommandTools(srv *mcp.Server, zordonHome string, miseVersion tools.MiseVersion, agent bool, testCfg alphasfile.TestConfig) {
+func registerCommandTools(srv *mcp.Server, zordonHome string, miseVersion tools.MiseVersion, buildMaxCPU buildquota.MaxCPU, agent bool, testCfg alphasfile.TestConfig) {
 	root, _ := buildRootCommand(commandIO{Stdout: nil, Stderr: nil}) // introspection only
 	for _, sub := range commandToolSubcommands(root) {
 		name := sub.Name
@@ -271,7 +273,7 @@ func registerCommandTools(srv *mcp.Server, zordonHome string, miseVersion tools.
 			Name:        name,
 			Description: commandToolDescription(sub),
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, in commandToolInput) (*mcp.CallToolResult, any, error) {
-			return runCommandTool(ctx, zordonHome, miseVersion, agent, testCfg, name, in.Args)
+			return runCommandTool(ctx, zordonHome, miseVersion, buildMaxCPU, agent, testCfg, name, in.Args)
 		})
 	}
 }
@@ -302,11 +304,11 @@ func commandToolDescription(sub *ff.Command) string {
 // runCommandTool re-runs one subcommand against capture buffers and returns its
 // output as text. Output stays in the buffers — it must never reach os.Stdout,
 // which is the JSON-RPC channel.
-func runCommandTool(ctx context.Context, zordonHome string, miseVersion tools.MiseVersion, agent bool, testCfg alphasfile.TestConfig, name string, args []string) (*mcp.CallToolResult, any, error) {
+func runCommandTool(ctx context.Context, zordonHome string, miseVersion tools.MiseVersion, buildMaxCPU buildquota.MaxCPU, agent bool, testCfg alphasfile.TestConfig, name string, args []string) (*mcp.CallToolResult, any, error) {
 	var out, errBuf bytes.Buffer
 	root, _ := buildRootCommand(commandIO{Stdout: &out, Stderr: &errBuf})
 
-	argv := commandArgv(zordonHome, miseVersion, agent, testCfg, name, args)
+	argv := commandArgv(zordonHome, miseVersion, buildMaxCPU, agent, testCfg, name, args)
 	err := root.ParseAndRun(ctx, argv, ff.WithEnvVarPrefix("ZORDON"))
 
 	text := joinOutput(out.String(), errBuf.String())
@@ -332,13 +334,16 @@ func runCommandTool(ctx context.Context, zordonHome string, miseVersion tools.Mi
 // commandArgv reconstructs the root flags the MCP server itself resolved so the
 // rebuilt tree sees the same home / test-harness context, then appends the
 // subcommand and its tool args.
-func commandArgv(zordonHome string, miseVersion tools.MiseVersion, agent bool, testCfg alphasfile.TestConfig, name string, args []string) []string {
+func commandArgv(zordonHome string, miseVersion tools.MiseVersion, buildMaxCPU buildquota.MaxCPU, agent bool, testCfg alphasfile.TestConfig, name string, args []string) []string {
 	var argv []string
 	if zordonHome != "" {
 		argv = append(argv, "--home", zordonHome)
 	}
 	if miseVersion != "" {
 		argv = append(argv, "--mise.version", string(miseVersion))
+	}
+	if buildMaxCPU > 0 {
+		argv = append(argv, "--build.maxcpu", buildMaxCPU.String())
 	}
 	if agent {
 		argv = append(argv, "--agent")

@@ -1,0 +1,40 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+# Demonstrates that `alpha` unconditionally lowers its own POSIX scheduling
+# priority (nice 10) at startup so its entire process tree — build steps,
+# provisions, tommy, and service runtimes — inherits lowered priority.
+
+service "go" "app" {
+  src {
+    path = "../.."
+    exe  = "./examples/priority/src/app"
+  }
+
+  build {
+    cmd = [
+      "/bin/sh",
+      "-c",
+      "go run . -probe > \"${fs::state()}/build-nice.env\"; go build -o \"${fs::bin()}/app\" .",
+    ]
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+
+    provision "probe" {
+      after = [self.runtime.ready]
+      cmd   = "go run . -probe > \"${fs::state()}/provision-nice.env\""
+    }
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

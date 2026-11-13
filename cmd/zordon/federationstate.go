@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
+	"github.com/piotrkowalczuk/zordon/internal/buildquota"
 	"github.com/piotrkowalczuk/zordon/internal/control"
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/protocol"
@@ -157,6 +158,7 @@ type startConfig struct {
 	verbose     bool
 	agent       bool
 	miseVersion tools.MiseVersion
+	buildMaxCPU buildquota.MaxCPU
 }
 
 // canReuse is the pure multi-agent-invariant decision: a running level may be
@@ -245,13 +247,13 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 
 	ctxLevel, cancel := context.WithTimeout(ctx, cfg.timeout)
 	defer cancel()
-	if err := spawnAlpha(cfg.alphaBin, levelLog, sock, cfg.timeout, cfg.verbose, cfg.miseVersion, log, inv.Env); err != nil {
+	if err := spawnAlpha(cfg.alphaBin, levelLog, sock, cfg.timeout, cfg.verbose, cfg.miseVersion, cfg.buildMaxCPU, log, inv.Env); err != nil {
 		return nil, fmt.Errorf("%s: %w", lvl.afPath, err)
 	}
 	if err := control.WaitListening(ctxLevel, sock); err != nil {
 		return nil, fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
-	sum, err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent, cfg.miseVersion, levelLog)
+	sum, err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent, cfg.miseVersion, cfg.buildMaxCPU, levelLog)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", lvl.afPath, err)
 	}

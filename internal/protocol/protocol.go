@@ -65,6 +65,9 @@ type ConfigureArgs struct {
 	// MiseVersion overrides tools.DefaultMiseVersion when set via
 	// --mise.version / ZORDON_MISE_VERSION.
 	MiseVersion string `json:"mise_version,omitempty"`
+	// BuildMaxCPU caps CPU parallelism per build subprocess when > 0
+	// (--build.maxcpu / ZORDON_BUILD_MAXCPU; 0 = auto).
+	BuildMaxCPU int `json:"build_maxcpu,omitempty"`
 	// FsHash is the filesystem-location identity of this invocation (depends
 	// only on the directory). Sent for symmetry / verification; the socket
 	// path already encodes it.

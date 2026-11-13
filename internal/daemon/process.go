@@ -1,6 +1,11 @@
 package daemon
 
-import "os/exec"
+import (
+	"context"
+	"os/exec"
+	"syscall"
+	"time"
+)
 
 // Process makes a started command's exit selectable like a context: Done()
 // closes when it exits, and Err() is the Wait result. It hides the one goroutine
@@ -29,3 +34,27 @@ func (p *Process) Done() <-chan struct{} { return p.done }
 // Err is the exec.Cmd.Wait result (nil on a clean exit). Read it only after
 // Done() is observed closed — that close establishes the happens-before.
 func (p *Process) Err() error { return p.err }
+
+func RunGroup(ctx context.Context, grace time.Duration, cmd *exec.Cmd) error {
+	if ctx == nil {
+		panic("daemon.RunGroup: nil context")
+	}
+	if cmd == nil {
+		panic("daemon.RunGroup: nil cmd")
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	proc := Wait(cmd)
+	select {
+	case <-proc.Done():
+		return proc.Err()
+	case <-ctx.Done():
+		_ = ReapGroup(cmd.Process.Pid, grace, proc.Done())
+		return ctx.Err()
+	}
+}

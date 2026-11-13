@@ -208,6 +208,8 @@ jobs:
           # downloads Maven + deps into HOME's ~/.m2 on a cold cache.
           - java
           - toolchain_bootstrap
+          - build_maxcpu
+          - priority
     container:
       image: ${{ matrix.distro }}
       # tini as pid 1 to reap zombies; GitHub's bare `tail` pid 1

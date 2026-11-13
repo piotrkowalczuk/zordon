@@ -84,6 +84,7 @@ nav:
       - Develop a dependency locally: how-to/develop-a-dependency-locally.md
   - Reference:
       - Binaries and layout: reference/binaries.md
+      - --build.maxcpu: reference/build-maxcpu.md
       - zordon mcp: reference/mcp.md
       - zordon status --format: reference/status-formats.md
       - Log filter DSL: reference/log-filter.md
