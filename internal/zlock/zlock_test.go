@@ -161,14 +161,22 @@ func TestGlobalKeychain_TryLockPort(t *testing.T) {
 
 func TestGlobalKeychain_TryLockPort_invalidPortPanics(t *testing.T) {
 	kc := NewGlobalKeychain(t.TempDir())
-	for _, port := range []int{-1, 0, 65536} {
-		t.Run(strconv.Itoa(port), func(t *testing.T) {
+	cases := map[string]struct {
+		port int
+	}{
+		"negative":     {port: -1},
+		"zero":         {port: 0},
+		"above_uint16": {port: 65536},
+	}
+
+	for hint, c := range cases {
+		t.Run(hint, func(t *testing.T) {
 			defer func() {
 				if recover() == nil {
-					t.Fatalf("TryLockPort(%d) did not panic", port)
+					t.Fatalf("TryLockPort(%d) did not panic", c.port)
 				}
 			}()
-			_, _ = kc.TryLockPort(port)
+			_, _ = kc.TryLockPort(c.port)
 		})
 	}
 }

@@ -18,7 +18,7 @@ arguments / readiness probe that consume them.
 
 ### Helpers
 
-- `net::pickport()` — reserves a free port in `20000..31999`, held by `alpha` during bringup and released into `TIME_WAIT` (`SO_REUSEADDR`) right before the service starts.
+- `net::pickport()` — reserves a free port in `20000..31999` under `$ZORDON_HOME/locks/port-<port>.lock`, held by `alpha` during bringup and released into `TIME_WAIT` (`SO_REUSEADDR`) right before the service starts.
   Each call returns a new port — store it in `vars` if you need to reuse it.
 - `fs::tmp()` — a per-invocation **scratch** dir under `$TMPDIR/zordon-<fs::hash>/`.
   For disposable byproducts only: it lives in the OS temp dir, which the

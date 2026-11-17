@@ -146,6 +146,7 @@ type resolver struct {
 
 	curSvc           *svcState
 	pickedPorts      map[int]bool
+	unownedPorts     map[int]bool
 	portReservations []*znet.Reservation
 	resolvedServices []*Service
 }
@@ -1165,8 +1166,11 @@ func (r *resolver) finishService(st *svcState) error {
 			return fmt.Errorf("readiness: %w", err)
 		}
 		rt.Readiness = p
-		if probePort > 0 && r.pickedPorts[probePort] && !slices.Contains(st.ports, probePort) {
-			st.ports = append(st.ports, probePort)
+		if probePort > 0 && r.unownedPorts[probePort] {
+			delete(r.unownedPorts, probePort)
+			if !slices.Contains(st.ports, probePort) {
+				st.ports = append(st.ports, probePort)
+			}
 		}
 	}
 
@@ -2437,6 +2441,9 @@ func (r *resolver) pickPort() (int, error) {
 	if r.pickedPorts == nil {
 		r.pickedPorts = map[int]bool{}
 	}
+	if r.inv != nil && r.inv.FsHash != "" {
+		r.pickedPorts[WorkspacePort(r.inv.FsHash)] = true
+	}
 	res, err := znet.ReservePort(r.keychain(), r.pickedPorts)
 	if err != nil {
 		return 0, err
@@ -2444,8 +2451,15 @@ func (r *resolver) pickPort() (int, error) {
 	port := res.Port()
 	r.pickedPorts[port] = true
 	r.portReservations = append(r.portReservations, res)
-	if r.curSvc != nil && !slices.Contains(r.curSvc.ports, port) {
-		r.curSvc.ports = append(r.curSvc.ports, port)
+	if r.curSvc != nil {
+		if !slices.Contains(r.curSvc.ports, port) {
+			r.curSvc.ports = append(r.curSvc.ports, port)
+		}
+	} else {
+		if r.unownedPorts == nil {
+			r.unownedPorts = map[int]bool{}
+		}
+		r.unownedPorts[port] = true
 	}
 	return port, nil
 }

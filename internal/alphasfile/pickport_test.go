@@ -2,8 +2,10 @@ package alphasfile
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/znet"
 )
 
@@ -65,4 +67,102 @@ service "go" "worker" {
 		}
 		seen[p] = true
 	}
+}
+
+func TestPlan_Compute_sharedReadinessPortOwnedOnlyByAllocator(t *testing.T) {
+	af := compile(t, `
+service "go" "db" {
+  package = "example.com/db@v1.0.0"
+  vars = { port = net::pickport() }
+  readiness {
+    tcp { port = self.vars.port }
+  }
+}
+
+service "go" "app" {
+  package = "example.com/app@v1.0.0"
+  readiness {
+    tcp { port = service.go.db.vars.port }
+  }
+}
+`, nil)
+
+	db := svcByName(af, "db")
+	if db == nil || len(db.Ports) != 1 {
+		t.Fatalf("db.Ports = %v, want 1 port", db.Ports)
+	}
+	app := svcByName(af, "app")
+	if app == nil {
+		t.Fatal("service app not found")
+	}
+	if len(app.Ports) != 0 {
+		t.Fatalf("app.Ports = %v, want empty (app must not claim db's port via readiness probe)", app.Ports)
+	}
+}
+
+func TestPlan_Compute_skipsWorkspacePort(t *testing.T) {
+	inv := testInv()
+	wsPort := WorkspacePort(inv.FsHash)
+
+	m, err := NewManifestState("test.hcl", []byte(`
+service "go" "api" {
+  package = "example.com/api@v1.0.0"
+  vars = { port = net::pickport() }
+}
+`), inv)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	plan, err := m.Plan(nil, testCfgHash, TestConfig{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	plan.r.pickedPorts = make(map[int]bool, znet.PortRangeSpan)
+	for i := range znet.PortRangeSpan {
+		p := znet.PortRangeBase + i
+		if p != wsPort {
+			plan.r.pickedPorts[p] = true
+		}
+	}
+
+	if _, err := plan.Compute(); err == nil || !strings.Contains(err.Error(), "no free port available") {
+		t.Fatalf("Compute when only WorkspacePort(%q)=%d is unpicked: err = %v, want no free port available", inv.FsHash, wsPort, err)
+	}
+}
+
+func TestPlan_Compute_respectsGlobalKeychainPortLocks(t *testing.T) {
+	kc := zlock.NewGlobalKeychain(t.TempDir())
+	inv := testInv()
+
+	m, err := NewManifestState("test.hcl", []byte(`
+service "go" "api" {
+  package = "example.com/api@v1.0.0"
+  vars = { port = net::pickport() }
+}
+`), inv)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	m.tree.kc = kc
+	plan, err := m.Plan(nil, testCfgHash, TestConfig{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+
+	af, err := plan.Compute()
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	api := svcByName(af, "api")
+	if api == nil || len(api.Ports) != 1 {
+		t.Fatalf("api.Ports = %v, want 1 port", api.Ports)
+	}
+	port := api.Ports[0]
+
+	unlock, err := kc.TryLockPort(port)
+	if err != nil {
+		t.Fatalf("TryLockPort(%d) after Compute: %v", port, err)
+	}
+	unlock()
 }

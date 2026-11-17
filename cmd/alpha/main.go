@@ -1172,7 +1172,7 @@ func (sc *serviceCtx) holdPorts(ports []int, kc zlock.GlobalKeychain, log *zlog.
 		if h, err := znet.HoldPort(kc, port); err == nil {
 			sc.portHolders = append(sc.portHolders, h)
 		} else if log != nil {
-			log.Info("alpha", "service[%s]: hold port %d: %v", sc.name, port, err)
+			log.Error("alpha", "service[%s]: hold port %d: %v", sc.name, port, err)
 		}
 	}
 }

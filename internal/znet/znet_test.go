@@ -2,10 +2,14 @@ package znet
 
 import (
 	"net"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -87,6 +91,7 @@ func TestReservePort_skipsFlockAndSkipMap(t *testing.T) {
 }
 
 func TestReservePort_timeWaitAndHoldPort(t *testing.T) {
+	assertLoopbackConnect(t)
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 
 	res, err := ReservePort(kc, nil)
@@ -140,6 +145,7 @@ func TestReservePort_timeWaitAndHoldPort(t *testing.T) {
 }
 
 func TestReservePort_raceStress60s(t *testing.T) {
+	assertLoopbackConnect(t)
 	const (
 		stressDuration = 60 * time.Second
 		burstInterval  = 200 * time.Millisecond
@@ -164,7 +170,7 @@ func TestReservePort_raceStress60s(t *testing.T) {
 			defer stealerWG.Done()
 			var lc net.ListenConfig
 			for !stopStealers.Load() {
-				if id%2 == 0 {
+				if id == 0 {
 					ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 					if err == nil {
 						_ = ln.Close()
@@ -177,9 +183,15 @@ func TestReservePort_raceStress60s(t *testing.T) {
 						if phaseBefore == 0 {
 							continue
 						}
-						if tryStealReservedPort(kc, p) {
+						stolen := false
+						if id == 1 {
+							stolen = tryBindAndListenProbe(p)
+						} else {
+							stolen = tryStealReservedPort(kc, p)
+						}
+						if stolen {
 							if phaseAfter := activeOwners[p].Load(); phaseAfter != 0 {
-								t.Errorf("RACE CONDITION: stealer bound reserved port %d while owned by worker (phaseBefore=%d phaseAfter=%d)", p, phaseBefore, phaseAfter)
+								t.Errorf("RACE CONDITION: stealer %d bound reserved port %d while owned by worker (phaseBefore=%d phaseAfter=%d)", id, p, phaseBefore, phaseAfter)
 								return
 							}
 						}
@@ -253,6 +265,119 @@ func TestReservation_panicsOnInvalidUse(t *testing.T) {
 	})
 }
 
+func TestReservation_Close_zeroValueDoesNotCloseStdin(t *testing.T) {
+	saved0, err := syscall.Dup(0)
+	if err != nil {
+		t.Fatalf("Dup(0): %v", err)
+	}
+	defer func() {
+		_ = syscall.Dup2(saved0, 0)
+		_ = syscall.Close(saved0)
+	}()
+
+	var zero Reservation
+	zero.TransitionToTimeWait()
+	zero.Close()
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(0, &st); err != nil {
+		t.Fatalf("zero Reservation closed fd 0 (stdin): Fstat(0) = %v", err)
+	}
+}
+
+func TestReservePort_propagatesLockIOError(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "locks"), []byte("not-a-dir"), 0o600); err != nil {
+		t.Fatalf("write locks file: %v", err)
+	}
+	kc := zlock.NewGlobalKeychain(home)
+
+	_, err := ReservePort(kc, nil)
+	if err == nil {
+		t.Fatal("ReservePort succeeded with broken locks path; want I/O error")
+	}
+	if strings.Contains(err.Error(), "no free port available") {
+		t.Fatalf("ReservePort swallowed lock I/O error and returned %q; want underlying filesystem error", err.Error())
+	}
+}
+
+func TestReservation_TransitionToTimeWait_leakedServerFDDoesNotHang(t *testing.T) {
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("Socketpair: %v", err)
+	}
+	cliFD, srvFD := fds[0], fds[1]
+	defer func() {
+		_ = syscall.Close(cliFD)
+		_ = syscall.Close(srvFD)
+	}()
+
+	leakedChildFD, err := syscall.Dup(srvFD)
+	if err != nil {
+		t.Fatalf("Dup(srvFD): %v", err)
+	}
+	defer func() { _ = syscall.Close(leakedChildFD) }()
+
+	_ = syscall.Close(srvFD)
+
+	done := make(chan bool, 1)
+	go func() {
+		tv := syscall.Timeval{Usec: 50_000}
+		_ = syscall.SetsockoptTimeval(cliFD, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+		done <- readEOF(cliFD)
+	}()
+
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("readEOF returned true when peer fd leaked and never sent FIN; want false")
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("readEOF hung forever when peer fd leaked (SO_RCVTIMEO EAGAIN was ignored)")
+	}
+}
+
+func TestReservePort_probeDoesNotTouchIPv4WhileIPv6InTimeWait(t *testing.T) {
+	assertLoopbackConnect(t)
+	kc := zlock.NewGlobalKeychain(t.TempDir())
+
+	res, err := ReservePort(kc, nil)
+	if err != nil {
+		t.Fatalf("ReservePort: %v", err)
+	}
+	port := res.Port()
+	res.ReleaseToTimeWait()
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	wg.Add(4)
+	for range 4 {
+		go func() {
+			defer wg.Done()
+			for !stop.Load() {
+				if tryBindAndListenProbe(port) {
+					t.Errorf("tryBindAndListenProbe(%d) succeeded while [::1]:%d is in TIME_WAIT", port, port)
+					return
+				}
+			}
+		}()
+	}
+	defer func() {
+		stop.Store(true)
+		wg.Wait()
+	}()
+
+	var lc net.ListenConfig
+	addr := "127.0.0.1:" + strconv.Itoa(port)
+	for i := range 200 {
+		ln, err := lc.Listen(t.Context(), "tcp", addr)
+		if err != nil {
+			t.Fatalf("iteration %d: service Listen(%s) failed while concurrent probes ran: %v", i, addr, err)
+		}
+		_ = ln.Close()
+	}
+}
+
 func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bool, activeOwners *[65536]atomic.Int32, totalCycles *atomic.Int64) {
 	t.Helper()
 	res, err := ReservePort(kc, skip)
@@ -318,6 +443,10 @@ func tryStealReservedPort(kc zlock.GlobalKeychain, port int) bool {
 		return false
 	}
 	defer unlock()
+	return tryBindAndListenProbe(port)
+}
+
+func tryBindAndListenProbe(port int) bool {
 	fd, fd6, ok := bindAndListenProbe(port)
 	if !ok {
 		return false
@@ -325,6 +454,22 @@ func tryStealReservedPort(kc zlock.GlobalKeychain, port int) bool {
 	r := &Reservation{port: port, listenFD: fd, listenFD6: fd6}
 	r.Close()
 	return true
+}
+
+func assertLoopbackConnect(t *testing.T) {
+	t.Helper()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp6", "[::1]:0")
+	if err != nil {
+		t.Fatalf("prerequisite tcp6 loopback listen failed: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	var d net.Dialer
+	c, err := d.DialContext(t.Context(), "tcp6", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("prerequisite tcp6 loopback connect failed (sandbox blocks loopback connect with EPERM): %v", err)
+	}
+	_ = c.Close()
 }
 
 func assertPanics(t *testing.T, name string, fn func()) {
