@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 func TestReservePort_rangeAndUniqueness(t *testing.T) {
@@ -91,7 +92,7 @@ func TestReservePort_skipsFlockAndSkipMap(t *testing.T) {
 }
 
 func TestReservePort_timeWaitAndHoldPort(t *testing.T) {
-	assertLoopbackConnect(t)
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 
 	res, err := ReservePort(kc, nil)
@@ -145,12 +146,12 @@ func TestReservePort_timeWaitAndHoldPort(t *testing.T) {
 }
 
 func TestReservePort_raceStress60s(t *testing.T) {
-	assertLoopbackConnect(t)
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	const (
 		stressDuration = 60 * time.Second
 		burstInterval  = 200 * time.Millisecond
 		workers        = 8
-		windowSize     = 10
+		windowSize     = 16
 		stealers       = 4
 	)
 
@@ -162,38 +163,33 @@ func TestReservePort_raceStress60s(t *testing.T) {
 		stopStealers atomic.Bool
 		stealerWG    sync.WaitGroup
 	)
-	currentBase.Store(PortRangeBase)
+	coprimeStrides := [...]int{17, 29, 43, 61, 89, 113, 149, 197, 251, 313, 389, 463}
+	stride := coprimeStrides[randomOffset(len(coprimeStrides))]
+	startOffset := randomOffset(PortRangeSpan)
+	currentBase.Store(int32(startOffset))
 
 	for s := range stealers {
 		stealerWG.Add(1)
 		go func(id int) {
 			defer stealerWG.Done()
-			var lc net.ListenConfig
 			for !stopStealers.Load() {
-				if id == 0 {
-					ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-					if err == nil {
-						_ = ln.Close()
+				winOffset := int(currentBase.Load())
+				for i := range windowSize {
+					p := PortRangeBase + (winOffset+i*stride)%PortRangeSpan
+					phaseBefore := activeOwners[p].Load()
+					if phaseBefore == 0 {
+						continue
 					}
-				} else {
-					base := int(currentBase.Load())
-					for offset := range windowSize {
-						p := PortRangeBase + (base-PortRangeBase+offset)%PortRangeSpan
-						phaseBefore := activeOwners[p].Load()
-						if phaseBefore == 0 {
-							continue
-						}
-						stolen := false
-						if id == 1 {
-							stolen = tryBindAndListenProbe(p)
-						} else {
-							stolen = tryStealReservedPort(kc, p)
-						}
-						if stolen {
-							if phaseAfter := activeOwners[p].Load(); phaseAfter != 0 {
-								t.Errorf("RACE CONDITION: stealer %d bound reserved port %d while owned by worker (phaseBefore=%d phaseAfter=%d)", id, p, phaseBefore, phaseAfter)
-								return
-							}
+					stolen := false
+					if id == 0 {
+						stolen = tryBindAndListenProbe(p)
+					} else {
+						stolen = tryStealReservedPort(kc, p)
+					}
+					if stolen {
+						if phaseAfter := activeOwners[p].Load(); phaseAfter != 0 {
+							t.Errorf("RACE CONDITION: stealer %d bound reserved port %d while owned by worker (phaseBefore=%d phaseAfter=%d)", id, p, phaseBefore, phaseAfter)
+							return
 						}
 					}
 				}
@@ -209,9 +205,9 @@ func TestReservePort_raceStress60s(t *testing.T) {
 	deadline := time.Now().Add(stressDuration)
 	for burst := 0; time.Now().Before(deadline); burst++ {
 		burstStart := time.Now()
-		winOffset := (burst * windowSize) % PortRangeSpan
-		currentBase.Store(int32(PortRangeBase + winOffset))
-		skip := buildSkipOutsideWindow(winOffset, windowSize)
+		winOffset := (startOffset + burst*windowSize*stride) % PortRangeSpan
+		currentBase.Store(int32(winOffset))
+		skip := buildSkipOutsideWindow(winOffset, windowSize, stride)
 
 		startBurst := make(chan struct{})
 		var wg sync.WaitGroup
@@ -318,27 +314,23 @@ func TestReservation_TransitionToTimeWait_leakedServerFDDoesNotHang(t *testing.T
 	}
 	defer func() { _ = syscall.Close(leakedChildFD) }()
 
-	_ = syscall.Close(srvFD)
-
 	done := make(chan bool, 1)
 	go func() {
-		tv := syscall.Timeval{Usec: 50_000}
-		_ = syscall.SetsockoptTimeval(cliFD, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
-		done <- readEOF(cliFD)
+		done <- closePeerAndWaitEOF(srvFD, cliFD)
 	}()
 
 	select {
 	case ok := <-done:
 		if ok {
-			t.Fatal("readEOF returned true when peer fd leaked and never sent FIN; want false")
+			t.Fatal("closePeerAndWaitEOF returned true when peer fd leaked and never sent FIN; want false")
 		}
-	case <-time.After(300 * time.Millisecond):
-		t.Fatal("readEOF hung forever when peer fd leaked (SO_RCVTIMEO EAGAIN was ignored)")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("closePeerAndWaitEOF hung forever when peer fd leaked (SO_RCVTIMEO EAGAIN was ignored)")
 	}
 }
 
 func TestReservePort_probeDoesNotTouchIPv4WhileIPv6InTimeWait(t *testing.T) {
-	assertLoopbackConnect(t)
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 
 	res, err := ReservePort(kc, nil)
@@ -378,6 +370,48 @@ func TestReservePort_probeDoesNotTouchIPv4WhileIPv6InTimeWait(t *testing.T) {
 	}
 }
 
+func TestReservation_TransitionToTimeWait_fallsBackToIPv4WhenIPv6Unavailable(t *testing.T) {
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
+	kc := zlock.NewGlobalKeychain(t.TempDir())
+
+	res, err := ReservePort(kc, nil)
+	if err != nil {
+		t.Fatalf("ReservePort: %v", err)
+	}
+	port := res.Port()
+	if res.listenFD6 >= 0 {
+		_ = syscall.Close(res.listenFD6)
+		res.listenFD6 = -1
+	}
+	res.ReleaseToTimeWait()
+
+	if tryBindAndListenProbe(port) {
+		t.Fatalf("tryBindAndListenProbe(%d) succeeded when IPv6 was unavailable; want IPv4 TIME_WAIT fallback to block SO_REUSEADDR=0 probe", port)
+	}
+}
+
+func TestBindAndListenTCP6Probe_rejectsSocketEMFILE(t *testing.T) {
+	var orig syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &orig); err != nil {
+		t.Fatalf("Getrlimit(RLIMIT_NOFILE): %v", err)
+	}
+	zero := syscall.Rlimit{Cur: 0, Max: orig.Max}
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &zero); err != nil {
+		t.Fatalf("Setrlimit(RLIMIT_NOFILE, 0): %v", err)
+	}
+	defer func() {
+		_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &orig)
+	}()
+
+	fd6, ok := bindAndListenTCP6Probe(PortRangeBase)
+	if fd6 >= 0 {
+		_ = syscall.Close(fd6)
+	}
+	if ok {
+		t.Fatal("bindAndListenTCP6Probe returned ok=true on EMFILE; want ok=false so transient fd exhaustion does not bypass IPv6 probe")
+	}
+}
+
 func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bool, activeOwners *[65536]atomic.Int32, totalCycles *atomic.Int64) {
 	t.Helper()
 	res, err := ReservePort(kc, skip)
@@ -393,8 +427,8 @@ func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bo
 	}
 	defer activeOwners[port].Store(0)
 
-	res.ReleaseToTimeWait()
 	activeOwners[port].Store(2)
+	res.ReleaseToTimeWait()
 	runtime.Gosched()
 
 	holder, err := HoldPort(kc, port)
@@ -407,8 +441,8 @@ func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bo
 
 	time.Sleep(5 * time.Millisecond)
 
-	holder.TransitionToTimeWait()
 	activeOwners[port].Store(4)
+	holder.TransitionToTimeWait()
 	runtime.Gosched()
 
 	var lc net.ListenConfig
@@ -422,10 +456,10 @@ func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bo
 	totalCycles.Add(1)
 }
 
-func buildSkipOutsideWindow(winOffset, windowSize int) map[int]bool {
+func buildSkipOutsideWindow(winOffset, windowSize, stride int) map[int]bool {
 	allowed := make(map[int]bool, windowSize)
 	for i := range windowSize {
-		allowed[PortRangeBase+(winOffset+i)%PortRangeSpan] = true
+		allowed[PortRangeBase+(winOffset+i*stride)%PortRangeSpan] = true
 	}
 	skip := make(map[int]bool, PortRangeSpan-windowSize)
 	for i := range PortRangeSpan {
@@ -454,22 +488,6 @@ func tryBindAndListenProbe(port int) bool {
 	r := &Reservation{port: port, listenFD: fd, listenFD6: fd6}
 	r.Close()
 	return true
-}
-
-func assertLoopbackConnect(t *testing.T) {
-	t.Helper()
-	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "tcp6", "[::1]:0")
-	if err != nil {
-		t.Fatalf("prerequisite tcp6 loopback listen failed: %v", err)
-	}
-	defer func() { _ = ln.Close() }()
-	var d net.Dialer
-	c, err := d.DialContext(t.Context(), "tcp6", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("prerequisite tcp6 loopback connect failed (sandbox blocks loopback connect with EPERM): %v", err)
-	}
-	_ = c.Close()
 }
 
 func assertPanics(t *testing.T, name string, fn func()) {

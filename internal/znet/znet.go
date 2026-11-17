@@ -42,19 +42,26 @@ func (r *Reservation) TransitionToTimeWait() {
 	if r.port <= 0 {
 		return
 	}
+	// ReservePort already placed [::1]:port into TIME_WAIT (2*MSL = 30..60s).
+	// Skip minting a second TIME_WAIT PCB when HoldPort held the port briefly
+	// so rapid bringups do not saturate the kernel's TIME_WAIT table.
+	needTimeWait := r.heldAt.IsZero() || time.Since(r.heldAt) >= 5*time.Second
+	placed6 := false
 	if r.listenFD6 >= 0 {
-		// ReservePort already placed [::1]:port into TIME_WAIT (2*MSL = 30..60s).
-		// Skip minting a second TIME_WAIT PCB when HoldPort held the port briefly
-		// so rapid bringups do not saturate the kernel's TIME_WAIT table.
-		if r.heldAt.IsZero() || time.Since(r.heldAt) >= 5*time.Second {
-			transitionToTimeWait6(r.listenFD6, r.port)
+		if needTimeWait {
+			placed6 = transitionToTimeWait6(r.listenFD6, r.port)
 		} else {
 			_ = syscall.Close(r.listenFD6)
+			placed6 = true
 		}
 		r.listenFD6 = -1
 	}
 	if r.listenFD >= 0 {
-		_ = syscall.Close(r.listenFD)
+		if needTimeWait && !placed6 {
+			_ = transitionToTimeWait4(r.listenFD, r.port)
+		} else {
+			_ = syscall.Close(r.listenFD)
+		}
 		r.listenFD = -1
 	}
 }
@@ -278,15 +285,12 @@ func bindAndListenProbe(port int) (int, int, bool) {
 func bindAndListenTCP6Probe(port int) (int, bool) {
 	fd, err := socketCloseOnExec(syscall.AF_INET6, syscall.SOCK_STREAM)
 	if err != nil {
-		return -1, true
+		return -1, isIPv6Unsupported(err)
 	}
 	sa := &syscall.SockaddrInet6{Port: port, Addr: [16]byte{15: 1}}
 	if err := syscall.Bind(fd, sa); err != nil {
 		_ = syscall.Close(fd)
-		if errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EADDRNOTAVAIL) {
-			return -1, true
-		}
-		return -1, false
+		return -1, isIPv6Unsupported(err)
 	}
 	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
 		_ = syscall.Close(fd)
@@ -297,6 +301,12 @@ func bindAndListenTCP6Probe(port int) (int, bool) {
 		return -1, false
 	}
 	return fd, true
+}
+
+func isIPv6Unsupported(err error) bool {
+	return errors.Is(err, syscall.EAFNOSUPPORT) ||
+		errors.Is(err, syscall.EPROTONOSUPPORT) ||
+		errors.Is(err, syscall.EADDRNOTAVAIL)
 }
 
 func probeUDP4Free(port int) bool {
@@ -310,40 +320,72 @@ func probeUDP4Free(port int) bool {
 	return syscall.Bind(fd, sa) == nil
 }
 
-func transitionToTimeWait6(listenFD6, port int) {
+func transitionToTimeWait6(listenFD6, port int) bool {
 	sa := &syscall.SockaddrInet6{Port: port, Addr: [16]byte{15: 1}}
-	for range 8 {
-		done, retry := connectAndClosePeer6(listenFD6, sa)
-		if done || !retry {
-			break
-		}
-	}
-	_ = syscall.Close(listenFD6)
+	return transitionToTimeWait(listenFD6, syscall.AF_INET6, sa)
 }
 
-func connectAndClosePeer6(listenFD6 int, sa *syscall.SockaddrInet6) (done, retry bool) {
-	cliFD, err := socketCloseOnExec(syscall.AF_INET6, syscall.SOCK_STREAM)
+func transitionToTimeWait4(listenFD4, port int) bool {
+	sa := &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}
+	return transitionToTimeWait(listenFD4, syscall.AF_INET, sa)
+}
+
+func transitionToTimeWait(listenFD, domain int, sa syscall.Sockaddr) bool {
+	curFD := listenFD
+	for range 8 {
+		done, retry := connectAndClosePeer(curFD, domain, sa)
+		if !done {
+			if !retry {
+				break
+			}
+			continue
+		}
+		_ = syscall.Close(curFD)
+		curFD = -1
+		checkFD, err := socketCloseOnExec(domain, syscall.SOCK_STREAM)
+		if err != nil {
+			return true
+		}
+		if err := syscall.Bind(checkFD, sa); err != nil {
+			_ = syscall.Close(checkFD)
+			return errors.Is(err, syscall.EADDRINUSE)
+		}
+		if err := syscall.SetsockoptInt(checkFD, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+			_ = syscall.Close(checkFD)
+			return false
+		}
+		if err := syscall.Listen(checkFD, 8); err != nil {
+			_ = syscall.Close(checkFD)
+			return false
+		}
+		curFD = checkFD
+	}
+	if curFD >= 0 {
+		_ = syscall.Close(curFD)
+	}
+	return false
+}
+
+func connectAndClosePeer(listenFD, domain int, sa syscall.Sockaddr) (done, retry bool) {
+	cliFD, err := socketCloseOnExec(domain, syscall.SOCK_STREAM)
 	if err != nil {
 		return false, false
 	}
 	connErr := syscall.Connect(cliFD, sa)
-	if connErr != nil && !errors.Is(connErr, syscall.EINTR) && !errors.Is(connErr, syscall.EISCONN) && !errors.Is(connErr, syscall.EALREADY) {
+	if connErr != nil && !errors.Is(connErr, syscall.EINTR) {
 		_ = syscall.Close(cliFD)
 		if errors.Is(connErr, syscall.EPERM) || errors.Is(connErr, syscall.EACCES) {
 			return false, false
 		}
 		return false, true
 	}
-	cliPort := localPortOf6(cliFD)
-	srvFD, err := acceptPeer6(listenFD6, cliPort)
+	cliPort := localPortOf(cliFD)
+	srvFD, err := acceptPeer(listenFD, cliPort)
 	if err != nil {
 		_ = syscall.Close(cliFD)
 		return false, true
 	}
-	_ = syscall.Close(srvFD)
-	tv := syscall.Timeval{Usec: 200_000}
-	_ = syscall.SetsockoptTimeval(cliFD, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
-	if !readEOF(cliFD) {
+	if !closePeerAndWaitEOF(srvFD, cliFD) {
 		_ = syscall.Close(cliFD)
 		return false, true
 	}
@@ -356,27 +398,42 @@ func connectAndClosePeer6(listenFD6 int, sa *syscall.SockaddrInet6) (done, retry
 	return true, false
 }
 
+func closePeerAndWaitEOF(srvFD, cliFD int) bool {
+	_ = syscall.Close(srvFD)
+	tv := syscall.Timeval{Usec: 200_000}
+	_ = syscall.SetsockoptTimeval(cliFD, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+	return readEOF(cliFD)
+}
+
 func waitDisconnected(fd int) {
 	for range 10000 {
-		if _, err := syscall.Getpeername(fd); err != nil {
+		_, err := syscall.Getpeername(fd)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
 			return
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
 }
 
-func localPortOf6(fd int) int {
+func localPortOf(fd int) int {
 	sa, err := syscall.Getsockname(fd)
 	if err != nil {
 		return 0
 	}
-	if inet6, ok := sa.(*syscall.SockaddrInet6); ok {
-		return inet6.Port
+	switch v := sa.(type) {
+	case *syscall.SockaddrInet6:
+		return v.Port
+	case *syscall.SockaddrInet4:
+		return v.Port
+	default:
+		return 0
 	}
-	return 0
 }
 
-func acceptPeer6(listenFD, wantPort int) (int, error) {
+func acceptPeer(listenFD, wantPort int) (int, error) {
 	_ = syscall.SetNonblock(listenFD, true)
 	defer func() { _ = syscall.SetNonblock(listenFD, false) }()
 	for range 4000 {
@@ -388,15 +445,24 @@ func acceptPeer6(listenFD, wantPort int) (int, error) {
 		if err != nil {
 			return -1, err
 		}
-		if wantPort > 0 {
-			if inet6, ok := rsa.(*syscall.SockaddrInet6); ok && inet6.Port != wantPort {
-				_ = syscall.Close(fd)
-				continue
-			}
+		if wantPort > 0 && sockaddrPort(rsa) != wantPort {
+			_ = syscall.Close(fd)
+			continue
 		}
 		return fd, nil
 	}
 	return -1, syscall.ETIMEDOUT
+}
+
+func sockaddrPort(sa syscall.Sockaddr) int {
+	switch v := sa.(type) {
+	case *syscall.SockaddrInet6:
+		return v.Port
+	case *syscall.SockaddrInet4:
+		return v.Port
+	default:
+		return 0
+	}
 }
 
 func acceptCloseOnExec(listenFD int) (int, syscall.Sockaddr, error) {

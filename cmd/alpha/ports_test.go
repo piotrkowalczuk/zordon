@@ -6,11 +6,14 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/znet"
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
-func TestServiceCtx_holdAndReleasePorts(t *testing.T) {
+func TestServiceCtx_holdPorts(t *testing.T) {
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 	res, err := znet.ReservePort(kc, nil)
 	if err != nil {
@@ -45,6 +48,43 @@ func TestServiceCtx_holdAndReleasePorts(t *testing.T) {
 	unlock, err := kc.TryLockPort(port)
 	if err != nil {
 		t.Fatalf("TryLockPort(%d) after releasePorts: %v", port, err)
+	}
+	unlock()
+}
+
+func TestServiceCtx_holdPorts_releasedOnStopServicesBeforeStart(t *testing.T) {
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
+	kc := zlock.NewGlobalKeychain(t.TempDir())
+	res, err := znet.ReservePort(kc, nil)
+	if err != nil {
+		t.Fatalf("ReservePort: %v", err)
+	}
+	port := res.Port()
+	res.ReleaseToTimeWait()
+
+	state := &alphaState{shutdownCh: make(chan struct{}), keychain: kc}
+	goTC := newToolchainCtx("go", "1.26.0", nil, nil)
+	goTC.key = "go"
+	state.addToolchain(goTC)
+
+	sc := newServiceCtx("api", "go")
+	sc.id = "service.go.api"
+	sc.holdPorts([]int{port}, kc, nil)
+	state.addService(sc)
+
+	svc := &alphasfile.Service{
+		Toolchain: "go",
+		Runtime:   &alphasfile.RuntimeConfig{Name: "api"},
+		Ports:     []int{port},
+	}
+	b := &bringup{state: state}
+	go bringupAndSupervise(b, svc, sc)
+
+	state.stopServices(map[string]bool{"api": true})
+
+	unlock, err := kc.TryLockPort(port)
+	if err != nil {
+		t.Fatalf("TryLockPort(%d) after stopServices: %v", port, err)
 	}
 	unlock()
 }

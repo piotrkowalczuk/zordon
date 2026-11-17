@@ -5,9 +5,9 @@ sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
 #      `<ZORDON_HOME>/locks/port-<port>.lock`.
 #   2. `alpha` holds a LISTEN socket on each service's picked port throughout
 #      toolchain install, workspace preparation, build, and `runtime.after`.
-#   3. Right before `cmd.Start()`, `alpha` transitions the reservation socket
-#      into `TIME_WAIT` (`SO_REUSEADDR=1`) so the service binds immediately
-#      while concurrent `bind(:0)` / `net::pickport()` probes cannot steal it.
+#   3. Right before `cmd.Start()`, `alpha` releases the `LISTEN` holder (keeping
+#      `<ZORDON_HOME>/locks/port-<port>.lock` locked for the service's lifetime
+#      and `[::1]:<port>` in `TIME_WAIT`) so the service binds cleanly.
 
 service "go" "app" {
   src {

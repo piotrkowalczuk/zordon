@@ -166,3 +166,35 @@ service "go" "api" {
 	}
 	unlock()
 }
+
+func TestPlan_Compute_claimsUnownedPortFromPackageInput(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `import "./web" { inputs = { http_port = net::pickport() } }`,
+		"web/Alphasfile": `
+package "web" {
+  inputs = {
+    http_port  = { description = "HTTP port.", type = number }
+    admin_port = { description = "Admin port.", type = number, default = net::pickport() }
+  }
+
+  component "web" {
+    service "go" "web" {
+      package = "example.com/web@v1.0.0"
+      vars = { port = inputs.http_port }
+      readiness {
+        tcp { port = inputs.admin_port }
+      }
+    }
+  }
+}
+`,
+	})
+	af := openTree(t, root)
+	svc := svcByName(af, "web/web/web")
+	if svc == nil {
+		t.Fatal("service web/web/web not found")
+	}
+	if len(svc.Ports) != 2 {
+		t.Fatalf("svc.Ports = %v, want 2 ports (http_port from vars + admin_port from readiness)", svc.Ports)
+	}
+}

@@ -1086,7 +1086,6 @@ type serviceCtx struct {
 	// the order this goroutine observed the barriers in.
 	deps []depSat
 
-	portMu      sync.Mutex
 	portHolders []*znet.Reservation
 }
 
@@ -1163,8 +1162,6 @@ func (sc *serviceCtx) requestStop(reason string) {
 }
 
 func (sc *serviceCtx) holdPorts(ports []int, kc zlock.GlobalKeychain, log *zlog.Logger) {
-	sc.portMu.Lock()
-	defer sc.portMu.Unlock()
 	for _, port := range ports {
 		if port <= 0 || port > 65535 {
 			continue
@@ -1178,19 +1175,14 @@ func (sc *serviceCtx) holdPorts(ports []int, kc zlock.GlobalKeychain, log *zlog.
 }
 
 func (sc *serviceCtx) releasePortHolders() {
-	sc.portMu.Lock()
-	holders := slices.Clone(sc.portHolders)
-	sc.portMu.Unlock()
-	for _, h := range holders {
+	for _, h := range sc.portHolders {
 		h.TransitionToTimeWait()
 	}
 }
 
 func (sc *serviceCtx) releasePorts() {
-	sc.portMu.Lock()
 	holders := sc.portHolders
 	sc.portHolders = nil
-	sc.portMu.Unlock()
 	for _, h := range holders {
 		h.Close()
 	}

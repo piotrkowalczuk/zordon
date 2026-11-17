@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
@@ -1166,13 +1167,8 @@ func (r *resolver) finishService(st *svcState) error {
 			return fmt.Errorf("readiness: %w", err)
 		}
 		rt.Readiness = p
-		if probePort > 0 && r.unownedPorts[probePort] {
-			delete(r.unownedPorts, probePort)
-			if !slices.Contains(st.ports, probePort) {
-				st.ports = append(st.ports, probePort)
-			}
-		}
 	}
+	r.claimUnownedPorts(st, rt, probePort)
 
 	switch sb.Toolchain {
 	case ToolchainGo, ToolchainRust, ToolchainRuby, ToolchainNode, ToolchainJava, ToolchainPkg:
@@ -2462,6 +2458,68 @@ func (r *resolver) pickPort() (int, error) {
 		r.unownedPorts[port] = true
 	}
 	return port, nil
+}
+
+func (r *resolver) claimUnownedPorts(st *svcState, rt *RuntimeConfig, probePort int) {
+	if len(r.unownedPorts) == 0 {
+		return
+	}
+	for port := range r.unownedPorts {
+		if port == probePort || serviceReferencesPort(st, rt, port) {
+			delete(r.unownedPorts, port)
+			if !slices.Contains(st.ports, port) {
+				st.ports = append(st.ports, port)
+			}
+		}
+	}
+	slices.Sort(st.ports)
+}
+
+func serviceReferencesPort(st *svcState, rt *RuntimeConfig, port int) bool {
+	portStr := strconv.Itoa(port)
+	if anyMapReferencesPort(st.vars, port, portStr) || anyMapReferencesPort(st.envMap, port, portStr) {
+		return true
+	}
+	for _, grp := range st.args {
+		if anyMapReferencesPort(grp, port, portStr) {
+			return true
+		}
+	}
+	for _, arg := range rt.Command {
+		if strings.Contains(arg, portStr) {
+			return true
+		}
+	}
+	for _, val := range rt.RunEnv {
+		if strings.Contains(val, portStr) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyMapReferencesPort(m map[string]any, port int, portStr string) bool {
+	for _, v := range m {
+		switch x := v.(type) {
+		case int:
+			if x == port {
+				return true
+			}
+		case int64:
+			if x == int64(port) {
+				return true
+			}
+		case string:
+			if strings.Contains(x, portStr) {
+				return true
+			}
+		default:
+			if strings.Contains(fmt.Sprint(v), portStr) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *resolver) releasePortReservations() {
