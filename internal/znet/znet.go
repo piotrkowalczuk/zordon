@@ -13,20 +13,21 @@ import (
 
 const (
 	// PortRangeBase and PortRangeSpan place dynamically picked ports in
-	// 20000..31999, below both Linux's default ephemeral range (32768..60999)
-	// and macOS/IANA's (49152..65535) so outbound connections from build tools
-	// or probes are not assigned ports from this pool by the kernel.
+	// 20000..31999, below Linux's default ephemeral range (32768..60999) and
+	// macOS/IANA's (49152..65535) so outbound connections from build tools or
+	// probes are not assigned ports from this pool under default sysctls.
 	PortRangeBase = 20000
 	PortRangeSpan = 12000
 )
 
 type Reservation struct {
-	port      int
-	listenFD  int
-	listenFD6 int
-	udpFD     int
-	heldAt    time.Time
-	unlock    zlock.UnlockFunc
+	port   int
+	tcpFD  int
+	tcpFD6 int
+	udpFD  int
+	udpFD6 int
+	heldAt time.Time
+	unlock zlock.UnlockFunc
 }
 
 func (r *Reservation) Port() int {
@@ -36,50 +37,60 @@ func (r *Reservation) Port() int {
 	return r.port
 }
 
-func (r *Reservation) TransitionToTimeWait() {
+// TransitionToTimeWait closes the held loopback sockets while keeping the
+// cross-process flock (if any) held. To guard the handoff window against
+// processes that do not share ZORDON_HOME (and therefore do not see the flock),
+// the IPv6 loopback socket ([::1]:port) is transitioned into TIME_WAIT while
+// IPv4 (127.0.0.1:port) is closed directly from TCP_CLOSE to CLOSED so IPv4
+// services that bind 127.0.0.1 or 0.0.0.0 without SO_REUSEADDR never collide
+// with TIME_WAIT. Services binding IPv6 ([::1] or [::]) directly must use
+// SO_REUSEADDR (the default in Go, Rust, Node.js, and Ruby). Returns true when
+// the [::1] TIME_WAIT guard is active.
+func (r *Reservation) TransitionToTimeWait() bool {
 	if r == nil {
 		panic("znet: nil Reservation")
 	}
 	if r.port <= 0 {
-		return
+		return false
 	}
-	// ReservePort already placed [::1]:port into TIME_WAIT (2*MSL = 30..60s).
-	// Skip minting a second TIME_WAIT PCB when HoldPort held the port briefly
-	// so rapid bringups do not saturate the kernel's TIME_WAIT table.
-	needTimeWait := r.heldAt.IsZero() || time.Since(r.heldAt) >= 5*time.Second
-	placed6 := false
-	if r.listenFD6 >= 0 {
-		if needTimeWait {
-			placed6 = transitionToTimeWait6(r.listenFD6, r.port)
+	placed := false
+	if r.tcpFD6 >= 0 {
+		// ReservePort already placed [::1]:port into TIME_WAIT (2*MSL = 30..60s).
+		// Skip minting a second TIME_WAIT PCB when HoldPort held the port briefly
+		// so rapid bringups do not saturate the kernel's TIME_WAIT table.
+		if r.heldAt.IsZero() || time.Since(r.heldAt) >= 5*time.Second {
+			placed = transitionToTimeWait6(r.tcpFD6, r.port)
 		} else {
-			_ = syscall.Close(r.listenFD6)
-			placed6 = true
+			_ = syscall.Close(r.tcpFD6)
+			placed = true
 		}
-		r.listenFD6 = -1
+		r.tcpFD6 = -1
 	}
-	if r.listenFD >= 0 {
-		if needTimeWait && !placed6 {
-			_ = transitionToTimeWait4(r.listenFD, r.port)
-		} else {
-			_ = syscall.Close(r.listenFD)
-		}
-		r.listenFD = -1
+	if r.tcpFD >= 0 {
+		_ = syscall.Close(r.tcpFD)
+		r.tcpFD = -1
+	}
+	if r.udpFD6 >= 0 {
+		_ = syscall.Close(r.udpFD6)
+		r.udpFD6 = -1
 	}
 	if r.udpFD >= 0 {
 		_ = syscall.Close(r.udpFD)
 		r.udpFD = -1
 	}
+	return placed
 }
 
-func (r *Reservation) ReleaseToTimeWait() {
+func (r *Reservation) ReleaseToTimeWait() bool {
 	if r == nil {
 		panic("znet: nil Reservation")
 	}
-	r.TransitionToTimeWait()
+	placed := r.TransitionToTimeWait()
 	if r.unlock != nil {
 		r.unlock()
 		r.unlock = nil
 	}
+	return placed
 }
 
 func (r *Reservation) Close() {
@@ -89,18 +100,14 @@ func (r *Reservation) Close() {
 	if r.port <= 0 {
 		return
 	}
-	if r.listenFD6 >= 0 {
-		_ = syscall.Close(r.listenFD6)
-		r.listenFD6 = -1
-	}
-	if r.listenFD >= 0 {
-		_ = syscall.Close(r.listenFD)
-		r.listenFD = -1
-	}
-	if r.udpFD >= 0 {
-		_ = syscall.Close(r.udpFD)
-		r.udpFD = -1
-	}
+	closeIfValid(r.tcpFD6)
+	r.tcpFD6 = -1
+	closeIfValid(r.tcpFD)
+	r.tcpFD = -1
+	closeIfValid(r.udpFD6)
+	r.udpFD6 = -1
+	closeIfValid(r.udpFD)
+	r.udpFD = -1
 	if r.unlock != nil {
 		r.unlock()
 		r.unlock = nil
@@ -116,7 +123,7 @@ func ReservePort(kc zlock.GlobalKeychain, skip map[int]bool) (*Reservation, erro
 		}
 		var unlock zlock.UnlockFunc
 		// Lock before probing so a candidate already held by a running service
-		// (after its LISTEN holder was released) is skipped without touching its socket.
+		// (after its socket holder was released) is skipped without touching it.
 		if kc.IsSet() {
 			u, err := kc.TryLockPort(port)
 			if err != nil {
@@ -127,7 +134,7 @@ func ReservePort(kc zlock.GlobalKeychain, skip map[int]bool) (*Reservation, erro
 			}
 			unlock = u
 		}
-		listenFD, listenFD6, udpFD, ok := bindAndListenProbe(port)
+		tcpFD, tcpFD6, udpFD, udpFD6, ok := bindLoopbackProbe(port)
 		if !ok {
 			if unlock != nil {
 				unlock()
@@ -135,11 +142,12 @@ func ReservePort(kc zlock.GlobalKeychain, skip map[int]bool) (*Reservation, erro
 			continue
 		}
 		return &Reservation{
-			port:      port,
-			listenFD:  listenFD,
-			listenFD6: listenFD6,
-			udpFD:     udpFD,
-			unlock:    unlock,
+			port:   port,
+			tcpFD:  tcpFD,
+			tcpFD6: tcpFD6,
+			udpFD:  udpFD,
+			udpFD6: udpFD6,
+			unlock: unlock,
 		}, nil
 	}
 	return nil, errors.New("znet: no free port available in range " + strconv.Itoa(PortRangeBase) + ".." + strconv.Itoa(PortRangeBase+PortRangeSpan-1))
@@ -149,50 +157,44 @@ func HoldPort(kc zlock.GlobalKeychain, port int) (*Reservation, error) {
 	if port <= 0 || port > 65535 {
 		panic("znet: HoldPort requires port in 1..65535")
 	}
-	// Bind before acquiring the flock so the kernel socket is immediately bound
-	// while lockPortWithRetry waits out any microsecond-lived probe lock from a
-	// concurrent ReservePort scan. Keep the socket bound with SO_REUSEADDR=0
-	// without calling Listen so both SO_REUSEADDR=0 and SO_REUSEADDR=1 binders
-	// receive EADDRINUSE while probing clients receive ECONNREFUSED immediately
-	// instead of hanging in an unserved accept queue.
-	fd, err := socketCloseOnExec(syscall.AF_INET, syscall.SOCK_STREAM)
+	// Bind loopback sockets (127.0.0.1 and [::1], avoiding 0.0.0.0 which
+	// triggers the macOS application firewall prompt) without calling Listen
+	// before acquiring the flock. Keeping the sockets bound in TCP_CLOSE state
+	// blocks 127.0.0.1 and [::1] binds on Darwin and Linux while immediately
+	// returning ECONNREFUSED to probing dialers instead of queuing them in an
+	// unserved accept backlog.
+	tcpFD, err := socketCloseOnExec(syscall.AF_INET, syscall.SOCK_STREAM)
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
-		_ = syscall.Close(fd)
+	sa4 := &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}
+	if err := bindWithRetry(tcpFD, sa4); err != nil {
+		_ = syscall.Close(tcpFD)
 		return nil, err
 	}
-	sa := &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}
-	if err := bindWithRetry(fd, sa); err != nil {
-		_ = syscall.Close(fd)
-		return nil, err
-	}
-	_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 0)
-	fd6 := holdTCP6(port)
+	tcpFD6 := holdTCP6(port)
 	udpFD := holdUDP4(port)
+	udpFD6 := holdUDP6(port)
 	var unlock zlock.UnlockFunc
 	if kc.IsSet() {
 		u, lerr := lockPortWithRetry(kc, port)
 		if lerr != nil {
-			if udpFD >= 0 {
-				_ = syscall.Close(udpFD)
-			}
-			if fd6 >= 0 {
-				_ = syscall.Close(fd6)
-			}
-			_ = syscall.Close(fd)
+			closeIfValid(udpFD6)
+			closeIfValid(udpFD)
+			closeIfValid(tcpFD6)
+			_ = syscall.Close(tcpFD)
 			return nil, lerr
 		}
 		unlock = u
 	}
 	return &Reservation{
-		port:      port,
-		listenFD:  fd,
-		listenFD6: fd6,
-		udpFD:     udpFD,
-		heldAt:    time.Now(),
-		unlock:    unlock,
+		port:   port,
+		tcpFD:  tcpFD,
+		tcpFD6: tcpFD6,
+		udpFD:  udpFD,
+		udpFD6: udpFD6,
+		heldAt: time.Now(),
+		unlock: unlock,
 	}, nil
 }
 
@@ -227,6 +229,19 @@ func holdUDP4(port int) int {
 	return fd
 }
 
+func holdUDP6(port int) int {
+	fd6, err := socketCloseOnExec(syscall.AF_INET6, syscall.SOCK_DGRAM)
+	if err != nil {
+		return -1
+	}
+	sa6 := &syscall.SockaddrInet6{Port: port, Addr: [16]byte{15: 1}}
+	if err := bindWithRetry(fd6, sa6); err != nil {
+		_ = syscall.Close(fd6)
+		return -1
+	}
+	return fd6
+}
+
 func bindWithRetry(fd int, sa syscall.Sockaddr) error {
 	var lastErr error
 	for range 100 {
@@ -259,45 +274,52 @@ func lockPortWithRetry(kc zlock.GlobalKeychain, port int) (zlock.UnlockFunc, err
 	return nil, lastErr
 }
 
-func bindAndListenProbe(port int) (int, int, int, bool) {
+func bindLoopbackProbe(port int) (int, int, int, int, bool) {
 	// Probe TCPv6 ([::1]) with SO_REUSEADDR=0 FIRST before touching IPv4
 	// 127.0.0.1. Because [::1] holds the TIME_WAIT PCB during the handoff
 	// window while 127.0.0.1 is left CLOSED for the target service, probing
 	// [::1] first ensures a failed probe never momentarily binds 127.0.0.1
 	// and collides with the service calling bind(127.0.0.1:port).
-	fd6, ok := bindAndListenTCP6Probe(port)
+	tcpFD6, ok := bindLoopback6Probe(port, syscall.SOCK_STREAM)
 	if !ok {
-		return -1, -1, -1, false
+		return -1, -1, -1, -1, false
 	}
-	udpFD, ok := bindUDP4Probe(port)
+	udpFD6, ok := bindLoopback6Probe(port, syscall.SOCK_DGRAM)
 	if !ok {
-		if fd6 >= 0 {
-			_ = syscall.Close(fd6)
-		}
-		return -1, -1, -1, false
+		closeIfValid(tcpFD6)
+		return -1, -1, -1, -1, false
 	}
-	fd, err := socketCloseOnExec(syscall.AF_INET, syscall.SOCK_STREAM)
+	udpFD, ok := bindLoopback4Probe(port, syscall.SOCK_DGRAM)
+	if !ok {
+		closeIfValid(udpFD6)
+		closeIfValid(tcpFD6)
+		return -1, -1, -1, -1, false
+	}
+	tcpFD, ok := bindLoopback4Probe(port, syscall.SOCK_STREAM)
+	if !ok {
+		closeIfValid(udpFD)
+		closeIfValid(udpFD6)
+		closeIfValid(tcpFD6)
+		return -1, -1, -1, -1, false
+	}
+	return tcpFD, tcpFD6, udpFD, udpFD6, true
+}
+
+func bindLoopback4Probe(port, typ int) (int, bool) {
+	fd, err := socketCloseOnExec(syscall.AF_INET, typ)
 	if err != nil {
-		_ = syscall.Close(udpFD)
-		if fd6 >= 0 {
-			_ = syscall.Close(fd6)
-		}
-		return -1, -1, -1, false
+		return -1, false
 	}
 	sa := &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}
 	if err := syscall.Bind(fd, sa); err != nil {
-		_ = syscall.Close(udpFD)
-		if fd6 >= 0 {
-			_ = syscall.Close(fd6)
-		}
 		_ = syscall.Close(fd)
-		return -1, -1, -1, false
+		return -1, false
 	}
-	return fd, fd6, udpFD, true
+	return fd, true
 }
 
-func bindAndListenTCP6Probe(port int) (int, bool) {
-	fd, err := socketCloseOnExec(syscall.AF_INET6, syscall.SOCK_STREAM)
+func bindLoopback6Probe(port, typ int) (int, bool) {
+	fd, err := socketCloseOnExec(syscall.AF_INET6, typ)
 	if err != nil {
 		return -1, isIPv6Unsupported(err)
 	}
@@ -315,42 +337,19 @@ func isIPv6Unsupported(err error) bool {
 		errors.Is(err, syscall.EADDRNOTAVAIL)
 }
 
-func bindUDP4Probe(port int) (int, bool) {
-	// Some services (e.g. CoreDNS) bind the picked port on UDP 127.0.0.1 as well.
-	fd, err := socketCloseOnExec(syscall.AF_INET, syscall.SOCK_DGRAM)
-	if err != nil {
-		return -1, false
-	}
-	sa := &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}
-	if err := syscall.Bind(fd, sa); err != nil {
-		_ = syscall.Close(fd)
-		return -1, false
-	}
-	return fd, true
-}
-
-func transitionToTimeWait6(listenFD6, port int) bool {
+func transitionToTimeWait6(tcpFD6, port int) bool {
 	sa := &syscall.SockaddrInet6{Port: port, Addr: [16]byte{15: 1}}
-	return transitionToTimeWait(listenFD6, syscall.AF_INET6, sa)
-}
-
-func transitionToTimeWait4(listenFD4, port int) bool {
-	sa := &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}
-	return transitionToTimeWait(listenFD4, syscall.AF_INET, sa)
-}
-
-func transitionToTimeWait(listenFD, domain int, sa syscall.Sockaddr) bool {
-	if err := syscall.SetsockoptInt(listenFD, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
-		_ = syscall.Close(listenFD)
+	if err := syscall.SetsockoptInt(tcpFD6, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+		_ = syscall.Close(tcpFD6)
 		return false
 	}
-	if err := syscall.Listen(listenFD, 8); err != nil {
-		_ = syscall.Close(listenFD)
+	if err := syscall.Listen(tcpFD6, 8); err != nil {
+		_ = syscall.Close(tcpFD6)
 		return false
 	}
-	curFD := listenFD
+	curFD := tcpFD6
 	for range 8 {
-		done, retry := connectAndClosePeer(curFD, domain, sa)
+		done, retry := connectAndClosePeer6(curFD, sa)
 		if !done {
 			if !retry {
 				break
@@ -359,7 +358,7 @@ func transitionToTimeWait(listenFD, domain int, sa syscall.Sockaddr) bool {
 		}
 		_ = syscall.Close(curFD)
 		curFD = -1
-		checkFD, err := socketCloseOnExec(domain, syscall.SOCK_STREAM)
+		checkFD, err := socketCloseOnExec(syscall.AF_INET6, syscall.SOCK_STREAM)
 		if err != nil {
 			return true
 		}
@@ -377,14 +376,12 @@ func transitionToTimeWait(listenFD, domain int, sa syscall.Sockaddr) bool {
 		}
 		curFD = checkFD
 	}
-	if curFD >= 0 {
-		_ = syscall.Close(curFD)
-	}
+	closeIfValid(curFD)
 	return false
 }
 
-func connectAndClosePeer(listenFD, domain int, sa syscall.Sockaddr) (done, retry bool) {
-	cliFD, err := socketCloseOnExec(domain, syscall.SOCK_STREAM)
+func connectAndClosePeer6(listenFD6 int, sa *syscall.SockaddrInet6) (done, retry bool) {
+	cliFD, err := socketCloseOnExec(syscall.AF_INET6, syscall.SOCK_STREAM)
 	if err != nil {
 		return false, false
 	}
@@ -396,8 +393,8 @@ func connectAndClosePeer(listenFD, domain int, sa syscall.Sockaddr) (done, retry
 		}
 		return false, true
 	}
-	cliPort := localPortOf(cliFD)
-	srvFD, err := acceptPeer(listenFD, cliPort)
+	cliPort := localPortOf6(cliFD)
+	srvFD, err := acceptPeer6(listenFD6, cliPort)
 	if err != nil {
 		_ = syscall.Close(cliFD)
 		return false, true
@@ -435,22 +432,18 @@ func waitDisconnected(fd int) {
 	}
 }
 
-func localPortOf(fd int) int {
+func localPortOf6(fd int) int {
 	sa, err := syscall.Getsockname(fd)
 	if err != nil {
 		return 0
 	}
-	switch v := sa.(type) {
-	case *syscall.SockaddrInet6:
-		return v.Port
-	case *syscall.SockaddrInet4:
-		return v.Port
-	default:
-		return 0
+	if inet6, ok := sa.(*syscall.SockaddrInet6); ok {
+		return inet6.Port
 	}
+	return 0
 }
 
-func acceptPeer(listenFD, wantPort int) (int, error) {
+func acceptPeer6(listenFD, wantPort int) (int, error) {
 	_ = syscall.SetNonblock(listenFD, true)
 	defer func() { _ = syscall.SetNonblock(listenFD, false) }()
 	for range 4000 {
@@ -462,24 +455,15 @@ func acceptPeer(listenFD, wantPort int) (int, error) {
 		if err != nil {
 			return -1, err
 		}
-		if wantPort > 0 && sockaddrPort(rsa) != wantPort {
-			_ = syscall.Close(fd)
-			continue
+		if wantPort > 0 {
+			if inet6, ok := rsa.(*syscall.SockaddrInet6); ok && inet6.Port != wantPort {
+				_ = syscall.Close(fd)
+				continue
+			}
 		}
 		return fd, nil
 	}
 	return -1, syscall.ETIMEDOUT
-}
-
-func sockaddrPort(sa syscall.Sockaddr) int {
-	switch v := sa.(type) {
-	case *syscall.SockaddrInet6:
-		return v.Port
-	case *syscall.SockaddrInet4:
-		return v.Port
-	default:
-		return 0
-	}
 }
 
 func acceptCloseOnExec(listenFD int) (int, syscall.Sockaddr, error) {
@@ -500,6 +484,12 @@ func readEOF(fd int) bool {
 			continue
 		}
 		return n == 0 && err == nil
+	}
+}
+
+func closeIfValid(fd int) {
+	if fd >= 0 {
+		_ = syscall.Close(fd)
 	}
 }
 

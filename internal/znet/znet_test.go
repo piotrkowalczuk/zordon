@@ -101,16 +101,18 @@ func TestReservePort_timeWaitAndHoldPort(t *testing.T) {
 	}
 	port := res.Port()
 
-	if tryBindAndListenProbe(port) {
+	if tryBindLoopbackProbe(port) {
 		res.Close()
-		t.Fatalf("bindAndListenProbe(%d) succeeded while Reservation is active", port)
+		t.Fatalf("bindLoopbackProbe(%d) succeeded while Reservation is active", port)
 	}
 
-	res.ReleaseToTimeWait()
-	res.ReleaseToTimeWait()
+	if !res.ReleaseToTimeWait() {
+		t.Fatalf("ReleaseToTimeWait(%d) = false, want true", port)
+	}
+	_ = res.ReleaseToTimeWait()
 
-	if tryBindAndListenProbe(port) {
-		t.Fatalf("bindAndListenProbe(%d) succeeded while port is in TIME_WAIT", port)
+	if tryBindLoopbackProbe(port) {
+		t.Fatalf("bindLoopbackProbe(%d) succeeded while port is in TIME_WAIT", port)
 	}
 
 	holder, err := HoldPort(kc, port)
@@ -119,14 +121,16 @@ func TestReservePort_timeWaitAndHoldPort(t *testing.T) {
 	}
 	defer holder.Close()
 
-	if tryBindAndListenProbe(port) {
-		t.Fatalf("bindAndListenProbe(%d) succeeded while HoldPort is active", port)
+	if tryBindLoopbackProbe(port) {
+		t.Fatalf("bindLoopbackProbe(%d) succeeded while HoldPort is active", port)
 	}
 
-	holder.TransitionToTimeWait()
+	if !holder.TransitionToTimeWait() {
+		t.Fatalf("holder.TransitionToTimeWait(%d) = false, want true", port)
+	}
 
-	if tryBindAndListenProbe(port) {
-		t.Fatalf("bindAndListenProbe(%d) succeeded after HoldPort TransitionToTimeWait", port)
+	if tryBindLoopbackProbe(port) {
+		t.Fatalf("bindLoopbackProbe(%d) succeeded after HoldPort TransitionToTimeWait", port)
 	}
 
 	var lc net.ListenConfig
@@ -174,7 +178,7 @@ func TestReservePort_raceStress60s(t *testing.T) {
 					}
 					stolen := false
 					if id == 0 {
-						stolen = tryBindAndListenProbe(p)
+						stolen = tryBindLoopbackProbe(p)
 					} else {
 						stolen = tryStealReservedPort(kc, p)
 					}
@@ -235,11 +239,11 @@ func TestReservation_panicsOnInvalidUse(t *testing.T) {
 	})
 	assertPanics(t, "nil.TransitionToTimeWait", func() {
 		var r *Reservation
-		r.TransitionToTimeWait()
+		_ = r.TransitionToTimeWait()
 	})
 	assertPanics(t, "nil.ReleaseToTimeWait", func() {
 		var r *Reservation
-		r.ReleaseToTimeWait()
+		_ = r.ReleaseToTimeWait()
 	})
 	assertPanics(t, "nil.Close", func() {
 		var r *Reservation
@@ -264,7 +268,9 @@ func TestReservation_Close_zeroValueDoesNotCloseStdin(t *testing.T) {
 	}()
 
 	var zero Reservation
-	zero.TransitionToTimeWait()
+	if zero.TransitionToTimeWait() {
+		t.Fatal("zero.TransitionToTimeWait() = true, want false")
+	}
 	zero.Close()
 
 	var st syscall.Stat_t
@@ -289,7 +295,7 @@ func TestReservePort_propagatesLockIOError(t *testing.T) {
 	}
 }
 
-func TestReservation_TransitionToTimeWait_leakedServerFDDoesNotHang(t *testing.T) {
+func TestClosePeerAndWaitEOF_leakedServerFDDoesNotHang(t *testing.T) {
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		t.Fatalf("Socketpair: %v", err)
@@ -330,7 +336,7 @@ func TestReservePort_probeDoesNotTouchIPv4WhileIPv6InTimeWait(t *testing.T) {
 		t.Fatalf("ReservePort: %v", err)
 	}
 	port := res.Port()
-	res.ReleaseToTimeWait()
+	_ = res.ReleaseToTimeWait()
 
 	var stop atomic.Bool
 	var wg sync.WaitGroup
@@ -339,8 +345,8 @@ func TestReservePort_probeDoesNotTouchIPv4WhileIPv6InTimeWait(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for !stop.Load() {
-				if tryBindAndListenProbe(port) {
-					t.Errorf("tryBindAndListenProbe(%d) succeeded while [::1]:%d is in TIME_WAIT", port, port)
+				if tryBindLoopbackProbe(port) {
+					t.Errorf("tryBindLoopbackProbe(%d) succeeded while [::1]:%d is in TIME_WAIT", port, port)
 					return
 				}
 			}
@@ -362,27 +368,10 @@ func TestReservePort_probeDoesNotTouchIPv4WhileIPv6InTimeWait(t *testing.T) {
 	}
 }
 
-func TestReservation_TransitionToTimeWait_fallsBackToIPv4WhenIPv6Unavailable(t *testing.T) {
-	ztest.AssertSystem(t, ztest.LoopbackConnect)
-	kc := zlock.NewGlobalKeychain(t.TempDir())
-
-	res, err := ReservePort(kc, nil)
-	if err != nil {
-		t.Fatalf("ReservePort: %v", err)
-	}
-	port := res.Port()
-	if res.listenFD6 >= 0 {
-		_ = syscall.Close(res.listenFD6)
-		res.listenFD6 = -1
-	}
-	res.ReleaseToTimeWait()
-
-	if tryBindAndListenProbe(port) {
-		t.Fatalf("tryBindAndListenProbe(%d) succeeded when IPv6 was unavailable; want IPv4 TIME_WAIT fallback to block SO_REUSEADDR=0 probe", port)
-	}
-}
-
-func TestBindAndListenTCP6Probe_rejectsSocketEMFILE(t *testing.T) {
+func TestBindLoopback6Probe_rejectsSocketEMFILE(t *testing.T) {
+	// Temporarily set RLIMIT_NOFILE soft limit to 0 (no t.Parallel and no
+	// child processes in this test) to verify transient fd exhaustion is not
+	// mistaken for missing kernel IPv6 support.
 	var orig syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &orig); err != nil {
 		t.Fatalf("Getrlimit(RLIMIT_NOFILE): %v", err)
@@ -395,12 +384,12 @@ func TestBindAndListenTCP6Probe_rejectsSocketEMFILE(t *testing.T) {
 		_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &orig)
 	}()
 
-	fd6, ok := bindAndListenTCP6Probe(PortRangeBase)
+	fd6, ok := bindLoopback6Probe(PortRangeBase, syscall.SOCK_STREAM)
 	if fd6 >= 0 {
 		_ = syscall.Close(fd6)
 	}
 	if ok {
-		t.Fatal("bindAndListenTCP6Probe returned ok=true on EMFILE; want ok=false so transient fd exhaustion does not bypass IPv6 probe")
+		t.Fatal("bindLoopback6Probe returned ok=true on EMFILE; want ok=false so transient fd exhaustion does not bypass IPv6 probe")
 	}
 }
 
@@ -413,7 +402,7 @@ func TestHoldPort_blocksTCPAndUDPBindsAndRefusesDialers(t *testing.T) {
 		t.Fatalf("ReservePort: %v", err)
 	}
 	port := res.Port()
-	res.ReleaseToTimeWait()
+	_ = res.ReleaseToTimeWait()
 
 	holder, err := HoldPort(kc, port)
 	if err != nil {
@@ -439,13 +428,43 @@ func TestHoldPort_blocksTCPAndUDPBindsAndRefusesDialers(t *testing.T) {
 		t.Fatalf("tcp4 Dial(%s) succeeded while HoldPort is active; want ECONNREFUSED so probing clients do not hang", addr4)
 	}
 
-	holder.TransitionToTimeWait()
+	_ = holder.TransitionToTimeWait()
 
 	pc, err := lc.ListenPacket(t.Context(), "udp4", addr4)
 	if err != nil {
 		t.Fatalf("udp4 ListenPacket(%s) after TransitionToTimeWait: %v", addr4, err)
 	}
 	_ = pc.Close()
+}
+
+func TestHoldPort_allowsRawZeroReuseAddrIPv4BindWhenIPv6Unavailable(t *testing.T) {
+	kc := zlock.NewGlobalKeychain(t.TempDir())
+
+	res, err := ReservePort(kc, nil)
+	if err != nil {
+		t.Fatalf("ReservePort: %v", err)
+	}
+	port := res.Port()
+	if res.tcpFD6 >= 0 {
+		_ = syscall.Close(res.tcpFD6)
+		res.tcpFD6 = -1
+	}
+	if res.ReleaseToTimeWait() {
+		t.Fatal("ReleaseToTimeWait() = true when tcpFD6 == -1, want false")
+	}
+
+	holder, err := HoldPort(kc, port)
+	if err != nil {
+		t.Fatalf("HoldPort(%d): %v", port, err)
+	}
+	defer holder.Close()
+	if holder.tcpFD6 >= 0 {
+		_ = syscall.Close(holder.tcpFD6)
+		holder.tcpFD6 = -1
+	}
+	_ = holder.TransitionToTimeWait()
+
+	assertRawBind4(t, port, [4]byte{127, 0, 0, 1}, "127.0.0.1")
 }
 
 func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bool, activeOwners *[65536]atomic.Int32, totalCycles *atomic.Int64) {
@@ -464,7 +483,7 @@ func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bo
 	defer activeOwners[port].Store(0)
 
 	activeOwners[port].Store(2)
-	res.ReleaseToTimeWait()
+	_ = res.ReleaseToTimeWait()
 	runtime.Gosched()
 
 	holder, err := HoldPort(kc, port)
@@ -478,7 +497,7 @@ func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bo
 	time.Sleep(5 * time.Millisecond)
 
 	activeOwners[port].Store(4)
-	holder.TransitionToTimeWait()
+	_ = holder.TransitionToTimeWait()
 	runtime.Gosched()
 
 	var lc net.ListenConfig
@@ -513,17 +532,29 @@ func tryStealReservedPort(kc zlock.GlobalKeychain, port int) bool {
 		return false
 	}
 	defer unlock()
-	return tryBindAndListenProbe(port)
+	return tryBindLoopbackProbe(port)
 }
 
-func tryBindAndListenProbe(port int) bool {
-	fd, fd6, udpFD, ok := bindAndListenProbe(port)
+func tryBindLoopbackProbe(port int) bool {
+	tcpFD, tcpFD6, udpFD, udpFD6, ok := bindLoopbackProbe(port)
 	if !ok {
 		return false
 	}
-	r := &Reservation{port: port, listenFD: fd, listenFD6: fd6, udpFD: udpFD}
+	r := &Reservation{port: port, tcpFD: tcpFD, tcpFD6: tcpFD6, udpFD: udpFD, udpFD6: udpFD6}
 	r.Close()
 	return true
+}
+
+func assertRawBind4(t *testing.T, port int, addr [4]byte, label string) {
+	t.Helper()
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("Socket(AF_INET) for %s: %v", label, err)
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Port: port, Addr: addr}); err != nil {
+		t.Fatalf("raw SO_REUSEADDR=0 Bind(%s:%d) failed: %v", label, port, err)
+	}
 }
 
 func assertPanics(t *testing.T, name string, fn func()) {

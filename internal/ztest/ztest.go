@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
@@ -100,7 +101,7 @@ func canLoopbackConnect() bool {
 		return false
 	}
 	defer func() { _ = ln.Close() }()
-	var d net.Dialer
+	d := net.Dialer{Timeout: 500 * time.Millisecond}
 	c, err := d.DialContext(context.Background(), "tcp", ln.Addr().String())
 	if err != nil {
 		return false

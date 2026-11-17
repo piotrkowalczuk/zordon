@@ -1176,7 +1176,7 @@ func (sc *serviceCtx) holdPorts(ports []int, kc zlock.GlobalKeychain, log *zlog.
 
 func (sc *serviceCtx) releasePortHolders() {
 	for _, h := range sc.portHolders {
-		h.TransitionToTimeWait()
+		_ = h.TransitionToTimeWait()
 	}
 }
 

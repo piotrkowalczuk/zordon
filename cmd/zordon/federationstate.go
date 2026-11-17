@@ -254,7 +254,7 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 	if err := control.WaitListening(ctxLevel, sock); err != nil {
 		return nil, fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
-	af.ReleasePortReservations()
+	af.HandOffPortReservations()
 	sum, err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent, cfg.miseVersion, cfg.buildMaxCPU, levelLog)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", lvl.afPath, err)

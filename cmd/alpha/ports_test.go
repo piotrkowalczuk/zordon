@@ -9,18 +9,16 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/znet"
-	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 func TestServiceCtx_holdPorts(t *testing.T) {
-	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 	res, err := znet.ReservePort(kc, nil)
 	if err != nil {
 		t.Fatalf("ReservePort: %v", err)
 	}
 	port := res.Port()
-	res.ReleaseToTimeWait()
+	res.Close()
 
 	sc := newServiceCtx("api", "go")
 	sc.holdPorts([]int{port}, kc, nil)
@@ -53,14 +51,13 @@ func TestServiceCtx_holdPorts(t *testing.T) {
 }
 
 func TestServiceCtx_holdPorts_releasedOnStopServicesBeforeStart(t *testing.T) {
-	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 	res, err := znet.ReservePort(kc, nil)
 	if err != nil {
 		t.Fatalf("ReservePort: %v", err)
 	}
 	port := res.Port()
-	res.ReleaseToTimeWait()
+	res.Close()
 
 	state := &alphaState{shutdownCh: make(chan struct{}), keychain: kc}
 	goTC := newToolchainCtx("go", "1.26.0", nil, nil)

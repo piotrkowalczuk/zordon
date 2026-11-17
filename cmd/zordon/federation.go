@@ -416,7 +416,9 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		if err != nil {
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
-		af.DiscardPortReservations()
+		if af != nil {
+			af.DiscardPortReservations()
+		}
 
 		if !lvl.IsLeaf() {
 			// Accumulate parent context only — shared parents are never cleaned.

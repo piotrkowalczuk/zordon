@@ -699,19 +699,28 @@ type ToolchainConfig struct {
 
 func (af *Alphasfile) All() []*Service { return af.Services }
 
-func (af *Alphasfile) ReleasePortReservations() {
+func (af *Alphasfile) HandOffPortReservations() {
 	if af == nil {
+		panic("alphasfile: nil Alphasfile")
+	}
+	reservations := af.portReservations
+	af.portReservations = nil
+	if len(reservations) == 0 {
 		return
 	}
-	for _, res := range af.portReservations {
-		res.ReleaseToTimeWait()
+	for _, res := range reservations {
+		_ = res.TransitionToTimeWait()
 	}
-	af.portReservations = nil
+	time.AfterFunc(5*time.Millisecond, func() {
+		for _, res := range reservations {
+			res.Close()
+		}
+	})
 }
 
 func (af *Alphasfile) DiscardPortReservations() {
 	if af == nil {
-		return
+		panic("alphasfile: nil Alphasfile")
 	}
 	for _, res := range af.portReservations {
 		res.Close()

@@ -16,7 +16,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
-func TestPortReservation_heldDuringBuildAndLockedAtRuntime(t *testing.T) {
+func TestStart_portReservationHeldDuringBuildAndLockedAtRuntime(t *testing.T) {
 	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/app")
@@ -27,6 +27,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"syscall"
 )
@@ -43,7 +44,18 @@ func main() {
 	defer func() { _ = syscall.Close(fd) }()
 	sa := &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}
 	held := syscall.Bind(fd, sa) != nil
-	fmt.Printf("PORT=%d\nHELD=%t\n", port, held)
+
+	lockPath := filepath.Join(os.Args[2], "locks", fmt.Sprintf("port-%d.lock", port))
+	locked := false
+	if lf, err := os.OpenFile(lockPath, os.O_RDWR, 0); err == nil {
+		if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			locked = true
+		} else {
+			_ = syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+		}
+		_ = lf.Close()
+	}
+	fmt.Printf("PORT=%d\nHELD=%t\nLOCKED=%t\n", port, held, locked)
 }
 `)
 
@@ -61,7 +73,7 @@ service "go" "app" {
   vars = { port = net::pickport() }
 
   build {
-    cmd = ["/bin/sh", "-c", "go run ./port_probe.go ${self.vars.port} > \"${fs::state()}/build-port.txt\"; go build -o \"${fs::bin()}/app\" ."]
+    cmd = ["/bin/sh", "-c", "go run ./port_probe.go ${self.vars.port} '`+p.Home()+`' > \"${fs::state()}/build-port.txt\"; go build -o \"${fs::bin()}/app\" ."]
   }
 
   runtime {
@@ -86,6 +98,9 @@ service "go" "app" {
 	report := readBuildProbeReport(t, filepath.Join(stateDir, "build-port.txt"))
 	if report["HELD"] != "true" {
 		t.Fatalf("build probe HELD = %q, want \"true\" (full=%v)", report["HELD"], report)
+	}
+	if report["LOCKED"] != "true" {
+		t.Fatalf("build probe LOCKED = %q, want \"true\" (full=%v)", report["LOCKED"], report)
 	}
 	port, err := strconv.Atoi(report["PORT"])
 	if err != nil {
@@ -115,7 +130,7 @@ service "go" "app" {
 	unlock()
 }
 
-func TestPortReservation_concurrentWorkspaceStartsPickDistinctLockedPorts(t *testing.T) {
+func TestStart_concurrentWorkspaceStartsPickDistinctLockedPorts(t *testing.T) {
 	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/app")
@@ -159,6 +174,8 @@ service "go" "app" {
 		_ = p.Zordon("stop").Run(t)
 	})
 
+	mainCmd := p.Zordon("start").WithTimeout(2 * time.Minute)
+	wt1Cmd := p.Zordon("start").WithDir(wtRel).WithTimeout(2 * time.Minute)
 	startGate := make(chan struct{})
 	var (
 		resMain, resWT1 zordontest.ZordonResult
@@ -168,12 +185,12 @@ service "go" "app" {
 	go func() {
 		defer wg.Done()
 		<-startGate
-		resMain = p.Zordon("start").WithTimeout(2 * time.Minute).Run(t)
+		resMain = mainCmd.Run(t)
 	}()
 	go func() {
 		defer wg.Done()
 		<-startGate
-		resWT1 = p.Zordon("start").WithDir(wtRel).WithTimeout(2 * time.Minute).Run(t)
+		resWT1 = wt1Cmd.Run(t)
 	}()
 	close(startGate)
 	wg.Wait()

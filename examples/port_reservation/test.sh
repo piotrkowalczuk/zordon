@@ -2,9 +2,9 @@
 # Claim:
 #   1. `net::pickport()` allocates from the non-ephemeral pool 20000..31999 and
 #      locks `<ZORDON_HOME>/locks/port-<port>.lock` while the service runs.
-#   2. `alpha` holds the picked port in LISTEN state throughout `build` (so no
-#      other process can steal it while the service compiles) and releases the
-#      LISTEN holder right before `cmd.Start()` so the service binds cleanly.
+#   2. `alpha` holds the picked port bound throughout `build` (so no other
+#      process can steal it while the service compiles) and closes the socket
+#      holders right before `cmd.Start()` so the service binds cleanly.
 cd "$(dirname "$0")"
 source ../_lib.sh
 need curl
