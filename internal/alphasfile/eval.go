@@ -264,8 +264,21 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 // post-pass, and assembles the *Alphasfile. This is where the effectful HCL
 // functions (net::pickport, src::hash, os::env) actually fire.
 func (p *Plan) Compute() (*Alphasfile, error) {
+	af, err := p.ComputeAndHold()
+	if err != nil {
+		return nil, err
+	}
+	af.DiscardPortReservations()
+	return af, nil
+}
+
+func (p *Plan) ComputeAndHold() (af *Alphasfile, err error) {
 	r := p.r
-	defer r.releasePortReservations()
+	defer func() {
+		if err != nil {
+			r.discardPortReservations()
+		}
+	}()
 	root := r.root
 	for _, n := range p.order {
 		if n.kind == kindPart {
@@ -366,12 +379,13 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 		return nil, err
 	}
 	return &Alphasfile{
-		CfgHash:   r.cfgHash,
-		Dotenv:    gdot,
-		Env:       toStringMap(genvMap),
-		Services:  r.resolvedServices,
-		Toolchain: toolchain,
-		SysEnv:    sysEnv,
+		CfgHash:          r.cfgHash,
+		Dotenv:           gdot,
+		Env:              toStringMap(genvMap),
+		Services:         r.resolvedServices,
+		Toolchain:        toolchain,
+		SysEnv:           sysEnv,
+		portReservations: r.portReservations,
 	}, nil
 }
 
@@ -2522,9 +2536,9 @@ func anyMapReferencesPort(m map[string]any, port int, portStr string) bool {
 	return false
 }
 
-func (r *resolver) releasePortReservations() {
+func (r *resolver) discardPortReservations() {
 	for _, res := range r.portReservations {
-		res.ReleaseToTimeWait()
+		res.Close()
 	}
 	r.portReservations = nil
 }

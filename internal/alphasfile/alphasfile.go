@@ -23,6 +23,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/znet"
 )
 
 const (
@@ -669,6 +670,8 @@ type Alphasfile struct {
 	// installs. Whitelisting forces the user to declare exactly what
 	// the spawn is allowed to inherit.
 	SysEnv []string `json:"sysenv,omitempty"`
+
+	portReservations []*znet.Reservation
 }
 
 // ToolchainConfig declares the version a particular language toolchain
@@ -695,6 +698,26 @@ type ToolchainConfig struct {
 }
 
 func (af *Alphasfile) All() []*Service { return af.Services }
+
+func (af *Alphasfile) ReleasePortReservations() {
+	if af == nil {
+		return
+	}
+	for _, res := range af.portReservations {
+		res.ReleaseToTimeWait()
+	}
+	af.portReservations = nil
+}
+
+func (af *Alphasfile) DiscardPortReservations() {
+	if af == nil {
+		return
+	}
+	for _, res := range af.portReservations {
+		res.Close()
+	}
+	af.portReservations = nil
+}
 
 // AllFiles flattens every service's generated files into one list (the order
 // services were resolved). Used by alpha to materialize / clean up.

@@ -101,19 +101,15 @@ func TestReservePort_timeWaitAndHoldPort(t *testing.T) {
 	}
 	port := res.Port()
 
-	if fd, fd6, ok := bindAndListenProbe(port); ok {
-		r := &Reservation{port: port, listenFD: fd, listenFD6: fd6}
-		r.Close()
+	if tryBindAndListenProbe(port) {
 		res.Close()
-		t.Fatalf("bindAndListenProbe(%d) succeeded while Reservation is in LISTEN", port)
+		t.Fatalf("bindAndListenProbe(%d) succeeded while Reservation is active", port)
 	}
 
 	res.ReleaseToTimeWait()
 	res.ReleaseToTimeWait()
 
-	if fd, fd6, ok := bindAndListenProbe(port); ok {
-		r := &Reservation{port: port, listenFD: fd, listenFD6: fd6}
-		r.Close()
+	if tryBindAndListenProbe(port) {
 		t.Fatalf("bindAndListenProbe(%d) succeeded while port is in TIME_WAIT", port)
 	}
 
@@ -123,17 +119,13 @@ func TestReservePort_timeWaitAndHoldPort(t *testing.T) {
 	}
 	defer holder.Close()
 
-	if fd, fd6, ok := bindAndListenProbe(port); ok {
-		r := &Reservation{port: port, listenFD: fd, listenFD6: fd6}
-		r.Close()
+	if tryBindAndListenProbe(port) {
 		t.Fatalf("bindAndListenProbe(%d) succeeded while HoldPort is active", port)
 	}
 
 	holder.TransitionToTimeWait()
 
-	if fd, fd6, ok := bindAndListenProbe(port); ok {
-		r := &Reservation{port: port, listenFD: fd, listenFD6: fd6}
-		r.Close()
+	if tryBindAndListenProbe(port) {
 		t.Fatalf("bindAndListenProbe(%d) succeeded after HoldPort TransitionToTimeWait", port)
 	}
 
@@ -412,6 +404,50 @@ func TestBindAndListenTCP6Probe_rejectsSocketEMFILE(t *testing.T) {
 	}
 }
 
+func TestHoldPort_blocksTCPAndUDPBindsAndRefusesDialers(t *testing.T) {
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
+	kc := zlock.NewGlobalKeychain(t.TempDir())
+
+	res, err := ReservePort(kc, nil)
+	if err != nil {
+		t.Fatalf("ReservePort: %v", err)
+	}
+	port := res.Port()
+	res.ReleaseToTimeWait()
+
+	holder, err := HoldPort(kc, port)
+	if err != nil {
+		t.Fatalf("HoldPort(%d): %v", port, err)
+	}
+	defer holder.Close()
+
+	addr4 := "127.0.0.1:" + strconv.Itoa(port)
+	var lc net.ListenConfig
+	if ln, err := lc.Listen(t.Context(), "tcp4", addr4); err == nil {
+		_ = ln.Close()
+		t.Fatalf("tcp4 Listen(%s) succeeded while HoldPort is active; want EADDRINUSE", addr4)
+	}
+	if pc, err := lc.ListenPacket(t.Context(), "udp4", addr4); err == nil {
+		_ = pc.Close()
+		t.Fatalf("udp4 ListenPacket(%s) succeeded while HoldPort is active; want EADDRINUSE", addr4)
+	}
+
+	var d net.Dialer
+	d.Timeout = 200 * time.Millisecond
+	if c, err := d.DialContext(t.Context(), "tcp4", addr4); err == nil {
+		_ = c.Close()
+		t.Fatalf("tcp4 Dial(%s) succeeded while HoldPort is active; want ECONNREFUSED so probing clients do not hang", addr4)
+	}
+
+	holder.TransitionToTimeWait()
+
+	pc, err := lc.ListenPacket(t.Context(), "udp4", addr4)
+	if err != nil {
+		t.Fatalf("udp4 ListenPacket(%s) after TransitionToTimeWait: %v", addr4, err)
+	}
+	_ = pc.Close()
+}
+
 func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bool, activeOwners *[65536]atomic.Int32, totalCycles *atomic.Int64) {
 	t.Helper()
 	res, err := ReservePort(kc, skip)
@@ -481,11 +517,11 @@ func tryStealReservedPort(kc zlock.GlobalKeychain, port int) bool {
 }
 
 func tryBindAndListenProbe(port int) bool {
-	fd, fd6, ok := bindAndListenProbe(port)
+	fd, fd6, udpFD, ok := bindAndListenProbe(port)
 	if !ok {
 		return false
 	}
-	r := &Reservation{port: port, listenFD: fd, listenFD6: fd6}
+	r := &Reservation{port: port, listenFD: fd, listenFD6: fd6, udpFD: udpFD}
 	r.Close()
 	return true
 }

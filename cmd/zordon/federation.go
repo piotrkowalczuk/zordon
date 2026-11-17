@@ -305,6 +305,7 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 		if lvl.IsLeaf() && len(picks) > 0 {
 			filtered, err := pickServices(af.All(), picks)
 			if err != nil {
+				af.DiscardPortReservations()
 				return fmt.Errorf("%s: %w", lvl.Path(), err)
 			}
 			log.Info("zordon", "picks=%v → bringing up %d of %d service(s)", picks, len(filtered), len(af.All()))
@@ -312,10 +313,12 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 		}
 
 		if err := validateInPlaceSources(af); err != nil {
+			af.DiscardPortReservations()
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
 
 		if err := pinLevel(ctx, *lvl, af, zordonHome, kc, lvl.IsLeaf() && pull.srv, log); err != nil {
+			af.DiscardPortReservations()
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
 
@@ -413,6 +416,7 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		if err != nil {
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
+		af.DiscardPortReservations()
 
 		if !lvl.IsLeaf() {
 			// Accumulate parent context only — shared parents are never cleaned.

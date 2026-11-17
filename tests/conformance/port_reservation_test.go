@@ -6,14 +6,18 @@ import (
 	"errors"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/znet"
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 func TestPortReservation_heldDuringBuildAndLockedAtRuntime(t *testing.T) {
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/app")
 	p.WriteFile("src/app/port_probe.go", `//go:build ignore
@@ -109,4 +113,88 @@ service "go" "app" {
 		t.Fatalf("TryLockPort(%d) after zordon stop: %v", port, err)
 	}
 	unlock()
+}
+
+func TestPortReservation_concurrentWorkspaceStartsPickDistinctLockedPorts(t *testing.T) {
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
+	p := zordontest.NewProject(t)
+	p.CopyTree("golden/go/echo", "src/app")
+	p.GitInit("src/app")
+
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "app" {
+  src {
+    path = "./src/app"
+    exe  = "."
+  }
+
+  vars = { port = net::pickport() }
+
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}
+`)
+
+	mustZordonOK(t, p, "workspace", "create", "wt1", "app")
+	wtRel := filepath.Join("workspaces", "wt1")
+	t.Cleanup(func() {
+		_ = p.Zordon("stop").WithDir(wtRel).Run(t)
+		_ = p.Zordon("stop").Run(t)
+	})
+
+	startGate := make(chan struct{})
+	var (
+		resMain, resWT1 zordontest.ZordonResult
+		wg              sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-startGate
+		resMain = p.Zordon("start").WithTimeout(2 * time.Minute).Run(t)
+	}()
+	go func() {
+		defer wg.Done()
+		<-startGate
+		resWT1 = p.Zordon("start").WithDir(wtRel).WithTimeout(2 * time.Minute).Run(t)
+	}()
+	close(startGate)
+	wg.Wait()
+
+	if resMain.ExitCode != 0 {
+		t.Fatalf("main zordon start exit=%d: %s\n%s", resMain.ExitCode, resMain.Stdout, resMain.Stderr)
+	}
+	if resWT1.ExitCode != 0 {
+		t.Fatalf("wt1 zordon start exit=%d: %s\n%s", resWT1.ExitCode, resWT1.Stdout, resWT1.Stderr)
+	}
+
+	portMain := p.Get(t, "service.go.app.vars.port").Int()
+	portWT1 := p.GetIn(t, wtRel, "service.go.app.vars.port").Int()
+	if portMain == portWT1 {
+		t.Fatalf("concurrent workspace starts picked same port %d", portMain)
+	}
+
+	kc := zlock.NewGlobalKeychain(p.Home())
+	for _, port := range []int{portMain, portWT1} {
+		if _, err := kc.TryLockPort(port); !errors.Is(err, zlock.ErrLocked) {
+			t.Fatalf("TryLockPort(%d) while service running = %v, want ErrLocked", port, err)
+		}
+	}
 }

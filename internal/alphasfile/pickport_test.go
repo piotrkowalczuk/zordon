@@ -1,12 +1,15 @@
 package alphasfile
 
 import (
+	"errors"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/znet"
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 func TestPlan_Compute_pickportPopulatesServicePortsWithoutCollision(t *testing.T) {
@@ -131,7 +134,8 @@ service "go" "api" {
 	}
 }
 
-func TestPlan_Compute_respectsGlobalKeychainPortLocks(t *testing.T) {
+func TestPlan_ComputeAndHold_holdsLockUntilReleased(t *testing.T) {
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 	inv := testInv()
 
@@ -150,19 +154,27 @@ service "go" "api" {
 		t.Fatalf("Plan: %v", err)
 	}
 
-	af, err := plan.Compute()
+	af, err := plan.ComputeAndHold()
 	if err != nil {
-		t.Fatalf("Compute: %v", err)
+		t.Fatalf("ComputeAndHold: %v", err)
 	}
+	defer af.DiscardPortReservations()
+
 	api := svcByName(af, "api")
 	if api == nil || len(api.Ports) != 1 {
 		t.Fatalf("api.Ports = %v, want 1 port", api.Ports)
 	}
 	port := api.Ports[0]
 
+	if _, err := kc.TryLockPort(port); !errors.Is(err, zlock.ErrLocked) {
+		t.Fatalf("TryLockPort(%d) while held by Alphasfile = %v, want ErrLocked", port, err)
+	}
+
+	af.ReleasePortReservations()
+
 	unlock, err := kc.TryLockPort(port)
 	if err != nil {
-		t.Fatalf("TryLockPort(%d) after Compute: %v", port, err)
+		t.Fatalf("TryLockPort(%d) after ReleasePortReservations: %v", port, err)
 	}
 	unlock()
 }
@@ -196,5 +208,29 @@ package "web" {
 	}
 	if len(svc.Ports) != 2 {
 		t.Fatalf("svc.Ports = %v, want 2 ports (http_port from vars + admin_port from readiness)", svc.Ports)
+	}
+}
+
+func TestCompile_doesNotLeavePickedPortsInTimeWait(t *testing.T) {
+	af := compile(t, `
+service "go" "api" {
+  package = "example.com/api@v1.0.0"
+  vars = { port = net::pickport() }
+}
+`, nil)
+	api := svcByName(af, "api")
+	if api == nil || len(api.Ports) != 1 {
+		t.Fatalf("api.Ports = %v, want 1 port", api)
+	}
+	port := api.Ports[0]
+
+	fd6, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("Socket(AF_INET6): %v", err)
+	}
+	defer func() { _ = syscall.Close(fd6) }()
+	sa6 := &syscall.SockaddrInet6{Port: port, Addr: [16]byte{15: 1}}
+	if err := syscall.Bind(fd6, sa6); err != nil {
+		t.Fatalf("Bind([::1]:%d) with SO_REUSEADDR=0 failed after Compile (read-only evaluation left TIME_WAIT behind): %v", port, err)
 	}
 }
