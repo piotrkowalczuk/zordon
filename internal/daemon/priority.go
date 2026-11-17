@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"runtime"
 	"strconv"
@@ -16,11 +17,11 @@ func LowerSelfPriority() error {
 	if cur, err := ProcessNice(pid); err == nil && cur >= DefaultNice {
 		return nil
 	}
-	if pgid, err := syscall.Getpgid(pid); err == nil && pgid == pid {
-		return syscall.Setpriority(syscall.PRIO_PGRP, pgid, DefaultNice)
-	}
 	if runtime.GOOS == "linux" {
 		return lowerLinuxThreadsPriority(pid)
+	}
+	if pgid, err := syscall.Getpgid(pid); err == nil && pgid == pid {
+		return syscall.Setpriority(syscall.PRIO_PGRP, pgid, DefaultNice)
 	}
 	return syscall.Setpriority(syscall.PRIO_PROCESS, pid, DefaultNice)
 }
@@ -41,23 +42,31 @@ func ProcessNice(pid int) (int, error) {
 	return raw, nil
 }
 
-// On Linux PRIO_PROCESS applies to a single kernel thread (TID), not the whole
-// multithreaded Go process; walk /proc/self/task when alpha is not a pgrp leader.
+// On Linux both PRIO_PROCESS and PRIO_PGRP apply only to thread-group leaders
+// (PIDTYPE_PGID), leaving sibling CLONE_THREAD tasks in the Go runtime at their
+// prior nice value; walk /proc/self/task twice so any thread cloned during the
+// first pass is also lowered.
 func lowerLinuxThreadsPriority(pid int) error {
-	entries, err := zfs.ReadDir("/proc/self/task")
-	if err != nil {
-		return syscall.Setpriority(syscall.PRIO_PROCESS, pid, DefaultNice)
-	}
+	_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, DefaultNice)
 	var firstErr error
 	applied := false
-	for _, e := range entries {
-		tid, convErr := strconv.Atoi(e.Name())
-		if convErr != nil || tid <= 0 {
-			continue
+	for range 2 {
+		entries, err := zfs.ReadDir("/proc/self/task")
+		if err != nil {
+			if !applied {
+				return syscall.Setpriority(syscall.PRIO_PROCESS, pid, DefaultNice)
+			}
+			return firstErr
 		}
-		applied = true
-		if setErr := syscall.Setpriority(syscall.PRIO_PROCESS, tid, DefaultNice); setErr != nil && firstErr == nil {
-			firstErr = setErr
+		for _, e := range entries {
+			tid, convErr := strconv.Atoi(e.Name())
+			if convErr != nil || tid <= 0 {
+				continue
+			}
+			applied = true
+			if setErr := syscall.Setpriority(syscall.PRIO_PROCESS, tid, DefaultNice); setErr != nil && !errors.Is(setErr, syscall.ESRCH) && firstErr == nil {
+				firstErr = setErr
+			}
 		}
 	}
 	if !applied {
