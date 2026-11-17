@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
-	"net"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -20,6 +20,8 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/logfilter"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
+	"github.com/piotrkowalczuk/zordon/internal/znet"
 	"github.com/piotrkowalczuk/zordon/internal/ztypes"
 )
 
@@ -142,6 +144,9 @@ type resolver struct {
 	// test:: HCL functions need; zero value disables them.
 	testCfg TestConfig
 
+	curSvc           *svcState
+	pickedPorts      map[int]bool
+	portReservations []*znet.Reservation
 	resolvedServices []*Service
 }
 
@@ -258,6 +263,7 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 // functions (net::pickport, src::hash, os::env) actually fire.
 func (p *Plan) Compute() (*Alphasfile, error) {
 	r := p.r
+	defer r.releasePortReservations()
 	root := r.root
 	for _, n := range p.order {
 		if n.kind == kindPart {
@@ -557,6 +563,7 @@ type svcState struct {
 	srcPath  string  // evaluated src{path} (local checkout); empty when no src{path}
 	// srcMissing is the src{path} that was not there, when git{} stands in.
 	srcMissing string
+	ports      []int
 }
 
 // srcDirs carries a service's source locations for the fs:: functions during
@@ -727,6 +734,8 @@ func (r *resolver) publishSelf(st *svcState) {
 // place and re-publishes to r.serviceByTC so downstream nodes see the
 // new value.
 func (r *resolver) evalProducerNode(n *node, st *svcState) error {
+	r.curSvc = st
+	defer func() { r.curSvc = nil }()
 	switch n.kind {
 	case kindVars:
 		if st.sb.Vars == nil {
@@ -871,6 +880,8 @@ func producerLabel(n *node) string {
 // Service. Cross-service references reach producers via r.serviceByTC,
 // which by now holds every service's complete evaluated form.
 func (r *resolver) finishService(st *svcState) error {
+	r.curSvc = st
+	defer func() { r.curSvc = nil }()
 	sb := st.sb
 	self := st.self
 	dirs := st.dirs
@@ -1154,6 +1165,9 @@ func (r *resolver) finishService(st *svcState) error {
 			return fmt.Errorf("readiness: %w", err)
 		}
 		rt.Readiness = p
+		if probePort > 0 && r.pickedPorts[probePort] && !slices.Contains(st.ports, probePort) {
+			st.ports = append(st.ports, probePort)
+		}
 	}
 
 	switch sb.Toolchain {
@@ -1193,6 +1207,7 @@ func (r *resolver) finishService(st *svcState) error {
 			Module:    sb.module,
 			Runtime:   rt,
 			Pkg:       &PkgSpec{Name: pname, Version: pversion},
+			Ports:     st.ports,
 		}
 		r.resolvedServices = append(r.resolvedServices, svc)
 		return nil
@@ -1355,6 +1370,7 @@ func (r *resolver) finishService(st *svcState) error {
 		},
 		Debugger: dbg,
 		Agent:    agent,
+		Ports:    st.ports,
 	}
 	r.resolvedServices = append(r.resolvedServices, svc)
 	return nil
@@ -1434,7 +1450,7 @@ func (r *resolver) evalDebuggerPort(expr hcl.Expression, self map[string]cty.Val
 			return 0, fmt.Errorf("must be a number or numeric string, got %s", val.Type().FriendlyName())
 		}
 	}
-	return pickFreePort()
+	return r.pickPort()
 }
 
 func parsePort(s string) (int, error) {
@@ -2140,7 +2156,7 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 		// src:: namespace — current service's source code identity.
 		"src::hash": r.srcHashFunc(dirs.root),
 
-		"net::pickport": pickPortFunc(),
+		"net::pickport": r.pickPortFunc(),
 		"os::env":       osEnvFunc(),
 
 		// Cross-toolchain binary access, all resolved at provision-run time
@@ -2404,11 +2420,11 @@ func (r *resolver) srcHashFunc(root string) function.Function {
 	})
 }
 
-func pickPortFunc() function.Function {
+func (r *resolver) pickPortFunc() function.Function {
 	return function.New(&function.Spec{
 		Type: function.StaticReturnType(cty.Number),
 		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
-			port, err := pickFreePort()
+			port, err := r.pickPort()
 			if err != nil {
 				return cty.NilVal, fmt.Errorf("net::pickport: %w", err)
 			}
@@ -2417,12 +2433,33 @@ func pickPortFunc() function.Function {
 	})
 }
 
-func pickFreePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+func (r *resolver) pickPort() (int, error) {
+	if r.pickedPorts == nil {
+		r.pickedPorts = map[int]bool{}
+	}
+	res, err := znet.ReservePort(r.keychain(), r.pickedPorts)
 	if err != nil {
 		return 0, err
 	}
-	addr := l.Addr().(*net.TCPAddr)
-	_ = l.Close()
-	return addr.Port, nil
+	port := res.Port()
+	r.pickedPorts[port] = true
+	r.portReservations = append(r.portReservations, res)
+	if r.curSvc != nil && !slices.Contains(r.curSvc.ports, port) {
+		r.curSvc.ports = append(r.curSvc.ports, port)
+	}
+	return port, nil
+}
+
+func (r *resolver) releasePortReservations() {
+	for _, res := range r.portReservations {
+		res.ReleaseToTimeWait()
+	}
+	r.portReservations = nil
+}
+
+func (r *resolver) keychain() zlock.GlobalKeychain {
+	if r.tree == nil {
+		return zlock.GlobalKeychain{}
+	}
+	return r.tree.kc
 }

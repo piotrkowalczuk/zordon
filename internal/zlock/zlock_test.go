@@ -125,6 +125,54 @@ func TestGlobalKeychain_LockPins(t *testing.T) {
 	again()
 }
 
+func TestGlobalKeychain_TryLockPort(t *testing.T) {
+	var zero GlobalKeychain
+	if zero.IsSet() {
+		t.Fatal("zero GlobalKeychain.IsSet() = true; want false")
+	}
+
+	kc := NewGlobalKeychain(t.TempDir())
+	if !kc.IsSet() {
+		t.Fatal("initialized GlobalKeychain.IsSet() = false; want true")
+	}
+
+	unlock, err := kc.TryLockPort(20001)
+	if err != nil {
+		t.Fatalf("TryLockPort: %v", err)
+	}
+	if _, err := kc.TryLockPort(20001); !errors.Is(err, ErrLocked) {
+		unlock()
+		t.Fatalf("second TryLockPort(20001) = %v, want ErrLocked", err)
+	}
+	other, err := kc.TryLockPort(20002)
+	if err != nil {
+		unlock()
+		t.Fatalf("TryLockPort(20002): %v", err)
+	}
+	other()
+	unlock()
+
+	again, err := kc.TryLockPort(20001)
+	if err != nil {
+		t.Fatalf("TryLockPort after unlock: %v", err)
+	}
+	again()
+}
+
+func TestGlobalKeychain_TryLockPort_invalidPortPanics(t *testing.T) {
+	kc := NewGlobalKeychain(t.TempDir())
+	for _, port := range []int{-1, 0, 65536} {
+		t.Run(strconv.Itoa(port), func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("TryLockPort(%d) did not panic", port)
+				}
+			}()
+			_, _ = kc.TryLockPort(port)
+		})
+	}
+}
+
 func TestWorkspaceKeychain_IsAlphaLockedBy_deadPID(t *testing.T) {
 	wsDir := t.TempDir()
 	kc := NewGlobalKeychain(t.TempDir()).ForWorkspace(wsDir)

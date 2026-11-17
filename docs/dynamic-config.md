@@ -18,9 +18,8 @@ arguments / readiness probe that consume them.
 
 ### Helpers
 
-- `net::pickport()` — returns a free TCP port (binds to `:0`, closes,
-  reports the port). Each call returns a new port — store it in `vars`
-  if you need to reuse it.
+- `net::pickport()` — reserves a free port in `20000..31999`, held by `alpha` during bringup and released into `TIME_WAIT` (`SO_REUSEADDR`) right before the service starts.
+  Each call returns a new port — store it in `vars` if you need to reuse it.
 - `fs::tmp()` — a per-invocation **scratch** dir under `$TMPDIR/zordon-<fs::hash>/`.
   For disposable byproducts only: it lives in the OS temp dir, which the
   system may reap (macOS clears untouched files after ~3 idle days). A file a
