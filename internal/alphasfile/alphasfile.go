@@ -23,7 +23,6 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/probe"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
-	"github.com/piotrkowalczuk/zordon/internal/znet"
 )
 
 const (
@@ -670,8 +669,6 @@ type Alphasfile struct {
 	// installs. Whitelisting forces the user to declare exactly what
 	// the spawn is allowed to inherit.
 	SysEnv []string `json:"sysenv,omitempty"`
-
-	portReservations []*znet.Reservation
 }
 
 // ToolchainConfig declares the version a particular language toolchain
@@ -698,40 +695,6 @@ type ToolchainConfig struct {
 }
 
 func (af *Alphasfile) All() []*Service { return af.Services }
-
-func (af *Alphasfile) HandOffPortReservations() {
-	if af == nil {
-		panic("alphasfile: nil Alphasfile")
-	}
-	reservations := af.portReservations
-	af.portReservations = nil
-	if len(reservations) == 0 {
-		return
-	}
-	// Close zordon's loopback sockets synchronously before sending OpConfigure
-	// so alpha's HoldPort can bind them immediately while zordon still holds
-	// the cross-process flock. Release zordon's flock after 5ms so alpha's
-	// lockPortWithRetry (which polls for up to 50ms) acquires it with
-	// make-before-break overlap.
-	for _, res := range reservations {
-		_ = res.TransitionToTimeWait()
-	}
-	time.AfterFunc(5*time.Millisecond, func() {
-		for _, res := range reservations {
-			res.Close()
-		}
-	})
-}
-
-func (af *Alphasfile) DiscardPortReservations() {
-	if af == nil {
-		panic("alphasfile: nil Alphasfile")
-	}
-	for _, res := range af.portReservations {
-		res.Close()
-	}
-	af.portReservations = nil
-}
 
 // AllFiles flattens every service's generated files into one list (the order
 // services were resolved). Used by alpha to materialize / clean up.

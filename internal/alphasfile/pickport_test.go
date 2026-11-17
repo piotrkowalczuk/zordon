@@ -124,7 +124,7 @@ service "go" "api" {
 	for i := range znet.PortRangeSpan {
 		p := znet.PortRangeBase + i
 		if p != wsPort {
-			plan.r.pickedPorts[p] = true
+			plan.r.ports.Exclude(p)
 		}
 	}
 
@@ -133,7 +133,7 @@ service "go" "api" {
 	}
 }
 
-func TestPlan_ComputeAndHold_holdsLockAcrossHandOff(t *testing.T) {
+func TestPlan_Compute_allowsHoldPortAfterCompute(t *testing.T) {
 	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 	inv := testInv()
@@ -153,11 +153,10 @@ service "go" "api" {
 		t.Fatalf("Plan: %v", err)
 	}
 
-	af, err := plan.ComputeAndHold()
+	af, err := plan.Compute()
 	if err != nil {
-		t.Fatalf("ComputeAndHold: %v", err)
+		t.Fatalf("Compute: %v", err)
 	}
-	defer af.DiscardPortReservations()
 
 	api := svcByName(af, "api")
 	if api == nil || len(api.Ports) != 1 {
@@ -165,15 +164,9 @@ service "go" "api" {
 	}
 	port := api.Ports[0]
 
-	if _, err := kc.TryLockPort(port); !errors.Is(err, zlock.ErrLocked) {
-		t.Fatalf("TryLockPort(%d) while held by Alphasfile = %v, want ErrLocked", port, err)
-	}
-
-	af.HandOffPortReservations()
-
 	holder, err := znet.HoldPort(kc, port)
 	if err != nil {
-		t.Fatalf("HoldPort(%d) after HandOffPortReservations: %v", port, err)
+		t.Fatalf("HoldPort(%d) after Compute: %v", port, err)
 	}
 	holder.Close()
 
@@ -184,7 +177,7 @@ service "go" "api" {
 	unlock()
 }
 
-func TestPlan_ComputeAndHold_discardsReservationsOnComputeError(t *testing.T) {
+func TestPlan_Compute_discardsReservationsOnComputeError(t *testing.T) {
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 	inv := testInv()
 
@@ -216,17 +209,17 @@ service "unknown_tc" "broken" {
 	for i := range znet.PortRangeSpan {
 		p := znet.PortRangeBase + i
 		if p != targetPort {
-			plan.r.pickedPorts[p] = true
+			plan.r.ports.Exclude(p)
 		}
 	}
 
-	if _, err := plan.ComputeAndHold(); err == nil {
-		t.Fatal("ComputeAndHold succeeded on invalid toolchain; want error")
+	if _, err := plan.Compute(); err == nil {
+		t.Fatal("Compute succeeded on invalid toolchain; want error")
 	}
 
 	unlock, err := kc.TryLockPort(targetPort)
 	if err != nil {
-		t.Fatalf("TryLockPort(%d) after failed ComputeAndHold: %v (lock leaked on error)", targetPort, err)
+		t.Fatalf("TryLockPort(%d) after failed Compute: %v (lock leaked on error)", targetPort, err)
 	}
 	unlock()
 }
@@ -402,24 +395,4 @@ package "web" {
 	if len(aclient.Ports) != 0 {
 		t.Fatalf("aclient.Ports = %v, want empty (client with exact int var must not claim unowned port without readiness)", aclient.Ports)
 	}
-}
-
-func TestAlphasfile_HandOffPortReservations_nilPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("nil.HandOffPortReservations did not panic")
-		}
-	}()
-	var af *Alphasfile
-	af.HandOffPortReservations()
-}
-
-func TestAlphasfile_DiscardPortReservations_nilPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("nil.DiscardPortReservations did not panic")
-		}
-	}()
-	var af *Alphasfile
-	af.DiscardPortReservations()
 }

@@ -7,7 +7,6 @@ import (
 	"math/big"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 
@@ -144,10 +143,8 @@ type resolver struct {
 	// test:: HCL functions need; zero value disables them.
 	testCfg TestConfig
 
-	curSvc           *svcState
-	pickedPorts      map[int]bool
-	unownedPorts     map[int]bool
-	portReservations []*znet.Reservation
+	curSvc           string
+	ports            *znet.Picker
 	resolvedServices []*Service
 }
 
@@ -182,9 +179,13 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	// path, from cmd/zordon/federation.go); for tests passing a bare
 	// filename it makes paths predictable against the test's working dir.
 	absPath, _ := filepath.Abs(name)
-	pickedPorts := map[int]bool{}
+	var kc zlock.GlobalKeychain
+	if m.tree != nil {
+		kc = m.tree.kc
+	}
+	var excludePorts []int
 	if m.inv != nil && m.inv.FsHash != "" {
-		pickedPorts[WorkspacePort(m.inv.FsHash)] = true
+		excludePorts = []int{WorkspacePort(m.inv.FsHash)}
 	}
 	r := &resolver{
 		path:            name,
@@ -196,7 +197,7 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 		tree:            m.tree,
 		taken:           map[string]string{},
 		testCfg:         testCfg,
-		pickedPorts:     pickedPorts,
+		ports:           znet.NewPicker(kc, excludePorts...),
 	}
 
 	parentKnown := map[string]struct{}{}
@@ -267,21 +268,10 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 // wire-stable Service), top-level dotenv + sysenv, the debugger-tools
 // post-pass, and assembles the *Alphasfile. This is where the effectful HCL
 // functions (net::pickport, src::hash, os::env) actually fire.
-func (p *Plan) Compute() (*Alphasfile, error) {
-	af, err := p.ComputeAndHold()
-	if err != nil {
-		return nil, err
-	}
-	af.DiscardPortReservations()
-	return af, nil
-}
-
-func (p *Plan) ComputeAndHold() (af *Alphasfile, err error) {
+func (p *Plan) Compute() (af *Alphasfile, err error) {
 	r := p.r
 	defer func() {
-		if err != nil {
-			r.discardPortReservations()
-		}
+		r.ports.Finish(err == nil)
 	}()
 	root := r.root
 	for _, n := range p.order {
@@ -318,7 +308,9 @@ func (p *Plan) ComputeAndHold() (af *Alphasfile, err error) {
 			return nil, fmt.Errorf("%s: %w", sid, err)
 		}
 	}
-	r.assignUnownedPorts(p.states)
+	for _, svc := range r.resolvedServices {
+		svc.Ports = r.ports.PortsFor(svc.ID())
+	}
 	// File-level dotenv and env: top-level, no `self`; may use fs::/cfg::
 	// funcs. The level's parts add theirs: dotenv files in file order, env
 	// keys once across all of them.
@@ -384,13 +376,12 @@ func (p *Plan) ComputeAndHold() (af *Alphasfile, err error) {
 		return nil, err
 	}
 	return &Alphasfile{
-		CfgHash:          r.cfgHash,
-		Dotenv:           gdot,
-		Env:              toStringMap(genvMap),
-		Services:         r.resolvedServices,
-		Toolchain:        toolchain,
-		SysEnv:           sysEnv,
-		portReservations: r.portReservations,
+		CfgHash:   r.cfgHash,
+		Dotenv:    gdot,
+		Env:       toStringMap(genvMap),
+		Services:  r.resolvedServices,
+		Toolchain: toolchain,
+		SysEnv:    sysEnv,
 	}, nil
 }
 
@@ -584,9 +575,6 @@ type svcState struct {
 	srcPath  string  // evaluated src{path} (local checkout); empty when no src{path}
 	// srcMissing is the src{path} that was not there, when git{} stands in.
 	srcMissing string
-	ports      []int
-	probePort  int
-	svc        *Service
 }
 
 // srcDirs carries a service's source locations for the fs:: functions during
@@ -757,8 +745,8 @@ func (r *resolver) publishSelf(st *svcState) {
 // place and re-publishes to r.serviceByTC so downstream nodes see the
 // new value.
 func (r *resolver) evalProducerNode(n *node, st *svcState) error {
-	r.curSvc = st
-	defer func() { r.curSvc = nil }()
+	r.curSvc = st.id
+	defer func() { r.curSvc = "" }()
 	switch n.kind {
 	case kindVars:
 		if st.sb.Vars == nil {
@@ -903,8 +891,8 @@ func producerLabel(n *node) string {
 // Service. Cross-service references reach producers via r.serviceByTC,
 // which by now holds every service's complete evaluated form.
 func (r *resolver) finishService(st *svcState) error {
-	r.curSvc = st
-	defer func() { r.curSvc = nil }()
+	r.curSvc = st.id
+	defer func() { r.curSvc = "" }()
 	sb := st.sb
 	self := st.self
 	dirs := st.dirs
@@ -1189,7 +1177,7 @@ func (r *resolver) finishService(st *svcState) error {
 		}
 		rt.Readiness = p
 	}
-	st.probePort = probePort
+	r.ports.ClaimProbePort(st.id, probePort)
 
 	switch sb.Toolchain {
 	case ToolchainGo, ToolchainRust, ToolchainRuby, ToolchainNode, ToolchainJava, ToolchainPkg:
@@ -1228,9 +1216,7 @@ func (r *resolver) finishService(st *svcState) error {
 			Module:    sb.module,
 			Runtime:   rt,
 			Pkg:       &PkgSpec{Name: pname, Version: pversion},
-			Ports:     st.ports,
 		}
-		st.svc = svc
 		r.resolvedServices = append(r.resolvedServices, svc)
 		return nil
 	}
@@ -1392,9 +1378,7 @@ func (r *resolver) finishService(st *svcState) error {
 		},
 		Debugger: dbg,
 		Agent:    agent,
-		Ports:    st.ports,
 	}
-	st.svc = svc
 	r.resolvedServices = append(r.resolvedServices, svc)
 	return nil
 }
@@ -2457,75 +2441,5 @@ func (r *resolver) pickPortFunc() function.Function {
 }
 
 func (r *resolver) pickPort() (int, error) {
-	if r.pickedPorts == nil {
-		r.pickedPorts = map[int]bool{}
-		if r.inv != nil && r.inv.FsHash != "" {
-			r.pickedPorts[WorkspacePort(r.inv.FsHash)] = true
-		}
-	}
-	res, err := znet.ReservePort(r.keychain(), r.pickedPorts)
-	if err != nil {
-		return 0, err
-	}
-	port := res.Port()
-	r.pickedPorts[port] = true
-	r.portReservations = append(r.portReservations, res)
-	if r.curSvc != nil {
-		if !slices.Contains(r.curSvc.ports, port) {
-			r.curSvc.ports = append(r.curSvc.ports, port)
-		}
-	} else {
-		if r.unownedPorts == nil {
-			r.unownedPorts = map[int]bool{}
-		}
-		r.unownedPorts[port] = true
-	}
-	return port, nil
-}
-
-func (r *resolver) assignUnownedPorts(states map[string]*svcState) {
-	if len(r.unownedPorts) == 0 {
-		return
-	}
-	// Ports picked outside any service block (e.g. in package inputs or parts)
-	// are claimed only when a single service's readiness probe targets that
-	// port. Leaving non-readiness or multi-service references unheld prevents a
-	// client service from claiming a server's port and blocking the server with
-	// EADDRINUSE during bringup.
-	for port := range r.unownedPorts {
-		var probeOwners []*svcState
-		for _, st := range states {
-			if st.probePort == port {
-				probeOwners = append(probeOwners, st)
-			}
-		}
-		if len(probeOwners) == 1 {
-			addPortToService(probeOwners[0], port)
-		}
-		delete(r.unownedPorts, port)
-	}
-}
-
-func addPortToService(st *svcState, port int) {
-	if !slices.Contains(st.ports, port) {
-		st.ports = append(st.ports, port)
-		slices.Sort(st.ports)
-		if st.svc != nil {
-			st.svc.Ports = st.ports
-		}
-	}
-}
-
-func (r *resolver) discardPortReservations() {
-	for _, res := range r.portReservations {
-		res.Close()
-	}
-	r.portReservations = nil
-}
-
-func (r *resolver) keychain() zlock.GlobalKeychain {
-	if r.tree == nil {
-		return zlock.GlobalKeychain{}
-	}
-	return r.tree.kc
+	return r.ports.Pick(r.curSvc)
 }

@@ -1086,7 +1086,7 @@ type serviceCtx struct {
 	// the order this goroutine observed the barriers in.
 	deps []depSat
 
-	portHolders []*znet.Reservation
+	ports *znet.Lease
 }
 
 // depSat is one dependency and the moment its barrier fired.
@@ -1162,32 +1162,29 @@ func (sc *serviceCtx) requestStop(reason string) {
 }
 
 func (sc *serviceCtx) holdPorts(ports []int, kc zlock.GlobalKeychain, log *zlog.Logger) {
-	for _, port := range ports {
-		if port <= 0 || port > 65535 {
-			continue
-		}
-		if h, err := znet.HoldPort(kc, port); err == nil {
-			sc.portHolders = append(sc.portHolders, h)
-		} else if log != nil {
+	sc.ports = znet.HoldPorts(kc, ports, func(port int, err error) {
+		if log != nil {
 			log.Error("alpha", "service[%s]: hold port %d: %v", sc.name, port, err)
 		}
-	}
+	})
 }
 
 func (sc *serviceCtx) releasePortHolders(log *zlog.Logger) {
-	for _, h := range sc.portHolders {
-		if !h.TransitionToTimeWait() && log != nil {
-			log.Info("alpha", "service[%s]: port %d released without IPv6 TIME_WAIT guard (flock remains active)", sc.name, h.Port())
-		}
+	if sc.ports == nil {
+		return
 	}
+	sc.ports.HandOff(func(port int) {
+		if log != nil {
+			log.Info("alpha", "service[%s]: port %d released without IPv6 TIME_WAIT guard (flock remains active)", sc.name, port)
+		}
+	})
 }
 
 func (sc *serviceCtx) releasePorts() {
-	holders := sc.portHolders
-	sc.portHolders = nil
-	for _, h := range holders {
-		h.Close()
+	if sc.ports == nil {
+		return
 	}
+	sc.ports.Close()
 }
 
 // provisionCtx is one bringup action — same channel/lifecycle shape as

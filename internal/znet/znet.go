@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"math/big"
+	"slices"
 	"strconv"
 	"syscall"
 	"time"
@@ -22,6 +23,7 @@ const (
 
 type Reservation struct {
 	port   int
+	state  reservationState
 	tcpFD  int
 	tcpFD6 int
 	udpFD  int
@@ -50,25 +52,24 @@ func (r *Reservation) TransitionToTimeWait() bool {
 	if r == nil {
 		panic("znet: nil Reservation")
 	}
-	if r.port <= 0 {
-		return false
+	if r.state != stateBound {
+		return r.state == stateTimeWait
 	}
 	placed := false
 	if r.tcpFD6 >= 0 {
 		placed = ensureTimeWait6(r.tcpFD6, r.port, r.heldAt)
 		r.tcpFD6 = -1
 	}
-	if r.tcpFD >= 0 {
-		_ = syscall.Close(r.tcpFD)
-		r.tcpFD = -1
-	}
-	if r.udpFD6 >= 0 {
-		_ = syscall.Close(r.udpFD6)
-		r.udpFD6 = -1
-	}
-	if r.udpFD >= 0 {
-		_ = syscall.Close(r.udpFD)
-		r.udpFD = -1
+	closeIfValid(r.tcpFD)
+	r.tcpFD = -1
+	closeIfValid(r.udpFD6)
+	r.udpFD6 = -1
+	closeIfValid(r.udpFD)
+	r.udpFD = -1
+	if placed {
+		r.state = stateTimeWait
+	} else {
+		r.state = stateSocketsClosed
 	}
 	return placed
 }
@@ -77,7 +78,7 @@ func (r *Reservation) Close() {
 	if r == nil {
 		panic("znet: nil Reservation")
 	}
-	if r.port <= 0 {
+	if r.state == stateZero || r.state == stateClosed {
 		return
 	}
 	closeIfValid(r.tcpFD6)
@@ -92,6 +93,7 @@ func (r *Reservation) Close() {
 		r.unlock()
 		r.unlock = nil
 	}
+	r.state = stateClosed
 }
 
 func ReservePort(kc zlock.GlobalKeychain, skip map[int]bool) (*Reservation, error) {
@@ -123,6 +125,7 @@ func ReservePort(kc zlock.GlobalKeychain, skip map[int]bool) (*Reservation, erro
 		}
 		return &Reservation{
 			port:   port,
+			state:  stateBound,
 			tcpFD:  tcpFD,
 			tcpFD6: tcpFD6,
 			udpFD:  udpFD,
@@ -169,6 +172,7 @@ func HoldPort(kc zlock.GlobalKeychain, port int) (*Reservation, error) {
 	}
 	return &Reservation{
 		port:   port,
+		state:  stateBound,
 		tcpFD:  tcpFD,
 		tcpFD6: tcpFD6,
 		udpFD:  udpFD,
@@ -177,6 +181,169 @@ func HoldPort(kc zlock.GlobalKeychain, port int) (*Reservation, error) {
 		unlock: unlock,
 	}, nil
 }
+
+// Lease manages the runtime lifecycle of a service's reserved ports in alpha:
+// Holding (bound loopback sockets + flock during build/prepare) -> HandOff
+// ([::1] in TIME_WAIT + flock held while the service binds and runs) -> Close
+// (flock and any remaining sockets released when the service stops).
+type Lease struct {
+	reservations []*Reservation
+}
+
+func HoldPorts(kc zlock.GlobalKeychain, ports []int, onError func(port int, err error)) *Lease {
+	var list []*Reservation
+	for _, port := range ports {
+		if port <= 0 || port > 65535 {
+			continue
+		}
+		res, err := HoldPort(kc, port)
+		if err != nil {
+			if onError != nil {
+				onError(port, err)
+			}
+			continue
+		}
+		list = append(list, res)
+	}
+	return &Lease{reservations: list}
+}
+
+func (l *Lease) HandOff(onNoGuard func(port int)) {
+	if l == nil {
+		panic("znet: nil Lease")
+	}
+	for _, res := range l.reservations {
+		if !res.TransitionToTimeWait() && onNoGuard != nil {
+			onNoGuard(res.Port())
+		}
+	}
+}
+
+func (l *Lease) Close() {
+	if l == nil {
+		panic("znet: nil Lease")
+	}
+	for _, res := range l.reservations {
+		res.Close()
+	}
+	l.reservations = nil
+}
+
+// Picker manages port allocation and service ownership during manifest
+// evaluation. Ports picked inside a service scope belong to that service;
+// ports picked outside a service scope (e.g. in package inputs or parts) are
+// claimed only when a single service's readiness probe targets that port.
+type Picker struct {
+	kc           zlock.GlobalKeychain
+	skip         map[int]bool
+	byOwner      map[string][]int
+	unowned      map[int]bool
+	probeOwners  map[int][]string
+	reservations []*Reservation
+}
+
+func NewPicker(kc zlock.GlobalKeychain, exclude ...int) *Picker {
+	skip := make(map[int]bool, len(exclude))
+	for _, port := range exclude {
+		if port > 0 && port <= 65535 {
+			skip[port] = true
+		}
+	}
+	return &Picker{
+		kc:          kc,
+		skip:        skip,
+		byOwner:     map[string][]int{},
+		unowned:     map[int]bool{},
+		probeOwners: map[int][]string{},
+	}
+}
+
+func (p *Picker) Exclude(ports ...int) {
+	if p == nil {
+		panic("znet: nil Picker")
+	}
+	for _, port := range ports {
+		if port > 0 && port <= 65535 {
+			p.skip[port] = true
+		}
+	}
+}
+
+func (p *Picker) Pick(owner string) (int, error) {
+	if p == nil {
+		panic("znet: nil Picker")
+	}
+	res, err := ReservePort(p.kc, p.skip)
+	if err != nil {
+		return 0, err
+	}
+	port := res.Port()
+	p.skip[port] = true
+	p.reservations = append(p.reservations, res)
+	if owner != "" {
+		if !slices.Contains(p.byOwner[owner], port) {
+			p.byOwner[owner] = append(p.byOwner[owner], port)
+		}
+	} else {
+		p.unowned[port] = true
+	}
+	return port, nil
+}
+
+func (p *Picker) ClaimProbePort(owner string, port int) {
+	if p == nil {
+		panic("znet: nil Picker")
+	}
+	if owner == "" || port <= 0 || !p.unowned[port] {
+		return
+	}
+	if !slices.Contains(p.probeOwners[port], owner) {
+		p.probeOwners[port] = append(p.probeOwners[port], owner)
+	}
+}
+
+func (p *Picker) PortsFor(owner string) []int {
+	if p == nil {
+		panic("znet: nil Picker")
+	}
+	out := slices.Clone(p.byOwner[owner])
+	for port, owners := range p.probeOwners {
+		if len(owners) == 1 && owners[0] == owner && !slices.Contains(out, port) {
+			out = append(out, port)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// Finish concludes manifest evaluation. When commit is true and a keychain is
+// configured, each reserved port transitions [::1]:port into TIME_WAIT before
+// releasing its flock so the kernel guards the handoff to alpha. On evaluation
+// error or stateless in-memory Compile (no keychain), all sockets and locks
+// are closed immediately without TIME_WAIT.
+func (p *Picker) Finish(commit bool) {
+	if p == nil {
+		panic("znet: nil Picker")
+	}
+	placeGuard := commit && p.kc.IsSet()
+	for _, res := range p.reservations {
+		if placeGuard {
+			_ = res.TransitionToTimeWait()
+		}
+		res.Close()
+	}
+	p.reservations = nil
+}
+
+type reservationState uint8
+
+const (
+	stateZero reservationState = iota
+	stateBound
+	stateTimeWait
+	stateSocketsClosed
+	stateClosed
+)
 
 func holdTCP6(port int) int {
 	fd6, err := socketCloseOnExec(syscall.AF_INET6, syscall.SOCK_STREAM)
@@ -319,7 +486,7 @@ func isIPv6Unsupported(err error) bool {
 
 func ensureTimeWait6(tcpFD6, port int, heldAt time.Time) bool {
 	sa := &syscall.SockaddrInet6{Port: port, Addr: [16]byte{15: 1}}
-	// When HoldPort held the port briefly (<5s), zordon's HandOffPortReservations
+	// When HoldPort held the port briefly (<5s), zordon's Picker.Finish
 	// typically already placed [::1]:port into TIME_WAIT (2*MSL = 30..60s) with
 	// plenty of TTL remaining. Probe [::1]:port after closing tcpFD6: if
 	// EADDRINUSE is already active, reuse the existing TIME_WAIT PCB so rapid

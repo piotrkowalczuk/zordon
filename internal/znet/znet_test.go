@@ -1,6 +1,7 @@
 package znet
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -497,6 +498,85 @@ func TestHoldPort_TransitionToTimeWait_placesGuardWhenNoPriorTimeWaitExists(t *t
 	}
 }
 
+func TestLease_lifecycleAndNilPanics(t *testing.T) {
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
+	kc := zlock.NewGlobalKeychain(t.TempDir())
+
+	var nilLease *Lease
+	assertPanics(t, "nil.HandOff()", func() { nilLease.HandOff(nil) })
+	assertPanics(t, "nil.Close()", func() { nilLease.Close() })
+
+	res, err := ReservePort(kc, nil)
+	if err != nil {
+		t.Fatalf("ReservePort: %v", err)
+	}
+	port := res.Port()
+	res.Close()
+
+	lease := HoldPorts(kc, []int{0, -1, 70000, port}, func(p int, err error) {
+		t.Fatalf("unexpected HoldPorts error on port %d: %v", p, err)
+	})
+	defer lease.Close()
+
+	if _, err := kc.TryLockPort(port); !errors.Is(err, zlock.ErrLocked) {
+		t.Fatalf("TryLockPort(%d) while Lease active = %v, want ErrLocked", port, err)
+	}
+
+	lease.HandOff(nil)
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		t.Fatalf("Listen(%d) after Lease.HandOff: %v", port, err)
+	}
+	_ = ln.Close()
+
+	lease.Close()
+	unlock, err := kc.TryLockPort(port)
+	if err != nil {
+		t.Fatalf("TryLockPort(%d) after Lease.Close: %v", port, err)
+	}
+	unlock()
+}
+
+func TestPicker_lifecycleAndNilPanics(t *testing.T) {
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
+	kc := zlock.NewGlobalKeychain(t.TempDir())
+
+	var nilPicker *Picker
+	assertPanics(t, "nil.Exclude()", func() { nilPicker.Exclude(30000) })
+	assertPanics(t, "nil.Pick()", func() { _, _ = nilPicker.Pick("svc") })
+	assertPanics(t, "nil.ClaimProbePort()", func() { nilPicker.ClaimProbePort("svc", 30000) })
+	assertPanics(t, "nil.PortsFor()", func() { _ = nilPicker.PortsFor("svc") })
+	assertPanics(t, "nil.Finish()", func() { nilPicker.Finish(true) })
+
+	p := NewPicker(kc)
+	p1, err := p.Pick("svc-a")
+	if err != nil {
+		t.Fatalf("Pick(svc-a): %v", err)
+	}
+	unowned1, err := p.Pick("")
+	if err != nil {
+		t.Fatalf("Pick(unowned1): %v", err)
+	}
+	unowned2, err := p.Pick("")
+	if err != nil {
+		t.Fatalf("Pick(unowned2): %v", err)
+	}
+	p.ClaimProbePort("svc-a", unowned1)
+	p.ClaimProbePort("svc-a", unowned2)
+	p.ClaimProbePort("svc-b", unowned2)
+
+	portsA := p.PortsFor("svc-a")
+	if len(portsA) != 2 {
+		t.Fatalf("PortsFor(svc-a) = %v, want 2 ports (%d and %d)", portsA, p1, unowned1)
+	}
+	if len(p.PortsFor("svc-b")) != 0 {
+		t.Fatalf("PortsFor(svc-b) = %v, want empty (shared probe port must not be claimed)", p.PortsFor("svc-b"))
+	}
+	p.Finish(true)
+}
+
 func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bool, activeOwners *[65536]atomic.Int32, totalCycles *atomic.Int64) {
 	t.Helper()
 	res, err := ReservePort(kc, skip)
@@ -571,7 +651,7 @@ func tryBindLoopbackProbe(port int) bool {
 	if !ok {
 		return false
 	}
-	r := &Reservation{port: port, tcpFD: tcpFD, tcpFD6: tcpFD6, udpFD: udpFD, udpFD6: udpFD6}
+	r := &Reservation{port: port, state: stateBound, tcpFD: tcpFD, tcpFD6: tcpFD6, udpFD: udpFD, udpFD6: udpFD6}
 	r.Close()
 	return true
 }
