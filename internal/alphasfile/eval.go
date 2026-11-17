@@ -2487,6 +2487,11 @@ func (r *resolver) assignUnownedPorts(states map[string]*svcState) {
 	if len(r.unownedPorts) == 0 {
 		return
 	}
+	// Ports picked outside any service block (e.g. in package inputs or parts)
+	// are claimed only when a single service's readiness probe targets that
+	// port. Leaving non-readiness or multi-service references unheld prevents a
+	// client service from claiming a server's port and blocking the server with
+	// EADDRINUSE during bringup.
 	for port := range r.unownedPorts {
 		var probeOwners []*svcState
 		for _, st := range states {
@@ -2496,21 +2501,6 @@ func (r *resolver) assignUnownedPorts(states map[string]*svcState) {
 		}
 		if len(probeOwners) == 1 {
 			addPortToService(probeOwners[0], port)
-			delete(r.unownedPorts, port)
-			continue
-		}
-		if len(probeOwners) > 1 {
-			delete(r.unownedPorts, port)
-			continue
-		}
-		var exactOwners []*svcState
-		for _, st := range states {
-			if serviceHasExactPortInt(st, port) {
-				exactOwners = append(exactOwners, st)
-			}
-		}
-		if len(exactOwners) == 1 {
-			addPortToService(exactOwners[0], port)
 		}
 		delete(r.unownedPorts, port)
 	}
@@ -2524,34 +2514,6 @@ func addPortToService(st *svcState, port int) {
 			st.svc.Ports = st.ports
 		}
 	}
-}
-
-func serviceHasExactPortInt(st *svcState, port int) bool {
-	if mapHasExactPortInt(st.vars, port) || mapHasExactPortInt(st.envMap, port) {
-		return true
-	}
-	for _, grp := range st.args {
-		if mapHasExactPortInt(grp, port) {
-			return true
-		}
-	}
-	return false
-}
-
-func mapHasExactPortInt(m map[string]any, port int) bool {
-	for _, v := range m {
-		switch x := v.(type) {
-		case int:
-			if x == port {
-				return true
-			}
-		case int64:
-			if x == int64(port) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (r *resolver) discardPortReservations() {

@@ -18,7 +18,7 @@ arguments / readiness probe that consume them.
 
 ### Helpers
 
-- `net::pickport()` — reserves a free port in `20000..31999`, locks `$ZORDON_HOME/locks/port-<port>.lock` across processes for the service's lifetime, and holds TCP (`127.0.0.1` and `[::1]`) and UDP (`127.0.0.1` and `[::1]`) loopback sockets bound from evaluation through build until right before the service starts.
+- `net::pickport()` — reserves a free port in `20000..31999`; when picked inside a service block (or claimed by a service's readiness probe), `alpha` locks `$ZORDON_HOME/locks/port-<port>.lock` for the service's lifetime and holds TCP (`127.0.0.1` and `[::1]`) and UDP (`127.0.0.1` and `[::1]`) loopback sockets bound from evaluation through build until right before the service starts.
   At handoff, `127.0.0.1:<port>` is closed cleanly while `[::1]:<port>` transitions to `TIME_WAIT` to guard against non-cooperating probes, so services binding IPv6 (`[::1]` or `[::]`) directly must use `SO_REUSEADDR` (the default in Go, Rust, Node.js, and Ruby).
   Each call returns a new port — store it in `vars` if you need to reuse it.
 - `fs::tmp()` — a per-invocation **scratch** dir under `$TMPDIR/zordon-<fs::hash>/`.

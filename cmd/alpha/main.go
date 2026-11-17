@@ -1174,9 +1174,11 @@ func (sc *serviceCtx) holdPorts(ports []int, kc zlock.GlobalKeychain, log *zlog.
 	}
 }
 
-func (sc *serviceCtx) releasePortHolders() {
+func (sc *serviceCtx) releasePortHolders(log *zlog.Logger) {
 	for _, h := range sc.portHolders {
-		_ = h.TransitionToTimeWait()
+		if !h.TransitionToTimeWait() && log != nil {
+			log.Info("alpha", "service[%s]: port %d released without IPv6 TIME_WAIT guard (flock remains active)", sc.name, h.Port())
+		}
 	}
 }
 
@@ -3396,7 +3398,7 @@ func bringupAndSuperviseStart(prepCtx context.Context, b *bringup, svc *alphasfi
 		sc.lifecycle.Reach("failed")
 		return
 	}
-	sc.releasePortHolders()
+	sc.releasePortHolders(log)
 	if err := cmd.Start(); err != nil {
 		ttyCleanup()
 		closeParentW(sc)

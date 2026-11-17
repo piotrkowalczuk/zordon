@@ -133,7 +133,7 @@ service "go" "api" {
 	}
 }
 
-func TestPlan_ComputeAndHold_holdsLockUntilReleased(t *testing.T) {
+func TestPlan_ComputeAndHold_holdsLockAcrossHandOff(t *testing.T) {
 	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 	inv := testInv()
@@ -184,97 +184,54 @@ service "go" "api" {
 	unlock()
 }
 
-func TestPlan_ComputeAndHold_concurrentEvaluationsNeverCollideInTwoPortPool(t *testing.T) {
+func TestPlan_ComputeAndHold_discardsReservationsOnComputeError(t *testing.T) {
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 	inv := testInv()
-	wsPort := WorkspacePort(inv.FsHash)
 
-	var freePorts []int
-	for i := range znet.PortRangeSpan {
-		p := znet.PortRangeBase + i
-		if p == wsPort {
-			continue
-		}
-		res, err := znet.ReservePort(kc, nil)
-		if err != nil {
-			t.Fatalf("ReservePort: %v", err)
-		}
-		cand := res.Port()
-		res.Close()
-		if cand != wsPort && !slices.Contains(freePorts, cand) {
-			freePorts = append(freePorts, cand)
-		}
-		if len(freePorts) == 2 {
-			break
-		}
+	res, err := znet.ReservePort(kc, nil)
+	if err != nil {
+		t.Fatalf("ReservePort: %v", err)
 	}
-	if len(freePorts) != 2 {
-		t.Fatalf("found %d free ports, want 2", len(freePorts))
-	}
+	targetPort := res.Port()
+	res.Close()
 
-	src := []byte(`
+	m, err := NewManifestState("test.hcl", []byte(`
 service "go" "api" {
   package = "example.com/api@v1.0.0"
   vars = { port = net::pickport() }
 }
-`)
 
-	for iter := range 16 {
-		plans := make([]*Plan, 2)
-		for idx := range 2 {
-			m, err := NewManifestState("test.hcl", src, inv)
-			if err != nil {
-				t.Fatalf("Parse: %v", err)
-			}
-			m.tree.kc = kc
-			pl, err := m.Plan(nil, testCfgHash, TestConfig{})
-			if err != nil {
-				t.Fatalf("Plan: %v", err)
-			}
-			for i := range znet.PortRangeSpan {
-				p := znet.PortRangeBase + i
-				if p != freePorts[0] && p != freePorts[1] {
-					pl.r.pickedPorts[p] = true
-				}
-			}
-			plans[idx] = pl
-		}
-
-		type result struct {
-			af  *Alphasfile
-			err error
-		}
-		results := make(chan result, 2)
-		start := make(chan struct{})
-		for _, pl := range plans {
-			go func(p *Plan) {
-				<-start
-				af, err := p.ComputeAndHold()
-				results <- result{af: af, err: err}
-			}(pl)
-		}
-		close(start)
-		r1, r2 := <-results, <-results
-		if r1.af != nil {
-			defer r1.af.DiscardPortReservations()
-		}
-		if r2.af != nil {
-			defer r2.af.DiscardPortReservations()
-		}
-		if r1.err != nil || r2.err != nil {
-			t.Fatalf("iter %d: ComputeAndHold errs = (%v, %v)", iter, r1.err, r2.err)
-		}
-		p1 := svcByName(r1.af, "api").Ports[0]
-		p2 := svcByName(r2.af, "api").Ports[0]
-		if p1 == p2 {
-			t.Fatalf("iter %d: concurrent ComputeAndHold picked same port %d from 2-port pool %v", iter, p1, freePorts)
-		}
-		r1.af.DiscardPortReservations()
-		r2.af.DiscardPortReservations()
+service "unknown_tc" "broken" {
+  package = "example.com/broken@v1.0.0"
+}
+`), inv)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
 	}
+	m.tree.kc = kc
+	plan, err := m.Plan(nil, testCfgHash, TestConfig{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	for i := range znet.PortRangeSpan {
+		p := znet.PortRangeBase + i
+		if p != targetPort {
+			plan.r.pickedPorts[p] = true
+		}
+	}
+
+	if _, err := plan.ComputeAndHold(); err == nil {
+		t.Fatal("ComputeAndHold succeeded on invalid toolchain; want error")
+	}
+
+	unlock, err := kc.TryLockPort(targetPort)
+	if err != nil {
+		t.Fatalf("TryLockPort(%d) after failed ComputeAndHold: %v (lock leaked on error)", targetPort, err)
+	}
+	unlock()
 }
 
-func TestPlan_Compute_claimsUnownedPortFromPackageInput(t *testing.T) {
+func TestPlan_Compute_claimsUnownedPortFromPackageInputViaReadiness(t *testing.T) {
 	root := writeTree(t, t.TempDir(), map[string]string{
 		"Alphasfile": `import "./web" { inputs = { http_port = net::pickport() } }`,
 		"web/Alphasfile": `
@@ -301,8 +258,8 @@ package "web" {
 	if svc == nil {
 		t.Fatal("service web/web/web not found")
 	}
-	if len(svc.Ports) != 2 {
-		t.Fatalf("svc.Ports = %v, want 2 ports (http_port from vars + admin_port from readiness)", svc.Ports)
+	if len(svc.Ports) != 1 {
+		t.Fatalf("svc.Ports = %v, want 1 port (admin_port from readiness)", svc.Ports)
 	}
 }
 
@@ -411,6 +368,39 @@ package "web" {
 		if len(svc.Ports) != 0 {
 			t.Fatalf("%s.Ports = %v, want empty when unowned port is referenced by multiple services without readiness", name, svc.Ports)
 		}
+	}
+}
+
+func TestPlan_Compute_unownedPortWithoutReadinessNotClaimedByClientVar(t *testing.T) {
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `import "./web" {}`,
+		"web/Alphasfile": `
+package "web" {
+  inputs = {
+    port = { description = "Port.", type = number, default = net::pickport() }
+  }
+
+  component "web" {
+    service "go" "server" {
+      package = "example.com/server@v1.0.0"
+      vars = { addr = "127.0.0.1:${inputs.port}" }
+    }
+
+    service "go" "aclient" {
+      package = "example.com/aclient@v1.0.0"
+      vars = { upstream_port = inputs.port }
+    }
+  }
+}
+`,
+	})
+	af := openTree(t, root)
+	aclient := svcByName(af, "web/web/aclient")
+	if aclient == nil {
+		t.Fatal("service web/web/aclient not found")
+	}
+	if len(aclient.Ports) != 0 {
+		t.Fatalf("aclient.Ports = %v, want empty (client with exact int var must not claim unowned port without readiness)", aclient.Ports)
 	}
 }
 

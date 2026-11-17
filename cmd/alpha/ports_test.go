@@ -9,9 +9,11 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/alphasfile"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/znet"
+	"github.com/piotrkowalczuk/zordon/internal/ztest"
 )
 
 func TestServiceCtx_holdPorts(t *testing.T) {
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 	res, err := znet.ReservePort(kc, nil)
 	if err != nil {
@@ -28,7 +30,7 @@ func TestServiceCtx_holdPorts(t *testing.T) {
 		t.Fatalf("TryLockPort(%d) while held = %v, want ErrLocked", port, err)
 	}
 
-	sc.releasePortHolders()
+	sc.releasePortHolders(nil)
 
 	if _, err := kc.TryLockPort(port); !errors.Is(err, zlock.ErrLocked) {
 		t.Fatalf("TryLockPort(%d) after releasePortHolders = %v, want ErrLocked (flock stays held while service runs)", port, err)

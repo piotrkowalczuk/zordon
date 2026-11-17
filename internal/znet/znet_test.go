@@ -106,10 +106,11 @@ func TestReservePort_timeWaitAndHoldPort(t *testing.T) {
 		t.Fatalf("bindLoopbackProbe(%d) succeeded while Reservation is active", port)
 	}
 
-	if !res.ReleaseToTimeWait() {
-		t.Fatalf("ReleaseToTimeWait(%d) = false, want true", port)
+	if !res.TransitionToTimeWait() {
+		res.Close()
+		t.Fatalf("TransitionToTimeWait(%d) = false, want true", port)
 	}
-	_ = res.ReleaseToTimeWait()
+	res.Close()
 
 	if tryBindLoopbackProbe(port) {
 		t.Fatalf("bindLoopbackProbe(%d) succeeded while port is in TIME_WAIT", port)
@@ -241,10 +242,6 @@ func TestReservation_panicsOnInvalidUse(t *testing.T) {
 		var r *Reservation
 		_ = r.TransitionToTimeWait()
 	})
-	assertPanics(t, "nil.ReleaseToTimeWait", func() {
-		var r *Reservation
-		_ = r.ReleaseToTimeWait()
-	})
 	assertPanics(t, "nil.Close", func() {
 		var r *Reservation
 		r.Close()
@@ -263,7 +260,10 @@ func TestReservation_Close_zeroValueDoesNotCloseStdin(t *testing.T) {
 		t.Fatalf("Dup(0): %v", err)
 	}
 	defer func() {
-		_ = syscall.Dup2(saved0, 0)
+		var st syscall.Stat_t
+		if syscall.Fstat(0, &st) != nil {
+			_, _ = syscall.Dup(saved0)
+		}
 		_ = syscall.Close(saved0)
 	}()
 
@@ -336,7 +336,8 @@ func TestReservePort_probeDoesNotTouchIPv4WhileIPv6InTimeWait(t *testing.T) {
 		t.Fatalf("ReservePort: %v", err)
 	}
 	port := res.Port()
-	_ = res.ReleaseToTimeWait()
+	_ = res.TransitionToTimeWait()
+	res.Close()
 
 	var stop atomic.Bool
 	var wg sync.WaitGroup
@@ -402,7 +403,8 @@ func TestHoldPort_blocksTCPAndUDPBindsAndRefusesDialers(t *testing.T) {
 		t.Fatalf("ReservePort: %v", err)
 	}
 	port := res.Port()
-	_ = res.ReleaseToTimeWait()
+	_ = res.TransitionToTimeWait()
+	res.Close()
 
 	holder, err := HoldPort(kc, port)
 	if err != nil {
@@ -449,9 +451,11 @@ func TestHoldPort_allowsRawZeroReuseAddrIPv4BindWhenIPv6Unavailable(t *testing.T
 		_ = syscall.Close(res.tcpFD6)
 		res.tcpFD6 = -1
 	}
-	if res.ReleaseToTimeWait() {
-		t.Fatal("ReleaseToTimeWait() = true when tcpFD6 == -1, want false")
+	if res.TransitionToTimeWait() {
+		res.Close()
+		t.Fatal("TransitionToTimeWait() = true when tcpFD6 == -1, want false")
 	}
+	res.Close()
 
 	holder, err := HoldPort(kc, port)
 	if err != nil {
@@ -465,6 +469,32 @@ func TestHoldPort_allowsRawZeroReuseAddrIPv4BindWhenIPv6Unavailable(t *testing.T
 	_ = holder.TransitionToTimeWait()
 
 	assertRawBind4(t, port, [4]byte{127, 0, 0, 1}, "127.0.0.1")
+	assertRawBind4(t, port, [4]byte{0, 0, 0, 0}, "0.0.0.0")
+}
+
+func TestHoldPort_TransitionToTimeWait_placesGuardWhenNoPriorTimeWaitExists(t *testing.T) {
+	ztest.AssertSystem(t, ztest.LoopbackConnect)
+	kc := zlock.NewGlobalKeychain(t.TempDir())
+
+	res, err := ReservePort(kc, nil)
+	if err != nil {
+		t.Fatalf("ReservePort: %v", err)
+	}
+	port := res.Port()
+	res.Close()
+
+	holder, err := HoldPort(kc, port)
+	if err != nil {
+		t.Fatalf("HoldPort(%d): %v", port, err)
+	}
+	defer holder.Close()
+
+	if !holder.TransitionToTimeWait() {
+		t.Fatalf("holder.TransitionToTimeWait(%d) = false, want true", port)
+	}
+	if tryBindLoopbackProbe(port) {
+		t.Fatalf("tryBindLoopbackProbe(%d) succeeded after HoldPort.TransitionToTimeWait with no prior TIME_WAIT; want [::1] TIME_WAIT guard placed", port)
+	}
 }
 
 func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bool, activeOwners *[65536]atomic.Int32, totalCycles *atomic.Int64) {
@@ -483,12 +513,13 @@ func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bo
 	defer activeOwners[port].Store(0)
 
 	activeOwners[port].Store(2)
-	_ = res.ReleaseToTimeWait()
+	_ = res.TransitionToTimeWait()
+	res.Close()
 	runtime.Gosched()
 
 	holder, err := HoldPort(kc, port)
 	if err != nil {
-		t.Errorf("HoldPort(%d) after ReleaseToTimeWait: %v", port, err)
+		t.Errorf("HoldPort(%d) after TransitionToTimeWait: %v", port, err)
 		return
 	}
 	defer holder.Close()

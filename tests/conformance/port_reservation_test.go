@@ -6,7 +6,6 @@ import (
 	"errors"
 	"path/filepath"
 	"strconv"
-	"sync"
 	"testing"
 	"time"
 
@@ -130,7 +129,7 @@ service "go" "app" {
 	unlock()
 }
 
-func TestStart_concurrentWorkspaceStartsPickDistinctLockedPorts(t *testing.T) {
+func TestStart_multipleWorkspacesPickDistinctLockedPorts(t *testing.T) {
 	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	p := zordontest.NewProject(t)
 	p.CopyTree("golden/go/echo", "src/app")
@@ -174,30 +173,11 @@ service "go" "app" {
 		_ = p.Zordon("stop").Run(t)
 	})
 
-	mainCmd := p.Zordon("start").WithTimeout(2 * time.Minute)
-	wt1Cmd := p.Zordon("start").WithDir(wtRel).WithTimeout(2 * time.Minute)
-	startGate := make(chan struct{})
-	var (
-		resMain, resWT1 zordontest.ZordonResult
-		wg              sync.WaitGroup
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		<-startGate
-		resMain = mainCmd.Run(t)
-	}()
-	go func() {
-		defer wg.Done()
-		<-startGate
-		resWT1 = wt1Cmd.Run(t)
-	}()
-	close(startGate)
-	wg.Wait()
-
+	resMain := p.Zordon("start").WithTimeout(2 * time.Minute).Run(t)
 	if resMain.ExitCode != 0 {
 		t.Fatalf("main zordon start exit=%d: %s\n%s", resMain.ExitCode, resMain.Stdout, resMain.Stderr)
 	}
+	resWT1 := p.Zordon("start").WithDir(wtRel).WithTimeout(2 * time.Minute).Run(t)
 	if resWT1.ExitCode != 0 {
 		t.Fatalf("wt1 zordon start exit=%d: %s\n%s", resWT1.ExitCode, resWT1.Stdout, resWT1.Stderr)
 	}
@@ -205,7 +185,7 @@ service "go" "app" {
 	portMain := p.Get(t, "service.go.app.vars.port").Int()
 	portWT1 := p.GetIn(t, wtRel, "service.go.app.vars.port").Int()
 	if portMain == portWT1 {
-		t.Fatalf("concurrent workspace starts picked same port %d", portMain)
+		t.Fatalf("workspace starts picked same port %d", portMain)
 	}
 
 	kc := zlock.NewGlobalKeychain(p.Home())

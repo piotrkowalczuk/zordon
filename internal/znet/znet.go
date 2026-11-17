@@ -55,15 +55,7 @@ func (r *Reservation) TransitionToTimeWait() bool {
 	}
 	placed := false
 	if r.tcpFD6 >= 0 {
-		// ReservePort already placed [::1]:port into TIME_WAIT (2*MSL = 30..60s).
-		// Skip minting a second TIME_WAIT PCB when HoldPort held the port briefly
-		// so rapid bringups do not saturate the kernel's TIME_WAIT table.
-		if r.heldAt.IsZero() || time.Since(r.heldAt) >= 5*time.Second {
-			placed = transitionToTimeWait6(r.tcpFD6, r.port)
-		} else {
-			_ = syscall.Close(r.tcpFD6)
-			placed = true
-		}
+		placed = ensureTimeWait6(r.tcpFD6, r.port, r.heldAt)
 		r.tcpFD6 = -1
 	}
 	if r.tcpFD >= 0 {
@@ -77,18 +69,6 @@ func (r *Reservation) TransitionToTimeWait() bool {
 	if r.udpFD >= 0 {
 		_ = syscall.Close(r.udpFD)
 		r.udpFD = -1
-	}
-	return placed
-}
-
-func (r *Reservation) ReleaseToTimeWait() bool {
-	if r == nil {
-		panic("znet: nil Reservation")
-	}
-	placed := r.TransitionToTimeWait()
-	if r.unlock != nil {
-		r.unlock()
-		r.unlock = nil
 	}
 	return placed
 }
@@ -337,8 +317,31 @@ func isIPv6Unsupported(err error) bool {
 		errors.Is(err, syscall.EADDRNOTAVAIL)
 }
 
-func transitionToTimeWait6(tcpFD6, port int) bool {
+func ensureTimeWait6(tcpFD6, port int, heldAt time.Time) bool {
 	sa := &syscall.SockaddrInet6{Port: port, Addr: [16]byte{15: 1}}
+	// When HoldPort held the port briefly (<5s), zordon's HandOffPortReservations
+	// typically already placed [::1]:port into TIME_WAIT (2*MSL = 30..60s) with
+	// plenty of TTL remaining. Probe [::1]:port after closing tcpFD6: if
+	// EADDRINUSE is already active, reuse the existing TIME_WAIT PCB so rapid
+	// bringups do not saturate the kernel's TIME_WAIT table; for longer holds
+	// (>=5s) or when no prior TIME_WAIT exists, mint a fresh TIME_WAIT PCB so a
+	// full 2*MSL window guards cmd.Start().
+	if !heldAt.IsZero() && time.Since(heldAt) < 5*time.Second {
+		_ = syscall.Close(tcpFD6)
+		checkFD, err := socketCloseOnExec(syscall.AF_INET6, syscall.SOCK_STREAM)
+		if err != nil {
+			return false
+		}
+		if err := syscall.Bind(checkFD, sa); err != nil {
+			_ = syscall.Close(checkFD)
+			return errors.Is(err, syscall.EADDRINUSE)
+		}
+		tcpFD6 = checkFD
+	}
+	return transitionToTimeWait6(tcpFD6, sa)
+}
+
+func transitionToTimeWait6(tcpFD6 int, sa *syscall.SockaddrInet6) bool {
 	if err := syscall.SetsockoptInt(tcpFD6, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
 		_ = syscall.Close(tcpFD6)
 		return false

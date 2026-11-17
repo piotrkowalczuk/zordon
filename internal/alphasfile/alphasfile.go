@@ -708,6 +708,11 @@ func (af *Alphasfile) HandOffPortReservations() {
 	if len(reservations) == 0 {
 		return
 	}
+	// Close zordon's loopback sockets synchronously before sending OpConfigure
+	// so alpha's HoldPort can bind them immediately while zordon still holds
+	// the cross-process flock. Release zordon's flock after 5ms so alpha's
+	// lockPortWithRetry (which polls for up to 50ms) acquires it with
+	// make-before-break overlap.
 	for _, res := range reservations {
 		_ = res.TransitionToTimeWait()
 	}
