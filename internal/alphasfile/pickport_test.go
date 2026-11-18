@@ -135,7 +135,7 @@ service "go" "api" {
 	}
 }
 
-func TestPlan_Compute_allowsHoldPortAfterCompute(t *testing.T) {
+func TestPlan_ReservePorts_holdsLockAcrossHandOff(t *testing.T) {
 	ztest.AssertSystem(t, ztest.LoopbackConnect)
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 	inv := testInv()
@@ -153,7 +153,8 @@ service "go" "api" {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	plan.ReservePorts(kc)
+	ports := plan.ReservePorts(kc)
+	defer ports.Close()
 
 	af, err := plan.Compute()
 	if err != nil {
@@ -166,9 +167,15 @@ service "go" "api" {
 	}
 	port := api.Ports[0]
 
+	if _, err := kc.TryLockPort(port); !errors.Is(err, zlock.ErrLocked) {
+		t.Fatalf("TryLockPort(%d) while held after Compute = %v, want ErrLocked", port, err)
+	}
+
+	ports.HandOff()
+
 	holder, err := znet.HoldPort(kc, port)
 	if err != nil {
-		t.Fatalf("HoldPort(%d) after Compute: %v", port, err)
+		t.Fatalf("HoldPort(%d) after ports.HandOff: %v", port, err)
 	}
 	holder.Close()
 

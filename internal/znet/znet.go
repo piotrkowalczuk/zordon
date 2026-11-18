@@ -192,10 +192,12 @@ type Lease struct {
 
 func HoldPorts(kc zlock.GlobalKeychain, ports []int, onError func(port int, err error)) *Lease {
 	var list []*Reservation
+	seen := make(map[int]bool, len(ports))
 	for _, port := range ports {
-		if port <= 0 || port > 65535 {
+		if port <= 0 || port > 65535 || seen[port] {
 			continue
 		}
+		seen[port] = true
 		res, err := HoldPort(kc, port)
 		if err != nil {
 			if onError != nil {
@@ -233,8 +235,15 @@ func (l *Lease) Close() {
 // evaluation. Ports picked inside a service scope belong to that service;
 // ports picked outside a service scope (e.g. in package inputs or parts) are
 // claimed only when a single service's readiness probe targets that port.
+//
+// State machine:
+//
+//	pickerOpen ──(Finish(false) or !kc.IsSet())──► pickerClosed
+//	   │
+//	   └──(Finish(true) with kc.IsSet())──► pickerHeld ──(HandOff / Close)──► pickerClosed
 type Picker struct {
 	kc           zlock.GlobalKeychain
+	state        pickerState
 	skip         map[int]bool
 	byOwner      map[string][]int
 	unowned      map[int]bool
@@ -251,6 +260,7 @@ func NewPicker(kc zlock.GlobalKeychain, exclude ...int) *Picker {
 	}
 	return &Picker{
 		kc:          kc,
+		state:       pickerOpen,
 		skip:        skip,
 		byOwner:     map[string][]int{},
 		unowned:     map[int]bool{},
@@ -262,12 +272,18 @@ func (p *Picker) SetKeychain(kc zlock.GlobalKeychain) {
 	if p == nil {
 		panic("znet: nil Picker")
 	}
+	if p.state != pickerOpen || len(p.reservations) > 0 {
+		panic("znet: Picker.SetKeychain called after Pick or Finish")
+	}
 	p.kc = kc
 }
 
 func (p *Picker) Exclude(ports ...int) {
 	if p == nil {
 		panic("znet: nil Picker")
+	}
+	if p.state != pickerOpen {
+		panic("znet: Picker.Exclude called after Finish")
 	}
 	for _, port := range ports {
 		if port > 0 && port <= 65535 {
@@ -279,6 +295,9 @@ func (p *Picker) Exclude(ports ...int) {
 func (p *Picker) Pick(owner string) (int, error) {
 	if p == nil {
 		panic("znet: nil Picker")
+	}
+	if p.state != pickerOpen {
+		panic("znet: Picker.Pick called after Finish")
 	}
 	res, err := ReservePort(p.kc, p.skip)
 	if err != nil {
@@ -301,6 +320,9 @@ func (p *Picker) ClaimProbePort(owner string, port int) {
 	if p == nil {
 		panic("znet: nil Picker")
 	}
+	if p.state != pickerOpen {
+		panic("znet: Picker.ClaimProbePort called after Finish")
+	}
 	if owner == "" || port <= 0 || !p.unowned[port] {
 		return
 	}
@@ -313,6 +335,9 @@ func (p *Picker) PortsFor(owner string) []int {
 	if p == nil {
 		panic("znet: nil Picker")
 	}
+	if p.state == pickerClosed {
+		panic("znet: Picker.PortsFor called after Close")
+	}
 	out := slices.Clone(p.byOwner[owner])
 	for port, owners := range p.probeOwners {
 		if len(owners) == 1 && owners[0] == owner && !slices.Contains(out, port) {
@@ -324,23 +349,65 @@ func (p *Picker) PortsFor(owner string) []int {
 }
 
 // Finish concludes manifest evaluation. When commit is true and a keychain is
-// configured, each reserved port transitions [::1]:port into TIME_WAIT before
-// releasing its flock so the kernel guards the handoff to alpha. On evaluation
-// error or stateless in-memory Compile (no keychain), all sockets and locks
-// are closed immediately without TIME_WAIT.
+// configured, the Picker enters pickerHeld and keeps its loopback sockets and
+// flocks bound until HandOff (right before configuring alpha) or Close. On
+// evaluation error or read-only evaluation (no keychain), all sockets and
+// locks are closed immediately without TIME_WAIT.
 func (p *Picker) Finish(commit bool) {
 	if p == nil {
 		panic("znet: nil Picker")
 	}
-	placeGuard := commit && p.kc.IsSet()
+	if p.state != pickerOpen {
+		panic("znet: Picker.Finish called more than once")
+	}
+	if commit && p.kc.IsSet() {
+		p.state = pickerHeld
+		return
+	}
+	p.Close()
+}
+
+// HandOff transitions each held port's [::1]:port socket into TIME_WAIT and
+// releases zordon's sockets and flock so alpha can immediately acquire the
+// port via HoldPorts.
+func (p *Picker) HandOff() {
+	if p == nil {
+		panic("znet: nil Picker")
+	}
+	if p.state != pickerHeld {
+		panic("znet: Picker.HandOff requires held state")
+	}
 	for _, res := range p.reservations {
-		if placeGuard {
-			_ = res.TransitionToTimeWait()
-		}
+		_ = res.TransitionToTimeWait()
 		res.Close()
 	}
 	p.reservations = nil
+	p.state = pickerClosed
 }
+
+// Close releases all held sockets and locks without placing [::1] into
+// TIME_WAIT. Safe to call multiple times (e.g. via defer after HandOff).
+func (p *Picker) Close() {
+	if p == nil {
+		panic("znet: nil Picker")
+	}
+	if p.state == pickerClosed {
+		return
+	}
+	for _, res := range p.reservations {
+		res.Close()
+	}
+	p.reservations = nil
+	p.state = pickerClosed
+}
+
+type pickerState uint8
+
+const (
+	pickerOpen pickerState = iota
+	pickerHeld
+	pickerClosed
+)
 
 type reservationState uint8
 
@@ -493,9 +560,9 @@ func isIPv6Unsupported(err error) bool {
 
 func ensureTimeWait6(tcpFD6, port int, heldAt time.Time) bool {
 	sa := &syscall.SockaddrInet6{Port: port, Addr: [16]byte{15: 1}}
-	// When HoldPort held the port briefly (<5s), zordon's Picker.Finish
-	// typically already placed [::1]:port into TIME_WAIT (2*MSL = 30..60s) with
-	// plenty of TTL remaining. Probe [::1]:port after closing tcpFD6: if
+	// When HoldPort held the port briefly (<5s), zordon's Picker.HandOff
+	// (called right before pushConfigure) typically already placed [::1]:port
+	// into TIME_WAIT (2*MSL = 30..60s) with plenty of TTL remaining. Probe [::1]:port after closing tcpFD6: if
 	// EADDRINUSE is already active, reuse the existing TIME_WAIT PCB so rapid
 	// bringups do not saturate the kernel's TIME_WAIT table; for longer holds
 	// (>=5s) or when no prior TIME_WAIT exists, mint a fresh TIME_WAIT PCB so a

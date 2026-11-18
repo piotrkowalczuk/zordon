@@ -259,16 +259,16 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 }
 
 // ReservePorts configures the plan to acquire host-wide port locks from kc
-// during Compute and transition [::1] into TIME_WAIT on completion so the
-// picked ports remain guarded across the handoff to alpha. Without
+// during Compute and keep the reservations held after Compute succeeds until
+// the caller calls HandOff (right before configuring alpha) or Close. Without
 // ReservePorts, Compute performs a transient probe (sockets closed immediately
 // on return, no lockfiles created and no TIME_WAIT left behind).
-func (p *Plan) ReservePorts(kc zlock.GlobalKeychain) *Plan {
+func (p *Plan) ReservePorts(kc zlock.GlobalKeychain) *znet.Picker {
 	if p == nil {
 		panic("alphasfile: nil Plan")
 	}
 	p.r.ports.SetKeychain(kc)
-	return p
+	return p.r.ports
 }
 
 // Compute runs the evaluation the Plan ordered: the producer fold (vars /

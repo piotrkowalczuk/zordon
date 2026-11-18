@@ -17,11 +17,14 @@ func LowerSelfPriority() error {
 	if cur, err := ProcessNice(pid); err == nil && cur >= DefaultNice {
 		return nil
 	}
+	if pgid, err := syscall.Getpgid(pid); err == nil && pgid == pid {
+		err := syscall.Setpriority(syscall.PRIO_PGRP, pgid, DefaultNice)
+		if runtime.GOOS != "linux" {
+			return err
+		}
+	}
 	if runtime.GOOS == "linux" {
 		return lowerLinuxThreadsPriority(pid)
-	}
-	if pgid, err := syscall.Getpgid(pid); err == nil && pgid == pid {
-		return syscall.Setpriority(syscall.PRIO_PGRP, pgid, DefaultNice)
 	}
 	return syscall.Setpriority(syscall.PRIO_PROCESS, pid, DefaultNice)
 }
@@ -42,10 +45,10 @@ func ProcessNice(pid int) (int, error) {
 	return raw, nil
 }
 
-// On Linux both PRIO_PROCESS and PRIO_PGRP apply only to thread-group leaders
-// (PIDTYPE_PGID), leaving sibling CLONE_THREAD tasks in the Go runtime at their
-// prior nice value; walk /proc/self/task twice so any thread cloned during the
-// first pass is also lowered.
+// On Linux PRIO_PROCESS applies to a single kernel thread (TID), not the whole
+// multithreaded Go process; walk /proc/self/task twice so non-pgrp-leader
+// processes and any Go runtime thread cloned concurrently during startup are
+// also lowered.
 func lowerLinuxThreadsPriority(pid int) error {
 	_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, DefaultNice)
 	var firstErr error

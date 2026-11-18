@@ -91,5 +91,6 @@ source "github.com/acme/ui" {
 | concurrent starts | every workspace of a project shares its `zordon.lock`; zordon serializes reading and rewriting it with a lock under `$ZORDON_HOME/locks`, so one start never drops another's pin |
 
 Checkouts live in `$ZORDON_HOME/mod/<host>/<owner>/<repo>@<commit>`.
+Host-wide advisory locks live in `$ZORDON_HOME/locks/` (`pins-<hash>.lock` for `zordon.lock` updates, `repo-<repo>.lock` for bare repository fetches, `mise.lock` and `tool-<tool>-<version>.lock` for toolchain installs, and `port-<port>.lock` for ports reserved by `zordon start` and held by `alpha`).
 
 See [Remote imports](../alphasfile.md#remote-imports) for the import syntax, [Use a package from another repository](../how-to/use-a-package-from-another-repository.md) and [Develop a dependency locally](../how-to/develop-a-dependency-locally.md).

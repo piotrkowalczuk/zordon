@@ -513,7 +513,7 @@ func TestLease_lifecycleAndNilPanics(t *testing.T) {
 	port := res.Port()
 	res.Close()
 
-	lease := HoldPorts(kc, []int{0, -1, 70000, port}, func(p int, err error) {
+	lease := HoldPorts(kc, []int{0, -1, 70000, port, port}, func(p int, err error) {
 		t.Fatalf("unexpected HoldPorts error on port %d: %v", p, err)
 	})
 	defer lease.Close()
@@ -550,12 +550,16 @@ func TestPicker_lifecycleAndNilPanics(t *testing.T) {
 	assertPanics(t, "nil.ClaimProbePort()", func() { nilPicker.ClaimProbePort("svc", 30000) })
 	assertPanics(t, "nil.PortsFor()", func() { _ = nilPicker.PortsFor("svc") })
 	assertPanics(t, "nil.Finish()", func() { nilPicker.Finish(true) })
+	assertPanics(t, "nil.HandOff()", func() { nilPicker.HandOff() })
+	assertPanics(t, "nil.Close()", func() { nilPicker.Close() })
 
 	p := NewPicker(kc)
+	assertPanics(t, "HandOff before Finish", func() { p.HandOff() })
 	p1, err := p.Pick("svc-a")
 	if err != nil {
 		t.Fatalf("Pick(svc-a): %v", err)
 	}
+	assertPanics(t, "SetKeychain after Pick", func() { p.SetKeychain(kc) })
 	unowned1, err := p.Pick("")
 	if err != nil {
 		t.Fatalf("Pick(unowned1): %v", err)
@@ -576,6 +580,14 @@ func TestPicker_lifecycleAndNilPanics(t *testing.T) {
 		t.Fatalf("PortsFor(svc-b) = %v, want empty (shared probe port must not be claimed)", p.PortsFor("svc-b"))
 	}
 	p.Finish(true)
+	assertPanics(t, "Pick after Finish", func() { _, _ = p.Pick("svc-a") })
+	assertPanics(t, "Exclude after Finish", func() { p.Exclude(30000) })
+	assertPanics(t, "ClaimProbePort after Finish", func() { p.ClaimProbePort("svc-a", unowned1) })
+	assertPanics(t, "Finish twice", func() { p.Finish(true) })
+	p.HandOff()
+	assertPanics(t, "HandOff twice", func() { p.HandOff() })
+	assertPanics(t, "PortsFor after Close", func() { _ = p.PortsFor("svc-a") })
+	p.Close()
 }
 
 func runStressWorkerCycle(t *testing.T, kc zlock.GlobalKeychain, skip map[int]bool, activeOwners *[65536]atomic.Int32, totalCycles *atomic.Int64) {
