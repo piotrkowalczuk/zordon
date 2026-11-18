@@ -179,7 +179,7 @@ func canReuse(isLeaf bool, old *protocol.StateInfo, cfgHash string) bool {
 //	reused=true  → adopt the running alpha as-is (af is nil; old carries its state)
 //	reused=false → af is freshly resolved; old (if non-nil) is a running alpha
 //	               the caller must stop before spawning the replacement.
-func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx *alphasfile.ParentContext, testCfg alphasfile.TestConfig) (af *alphasfile.Alphasfile, old *protocol.StateInfo, reused bool, err error) {
+func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx *alphasfile.ParentContext, testCfg alphasfile.TestConfig, kc zlock.GlobalKeychain) (af *alphasfile.Alphasfile, old *protocol.StateInfo, reused bool, err error) {
 	stateCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	resp, stateErr := control.Roundtrip(stateCtx, lvl.inv.SocketPath(), &protocol.Request{Op: protocol.OpState})
@@ -197,6 +197,9 @@ func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx
 	plan, err := alphasfile.NewManifestStateFromTree(lvl.tree, lvl.inv).Plan(parentCtx, cfgHash, testCfg)
 	if err != nil {
 		return nil, old, false, err
+	}
+	if kc.IsSet() {
+		plan.ReservePorts(kc)
 	}
 	af, err = plan.Compute()
 	if err != nil {

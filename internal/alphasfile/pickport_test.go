@@ -2,11 +2,13 @@ package alphasfile
 
 import (
 	"errors"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
 	"testing"
 
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/znet"
 	"github.com/piotrkowalczuk/zordon/internal/ztest"
@@ -147,11 +149,11 @@ service "go" "api" {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	m.tree.kc = kc
 	plan, err := m.Plan(nil, testCfgHash, TestConfig{})
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
+	plan.ReservePorts(kc)
 
 	af, err := plan.Compute()
 	if err != nil {
@@ -201,11 +203,11 @@ service "unknown_tc" "broken" {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	m.tree.kc = kc
 	plan, err := m.Plan(nil, testCfgHash, TestConfig{})
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
+	plan.ReservePorts(kc)
 	for i := range znet.PortRangeSpan {
 		p := znet.PortRangeBase + i
 		if p != targetPort {
@@ -307,26 +309,7 @@ service "go" "api" {
 	if api == nil || len(api.Ports) != 1 {
 		t.Fatalf("api.Ports = %v, want 1 port", api)
 	}
-	port := api.Ports[0]
-
-	fd4, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("Socket(AF_INET): %v", err)
-	}
-	defer func() { _ = syscall.Close(fd4) }()
-	sa4 := &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}
-	if err := syscall.Bind(fd4, sa4); err != nil {
-		t.Fatalf("Bind(127.0.0.1:%d) with SO_REUSEADDR=0 failed after Compile: %v", port, err)
-	}
-
-	fd6, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_STREAM, 0)
-	if err == nil {
-		defer func() { _ = syscall.Close(fd6) }()
-		sa6 := &syscall.SockaddrInet6{Port: port, Addr: [16]byte{15: 1}}
-		if err := syscall.Bind(fd6, sa6); err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) && !errors.Is(err, syscall.EADDRNOTAVAIL) {
-			t.Fatalf("Bind([::1]:%d) with SO_REUSEADDR=0 failed after Compile: %v", port, err)
-		}
-	}
+	assertPortImmediatelyBindable(t, api.Ports[0])
 }
 
 func TestPlan_Compute_ambiguousUnownedPortLeftUnheld(t *testing.T) {
@@ -394,5 +377,80 @@ package "web" {
 	}
 	if len(aclient.Ports) != 0 {
 		t.Fatalf("aclient.Ports = %v, want empty (client with exact int var must not claim unowned port without readiness)", aclient.Ports)
+	}
+}
+
+func TestResolve_readOnlyDoesNotCreatePortLocksOrTimeWait(t *testing.T) {
+	home := t.TempDir()
+	kc := zlock.NewGlobalKeychain(home)
+	root := writeTree(t, t.TempDir(), map[string]string{
+		"Alphasfile": `
+service "go" "a" {
+  package = "example.com/a@v1.0.0"
+  vars = { port = net::pickport() }
+}
+
+service "go" "b" {
+  package = "example.com/b@v1.0.0"
+  vars = { port = net::pickport() }
+}
+`,
+	})
+	tree, err := LoadTreeWith(root, LoadOptions{Keychain: kc})
+	if err != nil {
+		t.Fatalf("LoadTreeWith: %v", err)
+	}
+
+	for range 5 {
+		af, err := Resolve(tree, testInv(), nil, testCfgHash, TestConfig{})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		for _, svc := range af.All() {
+			for _, port := range svc.Ports {
+				assertPortImmediatelyBindable(t, port)
+			}
+		}
+	}
+
+	entries, err := zfs.ReadDir(filepath.Join(home, "locks"))
+	if err == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "port-") {
+				t.Fatalf("Resolve created unexpected port lockfile %s in %s/locks", e.Name(), home)
+			}
+		}
+	}
+}
+
+func TestPlan_ReservePorts_nilPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("nil.ReservePorts did not panic")
+		}
+	}()
+	var p *Plan
+	p.ReservePorts(zlock.GlobalKeychain{})
+}
+
+func assertPortImmediatelyBindable(t *testing.T, port int) {
+	t.Helper()
+	fd4, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("Socket(AF_INET): %v", err)
+	}
+	defer func() { _ = syscall.Close(fd4) }()
+	sa4 := &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}
+	if err := syscall.Bind(fd4, sa4); err != nil {
+		t.Fatalf("Bind(127.0.0.1:%d) with SO_REUSEADDR=0 failed: %v", port, err)
+	}
+
+	fd6, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_STREAM, 0)
+	if err == nil {
+		defer func() { _ = syscall.Close(fd6) }()
+		sa6 := &syscall.SockaddrInet6{Port: port, Addr: [16]byte{15: 1}}
+		if err := syscall.Bind(fd6, sa6); err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) && !errors.Is(err, syscall.EADDRNOTAVAIL) {
+			t.Fatalf("Bind([::1]:%d) with SO_REUSEADDR=0 failed (port left in TIME_WAIT): %v", port, err)
+		}
 	}
 }

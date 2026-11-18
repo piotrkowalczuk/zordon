@@ -258,6 +258,13 @@ func NewPicker(kc zlock.GlobalKeychain, exclude ...int) *Picker {
 	}
 }
 
+func (p *Picker) SetKeychain(kc zlock.GlobalKeychain) {
+	if p == nil {
+		panic("znet: nil Picker")
+	}
+	p.kc = kc
+}
+
 func (p *Picker) Exclude(ports ...int) {
 	if p == nil {
 		panic("znet: nil Picker")

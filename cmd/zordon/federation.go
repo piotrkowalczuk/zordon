@@ -292,7 +292,7 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 
 		// resolveLevel carries the multi-agent invariant: the leaf always
 		// recomputes/restarts; a parent is reused unless its config drifted.
-		af, old, reused, err := resolveLevel(ctx, *lvl, cfgHash, parents.ParentContext(), testCfg)
+		af, old, reused, err := resolveLevel(ctx, *lvl, cfgHash, parents.ParentContext(), testCfg, kc)
 		if err != nil {
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
@@ -409,7 +409,7 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		}
 		cfgHash := lvl.ConfigHash(parentJSON)
 
-		af, old, reused, err := resolveLevel(ctx, lvl, cfgHash, parents.ParentContext(), testCfg)
+		af, old, reused, err := resolveLevel(ctx, lvl, cfgHash, parents.ParentContext(), testCfg, zlock.GlobalKeychain{})
 		if err != nil {
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}

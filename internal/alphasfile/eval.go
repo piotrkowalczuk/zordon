@@ -179,10 +179,6 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	// path, from cmd/zordon/federation.go); for tests passing a bare
 	// filename it makes paths predictable against the test's working dir.
 	absPath, _ := filepath.Abs(name)
-	var kc zlock.GlobalKeychain
-	if m.tree != nil {
-		kc = m.tree.kc
-	}
 	var excludePorts []int
 	if m.inv != nil && m.inv.FsHash != "" {
 		excludePorts = []int{WorkspacePort(m.inv.FsHash)}
@@ -197,7 +193,7 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 		tree:            m.tree,
 		taken:           map[string]string{},
 		testCfg:         testCfg,
-		ports:           znet.NewPicker(kc, excludePorts...),
+		ports:           znet.NewPicker(zlock.GlobalKeychain{}, excludePorts...),
 	}
 
 	parentKnown := map[string]struct{}{}
@@ -260,6 +256,19 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 		return nil, err
 	}
 	return &Plan{r: r, order: order, states: states, toolchain: toolchain, parent: parent}, nil
+}
+
+// ReservePorts configures the plan to acquire host-wide port locks from kc
+// during Compute and transition [::1] into TIME_WAIT on completion so the
+// picked ports remain guarded across the handoff to alpha. Without
+// ReservePorts, Compute performs a transient probe (sockets closed immediately
+// on return, no lockfiles created and no TIME_WAIT left behind).
+func (p *Plan) ReservePorts(kc zlock.GlobalKeychain) *Plan {
+	if p == nil {
+		panic("alphasfile: nil Plan")
+	}
+	p.r.ports.SetKeychain(kc)
+	return p
 }
 
 // Compute runs the evaluation the Plan ordered: the producer fold (vars /

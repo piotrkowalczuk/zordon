@@ -544,6 +544,7 @@ func TestPicker_lifecycleAndNilPanics(t *testing.T) {
 	kc := zlock.NewGlobalKeychain(t.TempDir())
 
 	var nilPicker *Picker
+	assertPanics(t, "nil.SetKeychain()", func() { nilPicker.SetKeychain(kc) })
 	assertPanics(t, "nil.Exclude()", func() { nilPicker.Exclude(30000) })
 	assertPanics(t, "nil.Pick()", func() { _, _ = nilPicker.Pick("svc") })
 	assertPanics(t, "nil.ClaimProbePort()", func() { nilPicker.ClaimProbePort("svc", 30000) })

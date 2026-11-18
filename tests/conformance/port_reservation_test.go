@@ -6,9 +6,12 @@ import (
 	"errors"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/znet"
 	"github.com/piotrkowalczuk/zordon/internal/zordontest"
@@ -192,6 +195,67 @@ service "go" "app" {
 	for _, port := range []int{portMain, portWT1} {
 		if _, err := kc.TryLockPort(port); !errors.Is(err, zlock.ErrLocked) {
 			t.Fatalf("TryLockPort(%d) while service running = %v, want ErrLocked", port, err)
+		}
+	}
+}
+
+func TestReadOnlyCommands_doNotCreatePortLocksOrTimeWait(t *testing.T) {
+	p := zordontest.NewProject(t, zordontest.WithIsolatedHome(t.TempDir()))
+	p.CopyTree("golden/go/echo", "src/app")
+	p.WriteFile("Alphasfile", `
+sysenv = ["HOME", "USER", "PATH", "LANG", "TMPDIR"]
+toolchain {
+  go {
+    version = "1.26.2"
+  }
+}
+
+service "go" "a" {
+  src {
+    path = "./src/app"
+    exe  = "."
+  }
+  vars = { port = net::pickport() }
+}
+
+service "go" "b" {
+  src {
+    path = "./src/app"
+    exe  = "."
+  }
+  vars = { port = net::pickport() }
+}
+`)
+
+	for range 5 {
+		mustZordonOK(t, p, "status")
+	}
+	mustZordonOK(t, p, "plan")
+	port := p.Get(t, "service.go.a.vars.port").Int()
+
+	entries, err := zfs.ReadDir(filepath.Join(p.Home(), "locks"))
+	if err == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "port-") {
+				t.Fatalf("read-only commands created unexpected port lockfile %s in %s/locks", e.Name(), p.Home())
+			}
+		}
+	}
+
+	fd4, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("Socket(AF_INET): %v", err)
+	}
+	defer func() { _ = syscall.Close(fd4) }()
+	if err := syscall.Bind(fd4, &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		t.Fatalf("Bind(127.0.0.1:%d) with SO_REUSEADDR=0 failed after zordon get: %v", port, err)
+	}
+
+	fd6, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_STREAM, 0)
+	if err == nil {
+		defer func() { _ = syscall.Close(fd6) }()
+		if err := syscall.Bind(fd6, &syscall.SockaddrInet6{Port: port, Addr: [16]byte{15: 1}}); err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) && !errors.Is(err, syscall.EADDRNOTAVAIL) {
+			t.Fatalf("Bind([::1]:%d) with SO_REUSEADDR=0 failed after zordon get (TIME_WAIT leaked): %v", port, err)
 		}
 	}
 }

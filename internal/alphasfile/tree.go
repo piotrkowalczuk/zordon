@@ -16,7 +16,6 @@ import (
 
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
-	"github.com/piotrkowalczuk/zordon/internal/zlock"
 )
 
 // Tree is an entrypoint Alphasfile plus every package it
@@ -49,7 +48,6 @@ type Tree struct {
 	offs          *offIndex
 	chain         map[string]bool
 	src           importSource
-	kc            zlock.GlobalKeychain
 	changes       []LockChange
 	pins          []LockPin
 }
@@ -101,7 +99,6 @@ func LoadTreeWith(path string, opts LoadOptions) (*Tree, error) {
 		return nil, err
 	}
 	t := newTree(src)
-	t.kc = opts.Keychain
 	for _, c := range opts.Chain {
 		if a, err := filepath.Abs(c); err == nil {
 			t.chain[filepath.Clean(a)] = true
