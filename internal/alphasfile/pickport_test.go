@@ -171,7 +171,7 @@ service "go" "api" {
 		t.Fatalf("TryLockPort(%d) while held after Compute = %v, want ErrLocked", port, err)
 	}
 
-	ports.HandOff()
+	ports.HandOff(nil)
 
 	holder, err := znet.HoldPort(kc, port)
 	if err != nil {

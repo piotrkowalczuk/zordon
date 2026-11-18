@@ -370,7 +370,7 @@ func (p *Picker) Finish(commit bool) {
 // HandOff transitions each held port's [::1]:port socket into TIME_WAIT and
 // releases zordon's sockets and flock so alpha can immediately acquire the
 // port via HoldPorts.
-func (p *Picker) HandOff() {
+func (p *Picker) HandOff(onNoGuard func(port int)) {
 	if p == nil {
 		panic("znet: nil Picker")
 	}
@@ -378,7 +378,9 @@ func (p *Picker) HandOff() {
 		panic("znet: Picker.HandOff requires held state")
 	}
 	for _, res := range p.reservations {
-		_ = res.TransitionToTimeWait()
+		if !res.TransitionToTimeWait() && onNoGuard != nil {
+			onNoGuard(res.Port())
+		}
 		res.Close()
 	}
 	p.reservations = nil
@@ -562,11 +564,12 @@ func ensureTimeWait6(tcpFD6, port int, heldAt time.Time) bool {
 	sa := &syscall.SockaddrInet6{Port: port, Addr: [16]byte{15: 1}}
 	// When HoldPort held the port briefly (<5s), zordon's Picker.HandOff
 	// (called right before pushConfigure) typically already placed [::1]:port
-	// into TIME_WAIT (2*MSL = 30..60s) with plenty of TTL remaining. Probe [::1]:port after closing tcpFD6: if
-	// EADDRINUSE is already active, reuse the existing TIME_WAIT PCB so rapid
-	// bringups do not saturate the kernel's TIME_WAIT table; for longer holds
-	// (>=5s) or when no prior TIME_WAIT exists, mint a fresh TIME_WAIT PCB so a
-	// full 2*MSL window guards cmd.Start().
+	// into TIME_WAIT (2*MSL = 30..60s) with plenty of TTL remaining. Probe
+	// [::1]:port after closing tcpFD6: if EADDRINUSE is already active, reuse
+	// the existing TIME_WAIT PCB so rapid bringups do not saturate the
+	// kernel's TIME_WAIT table; for longer holds (>=5s) or when no prior
+	// TIME_WAIT exists, mint a fresh TIME_WAIT PCB so a full 2*MSL window
+	// guards cmd.Start().
 	if !heldAt.IsZero() && time.Since(heldAt) < 5*time.Second {
 		_ = syscall.Close(tcpFD6)
 		checkFD, err := socketCloseOnExec(syscall.AF_INET6, syscall.SOCK_STREAM)

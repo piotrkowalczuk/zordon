@@ -258,7 +258,11 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 		return nil, fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
 	}
 	if ports != nil {
-		ports.HandOff()
+		ports.HandOff(func(port int) {
+			if log != nil {
+				log.Info("zordon", "%s: port %d handed off without IPv6 TIME_WAIT guard", lvl.afPath, port)
+			}
+		})
 	}
 	sum, err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent, cfg.miseVersion, cfg.buildMaxCPU, levelLog)
 	if err != nil {

@@ -199,7 +199,7 @@ service "go" "app" {
 	}
 }
 
-func TestReservePort_readOnlyCommandsDoNotCreatePortLocksOrTimeWait(t *testing.T) {
+func TestStatus_readOnlyCommandsDoNotCreatePortLocksOrTimeWait(t *testing.T) {
 	p := zordontest.NewProject(t, zordontest.WithIsolatedHome(t.TempDir()))
 	p.CopyTree("golden/go/echo", "src/app")
 	p.WriteFile("Alphasfile", `

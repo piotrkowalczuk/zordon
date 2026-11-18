@@ -550,11 +550,11 @@ func TestPicker_lifecycleAndNilPanics(t *testing.T) {
 	assertPanics(t, "nil.ClaimProbePort()", func() { nilPicker.ClaimProbePort("svc", 30000) })
 	assertPanics(t, "nil.PortsFor()", func() { _ = nilPicker.PortsFor("svc") })
 	assertPanics(t, "nil.Finish()", func() { nilPicker.Finish(true) })
-	assertPanics(t, "nil.HandOff()", func() { nilPicker.HandOff() })
+	assertPanics(t, "nil.HandOff()", func() { nilPicker.HandOff(nil) })
 	assertPanics(t, "nil.Close()", func() { nilPicker.Close() })
 
 	p := NewPicker(kc)
-	assertPanics(t, "HandOff before Finish", func() { p.HandOff() })
+	assertPanics(t, "HandOff before Finish", func() { p.HandOff(nil) })
 	p1, err := p.Pick("svc-a")
 	if err != nil {
 		t.Fatalf("Pick(svc-a): %v", err)
@@ -584,8 +584,8 @@ func TestPicker_lifecycleAndNilPanics(t *testing.T) {
 	assertPanics(t, "Exclude after Finish", func() { p.Exclude(30000) })
 	assertPanics(t, "ClaimProbePort after Finish", func() { p.ClaimProbePort("svc-a", unowned1) })
 	assertPanics(t, "Finish twice", func() { p.Finish(true) })
-	p.HandOff()
-	assertPanics(t, "HandOff twice", func() { p.HandOff() })
+	p.HandOff(nil)
+	assertPanics(t, "HandOff twice", func() { p.HandOff(nil) })
 	assertPanics(t, "PortsFor after Close", func() { _ = p.PortsFor("svc-a") })
 	p.Close()
 }
