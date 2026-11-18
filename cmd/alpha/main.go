@@ -46,6 +46,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
+	"github.com/piotrkowalczuk/zordon/internal/znet"
 	"github.com/piotrkowalczuk/zordon/internal/zversion"
 )
 
@@ -1084,6 +1085,8 @@ type serviceCtx struct {
 	// start summary can attribute the wait phase correctly regardless of
 	// the order this goroutine observed the barriers in.
 	deps []depSat
+
+	ports *znet.Lease
 }
 
 // depSat is one dependency and the moment its barrier fired.
@@ -1156,6 +1159,32 @@ func (sc *serviceCtx) requestStop(reason string) {
 		sc.stopReason = reason
 		close(sc.stopCh)
 	})
+}
+
+func (sc *serviceCtx) holdPorts(ports []int, kc zlock.GlobalKeychain, log *zlog.Logger) {
+	sc.ports = znet.HoldPorts(kc, ports, func(port int, err error) {
+		if log != nil {
+			log.Error("alpha", "service[%s]: hold port %d: %v", sc.name, port, err)
+		}
+	})
+}
+
+func (sc *serviceCtx) releasePortHolders(log *zlog.Logger) {
+	if sc.ports == nil {
+		return
+	}
+	sc.ports.HandOff(func(port int) {
+		if log != nil {
+			log.Info("alpha", "service[%s]: port %d released without IPv6 TIME_WAIT guard (flock remains active)", sc.name, port)
+		}
+	})
+}
+
+func (sc *serviceCtx) releasePorts() {
+	if sc.ports == nil {
+		return
+	}
+	sc.ports.Close()
 }
 
 // provisionCtx is one bringup action — same channel/lifecycle shape as
@@ -2635,6 +2664,7 @@ func handleConfigure(req *protocol.Request, state *alphaState, cfg bringupConfig
 	for _, svc := range toBringup {
 		sc := newServiceCtx(svc.Name(), svc.Toolchain)
 		sc.id = svc.ID()
+		sc.holdPorts(svc.Ports, state.keychain, log)
 		state.addService(sc)
 		serviceCtxs[svc.Name()] = sc
 	}
@@ -3046,6 +3076,7 @@ func toolchainAfter(svc *alphasfile.Service, state *alphaState) []string {
 func bringupAndSupervise(b *bringup, svc *alphasfile.Service, sc *serviceCtx) {
 	state, stream, log, failfast := b.state, b.stream, b.log, b.failfast
 	defer close(sc.done)
+	defer sc.releasePorts()
 	// Note: DO NOT removeService here. Entity entries (and their
 	// closed barriers) must remain in state.services for the rest of
 	// the configure so late waiters — other provisions chained via
@@ -3364,6 +3395,7 @@ func bringupAndSuperviseStart(prepCtx context.Context, b *bringup, svc *alphasfi
 		sc.lifecycle.Reach("failed")
 		return
 	}
+	sc.releasePortHolders(log)
 	if err := cmd.Start(); err != nil {
 		ttyCleanup()
 		closeParentW(sc)

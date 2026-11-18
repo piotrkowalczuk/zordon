@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
-	"net"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -20,6 +19,8 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/logfilter"
 	"github.com/piotrkowalczuk/zordon/internal/zenv"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/zlock"
+	"github.com/piotrkowalczuk/zordon/internal/znet"
 	"github.com/piotrkowalczuk/zordon/internal/ztypes"
 )
 
@@ -142,6 +143,8 @@ type resolver struct {
 	// test:: HCL functions need; zero value disables them.
 	testCfg TestConfig
 
+	curSvc           string
+	ports            *znet.Picker
 	resolvedServices []*Service
 }
 
@@ -176,6 +179,10 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	// path, from cmd/zordon/federation.go); for tests passing a bare
 	// filename it makes paths predictable against the test's working dir.
 	absPath, _ := filepath.Abs(name)
+	var excludePorts []int
+	if m.inv != nil && m.inv.FsHash != "" {
+		excludePorts = []int{WorkspacePort(m.inv.FsHash)}
+	}
 	r := &resolver{
 		path:            name,
 		afDir:           filepath.Dir(absPath),
@@ -186,6 +193,7 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 		tree:            m.tree,
 		taken:           map[string]string{},
 		testCfg:         testCfg,
+		ports:           znet.NewPicker(zlock.GlobalKeychain{}, excludePorts...),
 	}
 
 	parentKnown := map[string]struct{}{}
@@ -250,14 +258,30 @@ func (m *ManifestState) Plan(parent *ParentContext, cfgHash string, testCfg Test
 	return &Plan{r: r, order: order, states: states, toolchain: toolchain, parent: parent}, nil
 }
 
+// ReservePorts configures the plan to acquire host-wide port locks from kc
+// during Compute and keep the reservations held after Compute succeeds until
+// the caller calls HandOff (right before configuring alpha) or Close. Without
+// ReservePorts, Compute performs a transient probe (sockets closed immediately
+// on return, no lockfiles created and no TIME_WAIT left behind).
+func (p *Plan) ReservePorts(kc zlock.GlobalKeychain) *znet.Picker {
+	if p == nil {
+		panic("alphasfile: nil Plan")
+	}
+	p.r.ports.SetKeychain(kc)
+	return p.r.ports
+}
+
 // Compute runs the evaluation the Plan ordered: the producer fold (vars /
 // arguments / env / file in dependency order), then per-service sinks
 // (runtime/build/agent env, dotenv, print, sudo, provisions, readiness, the
 // wire-stable Service), top-level dotenv + sysenv, the debugger-tools
 // post-pass, and assembles the *Alphasfile. This is where the effectful HCL
 // functions (net::pickport, src::hash, os::env) actually fire.
-func (p *Plan) Compute() (*Alphasfile, error) {
+func (p *Plan) Compute() (af *Alphasfile, err error) {
 	r := p.r
+	defer func() {
+		r.ports.Finish(err == nil)
+	}()
 	root := r.root
 	for _, n := range p.order {
 		if n.kind == kindPart {
@@ -292,6 +316,9 @@ func (p *Plan) Compute() (*Alphasfile, error) {
 		if err := r.finishService(p.states[sid]); err != nil {
 			return nil, fmt.Errorf("%s: %w", sid, err)
 		}
+	}
+	for _, svc := range r.resolvedServices {
+		svc.Ports = r.ports.PortsFor(svc.ID())
 	}
 	// File-level dotenv and env: top-level, no `self`; may use fs::/cfg::
 	// funcs. The level's parts add theirs: dotenv files in file order, env
@@ -727,6 +754,8 @@ func (r *resolver) publishSelf(st *svcState) {
 // place and re-publishes to r.serviceByTC so downstream nodes see the
 // new value.
 func (r *resolver) evalProducerNode(n *node, st *svcState) error {
+	r.curSvc = st.id
+	defer func() { r.curSvc = "" }()
 	switch n.kind {
 	case kindVars:
 		if st.sb.Vars == nil {
@@ -871,6 +900,8 @@ func producerLabel(n *node) string {
 // Service. Cross-service references reach producers via r.serviceByTC,
 // which by now holds every service's complete evaluated form.
 func (r *resolver) finishService(st *svcState) error {
+	r.curSvc = st.id
+	defer func() { r.curSvc = "" }()
 	sb := st.sb
 	self := st.self
 	dirs := st.dirs
@@ -1155,6 +1186,7 @@ func (r *resolver) finishService(st *svcState) error {
 		}
 		rt.Readiness = p
 	}
+	r.ports.ClaimProbePort(st.id, probePort)
 
 	switch sb.Toolchain {
 	case ToolchainGo, ToolchainRust, ToolchainRuby, ToolchainNode, ToolchainJava, ToolchainPkg:
@@ -1434,7 +1466,7 @@ func (r *resolver) evalDebuggerPort(expr hcl.Expression, self map[string]cty.Val
 			return 0, fmt.Errorf("must be a number or numeric string, got %s", val.Type().FriendlyName())
 		}
 	}
-	return pickFreePort()
+	return r.pickPort()
 }
 
 func parsePort(s string) (int, error) {
@@ -2140,7 +2172,7 @@ func (r *resolver) functions(dirs srcDirs) map[string]function.Function {
 		// src:: namespace — current service's source code identity.
 		"src::hash": r.srcHashFunc(dirs.root),
 
-		"net::pickport": pickPortFunc(),
+		"net::pickport": r.pickPortFunc(),
 		"os::env":       osEnvFunc(),
 
 		// Cross-toolchain binary access, all resolved at provision-run time
@@ -2404,11 +2436,11 @@ func (r *resolver) srcHashFunc(root string) function.Function {
 	})
 }
 
-func pickPortFunc() function.Function {
+func (r *resolver) pickPortFunc() function.Function {
 	return function.New(&function.Spec{
 		Type: function.StaticReturnType(cty.Number),
 		Impl: func(_ []cty.Value, _ cty.Type) (cty.Value, error) {
-			port, err := pickFreePort()
+			port, err := r.pickPort()
 			if err != nil {
 				return cty.NilVal, fmt.Errorf("net::pickport: %w", err)
 			}
@@ -2417,12 +2449,6 @@ func pickPortFunc() function.Function {
 	})
 }
 
-func pickFreePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	addr := l.Addr().(*net.TCPAddr)
-	_ = l.Close()
-	return addr.Port, nil
+func (r *resolver) pickPort() (int, error) {
+	return r.ports.Pick(r.curSvc)
 }

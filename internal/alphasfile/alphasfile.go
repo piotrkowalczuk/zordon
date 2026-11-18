@@ -191,6 +191,7 @@ type Service struct {
 	Pkg      *PkgSpec        `json:"pkg,omitempty"`
 	Debugger *DebuggerConfig `json:"debugger,omitempty"`
 	Agent    *ServiceAgent   `json:"agent,omitempty"`
+	Ports    []int           `json:"ports,omitempty"`
 }
 
 // PkgSpec is the resolved mise coordinate for a `pkg` service. Name is

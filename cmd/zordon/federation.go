@@ -292,9 +292,12 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 
 		// resolveLevel carries the multi-agent invariant: the leaf always
 		// recomputes/restarts; a parent is reused unless its config drifted.
-		af, old, reused, err := resolveLevel(ctx, *lvl, cfgHash, parents.ParentContext(), testCfg)
+		af, ports, old, reused, err := resolveLevel(ctx, *lvl, cfgHash, parents.ParentContext(), testCfg, kc)
 		if err != nil {
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
+		}
+		if ports != nil {
+			defer ports.Close()
 		}
 		if reused {
 			log.Info("zordon", "%s [%s] up-to-date (alpha pid=%d), reusing", lvl.Path(), inv.FsHash, old.PID)
@@ -319,7 +322,7 @@ func runStart(ctx context.Context, log *zlog.Logger, out io.Writer, alphaBin, al
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}
 
-		sum, err := reconcileAlpha(ctx, *lvl, af, old, parentDotenv, parentEnv, cfg, log)
+		sum, err := reconcileAlpha(ctx, *lvl, af, ports, old, parentDotenv, parentEnv, cfg, log)
 		if err != nil {
 			return err
 		}
@@ -409,7 +412,7 @@ func runClean(ctx context.Context, log *zlog.Logger, alphaBin, alphaLog string, 
 		}
 		cfgHash := lvl.ConfigHash(parentJSON)
 
-		af, old, reused, err := resolveLevel(ctx, lvl, cfgHash, parents.ParentContext(), testCfg)
+		af, _, old, reused, err := resolveLevel(ctx, lvl, cfgHash, parents.ParentContext(), testCfg, zlock.GlobalKeychain{})
 		if err != nil {
 			return fmt.Errorf("%s: %w", lvl.Path(), err)
 		}

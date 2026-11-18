@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
@@ -30,6 +31,10 @@ func NewGlobalKeychain(homeDir string) GlobalKeychain {
 		panic("zlock: NewGlobalKeychain requires non-empty homeDir")
 	}
 	return GlobalKeychain{homeDir: homeDir}
+}
+
+func (k GlobalKeychain) IsSet() bool {
+	return k.homeDir != ""
 }
 
 func (k GlobalKeychain) ForWorkspace(workspaceDir string) WorkspaceKeychain {
@@ -80,6 +85,14 @@ func (k GlobalKeychain) LockPins(ctx context.Context, lockPath string) (UnlockFu
 	}
 	sum := sha256.Sum256([]byte(abs))
 	return zfs.Lock(ctx, filepath.Join(k.revealHome(), "locks"), "pins-"+hex.EncodeToString(sum[:8]))
+}
+
+// TryLockPort takes a non-blocking lock on <homeDir>/locks/port-<port>.lock.
+func (k GlobalKeychain) TryLockPort(port int) (UnlockFunc, error) {
+	if port <= 0 || port > 65535 {
+		panic("zlock: GlobalKeychain.TryLockPort requires port in 1..65535")
+	}
+	return zfs.TryLock(filepath.Join(k.revealHome(), "locks"), "port-"+strconv.Itoa(port))
 }
 
 // WorkspaceKeychain holds per-workspace lifecycle locks rooted at <projectRoot>/workspaces/<workspace>.

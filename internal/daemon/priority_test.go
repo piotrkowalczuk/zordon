@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -106,6 +107,25 @@ func TestRunGroup_cancelsProcessGroup(t *testing.T) {
 }
 
 func runPriorityHelperChild() {
+	threadReady := make(chan struct{})
+	runOnSiblingThread := make(chan struct{})
+	type grandResult struct {
+		out []byte
+		err error
+	}
+	grandDone := make(chan grandResult, 1)
+	go func() {
+		runtime.LockOSThread()
+		close(threadReady)
+		<-runOnSiblingThread
+		grand := exec.Command(os.Args[0], "-test.run=^TestLowerSelfPriority_inheritedAcrossProcessTree$")
+		grand.Env = append(os.Environ(), "ZORDON_TEST_PRIORITY_ROLE=grandchild")
+		grand.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		out, err := grand.CombinedOutput()
+		grandDone <- grandResult{out: out, err: err}
+	}()
+	<-threadReady
+
 	if err := LowerSelfPriority(); err != nil {
 		fmt.Fprintf(os.Stderr, "LowerSelfPriority: %v\n", err)
 		os.Exit(1)
@@ -115,15 +135,13 @@ func runPriorityHelperChild() {
 		fmt.Fprintf(os.Stderr, "ProcessNice(self): %v\n", err)
 		os.Exit(1)
 	}
-	grand := exec.Command(os.Args[0], "-test.run=^TestLowerSelfPriority_inheritedAcrossProcessTree$")
-	grand.Env = append(os.Environ(), "ZORDON_TEST_PRIORITY_ROLE=grandchild")
-	grand.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	out, err := grand.CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "grandchild: %v (%s)\n", err, out)
+	close(runOnSiblingThread)
+	res := <-grandDone
+	if res.err != nil {
+		fmt.Fprintf(os.Stderr, "grandchild: %v (%s)\n", res.err, res.out)
 		os.Exit(1)
 	}
-	fmt.Printf("%d %s\n", selfNice, strings.TrimSpace(string(out)))
+	fmt.Printf("%d %s\n", selfNice, strings.TrimSpace(string(res.out)))
 }
 
 func parseTwoInts(t *testing.T, s string) (int, int) {

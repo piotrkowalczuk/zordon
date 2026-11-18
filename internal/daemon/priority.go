@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"runtime"
 	"strconv"
@@ -17,7 +18,10 @@ func LowerSelfPriority() error {
 		return nil
 	}
 	if pgid, err := syscall.Getpgid(pid); err == nil && pgid == pid {
-		return syscall.Setpriority(syscall.PRIO_PGRP, pgid, DefaultNice)
+		err := syscall.Setpriority(syscall.PRIO_PGRP, pgid, DefaultNice)
+		if runtime.GOOS != "linux" {
+			return err
+		}
 	}
 	if runtime.GOOS == "linux" {
 		return lowerLinuxThreadsPriority(pid)
@@ -42,22 +46,30 @@ func ProcessNice(pid int) (int, error) {
 }
 
 // On Linux PRIO_PROCESS applies to a single kernel thread (TID), not the whole
-// multithreaded Go process; walk /proc/self/task when alpha is not a pgrp leader.
+// multithreaded Go process; walk /proc/self/task twice so non-pgrp-leader
+// processes and any Go runtime thread cloned concurrently during startup are
+// also lowered.
 func lowerLinuxThreadsPriority(pid int) error {
-	entries, err := zfs.ReadDir("/proc/self/task")
-	if err != nil {
-		return syscall.Setpriority(syscall.PRIO_PROCESS, pid, DefaultNice)
-	}
+	_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, DefaultNice)
 	var firstErr error
 	applied := false
-	for _, e := range entries {
-		tid, convErr := strconv.Atoi(e.Name())
-		if convErr != nil || tid <= 0 {
-			continue
+	for range 2 {
+		entries, err := zfs.ReadDir("/proc/self/task")
+		if err != nil {
+			if !applied {
+				return syscall.Setpriority(syscall.PRIO_PROCESS, pid, DefaultNice)
+			}
+			return firstErr
 		}
-		applied = true
-		if setErr := syscall.Setpriority(syscall.PRIO_PROCESS, tid, DefaultNice); setErr != nil && firstErr == nil {
-			firstErr = setErr
+		for _, e := range entries {
+			tid, convErr := strconv.Atoi(e.Name())
+			if convErr != nil || tid <= 0 {
+				continue
+			}
+			applied = true
+			if setErr := syscall.Setpriority(syscall.PRIO_PROCESS, tid, DefaultNice); setErr != nil && !errors.Is(setErr, syscall.ESRCH) && firstErr == nil {
+				firstErr = setErr
+			}
 		}
 	}
 	if !applied {

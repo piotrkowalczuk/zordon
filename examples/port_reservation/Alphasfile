@@ -1,0 +1,41 @@
+sysenv = ["HOME", "USER", "PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"]
+
+# Demonstrates 3-layer port reservation for `net::pickport()`:
+#   1. Non-ephemeral pool (20000..31999) + cross-process flock under
+#      `<ZORDON_HOME>/locks/port-<port>.lock`.
+#   2. `zordon` and `alpha` hold bound TCP and UDP loopback sockets on each
+#      service's picked port throughout toolchain install, workspace
+#      preparation, build, and `runtime.after`.
+#   3. Right before `cmd.Start()`, `alpha` closes the bound socket holders
+#      (keeping `<ZORDON_HOME>/locks/port-<port>.lock` locked for the service's
+#      lifetime) so the service binds cleanly.
+
+service "go" "app" {
+  src {
+    path = "../.."
+    exe  = "./examples/port_reservation/src/app"
+  }
+
+  vars = { port = net::pickport() }
+
+  build {
+    cmd = [
+      "/bin/sh",
+      "-c",
+      "go run . -probe-port ${self.vars.port} > \"${fs::state()}/build-port.env\"; go build -o \"${fs::bin()}/app\" .",
+    ]
+  }
+
+  runtime {
+    cmd = ["${fs::bin()}/app", "-addr", "127.0.0.1:${self.vars.port}"]
+  }
+
+  readiness {
+    http {
+      path = "/"
+      port = self.vars.port
+    }
+    period            = "200ms"
+    failure_threshold = 50
+  }
+}

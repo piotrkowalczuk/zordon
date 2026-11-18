@@ -17,6 +17,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/invocation"
 	"github.com/piotrkowalczuk/zordon/internal/zdoc"
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
+	"github.com/piotrkowalczuk/zordon/internal/znet"
 )
 
 // DefaultBranchTemplate is the branch a picked service's checkout lives on
@@ -34,15 +35,11 @@ const DefaultBranchTemplate = "zordon/${workspace.name}/${service.name}"
 // a reservation: two workspaces on one machine could in principle collide, and
 // whoever binds second gets the error.
 func WorkspacePort(fsHash string) int {
-	const (
-		base = 20000
-		span = 12000 // 20000-31999, clear of the ephemeral floor at 32768
-	)
 	var sum uint32
 	for _, c := range []byte(fsHash) {
 		sum = sum*31 + uint32(c)
 	}
-	return base + int(sum%span)
+	return znet.PortRangeBase + int(sum%znet.PortRangeSpan)
 }
 
 // DefaultBranchFor renders DefaultBranchTemplate directly. It is the fallback

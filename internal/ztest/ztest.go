@@ -4,13 +4,16 @@
 package ztest
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 )
@@ -28,6 +31,13 @@ var Python3 = Need{
 	name:  "python3",
 	why:   "the test spawns a helper process with python3; install python3",
 	ready: onPath("python3"),
+}
+
+// LoopbackConnect is required by tests that establish loopback TCP connections.
+var LoopbackConnect = Need{
+	name:  "loopback-connect",
+	why:   "the test establishes TCP loopback connections; allow loopback connect in the test environment",
+	ready: canLoopbackConnect,
 }
 
 // AssertSystem fails the test unless the host has what zordon itself stands
@@ -82,6 +92,22 @@ func onPath(bin string) func() bool {
 		_, err := exec.LookPath(bin)
 		return err == nil
 	}
+}
+
+func canLoopbackConnect() bool {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = ln.Close() }()
+	d := net.Dialer{Timeout: 500 * time.Millisecond}
+	c, err := d.DialContext(context.Background(), "tcp", ln.Addr().String())
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
 }
 
 var (

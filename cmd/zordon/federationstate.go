@@ -17,6 +17,7 @@ import (
 	"github.com/piotrkowalczuk/zordon/internal/zfs"
 	"github.com/piotrkowalczuk/zordon/internal/zlock"
 	"github.com/piotrkowalczuk/zordon/internal/zlog"
+	"github.com/piotrkowalczuk/zordon/internal/znet"
 )
 
 // ChainLevel is one Alphasfile in the federation chain as discovered: its
@@ -179,7 +180,7 @@ func canReuse(isLeaf bool, old *protocol.StateInfo, cfgHash string) bool {
 //	reused=true  → adopt the running alpha as-is (af is nil; old carries its state)
 //	reused=false → af is freshly resolved; old (if non-nil) is a running alpha
 //	               the caller must stop before spawning the replacement.
-func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx *alphasfile.ParentContext, testCfg alphasfile.TestConfig) (af *alphasfile.Alphasfile, old *protocol.StateInfo, reused bool, err error) {
+func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx *alphasfile.ParentContext, testCfg alphasfile.TestConfig, kc zlock.GlobalKeychain) (af *alphasfile.Alphasfile, ports *znet.Picker, old *protocol.StateInfo, reused bool, err error) {
 	stateCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	resp, stateErr := control.Roundtrip(stateCtx, lvl.inv.SocketPath(), &protocol.Request{Op: protocol.OpState})
@@ -187,22 +188,25 @@ func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx
 	case stateErr == nil && resp != nil && resp.State != nil:
 		old = resp.State
 	case stateErr != nil && !control.IsNotRunning(stateErr):
-		return nil, nil, false, fmt.Errorf("query running alpha state: %w", stateErr)
+		return nil, nil, nil, false, fmt.Errorf("query running alpha state: %w", stateErr)
 	}
 	if canReuse(lvl.IsLeaf(), old, cfgHash) {
-		return nil, old, true, nil
+		return nil, nil, old, true, nil
 	}
 	// Fresh: Plan (ordering; a cycle fails here) then Compute (eval + effects),
 	// over the tree loaded once at discovery, the same bytes cfgHash covers.
 	plan, err := alphasfile.NewManifestStateFromTree(lvl.tree, lvl.inv).Plan(parentCtx, cfgHash, testCfg)
 	if err != nil {
-		return nil, old, false, err
+		return nil, nil, old, false, err
+	}
+	if kc.IsSet() {
+		ports = plan.ReservePorts(kc)
 	}
 	af, err = plan.Compute()
 	if err != nil {
-		return nil, old, false, err
+		return nil, nil, old, false, err
 	}
-	return af, old, false, nil
+	return af, ports, old, false, nil
 }
 
 // reconcileAlpha brings a freshly resolved level's alpha into being: stop a
@@ -210,7 +214,7 @@ func resolveLevel(ctx context.Context, lvl ChainLevel, cfgHash string, parentCtx
 // replacement and block until it has accepted the config (EventDone) or
 // failed. Resolution already happened (resolveLevel) — so a config that
 // won't even parse never tears down the old, healthy alpha.
-func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, old *protocol.StateInfo, parentDotenv []string, parentEnv map[string]string, cfg startConfig, log *zlog.Logger) (*summary.StartSummary, error) {
+func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfile, ports *znet.Picker, old *protocol.StateInfo, parentDotenv []string, parentEnv map[string]string, cfg startConfig, log *zlog.Logger) (*summary.StartSummary, error) {
 	inv := lvl.inv
 	sock := inv.SocketPath()
 
@@ -252,6 +256,13 @@ func reconcileAlpha(ctx context.Context, lvl ChainLevel, af *alphasfile.Alphasfi
 	}
 	if err := control.WaitListening(ctxLevel, sock); err != nil {
 		return nil, fmt.Errorf("%s: waiting for alpha socket: %w", lvl.afPath, err)
+	}
+	if ports != nil {
+		ports.HandOff(func(port int) {
+			if log != nil {
+				log.Info("zordon", "%s: port %d handed off without IPv6 TIME_WAIT guard", lvl.afPath, port)
+			}
+		})
 	}
 	sum, err := pushConfigure(ctxLevel, log, sock, lvl.afPath, inv.FsHash, af.CfgHash, parentDotenv, parentEnv, af, cfg.failfast, cfg.agent, cfg.miseVersion, cfg.buildMaxCPU, levelLog)
 	if err != nil {
